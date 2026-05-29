@@ -1,0 +1,31 @@
+# Outputs
+
+`run_config.json` records command-line options, package choices, worker count, and dependency probe results.
+
+`run_prep.json` records the exact input structure and reflection files used for the run.
+
+`logs/commands.jsonl` is the timing ledger. Each engine stage has a start record and a completion record with elapsed seconds and return code.
+
+`grond_progress.json` stores completed stages for resume. Re-run the same command with the same output directory to continue after an interruption.
+
+`runs/<dataset>/.../native_dyn_calc.csv` is the row-level table with observed intensity, uncertainty, predicted dynamic intensity, predicted Born intensity, scale, raw-row resolution-envelope factor, and nuisance information.
+
+`summary.json` files hold machine-readable statistics. `REPORT.md` files hold the same information in a human-readable form.
+
+Endpoint `summary.json` records include `iteration_history` for SHELXL polishing. Each entry includes the endpoint `R1gt`, `R1all`, `wR2all`, `GooF`, the recommended `WGHT`, and whether that recommendation was promoted into the next active `.ins` file. The final promoted endpoint should be judged from the last iteration, not from the first stale-weight pass.
+
+Corrected-HKL endpoint directories contain `dyn_nuisance_corrected.hkl`, the unmerged companion HKL, `.ins/.res/.lst/.fcf` files from the endpoint polish, and maps when the external map tool is available. Full auto keeps EXTI off for promoted outputs. Any explicit EXTI run is a diagnostic comparison rather than the final physical path.
+
+`forensics/<dataset>/` contains residual, pre-merge, dose, observation-correction, and endpoint-promotion audits when those gates are enabled.
+
+`scale_polish/<dataset>/` contains the adaptive frame-scale compression audit. It writes `scale_compression_candidates.csv`, `scale_compression_summary.json`, a readable `REPORT.md`, and `selected_compact_run/native_dyn_calc.csv` when a compressed model passes the all-row gates. The default audit keeps the detector-position scale grid exact, compresses only the frame-scale manifold, and gates on all-row R factors rather than strong-row-only improvements. The in-regularization `--scale-smoothness` penalty is experimental and defaults to zero because it can suppress real frame-scale structure; the publication parameter reduction comes from this post-hoc accepted compression table.
+
+`dataset_policy/structure_update/` and `dataset_policy/final/` are written for multi-dataset jobs. The policy table classifies each crystal as `primary`, `downweight`, `completeness_only`, or `exclude`. Primary datasets keep full raw-row weight. Downweighted datasets stay in raw-row regularization, but their effective sigmas are inflated so they cannot dominate gradients. Completeness-only datasets are excluded from raw-row structure statistics and shared-model gradients, but their endpoint rows can still improve merged coverage. The final policy directory also contains `weighted_runs/<dataset>/native_dyn_calc.csv`; combined endpoint export can consume all non-excluded weighted runs, while GROND row/MR publication row metrics use the primary and downweighted subset. The combined endpoint summary records `interdataset_scale`, an overlap-derived per-crystal scale applied after dynamical correction and before merging.
+
+`resolution_limits/<dataset>/` contains the promoted resolution-limit audit for one final row table. It writes `resolution_shells.csv`, `summary.json`, and `REPORT.md`. The shell table reports signal, split-half stability across symmetry-equivalent row groups, dynamic and Born GROND row/MR `Rall`/`wRall`/`MRall`/`MwRall`, cumulative metrics, and work/free stability when the final row table has enough held-out rows. A shell is promoted only when it stays inside the configured signal, stability, and GROND row/MR residual gates. Multi-dataset `auto` runs also write `resolution_limits/combined/` so the final merged endpoint has the same audit as the individual crystals.
+
+`endpoint_chooser/` contains the publication endpoint chooser. It writes `publication_endpoint_choice.json`, `PUBLICATION_ENDPOINT_CHOOSER.md`, and `publication_endpoint_chooser.tex`. This report separates the best physical endpoint from the best single-dataset physical diagnostic and the best rejected diagnostic endpoint, then lists why each rejected correction was not promoted. In a multi-dataset run, a lower-residual single-crystal endpoint is not allowed to replace the combined endpoint in the publication slot. Physical endpoints must keep EXTI off, keep endpoint-B at zero, have finite endpoint statistics, pass HKL safety and modulation gates, and pass the raw-row/endpoint holdout gates if they come from the optional observation-polish path.
+
+`tables/` contains the run-level publication table artifacts. `publication_table.md`, `publication_table.tex`, and, when a LaTeX engine is available, `publication_table.pdf` report GROND row/MR `Robs`, `Rall`, `wRall`, `MRobs`, `MRall`, and `MwRall` for the final dynamical row model and the matched Born/kinematical model. The unmerged R factors are calculated directly from `native_dyn_calc.csv`; the MR factors are calculated after arithmetic merging of model-symmetry-related rows with propagated merged uncertainties. Auto reports three endpoint rows so the decision is auditable: the requested resolution with the full fitted scale curve, the requested resolution with accepted compact scale parameters, and the final suggested endpoint using the promoted resolution limit with the suggested compact scale model. When the default compact scale-manifold pass runs, the same table also reports full-to-compact scale and total parameter counts plus all-row residual penalties in percentage points, so the nuisance-parameter savings are visible in the manuscript-facing outputs. The machine-readable values are also written to `row_mr_metrics.json`.
+
+Small examples of the input and output file structures are in [FILE_FORMATS.md](FILE_FORMATS.md). Start there if you want to know what a reflection JSON line, row-level CSV, corrected HKL, summary JSON, or resume file looks like before opening a real run.

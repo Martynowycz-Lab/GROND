@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "grond"
+version = "0.2.0"
+description = "Global Regularization Of Non-kinematical Diffraction for electron-diffraction data."
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+license = "MIT"
+authors = [{name = "Martynowycz Lab"}]
+keywords = ["electron diffraction", "Bloch waves", "N-beam", "XDS", "crystallography", "non-kinematical diffraction"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: Chemistry",
+  "Topic :: Scientific/Engineering :: Physics",
+]
+dependencies = [
+  "gemmi>=0.6,<0.8",
+  "numpy>=1.26,<2.6",
+  "pandas>=2.0,<3",
+  "scipy>=1.11,<1.18",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.8", "build>=1.2"]
+config = ["PyYAML>=6"]
+raw = ["fabio>=2024.0"]
+
+[project.scripts]
+grond = "grond.cli:main"
+GROND = "grond.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+grond = ["legacy/**/*.py"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+exclude = ["src/grond/legacy/engine"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
+ignore = ["E501"]

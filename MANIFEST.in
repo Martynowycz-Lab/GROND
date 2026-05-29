@@ -1,0 +1,9 @@
+include CHANGELOG.md
+include CITATION.cff
+include CONTRIBUTING.md
+include LIMITATIONS.md
+include PROVENANCE.md
+include constraints.txt
+include environment.yml
+recursive-include docs *.md *.tex *.pdf
+recursive-include examples *.csv *.json

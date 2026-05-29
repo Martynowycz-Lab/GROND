@@ -1,0 +1,8 @@
+cff-version: 1.2.0
+title: "GROND: Global Refinement Of Non-kinematical Diffraction"
+type: software
+authors:
+  - name: Martynowycz Lab
+version: 0.2.0
+license: MIT
+message: "If GROND helps your work, please cite the software and the relevant dynamical-diffraction literature."

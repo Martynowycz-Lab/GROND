@@ -1,0 +1,11 @@
+{
+  "tools": {
+    "python": "",
+    "shelxl": "",
+    "shelx2map": "",
+    "shelxt": "",
+    "xds": "",
+    "xdsconv": ""
+  },
+  "notes": "Use absolute paths on shared servers. Empty values mean GROND will try environment variables and PATH."
+}

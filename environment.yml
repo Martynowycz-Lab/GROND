@@ -1,0 +1,13 @@
+name: grond
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - numpy
+  - scipy
+  - pandas
+  - gemmi
+  - pytest
+  - pip
+  - pip:
+      - -e .[dev]

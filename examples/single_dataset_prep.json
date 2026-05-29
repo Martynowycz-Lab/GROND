@@ -1,0 +1,20 @@
+{
+  "structure": "/data/project/model.res",
+  "baseline_hkl": "/data/project/model.hkl",
+  "default_hkl_transform": "identity",
+  "geometry_percentile": 99.0,
+  "datasets": [
+    {
+      "name": "crystal_a",
+      "hkl": "/data/project/crystal_a/INTEGRATE.HKL",
+      "xds_dir": "/data/project/crystal_a",
+      "baseline_hkl": "",
+      "hkl_transform": "identity",
+      "min_d_spacing": 0.7,
+      "min_peak": 90.0,
+      "target_mode": "iobs",
+      "include_nonpositive": false,
+      "geometry_percentile": 99.0
+    }
+  ]
+}

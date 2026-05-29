@@ -1,0 +1,98 @@
+from __future__ import annotations
+
+import math
+from pathlib import Path
+
+from grond.io.config import DatasetSpec
+from grond.workflows.decision import expand_transform_candidates, preflight_dataset, score_native_summary
+from grond.workflows.transform_metadata import metadata_prefilter_transforms
+
+
+def _write_minimal_xds(path: Path, n: int = 300) -> None:
+    lines = ["!UNIT_CELL_CONSTANTS= 5 6 7 90 90 90\n"]
+    for i in range(n):
+        h = i % 4 + 1
+        k = (i // 4) % 4
+        ell = (i // 16) % 4
+        x = 100.0 + (i % 5)
+        y = 120.0 + (i % 7)
+        z = 10.0 + (i % 3)
+        row = [
+            h,
+            k,
+            ell,
+            1000.0 + i,
+            10.0,
+            x,
+            y,
+            z,
+            0.001,
+            100.0,
+            0.9,
+            0.0,
+            x + 0.1,
+            y - 0.1,
+            z + 0.02,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        ]
+        lines.append(" ".join(str(v) for v in row) + "\n")
+    path.write_text("".join(lines))
+
+
+def test_expand_transform_candidates_deduplicates_current():
+    transforms = expand_transform_candidates("l,-k,h", "auto;l,-k,h")
+    assert transforms[0] == "l,-k,h"
+    assert transforms.count("l,-k,h") == 1
+    assert "identity" in transforms
+
+
+def test_score_native_summary_tolerates_missing_values():
+    score = score_native_summary({"best_native": {"metrics": {"all": {"dyn": {"wR2_all": None}}}}})
+    assert math.isinf(score["score"])
+
+
+def test_preflight_keeps_healthy_minimal_xds(tmp_path: Path):
+    hkl = tmp_path / "INTEGRATE.HKL"
+    _write_minimal_xds(hkl)
+    ds = DatasetSpec(name="tiny", hkl=str(hkl), min_peak=90.0, geometry_percentile=99.0)
+    decision = preflight_dataset(ds, requested_min_peak=90.0, requested_geometry_percentile=99.0, requested_scout_rows=500)
+    assert decision.status == "ok"
+    assert decision.row_count == 300
+    assert decision.scout_max_rows == 300
+    assert decision.recommended_min_peak == 90.0
+
+
+def test_metadata_transform_prefilter_promotes_hkl_overlap(tmp_path: Path):
+    moving = tmp_path / "INTEGRATE.HKL"
+    baseline = tmp_path / "model.hkl"
+    moving_lines = []
+    baseline_lines = []
+    for i in range(1, 220):
+        h = i % 7 + 1
+        k = (i // 7) % 5 - 2
+        ell = (i // 35) % 9 + 1
+        intensity = float(500 + 11 * h + 23 * k + 37 * ell + i)
+        sigma = 10.0
+        moving_lines.append(f"{h:4d}{k:4d}{ell:4d}{intensity:10.2f}{sigma:8.2f}\n")
+        baseline_lines.append(f"{ell:4d}{-k:4d}{h:4d}{(2.0 * intensity):10.2f}{sigma:8.2f}\n")
+    moving.write_text("".join(moving_lines))
+    baseline.write_text("".join(baseline_lines))
+
+    selected, payload = metadata_prefilter_transforms(
+        moving,
+        baseline,
+        ["identity", "l,-k,h", "-l,k,-h"],
+        min_pairs=50,
+        min_correlation=0.70,
+        min_correlation_gap=0.05,
+    )
+
+    assert payload["status"] == "promoted"
+    assert selected == ["l,-k,h"]
+    assert payload["records"][0]["transform"] == "l,-k,h"
+    assert payload["records"][0]["paired_rows"] >= 200
