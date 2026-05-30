@@ -32,8 +32,9 @@ import gemmi
 import numpy as np
 from numpy.polynomial.hermite import hermgauss
 from numpy.polynomial.legendre import leggauss
-from scipy.linalg import eig, eigh
+from scipy.linalg import eig, eigh, expm
 from scipy.optimize import minimize
+from scipy.sparse.linalg import expm_multiply
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -845,7 +846,7 @@ def frozen_kernel_contract(cfg: Config | None = None):
                 "EXTI-like extinction inside the raw Bloch matrix",
                 "per-row fitted absorptive form factors",
             ],
-            "solver": "scipy.linalg.eigh/eig by default; optional experimental JAX batched pmap eigh/eig only when explicitly requested and probed",
+            "solver": "scipy.linalg.eigh/eig by default; optional experimental scipy expm/expm_multiply and JAX batched paths only when explicitly requested and probed",
         },
         "basis": {
             "mode": "direct_target_topup",
@@ -1512,6 +1513,16 @@ class XDSBlochPort:
                 coupling = vecs[1, :] * np.conj(vecs[0, :])
             phase = np.exp(2j * np.pi * vals * thickness)
             return abs(np.sum(coupling * phase)) ** 2
+        if backend in {"scipy_expm", "expm"}:
+            psi0 = np.zeros(H.shape[0], dtype=np.complex128)
+            psi0[0] = 1.0 + 0.0j
+            psi = expm((2j * np.pi * float(thickness)) * H) @ psi0
+            return float(abs(psi[1]) ** 2)
+        if backend in {"scipy_expm_multiply", "expm_multiply"}:
+            psi0 = np.zeros(H.shape[0], dtype=np.complex128)
+            psi0[0] = 1.0 + 0.0j
+            psi = expm_multiply((2j * np.pi * float(thickness)) * H, psi0)
+            return float(abs(psi[1]) ** 2)
         if backend in {"jax", "jax_auto", "jax_cpu", "jax_mps", "jax_cuda", "jax_gpu"}:
             try:
                 _jax, jnp = _jax_modules(_jax_module_key(backend))
@@ -1533,7 +1544,7 @@ class XDSBlochPort:
                     f"for GROND production runs. Error: {type(exc).__name__}: {exc}"
                 ) from exc
         raise NotImplementedError(
-            f"unknown compute_backend={backend!r}; expected scipy, jax, jax_auto, jax_cpu, jax_mps, or jax_cuda"
+            f"unknown compute_backend={backend!r}; expected scipy, scipy_expm, scipy_expm_multiply, jax, jax_auto, jax_cpu, jax_mps, or jax_cuda"
         )
 
     def propagate_direct_to_target_thickness_average(self, H):
@@ -1554,6 +1565,17 @@ class XDSBlochPort:
             phase = np.exp((2j * np.pi) * vals[:, None] * self.thick[None, :])
             per_t = np.abs(np.sum(coupling[:, None] * phase, axis=0)) ** 2
             return float(np.sum(self.thick_w * per_t))
+        if backend in {"scipy_expm", "expm", "scipy_expm_multiply", "expm_multiply"}:
+            psi0 = np.zeros(H.shape[0], dtype=np.complex128)
+            psi0[0] = 1.0 + 0.0j
+            per_t = []
+            for t in self.thick:
+                if backend in {"scipy_expm", "expm"}:
+                    psi = expm((2j * np.pi * float(t)) * H) @ psi0
+                else:
+                    psi = expm_multiply((2j * np.pi * float(t)) * H, psi0)
+                per_t.append(float(abs(psi[1]) ** 2))
+            return float(np.sum(self.thick_w * np.asarray(per_t, dtype=float)))
         if backend in {"jax", "jax_auto", "jax_cpu", "jax_mps", "jax_cuda", "jax_gpu"}:
             vals = _jax_propagate_batch(
                 np.asarray(H, dtype=np.complex128)[None, :, :],
@@ -1565,7 +1587,7 @@ class XDSBlochPort:
             )
             return float(vals[0])
         raise NotImplementedError(
-            f"unknown compute_backend={backend!r}; expected scipy, jax, jax_auto, jax_cpu, jax_mps, or jax_cuda"
+            f"unknown compute_backend={backend!r}; expected scipy, scipy_expm, scipy_expm_multiply, jax, jax_auto, jax_cpu, jax_mps, or jax_cuda"
         )
 
     def row_prediction_plan(self, row_idx):
@@ -2072,7 +2094,7 @@ def main():
     ap.add_argument("--save-row-table", default="", help="Optional CSV with row-wise metadata, predictions, and residuals.")
     ap.add_argument("--workers", type=int, default=1)
     ap.add_argument("--chunksize", type=int, default=8)
-    ap.add_argument("--compute-backend", choices=["scipy", "jax", "jax_auto", "jax_cpu", "jax_mps", "jax_cuda"], default="scipy")
+    ap.add_argument("--compute-backend", choices=["scipy", "scipy_expm", "scipy_expm_multiply", "jax", "jax_auto", "jax_cpu", "jax_mps", "jax_cuda"], default="scipy")
     ap.add_argument("--jax-batch-size", type=int, default=0, help="JAX matrix batch size. 0 chooses a conservative size from matrix dimension and device count.")
     ap.add_argument("--positive-only", action="store_true", help="Ignore non-positive XDS IOBS rows for fitting/evaluation.")
     ap.add_argument("--min-peak", type=float, default=90.0, help="Default PEAK/partiality cutoff for XDS row selection. Use 0 for a true full-row diagnostic.")

@@ -45,3 +45,25 @@ def test_single_profile_point_is_centered():
     points, weights, _ = profile_points(Config(n_points=1))
     assert np.allclose(points, [0.0])
     assert np.allclose(weights, [1.0])
+
+
+def test_expm_multiply_backend_matches_eigensolver_on_hermitian_matrix():
+    rng = np.random.default_rng(123)
+    raw = rng.normal(size=(8, 8)) + 1j * rng.normal(size=(8, 8))
+    H = (raw + raw.conj().T) * 0.5
+    H[np.diag_indices_from(H)] = np.real(np.diag(H))
+
+    port = object.__new__(XDSBlochPort)
+    port.cfg = Config(compute_backend="scipy")
+    port.thick = np.asarray([300.0, 600.0, 900.0], dtype=float)
+    port.thick_w = np.asarray([0.2, 0.5, 0.3], dtype=float)
+
+    reference_single = port.propagate_direct_to_target(H, 700.0)
+    reference_average = port.propagate_direct_to_target_thickness_average(H)
+
+    port.cfg = Config(compute_backend="scipy_expm_multiply")
+    trial_single = port.propagate_direct_to_target(H, 700.0)
+    trial_average = port.propagate_direct_to_target_thickness_average(H)
+
+    assert np.isclose(trial_single, reference_single, rtol=1e-9, atol=1e-11)
+    assert np.isclose(trial_average, reference_average, rtol=1e-9, atol=1e-11)

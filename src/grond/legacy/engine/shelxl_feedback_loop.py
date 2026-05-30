@@ -344,7 +344,7 @@ def main() -> None:
     ap.add_argument("--lambda-grid", default="1.0")
     ap.add_argument("--rescale", choices=["median-iobs", "none"], default="median-iobs")
     ap.add_argument("--cache-compression", choices=["compressed", "none"], default="none")
-    ap.add_argument("--compute-backend", choices=["scipy", "jax", "jax_auto", "jax_cpu", "jax_mps", "jax_cuda"], default="scipy")
+    ap.add_argument("--compute-backend", choices=["scipy", "scipy_expm", "scipy_expm_multiply", "jax", "jax_auto", "jax_cpu", "jax_mps", "jax_cuda"], default="scipy")
     ap.add_argument("--jax-batch-size", type=int, default=0)
     ap.add_argument("--min-d-spacing", type=float, default=0.0)
     ap.add_argument("--topup-d-min", type=float, default=0.0)
