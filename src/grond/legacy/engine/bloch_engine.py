@@ -32,8 +32,9 @@ import gemmi
 import numpy as np
 from numpy.polynomial.hermite import hermgauss
 from numpy.polynomial.legendre import leggauss
-from scipy.linalg import eig, eigh
+from scipy.linalg import eig, eigh, expm
 from scipy.optimize import minimize
+from scipy.sparse.linalg import expm_multiply
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -804,6 +805,10 @@ class Config:
     dose_b_ref_frame: float = float("nan")
     compute_backend: str = "scipy"
     jax_batch_size: int = 0
+    bethe_strong_count: int = 48
+    bethe_variant: str = "schur_target"
+    bethe_promote_denom: float = 0.005
+    bethe_denom_eps: float = 1e-5
     matrix_convention: str = "j_minus_i"
 
 
@@ -845,7 +850,7 @@ def frozen_kernel_contract(cfg: Config | None = None):
                 "EXTI-like extinction inside the raw Bloch matrix",
                 "per-row fitted absorptive form factors",
             ],
-            "solver": "scipy.linalg.eigh/eig by default; optional experimental JAX batched pmap eigh/eig only when explicitly requested and probed",
+            "solver": "scipy.linalg.eigh/eig by default; optional experimental scipy expm/expm_multiply, promoted Bethe/Schur, and JAX batched paths only when explicitly requested and probed",
         },
         "basis": {
             "mode": "direct_target_topup",
@@ -862,6 +867,85 @@ def frozen_kernel_contract(cfg: Config | None = None):
             "p222_canonicalization": False,
         },
     }
+
+
+BETHE_BACKENDS = {"scipy_bethe", "bethe", "scipy_bethe_promoted"}
+
+
+def safe_complex_inverse(values: np.ndarray, eps: float) -> np.ndarray:
+    """Return a reciprocal with bounded near-zero denominators."""
+
+    values = np.asarray(values, dtype=np.complex128)
+    out = np.empty_like(values)
+    mag = np.abs(values)
+    ok = mag >= float(eps)
+    out[ok] = 1.0 / values[ok]
+    if np.any(~ok):
+        small = values[~ok]
+        phase = np.ones(len(small), dtype=np.complex128)
+        nonzero = np.abs(small) > 0.0
+        phase[nonzero] = small[nonzero] / np.abs(small[nonzero])
+        out[~ok] = phase / float(eps)
+    return out
+
+
+def promoted_bethe_effective_hamiltonian(H: np.ndarray, cfg: Config) -> np.ndarray:
+    """Return a near-resonance-promoted strong-beam Schur Hamiltonian.
+
+    The strong/weak-beam split follows a practical suggestion from Takanori
+    Nakane; this implementation is GROND's independent Schur-complement
+    realization and is kept as an explicit backend for parity testing.
+    """
+
+    H = np.asarray(H, dtype=np.complex128)
+    n = int(H.shape[0])
+    m = max(2, min(int(getattr(cfg, "bethe_strong_count", 48)), n))
+    if m >= n:
+        return H
+
+    variant = str(getattr(cfg, "bethe_variant", "schur_target") or "schur_target").lower()
+    promote_denom = max(0.0, float(getattr(cfg, "bethe_promote_denom", 0.005)))
+    eps = max(float(getattr(cfg, "bethe_denom_eps", 1e-5)), 1e-30)
+    if variant not in {"truncate", "schur0", "schur_target", "schur_mean"}:
+        raise ValueError(
+            f"unknown bethe_variant={variant!r}; expected truncate, schur0, schur_target, or schur_mean"
+        )
+
+    if promote_denom > 0.0 and variant in {"schur0", "schur_target", "schur_mean"}:
+        strong_diag0 = np.diag(H[:m, :m]).astype(np.complex128)
+        weak_diag0 = np.diag(H[m:, m:]).astype(np.complex128)
+        if variant == "schur0":
+            energy0 = 0.0 + 0.0j
+        elif variant == "schur_target":
+            energy0 = H[1, 1]
+        else:
+            energy0 = np.mean(strong_diag0)
+        promote = np.abs(energy0 - weak_diag0) < promote_denom
+        if np.any(promote):
+            weak_indices = np.arange(m, n)
+            promoted = weak_indices[promote]
+            remaining = weak_indices[~promote]
+            perm = np.concatenate([np.arange(m), promoted, remaining])
+            H = H[np.ix_(perm, perm)]
+            m = int(m + len(promoted))
+            if m >= n:
+                return H
+
+    Hss = H[:m, :m].copy()
+    if variant == "truncate":
+        return Hss
+
+    Hsw = H[:m, m:]
+    Hws = H[m:, :m]
+    weak_diag = np.diag(H[m:, m:]).astype(np.complex128)
+    if variant == "schur0":
+        energy = 0.0 + 0.0j
+    elif variant == "schur_target":
+        energy = Hss[1, 1]
+    else:
+        energy = np.mean(np.diag(Hss).astype(np.complex128))
+    denom = energy - weak_diag
+    return Hss + (Hsw * safe_complex_inverse(denom, eps)[None, :]) @ Hws
 
 
 class XDSData:
@@ -1499,6 +1583,9 @@ class XDSBlochPort:
 
     def propagate_direct_to_target(self, H, thickness):
         backend = str(getattr(self.cfg, "compute_backend", "scipy") or "scipy").lower()
+        if backend in BETHE_BACKENDS:
+            H = promoted_bethe_effective_hamiltonian(H, self.cfg)
+            backend = "scipy"
         if backend in {"scipy", "numpy_scipy_cpu"}:
             if self.absorption_enabled():
                 vals, vecs = eig(H)
@@ -1512,6 +1599,16 @@ class XDSBlochPort:
                 coupling = vecs[1, :] * np.conj(vecs[0, :])
             phase = np.exp(2j * np.pi * vals * thickness)
             return abs(np.sum(coupling * phase)) ** 2
+        if backend in {"scipy_expm", "expm"}:
+            psi0 = np.zeros(H.shape[0], dtype=np.complex128)
+            psi0[0] = 1.0 + 0.0j
+            psi = expm((2j * np.pi * float(thickness)) * H) @ psi0
+            return float(abs(psi[1]) ** 2)
+        if backend in {"scipy_expm_multiply", "expm_multiply"}:
+            psi0 = np.zeros(H.shape[0], dtype=np.complex128)
+            psi0[0] = 1.0 + 0.0j
+            psi = expm_multiply((2j * np.pi * float(thickness)) * H, psi0)
+            return float(abs(psi[1]) ** 2)
         if backend in {"jax", "jax_auto", "jax_cpu", "jax_mps", "jax_cuda", "jax_gpu"}:
             try:
                 _jax, jnp = _jax_modules(_jax_module_key(backend))
@@ -1533,13 +1630,16 @@ class XDSBlochPort:
                     f"for GROND production runs. Error: {type(exc).__name__}: {exc}"
                 ) from exc
         raise NotImplementedError(
-            f"unknown compute_backend={backend!r}; expected scipy, jax, jax_auto, jax_cpu, jax_mps, or jax_cuda"
+            f"unknown compute_backend={backend!r}; expected scipy, scipy_bethe, scipy_expm, scipy_expm_multiply, jax, jax_auto, jax_cpu, jax_mps, or jax_cuda"
         )
 
     def propagate_direct_to_target_thickness_average(self, H):
         """Propagate one Bloch matrix and average over the configured thickness quadrature."""
 
         backend = str(getattr(self.cfg, "compute_backend", "scipy") or "scipy").lower()
+        if backend in BETHE_BACKENDS:
+            H = promoted_bethe_effective_hamiltonian(H, self.cfg)
+            backend = "scipy"
         if backend in {"scipy", "numpy_scipy_cpu"}:
             if self.absorption_enabled():
                 vals, vecs = eig(H)
@@ -1554,6 +1654,17 @@ class XDSBlochPort:
             phase = np.exp((2j * np.pi) * vals[:, None] * self.thick[None, :])
             per_t = np.abs(np.sum(coupling[:, None] * phase, axis=0)) ** 2
             return float(np.sum(self.thick_w * per_t))
+        if backend in {"scipy_expm", "expm", "scipy_expm_multiply", "expm_multiply"}:
+            psi0 = np.zeros(H.shape[0], dtype=np.complex128)
+            psi0[0] = 1.0 + 0.0j
+            per_t = []
+            for t in self.thick:
+                if backend in {"scipy_expm", "expm"}:
+                    psi = expm((2j * np.pi * float(t)) * H) @ psi0
+                else:
+                    psi = expm_multiply((2j * np.pi * float(t)) * H, psi0)
+                per_t.append(float(abs(psi[1]) ** 2))
+            return float(np.sum(self.thick_w * np.asarray(per_t, dtype=float)))
         if backend in {"jax", "jax_auto", "jax_cpu", "jax_mps", "jax_cuda", "jax_gpu"}:
             vals = _jax_propagate_batch(
                 np.asarray(H, dtype=np.complex128)[None, :, :],
@@ -1565,7 +1676,7 @@ class XDSBlochPort:
             )
             return float(vals[0])
         raise NotImplementedError(
-            f"unknown compute_backend={backend!r}; expected scipy, jax, jax_auto, jax_cpu, jax_mps, or jax_cuda"
+            f"unknown compute_backend={backend!r}; expected scipy, scipy_bethe, scipy_expm, scipy_expm_multiply, jax, jax_auto, jax_cpu, jax_mps, or jax_cuda"
         )
 
     def row_prediction_plan(self, row_idx):
@@ -2072,7 +2183,7 @@ def main():
     ap.add_argument("--save-row-table", default="", help="Optional CSV with row-wise metadata, predictions, and residuals.")
     ap.add_argument("--workers", type=int, default=1)
     ap.add_argument("--chunksize", type=int, default=8)
-    ap.add_argument("--compute-backend", choices=["scipy", "jax", "jax_auto", "jax_cpu", "jax_mps", "jax_cuda"], default="scipy")
+    ap.add_argument("--compute-backend", choices=["scipy", "scipy_bethe", "scipy_expm", "scipy_expm_multiply", "jax", "jax_auto", "jax_cpu", "jax_mps", "jax_cuda"], default="scipy")
     ap.add_argument("--jax-batch-size", type=int, default=0, help="JAX matrix batch size. 0 chooses a conservative size from matrix dimension and device count.")
     ap.add_argument("--positive-only", action="store_true", help="Ignore non-positive XDS IOBS rows for fitting/evaluation.")
     ap.add_argument("--min-peak", type=float, default=90.0, help="Default PEAK/partiality cutoff for XDS row selection. Use 0 for a true full-row diagnostic.")

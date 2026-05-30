@@ -1128,7 +1128,7 @@ def main():
     ap.add_argument("--chunksize", type=int, default=8)
     ap.add_argument("--prediction-cache-dir", default=str(ROOT / "engine/pred_cache"))
     ap.add_argument("--cache-compression", choices=["compressed", "none"], default="compressed", help="Use none for faster local SSD caches; compressed saves disk on slow/limited storage.")
-    ap.add_argument("--compute-backend", choices=["scipy", "jax", "jax_auto", "jax_cpu", "jax_mps", "jax_cuda"], default="scipy", help="Prediction backend. SciPy is the production reference; JAX backends are experimental and must pass eigensolver parity.")
+    ap.add_argument("--compute-backend", choices=["scipy", "scipy_bethe", "scipy_expm", "scipy_expm_multiply", "jax", "jax_auto", "jax_cpu", "jax_mps", "jax_cuda"], default="scipy", help="Prediction backend. SciPy eigensolver is the production reference; scipy_bethe uses an opt-in promoted Bethe/Schur strong-beam reduction; SciPy expm/expm_multiply and JAX backends are experimental parity/speed probes.")
     ap.add_argument("--jax-batch-size", type=int, default=0, help="JAX matrix batch size. 0 chooses a conservative size from matrix dimension and device count.")
     ap.add_argument("--max-rows", type=int, default=0)
     ap.add_argument("--make-maps", action="store_true")
