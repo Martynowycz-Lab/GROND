@@ -6,9 +6,11 @@ from grond.cli import (
     apply_tool_config,
     build_parser,
     estimate_model_nonh_atoms,
+    parse_numeric_grid,
     publication_report_cmd,
     required_external_tool_errors,
     resolve_structure_update_strategy,
+    resolved_sg_window_mode,
     transform_scout_job_count,
 )
 from grond.io.config import DatasetSpec, PrepConfig
@@ -26,6 +28,7 @@ def test_run_parser_exposes_staged_feature_grids():
     assert args.prediction_cache_compression == "none"
     assert args.compute_backend == "scipy"
     assert args.jax_batch_size == 0
+    assert args.jax_matrix_bucket_size == 0
     assert args.matrix_convention == "j_minus_i"
     assert args.profile_quadrature == "uniform"
     assert args.profile_accumulation == "sum"
@@ -38,14 +41,14 @@ def test_run_parser_exposes_staged_feature_grids():
     assert args.publication_endpoint_max_modulation_p95 == 20.0
     assert args.fast is False
     assert args.full_fast is False
-    assert args.full_fast_n_basis == 20
+    assert args.full_fast_n_basis == 24
     assert args.full_fast_n_points == 10
     assert args.full_fast_structure_rows == 0
     assert args.full_fast_structure_max_nfev == 0
     assert args.scout_n_basis == 8
     assert args.scout_n_points == 3
     assert args.transform_rerank_top == 3
-    assert args.transform_rerank_n_basis == 20
+    assert args.transform_rerank_n_basis == 24
     assert args.transform_rerank_n_points == 10
     assert args.transform_rerank_max_rows == 0
     assert args.transform_scout_jobs == 0
@@ -56,7 +59,17 @@ def test_run_parser_exposes_staged_feature_grids():
     assert args.final_basis_scan_limit == 500
     assert args.final_basis_margin == 10
     assert args.final_basis_max == 500
+    assert args.sg_window_scout == "auto"
+    assert args.sg_window_scout_grid == "0.003,0.004,0.006,0.008"
+    assert args.sg_window_scout_n_basis == 24
+    assert args.sg_window_scout_n_points == 10
+    assert args.sg_window_scout_max_rows == 0
+    assert args.sg_window_scout_min_wR2_gain == 0.002
+    assert args.sg_window_scout_free_wR2_tolerance == 0.003
     assert args.n_points == 20
+    assert args.screen_n_basis == 24
+    assert args.polarity_n_basis == 24
+    assert args.structure_n_basis == 24
     assert args.scale_polish_frame_models == "adaptive,fixed"
     assert args.scale_polish_adaptive_counts == "auto"
     assert args.scale_polish_detector_bins == "exact"
@@ -128,6 +141,23 @@ def test_auto_parser_accepts_dials_input_pair():
     assert args.dials_python == "/path/to/dials.python"
     assert args.dials_drop_dont_integrate is False
     assert args.dials_keep_dont_integrate is False
+    assert args.sg_window_mode == "auto"
+
+
+def test_auto_sg_window_mode_keeps_fixed_width_unless_explicit():
+    args = build_parser().parse_args(["auto", "--out-dir", "out", "--xds-dir", "xds", "--structure", "model.res"])
+    ds = DatasetSpec(name="d", hkl="missing.INTEGRATE.HKL")
+
+    assert resolved_sg_window_mode(args, ds) == "fixed"
+
+    args = build_parser().parse_args(
+        ["auto", "--out-dir", "out", "--xds-dir", "xds", "--structure", "model.res", "--sg-window-mode", "dials_bbox"]
+    )
+    assert resolved_sg_window_mode(args, ds) == "dials_bbox"
+
+
+def test_parse_numeric_grid_accepts_commas_semicolons_and_spaces():
+    assert parse_numeric_grid("0.003, 0.004;0.006 0.008") == [0.003, 0.004, 0.006, 0.008]
 
 
 def test_import_dials_parser_exposes_bridge_options():
@@ -183,13 +213,16 @@ def test_auto_parser_accepts_cuda_jax_backend_explicitly():
             "--structure",
             "model.res",
             "--compute-backend",
-            "jax_cuda",
+            "jax_cuda_padded",
             "--jax-batch-size",
             "192",
+            "--jax-matrix-bucket-size",
+            "8",
         ]
     )
-    assert args.compute_backend == "jax_cuda"
+    assert args.compute_backend == "jax_cuda_padded"
     assert args.jax_batch_size == 192
+    assert args.jax_matrix_bucket_size == 8
 
 
 def test_full_fast_parser_exposes_middle_profile():
@@ -198,7 +231,7 @@ def test_full_fast_parser_exposes_middle_profile():
     assert args.mode == "auto"
     assert args.fast is False
     assert args.full_fast is True
-    assert args.full_fast_n_basis == 20
+    assert args.full_fast_n_basis == 24
     assert args.full_fast_n_points == 10
     assert args.full_fast_structure_rows == 0
     assert args.full_fast_structure_max_nfev == 0
@@ -208,9 +241,9 @@ def test_full_fast_profile_pins_cheap_automatic_work():
     args = build_parser().parse_args(["auto", "--out-dir", "out", "--xds-dir", "xds", "--structure", "model.res", "--full-fast"])
     profile = apply_speed_profile(args)
     assert profile["profile"] == "full_fast"
-    assert args.screen_n_basis == 20
+    assert args.screen_n_basis == 24
     assert args.screen_n_points == 10
-    assert args.transform_rerank_n_basis == 20
+    assert args.transform_rerank_n_basis == 24
     assert args.transform_rerank_n_points == 10
     assert args.n_points == 10
     assert args.structure_objective_rows == 250

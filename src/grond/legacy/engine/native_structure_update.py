@@ -721,6 +721,11 @@ def main():
     ap.add_argument("--n-basis", type=int, default=20)
     ap.add_argument("--n-points", type=int, default=10)
     ap.add_argument("--sg-window", type=float, default=0.004)
+    ap.add_argument("--sg-window-mode", choices=["fixed", "zobs_residual", "zobs_plus_floor", "rlp_peak", "dials_bbox"], default="fixed")
+    ap.add_argument("--sg-window-min", type=float, default=0.003)
+    ap.add_argument("--sg-window-max", type=float, default=0.012)
+    ap.add_argument("--sg-window-scale", type=float, default=1.0)
+    ap.add_argument("--sg-window-frame-floor", type=float, default=0.50)
     ap.add_argument("--min-d-spacing", type=float, default=0.70)
     ap.add_argument("--min-peak", type=float, default=0.0)
     ap.add_argument("--geometry-percentile", type=float, default=100.0, help="Keep this broad geometry percentile after PEAK/d-spacing filters.")
@@ -765,8 +770,9 @@ def main():
     ap.add_argument("--sigma-a", type=float, default=0.0)
     ap.add_argument("--sigma-b-corr", type=float, default=0.0)
     ap.add_argument("--sigma-c-peak", type=float, default=0.05)
-    ap.add_argument("--compute-backend", choices=["scipy", "scipy_bethe", "scipy_expm", "scipy_expm_multiply", "jax", "jax_auto", "jax_cpu", "jax_mps", "jax_cuda"], default="scipy", help="Bloch propagation backend. SciPy eigensolver is the production reference; scipy_bethe uses an opt-in promoted Bethe/Schur strong-beam reduction; SciPy expm/expm_multiply and JAX are experimental.")
+    ap.add_argument("--compute-backend", choices=["scipy", "scipy_bethe", "scipy_expm", "scipy_expm_multiply", "jax", "jax_auto", "jax_cpu", "jax_mps", "jax_cuda", "jax_padded", "jax_auto_padded", "jax_cpu_padded", "jax_mps_padded", "jax_cuda_padded"], default="scipy", help="Bloch propagation backend. SciPy eigensolver is the production reference; scipy_bethe uses an opt-in promoted Bethe/Schur strong-beam reduction; SciPy expm/expm_multiply and JAX are experimental. *_padded JAX backends pad matrix dimensions into small buckets to reduce compilation churn.")
     ap.add_argument("--jax-batch-size", type=int, default=0, help="JAX matrix batch size. 0 chooses a conservative size from matrix dimension and device count.")
+    ap.add_argument("--jax-matrix-bucket-size", type=int, default=0, help="Pad JAX matrix dimensions to this multiple. 0 keeps exact sizes unless a *_padded backend is selected, where 0 means 8.")
     ap.add_argument("--profile-quadrature", choices=["uniform", "trapezoid", "gauss_legendre"], default="uniform", help="Rocking-profile Sg quadrature rule.")
     ap.add_argument("--profile-accumulation", choices=["sum", "mean"], default="sum", help="Accumulate rocking-profile samples as summed detector sub-exposures or legacy normalized means.")
     ap.add_argument("--free-fraction", type=float, default=0.10)
@@ -824,6 +830,11 @@ def main():
         n_basis=args.n_basis,
         n_points=args.n_points,
         sg_window=args.sg_window,
+        sg_window_mode=args.sg_window_mode,
+        sg_window_min=args.sg_window_min,
+        sg_window_max=args.sg_window_max,
+        sg_window_scale=args.sg_window_scale,
+        sg_window_frame_floor=args.sg_window_frame_floor,
         thickness_A=args.thickness,
         thickness_grad_frac=args.thickness_grad_frac,
         thickness_points=args.thickness_points,
@@ -837,6 +848,7 @@ def main():
         variance_c_peak=args.sigma_c_peak,
         compute_backend=args.compute_backend,
         jax_batch_size=args.jax_batch_size,
+        jax_matrix_bucket_size=args.jax_matrix_bucket_size,
         profile_quadrature=args.profile_quadrature,
         profile_accumulation=args.profile_accumulation,
         ug_d_min=args.ug_d_min,

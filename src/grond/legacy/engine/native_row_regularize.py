@@ -1052,7 +1052,7 @@ def main():
     ap.add_argument("--n-basis", type=int, default=20)
     ap.add_argument("--n-points", type=int, default=10)
     ap.add_argument("--sg-window", type=float, default=0.004)
-    ap.add_argument("--sg-window-mode", choices=["fixed", "zobs_residual", "zobs_plus_floor", "rlp_peak"], default="fixed")
+    ap.add_argument("--sg-window-mode", choices=["fixed", "zobs_residual", "zobs_plus_floor", "rlp_peak", "dials_bbox"], default="fixed")
     ap.add_argument("--sg-window-min", type=float, default=0.003)
     ap.add_argument("--sg-window-max", type=float, default=0.012)
     ap.add_argument("--sg-window-scale", type=float, default=1.0)
@@ -1128,8 +1128,9 @@ def main():
     ap.add_argument("--chunksize", type=int, default=8)
     ap.add_argument("--prediction-cache-dir", default=str(ROOT / "engine/pred_cache"))
     ap.add_argument("--cache-compression", choices=["compressed", "none"], default="compressed", help="Use none for faster local SSD caches; compressed saves disk on slow/limited storage.")
-    ap.add_argument("--compute-backend", choices=["scipy", "scipy_bethe", "scipy_expm", "scipy_expm_multiply", "jax", "jax_auto", "jax_cpu", "jax_mps", "jax_cuda"], default="scipy", help="Prediction backend. SciPy eigensolver is the production reference; scipy_bethe uses an opt-in promoted Bethe/Schur strong-beam reduction; SciPy expm/expm_multiply and JAX backends are experimental parity/speed probes.")
+    ap.add_argument("--compute-backend", choices=["scipy", "scipy_bethe", "scipy_expm", "scipy_expm_multiply", "jax", "jax_auto", "jax_cpu", "jax_mps", "jax_cuda", "jax_padded", "jax_auto_padded", "jax_cpu_padded", "jax_mps_padded", "jax_cuda_padded"], default="scipy", help="Prediction backend. SciPy eigensolver is the production reference; scipy_bethe uses an opt-in promoted Bethe/Schur strong-beam reduction; SciPy expm/expm_multiply and JAX backends are experimental parity/speed probes. *_padded JAX backends pad matrix dimensions into small buckets to reduce compilation churn.")
     ap.add_argument("--jax-batch-size", type=int, default=0, help="JAX matrix batch size. 0 chooses a conservative size from matrix dimension and device count.")
+    ap.add_argument("--jax-matrix-bucket-size", type=int, default=0, help="Pad JAX matrix dimensions to this multiple. 0 keeps exact sizes unless a *_padded backend is selected, where 0 means 8.")
     ap.add_argument("--max-rows", type=int, default=0)
     ap.add_argument("--make-maps", action="store_true")
     ap.add_argument("--coordinate-polarity-alt", action="store_true", help="Use alternate fractional xyz before building U_g for a native polarity-control run.")
@@ -1231,6 +1232,7 @@ def main():
                                                             dose_b_ref_frame=args.dose_b_ref_frame,
                                                             compute_backend=args.compute_backend,
                                                             jax_batch_size=args.jax_batch_size,
+                                                            jax_matrix_bucket_size=args.jax_matrix_bucket_size,
                                                             matrix_convention=args.matrix_convention,
                                                             free_fraction=args.free_fraction,
                                                             split_seed=args.split_seed,

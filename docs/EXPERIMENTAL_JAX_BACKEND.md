@@ -9,6 +9,7 @@ The backend options are:
 - `scipy`: production reference and default.
 - `jax_cpu`: experimental, mathematically matches SciPy on benchmark rows, but is slower in the current row-by-row kernel.
 - `jax_cuda`: experimental CUDA path. It uses JAX complex128 and `pmap` over visible CUDA devices for same-size Bloch matrix batches. It was correct on an internal three-GPU RTX 2080 Ti test, but slower than optimized SciPy CPU parallelism for the tested N128/Q20 workload.
+- `jax_cpu_padded`, `jax_cuda_padded`, and the other `*_padded` variants: experimental bucketed-shape paths motivated by Takanori Nakane's suggestion to keep matrices the same size where possible. They pad matrices to small size buckets rather than padding every row to the worst-case basis size.
 - `jax`, `jax_auto`, `jax_mps`: experimental. On the tested Apple Silicon/JAX-MPS environment, MPS saw the GPU but failed the required complex `eigh`/`eig` operations, so it is not usable for GROND.
 
 GROND intentionally raises a backend error if a JAX backend cannot run the complex Hermitian and non-Hermitian eigensolvers. It must not silently fall back to SciPy, because that would make timing comparisons meaningless.
@@ -38,6 +39,10 @@ Before promoting any JAX/Metal path, rerun a real parity benchmark and require:
 - End-to-end wall time beats SciPy on realistic row counts, not just a synthetic eigensolver microbenchmark.
 
 The likely useful future path is batched same-size Bloch matrices, not simply replacing each small per-row SciPy eigensolver call with a separate JAX call.
+
+## Bucketed Matrix Snapshot
+
+The padded JAX path was tested after the vectorized Hamiltonian work. Padding every row to the largest matrix size was not useful on CPU, but small buckets were. On a production-like N108/Q20 Bethe-Schur matrix set, exact JAX grouped 45 separate matrix sizes; `jax_cpu_padded` with bucket size 8 reduced that to 7 compiled shapes. In the hot loop this changed the JAX timing from about 1.51 s to 1.35 s for the benchmark batch, and a 32-row end-to-end smoke matched SciPy with maximum `Idyn` difference at numerical noise. This is a real implementation win for the experimental JAX path, but it is still not enough to replace SciPy as the default until whole-workflow timings improve.
 
 ## CUDA Snapshot
 

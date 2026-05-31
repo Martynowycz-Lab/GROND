@@ -12,7 +12,21 @@ DIALS normally writes summation intensities and, when profile fitting is enabled
 dials.integrate updated.expt updated.refl integration.profile.fitting=False prediction.d_min=0.70
 ```
 
-If the detector gain is known, pass it explicitly during DIALS integration, for example `integration.summation.detector_gain=<gain>`. DIALS applies this parameter to summation variances, and GROND records whether the bridge later had to apply any additional sigma scaling because the integration output still looked grossly over-precise. For the 370 electron-diffraction CBF test, the detector model carried gain 204. Once that gain was supplied to `dials.integrate`, GROND should keep the raw DIALS reflection-table sigmas; applying another `sqrt(gain)` multiplier in the bridge double-counts the detector gain and makes the data look artificially weak.
+If the detector gain is known, put it on the detector model during import, for example `dials.import /path/to/images_*.cbf panel.gain=<gain>`, and then integrate that experiment file. For rotation data this is the correct place for the gain; do not rely on `integration.summation.detector_gain` as the routine GROND workflow. GROND records whether the bridge later had to apply any additional sigma scaling because the integration output still looked grossly over-precise. For the 370 DIALS test, the detector model carried gain 204 and the raw DIALS sigmas were already plausible. Applying another `sqrt(gain)` multiplier in the bridge double-counts the detector gain and makes the data look artificially weak.
+
+DIALS reflection tables also carry a `bbox` for each integrated row. GROND stores the z-range from that box in the generated `INTEGRATE.HKL` compatibility file as `ALF0=z_min`, `BET0=z_max`, and `MAXC=z_width`. This gives GROND a cheap record of the DIALS integration support without requiring debug shoebox files. It is not promoted by default as the Bloch rocking width because the integration support is deliberately broad; use `--sg-window-mode dials_bbox` only as an explicit diagnostic.
+
+For forensic work, DIALS can write the full diagnostic shoeboxes:
+
+```bash
+dials.integrate refined.expt refined.refl \
+  integration.profile.fitting=False \
+  prediction.d_min=0.70 \
+  debug.output=True \
+  debug.delete_shoeboxes=False
+```
+
+Those files can be large because they preserve pixel-level shoebox data for each integration block. They are useful for auditing frame profiles and rejected pixels, but they are not required for ordinary GROND auto runs.
 
 The important point is that the GROND input remains the row-preserving integrated reflection table and matching experiment list. It should not be scaled, merged, or symmetry-averaged before the Bloch calculation. If you also run `dials.scale`, keep the scaled files for conventional comparisons, but use `integrated.refl` and `integrated.expt` for the default GROND path unless you deliberately choose the diagnostic `--dials-intensity-mode scale`.
 
@@ -68,7 +82,7 @@ RLP_GROND = lp
 
 This makes GROND's normal `--min-peak 90` selection equivalent to DIALS partiality `>= 0.90`, while leaving weaker partial rows available for diagnostics if you lower `--min-peak`. The `recorded_proxy()` value in the GROND engine maps back to the raw DIALS summation intensity for this bridge mode. That is useful for audits because it keeps the raw summation observation recoverable while the default target remains a complete-intensity estimate.
 
-The default sigma policy is `--dials-sigma-mode auto`. DIALS stores a detector gain on the detector model, but the summation variance path is controlled by the `integration.summation.detector_gain` integration parameter. Electron-diffraction CBF data can therefore carry summation variances that are too optimistic if the detector gain was not applied during integration. In auto mode, GROND checks the detector gain and the high-partiality `I/sigma` distribution; it keeps raw DIALS sigmas for plausible integrated data and only applies `sqrt(detector_gain)` when the rows look grossly over-precise. Use `--dials-sigma-mode raw` to force the raw DIALS variances, `--dials-sigma-mode detector_gain` to force detector-gain scaling, or `--dials-sigma-scale <factor>` for a deliberate diagnostic multiplier. The chosen policy and before/after `I/sigma` distribution are recorded in `dials_bridge_summary.json`.
+The default sigma policy is `--dials-sigma-mode auto`. DIALS stores detector gain on the detector model, and that model should be populated during import for rotation data. Older or hand-edited reductions can still carry summation variances that are too optimistic, so GROND checks the detector gain and the high-partiality `I/sigma` distribution. It keeps raw DIALS sigmas for plausible integrated data and only applies `sqrt(detector_gain)` when the rows look grossly over-precise. Use `--dials-sigma-mode raw` to force the raw DIALS variances, `--dials-sigma-mode detector_gain` to force detector-gain scaling, or `--dials-sigma-scale <factor>` for a deliberate diagnostic multiplier. The chosen policy and before/after `I/sigma` distribution are recorded in `dials_bridge_summary.json`.
 
 Two diagnostic alternatives exist. `--dials-intensity-mode sum_raw` uses the raw summation intensity without LP/partiality completion. `--dials-intensity-mode scale` uses `intensity.scale.value` from `scaled.refl`, and should be treated as a conventional comparison rather than the default Bloch row target.
 

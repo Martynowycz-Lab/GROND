@@ -45,8 +45,8 @@ print(json.dumps({
     "jax": jax_info,
     "engine": {
         "current_core": "numpy_scipy_cpu",
-        "optional_backends": ["jax", "jax_auto", "jax_cpu", "jax_mps", "jax_cuda"],
-        "reason": "The portable NumPy/SciPy Bloch solver remains the production reference; JAX backends are experimental and must pass complex eig/eigh parity before use.",
+        "optional_backends": ["jax", "jax_auto", "jax_cpu", "jax_mps", "jax_cuda", "jax_cpu_padded", "jax_cuda_padded"],
+        "reason": "The portable NumPy/SciPy Bloch solver remains the production reference; JAX backends are experimental and must pass complex eig/eigh parity before use. Padded JAX backends bucket matrix dimensions to reduce recompilation on CPU/CUDA.",
     },
 }, indent=2))
 """

@@ -45,6 +45,33 @@ DEFAULT_RES = Path("model.res")
 _WORKER_PORT = None
 _JAX_MODULES = {}
 _JAX_PROPAGATORS = {}
+JAX_BACKENDS = {"jax", "jax_auto", "jax_cpu", "jax_mps", "jax_cuda", "jax_gpu"}
+JAX_PADDED_BACKENDS = {
+    "jax_padded",
+    "jax_auto_padded",
+    "jax_cpu_padded",
+    "jax_mps_padded",
+    "jax_cuda_padded",
+    "jax_gpu_padded",
+}
+ALL_JAX_BACKENDS = JAX_BACKENDS | JAX_PADDED_BACKENDS
+COMPUTE_BACKENDS = [
+    "scipy",
+    "scipy_bethe",
+    "scipy_expm",
+    "scipy_expm_multiply",
+    "jax",
+    "jax_auto",
+    "jax_cpu",
+    "jax_mps",
+    "jax_cuda",
+    "jax_padded",
+    "jax_auto_padded",
+    "jax_cpu_padded",
+    "jax_mps_padded",
+    "jax_cuda_padded",
+]
+COMPUTE_BACKEND_HELP = ", ".join(COMPUTE_BACKENDS)
 
 
 def _init_prediction_worker(port):
@@ -52,10 +79,44 @@ def _init_prediction_worker(port):
     _WORKER_PORT = port
 
 
+def _jax_backend_base(backend: str) -> str:
+    """Return the accelerator selector for a possibly padded JAX backend name."""
+
+    key = str(backend or "jax").lower()
+    if key.endswith("_padded"):
+        key = key[: -len("_padded")]
+    if key == "jax_auto":
+        key = "jax"
+    if key == "jax_gpu":
+        key = "jax_cuda"
+    return key
+
+
+def _jax_backend_uses_matrix_padding(backend: str) -> bool:
+    """Return whether the backend should bucket/pad matrix dimensions for JAX."""
+
+    return str(backend or "").lower() in JAX_PADDED_BACKENDS
+
+
+def _jax_matrix_bucket_size(cfg: Config | None, backend: str) -> int:
+    """Return the matrix-dimension bucket for padded JAX backends.
+
+    Exact-size JAX grouping is still the default for ordinary JAX backends.
+    The padded backends default to multiples of 8 because 370 benchmarks showed
+    this keeps compilation count low without paying too much extra eigensolver
+    work from full max-size padding.
+    """
+
+    requested = int(getattr(cfg, "jax_matrix_bucket_size", 0) or 0) if cfg is not None else 0
+    if requested > 0:
+        return requested
+    return 8 if _jax_backend_uses_matrix_padding(backend) else 0
+
+
 def _jax_modules(backend: str):
     """Import JAX lazily for optional experimental Bloch propagation backends."""
 
-    key = str(backend or "jax").lower()
+    key = _jax_backend_base(backend)
     if key in _JAX_MODULES:
         return _JAX_MODULES[key]
     os.environ.setdefault("JAX_ENABLE_X64", "True")
@@ -81,8 +142,26 @@ def _jax_modules(backend: str):
 
 
 def _jax_module_key(backend: str) -> str:
-    key = str(backend or "jax").lower()
-    return "jax" if key == "jax_auto" else key
+    return _jax_backend_base(backend)
+
+
+def _stack_square_matrices(matrices, pad_to: int | None = None) -> np.ndarray:
+    """Stack square complex matrices, padding smaller matrices with zero beams."""
+
+    matrices = list(matrices)
+    if not matrices:
+        return np.zeros((0, 0, 0), dtype=np.complex128)
+    sizes = [int(np.asarray(H).shape[0]) for H in matrices]
+    n = int(pad_to or max(sizes))
+    out = np.zeros((len(matrices), n, n), dtype=np.complex128)
+    for i, H in enumerate(matrices):
+        H = np.asarray(H, dtype=np.complex128)
+        if H.ndim != 2 or H.shape[0] != H.shape[1]:
+            raise ValueError(f"expected square matrix, got shape {H.shape}")
+        if H.shape[0] > n:
+            raise ValueError(f"matrix dimension {H.shape[0]} exceeds requested pad_to={n}")
+        out[i, : H.shape[0], : H.shape[1]] = H
+    return out
 
 
 def _auto_jax_batch_size(n: int, n_devices: int) -> int:
@@ -805,6 +884,7 @@ class Config:
     dose_b_ref_frame: float = float("nan")
     compute_backend: str = "scipy"
     jax_batch_size: int = 0
+    jax_matrix_bucket_size: int = 0
     bethe_strong_count: int = 48
     bethe_variant: str = "schur_target"
     bethe_promote_denom: float = 0.005
@@ -1337,6 +1417,16 @@ class XDSBlochPort:
             half_frames_used = float("nan")
             raw = base * math.sqrt(max(rlp_ratio, 1e-12) / peak_frac)
             source = "sg_window*sqrt((RLP/median_RLP)/(PEAK/100))"
+        elif mode == "dials_bbox":
+            z0 = float(self.data.alf0[row_idx])
+            z1 = float(self.data.bet0[row_idx])
+            if np.isfinite(z0) and np.isfinite(z1) and z1 > z0:
+                half_frames_used = max(half_frames, 0.5 * (z1 - z0))
+                source = "2*abs(dSg/dframe)*max(frame_floor,0.5*(DIALS bbox z1-z0))"
+            else:
+                half_frames_used = half_frames
+                source = "2*abs(dSg/dframe)*frame_floor; DIALS bbox z-range unavailable"
+            raw = 2.0 * deriv_frame * half_frames_used
         else:
             raise ValueError(f"unknown sg_window_mode={self.cfg.sg_window_mode!r}")
 
@@ -1609,7 +1699,7 @@ class XDSBlochPort:
             psi0[0] = 1.0 + 0.0j
             psi = expm_multiply((2j * np.pi * float(thickness)) * H, psi0)
             return float(abs(psi[1]) ** 2)
-        if backend in {"jax", "jax_auto", "jax_cpu", "jax_mps", "jax_cuda", "jax_gpu"}:
+        if backend in ALL_JAX_BACKENDS:
             try:
                 _jax, jnp = _jax_modules(_jax_module_key(backend))
                 Hj = jnp.asarray(H, dtype=jnp.complex128)
@@ -1630,7 +1720,7 @@ class XDSBlochPort:
                     f"for GROND production runs. Error: {type(exc).__name__}: {exc}"
                 ) from exc
         raise NotImplementedError(
-            f"unknown compute_backend={backend!r}; expected scipy, scipy_bethe, scipy_expm, scipy_expm_multiply, jax, jax_auto, jax_cpu, jax_mps, or jax_cuda"
+            f"unknown compute_backend={backend!r}; expected one of {COMPUTE_BACKEND_HELP}"
         )
 
     def propagate_direct_to_target_thickness_average(self, H):
@@ -1665,7 +1755,7 @@ class XDSBlochPort:
                     psi = expm_multiply((2j * np.pi * float(t)) * H, psi0)
                 per_t.append(float(abs(psi[1]) ** 2))
             return float(np.sum(self.thick_w * np.asarray(per_t, dtype=float)))
-        if backend in {"jax", "jax_auto", "jax_cpu", "jax_mps", "jax_cuda", "jax_gpu"}:
+        if backend in ALL_JAX_BACKENDS:
             vals = _jax_propagate_batch(
                 np.asarray(H, dtype=np.complex128)[None, :, :],
                 self.thick,
@@ -1676,7 +1766,7 @@ class XDSBlochPort:
             )
             return float(vals[0])
         raise NotImplementedError(
-            f"unknown compute_backend={backend!r}; expected scipy, scipy_bethe, scipy_expm, scipy_expm_multiply, jax, jax_auto, jax_cpu, jax_mps, or jax_cuda"
+            f"unknown compute_backend={backend!r}; expected one of {COMPUTE_BACKEND_HELP}"
         )
 
     def row_prediction_plan(self, row_idx):
@@ -1767,19 +1857,23 @@ class XDSBlochPort:
             return out
         plans = []
         jobs_by_size = {}
+        backend = str(getattr(self.cfg, "compute_backend", "jax") or "jax")
+        matrix_bucket = _jax_matrix_bucket_size(self.cfg, backend)
         t0_plan = time.perf_counter()
         for pos, idx in enumerate(indices):
             plan = self.row_prediction_plan(int(idx))
             plans.append(plan)
             for profile_pos, H in enumerate(plan["_dyn_matrices"]):
-                jobs_by_size.setdefault(int(H.shape[0]), []).append((pos, profile_pos, H))
+                n = int(H.shape[0])
+                if matrix_bucket > 0:
+                    n = int(math.ceil(n / matrix_bucket) * matrix_bucket)
+                jobs_by_size.setdefault(n, []).append((pos, profile_pos, H))
             if (pos + 1) % 500 == 0 or pos + 1 == len(indices):
                 elapsed = time.perf_counter() - t0_plan
                 rate = (pos + 1) / max(elapsed, 1e-12)
                 eta = (len(indices) - (pos + 1)) / max(rate, 1e-12)
                 print(f"prepared {pos + 1}/{len(indices)} rows for JAX | rate={rate:.2f}/s | ETA={eta/60:.1f}m", flush=True)
         dyn_profile_vals = [np.zeros(len(p["_dyn_matrices"]), dtype=float) for p in plans]
-        backend = str(getattr(self.cfg, "compute_backend", "jax") or "jax")
         batch_size = int(getattr(self.cfg, "jax_batch_size", 0))
         absorption = self.absorption_enabled()
         total_matrices = 0
@@ -1787,7 +1881,10 @@ class XDSBlochPort:
         verbose_jax = str(os.environ.get("GROND_JAX_VERBOSE", "")).strip().lower() in {"1", "true", "yes", "on"}
         for n in sorted(jobs_by_size):
             jobs = jobs_by_size[n]
-            H_batch = np.stack([j[2] for j in jobs], axis=0)
+            if matrix_bucket > 0:
+                H_batch = _stack_square_matrices((j[2] for j in jobs), pad_to=n)
+            else:
+                H_batch = np.stack([j[2] for j in jobs], axis=0)
             t0 = time.perf_counter()
             vals = _jax_propagate_batch(H_batch, self.thick, self.thick_w, backend, absorption, batch_size)
             elapsed = time.perf_counter() - t0
@@ -1797,7 +1894,7 @@ class XDSBlochPort:
             if verbose_jax:
                 print(
                     f"JAX Bloch size={n} matrices={len(jobs)} devices={len(_jax_modules(_jax_module_key(backend))[0].devices())} "
-                    f"rate={rate:.2f}/s wall={elapsed:.2f}s",
+                    f"matrix_bucket={matrix_bucket} rate={rate:.2f}/s wall={elapsed:.2f}s",
                     flush=True,
                 )
             for val, (row_pos, profile_pos, _H) in zip(vals, jobs):
@@ -1805,7 +1902,8 @@ class XDSBlochPort:
         if total_matrices:
             print(
                 f"JAX Bloch matrices={total_matrices} groups={len(jobs_by_size)} "
-                f"eig_wall={total_eig_seconds:.2f}s matrix_rate={total_matrices / max(total_eig_seconds, 1e-12):.2f}/s",
+                f"matrix_bucket={matrix_bucket} eig_wall={total_eig_seconds:.2f}s "
+                f"matrix_rate={total_matrices / max(total_eig_seconds, 1e-12):.2f}/s",
                 flush=True,
             )
         results = [self.finish_row_prediction_plan(plan, dyn_profile_vals[pos]) for pos, plan in enumerate(plans)]
@@ -1921,7 +2019,7 @@ class XDSBlochPort:
             indices = np.arange(len(self.data.iobs))
         indices = np.asarray(indices, dtype=int)
         backend = str(getattr(self.cfg, "compute_backend", "scipy") or "scipy").lower()
-        if backend in {"jax", "jax_auto", "jax_cpu", "jax_mps", "jax_cuda", "jax_gpu"} and len(indices) > 1:
+        if backend in ALL_JAX_BACKENDS and len(indices) > 1:
             if int(workers) > 1:
                 print("JAX backend requested; ignoring multiprocessing workers and batching in one process.", flush=True)
             return self.predict_rows_jax_batched(indices, chunksize=chunksize)
@@ -2132,7 +2230,7 @@ def main():
     ap.add_argument("--n-basis", type=int, default=20)
     ap.add_argument("--n-points", type=int, default=20)
     ap.add_argument("--sg-window", type=float, default=0.006)
-    ap.add_argument("--sg-window-mode", choices=["fixed", "zobs_residual", "zobs_plus_floor", "rlp_peak"], default="fixed")
+    ap.add_argument("--sg-window-mode", choices=["fixed", "zobs_residual", "zobs_plus_floor", "rlp_peak", "dials_bbox"], default="fixed")
     ap.add_argument("--sg-window-min", type=float, default=0.003)
     ap.add_argument("--sg-window-max", type=float, default=0.012)
     ap.add_argument("--sg-window-scale", type=float, default=1.0)
@@ -2183,8 +2281,9 @@ def main():
     ap.add_argument("--save-row-table", default="", help="Optional CSV with row-wise metadata, predictions, and residuals.")
     ap.add_argument("--workers", type=int, default=1)
     ap.add_argument("--chunksize", type=int, default=8)
-    ap.add_argument("--compute-backend", choices=["scipy", "scipy_bethe", "scipy_expm", "scipy_expm_multiply", "jax", "jax_auto", "jax_cpu", "jax_mps", "jax_cuda"], default="scipy")
+    ap.add_argument("--compute-backend", choices=COMPUTE_BACKENDS, default="scipy")
     ap.add_argument("--jax-batch-size", type=int, default=0, help="JAX matrix batch size. 0 chooses a conservative size from matrix dimension and device count.")
+    ap.add_argument("--jax-matrix-bucket-size", type=int, default=0, help="Pad JAX matrix dimensions to this multiple. 0 keeps exact sizes unless a *_padded backend is selected, where 0 means 8.")
     ap.add_argument("--positive-only", action="store_true", help="Ignore non-positive XDS IOBS rows for fitting/evaluation.")
     ap.add_argument("--min-peak", type=float, default=90.0, help="Default PEAK/partiality cutoff for XDS row selection. Use 0 for a true full-row diagnostic.")
     ap.add_argument("--min-corr", type=float, default=-999.0)
@@ -2233,6 +2332,7 @@ def main():
         dose_b_ref_frame=args.dose_b_ref_frame,
         compute_backend=args.compute_backend,
         jax_batch_size=args.jax_batch_size,
+        jax_matrix_bucket_size=args.jax_matrix_bucket_size,
         matrix_convention=args.matrix_convention,
         free_fraction=args.free_fraction,
         split_seed=args.split_seed,

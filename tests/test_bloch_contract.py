@@ -1,6 +1,12 @@
 import numpy as np
 
-from grond.legacy.engine.bloch_engine import Config, XDSBlochPort, frozen_kernel_contract
+from grond.legacy.engine.bloch_engine import (
+    Config,
+    XDSBlochPort,
+    _jax_matrix_bucket_size,
+    _stack_square_matrices,
+    frozen_kernel_contract,
+)
 
 
 def test_matrix_convention_is_recorded_in_kernel_contract():
@@ -67,3 +73,26 @@ def test_expm_multiply_backend_matches_eigensolver_on_hermitian_matrix():
 
     assert np.isclose(trial_single, reference_single, rtol=1e-9, atol=1e-11)
     assert np.isclose(trial_average, reference_average, rtol=1e-9, atol=1e-11)
+
+
+def test_padded_jax_backend_defaults_to_eight_beam_buckets():
+    assert _jax_matrix_bucket_size(Config(compute_backend="jax_cpu"), "jax_cpu") == 0
+    assert _jax_matrix_bucket_size(Config(compute_backend="jax_cpu_padded"), "jax_cpu_padded") == 8
+    assert (
+        _jax_matrix_bucket_size(
+            Config(compute_backend="jax_cpu_padded", jax_matrix_bucket_size=16),
+            "jax_cpu_padded",
+        )
+        == 16
+    )
+
+
+def test_stack_square_matrices_pads_with_uncoupled_zero_beams():
+    a = np.eye(2, dtype=np.complex128)
+    b = np.ones((3, 3), dtype=np.complex128)
+    stack = _stack_square_matrices([a, b], pad_to=4)
+    assert stack.shape == (2, 4, 4)
+    assert np.allclose(stack[0, :2, :2], a)
+    assert np.allclose(stack[0, 2:, :], 0.0)
+    assert np.allclose(stack[0, :, 2:], 0.0)
+    assert np.allclose(stack[1, :3, :3], b)

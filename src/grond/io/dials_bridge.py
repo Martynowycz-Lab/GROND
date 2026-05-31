@@ -63,6 +63,12 @@ def vec3_col(table, name, default=np.nan):
     return np.asarray(list(table[name]), dtype=float)
 
 
+def bbox_col(table):
+    if "bbox" not in table:
+        return np.full((len(table), 6), -1, dtype=np.int32)
+    return np.asarray(list(table["bbox"]), dtype=np.int32)
+
+
 def first_panel_metadata(detector):
     if detector is None or len(detector) == 0:
         return {}
@@ -127,6 +133,7 @@ def main():
         "partiality": float_col(table, "partiality", 1.0),
         "zeta": float_col(table, "zeta"),
         "d": float_col(table, "d"),
+        "bbox": bbox_col(table),
         "xyzcal": xyzcal,
         "xyzobs": xyzobs,
         "panel": int_col(table, "panel", 0),
@@ -372,13 +379,11 @@ def _dials_sigma_multiplier(
 ) -> tuple[float, dict[str, Any]]:
     """Choose a DIALS sigma multiplier and explain the decision.
 
-    DIALS stores detector gain on the detector model, while the summation
-    variance path is controlled by the `integration.summation.detector_gain`
-    integration parameter.  If that parameter was used during integration, the
-    reflection-table variance is already on the intended scale.  Auto mode is
-    therefore conservative: it keeps raw DIALS sigmas unless the rows look
-    grossly overconfident, and leaves forced detector-gain scaling as an
-    explicit diagnostic mode.
+    DIALS stores detector gain on the detector model, and rotation data should
+    normally receive that gain during import.  Auto mode is therefore
+    conservative: it keeps raw DIALS sigmas unless the rows look grossly
+    overconfident, and leaves forced detector-gain scaling as an explicit
+    diagnostic mode.
     """
 
     requested = str(sigma_mode or "auto").strip().lower()
@@ -486,6 +491,10 @@ def convert_dials_to_grond(
     xyzcal = np.asarray(arrays["xyzcal"], dtype=float)
     xyzobs = np.asarray(arrays["xyzobs"], dtype=float)
     partiality = np.asarray(arrays["partiality"], dtype=float)
+    bbox = np.asarray(arrays.get("bbox", np.full((len(hkl), 6), -1, dtype=int)), dtype=float)
+    bbox_z0 = bbox[:, 4] if bbox.ndim == 2 and bbox.shape[1] >= 6 else np.full(len(hkl), np.nan)
+    bbox_z1 = bbox[:, 5] if bbox.ndim == 2 and bbox.shape[1] >= 6 else np.full(len(hkl), np.nan)
+    bbox_z_width = bbox_z1 - bbox_z0
     panel = np.asarray(arrays["panel"], dtype=int)
     integrated_sum = np.asarray(arrays["integrated_sum"], dtype=bool)
     dont_integrate = np.asarray(arrays["dont_integrate"], dtype=bool)
@@ -548,6 +557,7 @@ def convert_dials_to_grond(
         f.write(f"!DIALS_ROWS_READ= {len(hkl)}\n")
         f.write(f"!DIALS_ROWS_WRITTEN= {int(np.count_nonzero(finite))}\n")
         f.write("!DIALS_PARTIALITY_AS_PEAK= TRUE\n")
+        f.write("!DIALS_BBOX_Z_RANGE_AS_ALF0_BET0= TRUE\n")
         f.write(f"!DIALS_A_AT_SCAN_POINTS_FILE= {scan_points_path.name}\n")
         f.write(f"!X-RAY_WAVELENGTH= {float(metadata['beam']['wavelength_A']):.12g}\n")
         f.write("!STARTING_FRAME= 0\n")
@@ -575,12 +585,12 @@ def convert_dials_to_grond(
                 float(rlp[i]),
                 float(peak[i]),
                 100.0,
-                0.0,
+                float(bbox_z_width[i]) if np.isfinite(bbox_z_width[i]) else 0.0,
                 float(xyzobs[i, 0]),
                 float(xyzobs[i, 1]),
                 float(xyzobs[i, 2]),
-                0.0,
-                0.0,
+                float(bbox_z0[i]) if np.isfinite(bbox_z0[i]) else 0.0,
+                float(bbox_z1[i]) if np.isfinite(bbox_z1[i]) else 0.0,
                 0.0,
                 0.0,
                 0.0,
@@ -637,6 +647,14 @@ def convert_dials_to_grond(
             "rows_ge_0p90": int(np.count_nonzero(partiality >= 0.90)),
             "rows_ge_0p99": int(np.count_nonzero(partiality >= 0.99)),
         },
+        "bbox_z": {
+            "encoded_as": "ALF0=z_min_frame, BET0=z_max_frame, MAXC=z_width_frames",
+            "available_rows": int(np.count_nonzero(np.isfinite(bbox_z_width) & (bbox_z_width > 0))),
+            "width_min": float(np.nanmin(bbox_z_width)) if np.any(np.isfinite(bbox_z_width)) else None,
+            "width_median": float(np.nanmedian(bbox_z_width)) if np.any(np.isfinite(bbox_z_width)) else None,
+            "width_p90": float(np.nanpercentile(bbox_z_width, 90)) if np.any(np.isfinite(bbox_z_width)) else None,
+            "width_max": float(np.nanmax(bbox_z_width)) if np.any(np.isfinite(bbox_z_width)) else None,
+        },
         "geometry": {
             "space_group": metadata.get("space_group", ""),
             "unit_cell": metadata.get("unit_cell", []),
@@ -665,6 +683,7 @@ def convert_dials_to_grond(
         f"- Intensity mode: `{mode}` ({intensity_note})\n"
         f"- Sigma mode: `{sigma_summary['mode']}`; multiplier `{sigma_summary['sigma_multiplier']:.6g}` ({sigma_summary['source']}).\n"
         "- `PEAK` is `100 * DIALS partiality`, so GROND's ordinary `--min-peak 90` means partiality >= 0.90.\n"
+        "- `ALF0` and `BET0` store the DIALS reflection-table `bbox` z-range. GROND can use this as an auditable rocking-width estimate with `--sg-window-mode dials_bbox`.\n"
         "- Rows flagged `dont_integrate` or with severe DIALS bad-pixel/integration flags are dropped by default. Use the keep flags only for diagnostics.\n"
         "- `DIALS_A_AT_SCAN_POINTS.txt` carries scan-varying reciprocal A matrices. GROND interpolates these and then applies the goniometer rotation for Sg calculations.\n\n"
         "Run GROND with `--xds-dir` pointed at this generated directory, or use `GROND auto --dials-refl ... --dials-expt ...` to create it automatically under the run output directory.\n"

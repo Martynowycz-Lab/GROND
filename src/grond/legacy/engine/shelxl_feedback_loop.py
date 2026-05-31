@@ -265,6 +265,8 @@ def native_command(
         str(args.compute_backend),
         "--jax-batch-size",
         str(int(args.jax_batch_size)),
+        "--jax-matrix-bucket-size",
+        str(int(args.jax_matrix_bucket_size)),
         "--matrix-convention",
         str(nui.get("matrix_convention", summary_value(source_summary, "matrix_convention", "j_minus_i"))),
         "--positive-only",
@@ -344,8 +346,9 @@ def main() -> None:
     ap.add_argument("--lambda-grid", default="1.0")
     ap.add_argument("--rescale", choices=["median-iobs", "none"], default="median-iobs")
     ap.add_argument("--cache-compression", choices=["compressed", "none"], default="none")
-    ap.add_argument("--compute-backend", choices=["scipy", "scipy_bethe", "scipy_expm", "scipy_expm_multiply", "jax", "jax_auto", "jax_cpu", "jax_mps", "jax_cuda"], default="scipy")
+    ap.add_argument("--compute-backend", choices=["scipy", "scipy_bethe", "scipy_expm", "scipy_expm_multiply", "jax", "jax_auto", "jax_cpu", "jax_mps", "jax_cuda", "jax_padded", "jax_auto_padded", "jax_cpu_padded", "jax_mps_padded", "jax_cuda_padded"], default="scipy")
     ap.add_argument("--jax-batch-size", type=int, default=0)
+    ap.add_argument("--jax-matrix-bucket-size", type=int, default=0)
     ap.add_argument("--min-d-spacing", type=float, default=0.0)
     ap.add_argument("--topup-d-min", type=float, default=0.0)
     ap.add_argument("--min-peak", type=float, default=-1.0)
