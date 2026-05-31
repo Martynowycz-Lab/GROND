@@ -23,7 +23,7 @@ dials.integrate updated.expt updated.refl \
   integration.summation.detector_gain=<detector_gain>
 ```
 
-GROND can detect and compensate for missing detector-gain sigma scaling in the bridge, but it is cleaner to make the DIALS summation variances correct at integration time. On the 370 DIALS test set, the detector model reported gain 204; leaving that gain out of the DIALS summation variance path made the rows look far more precise than they really were, which mainly damaged weighted residuals and significance-based tables rather than the unweighted `R1` values.
+GROND can detect and compensate for grossly missing detector-gain sigma scaling in the bridge, but it is cleaner to make the DIALS summation variances correct at integration time. On the 370 DIALS test set, the detector model reported gain 204; once `integration.summation.detector_gain=204` was used during DIALS integration, GROND's DIALS bridge should keep the raw reflection-table sigmas. Forcing an additional detector-gain multiplier after that double-counts the gain, makes the data look artificially weak, and can make significance-based resolution gates far too conservative.
 
 For each row, GROND converts the XDS frame coordinate into a goniometer angle and reconstructs the reciprocal vector for the signed reflection at that angle. In the current XDS bridge, the working geometry is
 

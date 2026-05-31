@@ -26,7 +26,7 @@ def test_dials_sg_statistics_uses_scan_point_geometry():
     assert stats["max_abs_sg_inv_A"] > 0.0
 
 
-def test_dials_sigma_auto_applies_detector_gain_for_overprecise_rows():
+def test_dials_sigma_auto_keeps_plausible_gain_integrated_rows_raw():
     arrays = {"partiality": np.array([0.99, 0.99, 0.99], dtype=float)}
     metadata = {"detector": {"gain": 204.0}}
     iobs = np.array([100.0, 120.0, 80.0], dtype=float)
@@ -42,8 +42,29 @@ def test_dials_sigma_auto_applies_detector_gain_for_overprecise_rows():
         sigma_scale=None,
     )
 
+    assert multiplier == 1.0
+    assert summary["source"] == "auto_raw"
+    assert summary["i_over_sigma_after_median"] == pytest.approx(summary["i_over_sigma_before_median"])
+
+
+def test_dials_sigma_auto_applies_detector_gain_for_grossly_overprecise_rows():
+    arrays = {"partiality": np.array([0.99, 0.99, 0.99], dtype=float)}
+    metadata = {"detector": {"gain": 204.0}}
+    iobs = np.array([10000.0, 12000.0, 8000.0], dtype=float)
+    sigma = np.array([10.0, 10.0, 10.0], dtype=float)
+
+    multiplier, summary = _dials_sigma_multiplier(
+        arrays,
+        metadata,
+        iobs,
+        sigma,
+        mode="sum_complete",
+        sigma_mode="auto",
+        sigma_scale=None,
+    )
+
     assert multiplier == pytest.approx(np.sqrt(204.0))
-    assert summary["source"] == "auto_detector_gain"
+    assert summary["source"] == "auto_detector_gain_gross_overprecision"
     assert summary["i_over_sigma_after_median"] < summary["i_over_sigma_before_median"]
 
 

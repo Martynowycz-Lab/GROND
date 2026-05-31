@@ -67,9 +67,9 @@ default, stores `100 * partiality` in the `PEAK` column, stores `lp` in `RLP`,
 and keeps the exact signed DIALS `miller_index`. GROND's default `--min-peak 90`
 therefore means DIALS partiality `>= 0.90`. The DIALS bridge also writes
 `!DIALS_SIGMA_MODE` and `!DIALS_SIGMA_MULTIPLIER` header records. In the default
-auto mode, electron-diffraction rows with detector-gain metadata and
-over-precise raw summation sigmas receive detector-gain sigma scaling while
-leaving the intensities unchanged.
+auto mode, GROND keeps raw DIALS sigmas for plausible integrated data and only
+applies detector-gain sigma scaling when rows look grossly over-precise. The
+intensities are not changed by sigma scaling.
 
 The structure file supplies the atomic model. GROND accepts `RES` or `CIF`.
 For a CIF, the atom loop has the usual atom labels, element types, fractional

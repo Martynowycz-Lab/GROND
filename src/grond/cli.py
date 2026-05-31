@@ -4043,7 +4043,7 @@ def add_common_run_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--dials-expt", default="", help="DIALS integrated.expt/scaled.expt file matching --dials-refl.")
     ap.add_argument("--dials-python", default="", help="Python executable that can import dials and dxtbx. Leave blank when the active Python already can.")
     ap.add_argument("--dials-intensity-mode", choices=["sum_complete", "sum_raw", "scale"], default="sum_complete", help="DIALS intensity mapping for the GROND row contract.")
-    ap.add_argument("--dials-sigma-mode", choices=["auto", "raw", "detector_gain"], default="auto", help="DIALS sigma bridge policy. auto applies detector-gain sigma scaling when DIALS variances look unconverted.")
+    ap.add_argument("--dials-sigma-mode", choices=["auto", "raw", "detector_gain"], default="auto", help="DIALS sigma bridge policy. auto keeps raw DIALS sigmas unless rows look grossly overconfident; detector_gain forces sqrt(gain) scaling.")
     ap.add_argument("--dials-sigma-scale", type=float, default=None, help="Explicit DIALS sigma multiplier. Overrides --dials-sigma-mode when positive.")
     ap.add_argument("--dials-min-partiality-write", type=float, default=1e-6, help="Minimum DIALS partiality written into the converted row file. GROND's --min-peak still controls production row selection.")
     ap.add_argument("--dials-drop-dont-integrate", action="store_true", help="Deprecated alias for the default production behavior. Rows flagged dont_integrate are dropped unless --dials-keep-dont-integrate is used.")

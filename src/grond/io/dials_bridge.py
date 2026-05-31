@@ -374,10 +374,11 @@ def _dials_sigma_multiplier(
 
     DIALS stores detector gain on the detector model, while the summation
     variance path is controlled by the `integration.summation.detector_gain`
-    integration parameter.  Electron-diffraction CBF reductions may therefore
-    carry Poisson-like variances that have not been converted by the detector
-    gain.  GROND keeps this as an explicit, auditable bridge policy rather than
-    silently treating unrealistically precise DIALS rows as final weights.
+    integration parameter.  If that parameter was used during integration, the
+    reflection-table variance is already on the intended scale.  Auto mode is
+    therefore conservative: it keeps raw DIALS sigmas unless the rows look
+    grossly overconfident, and leaves forced detector-gain scaling as an
+    explicit diagnostic mode.
     """
 
     requested = str(sigma_mode or "auto").strip().lower()
@@ -395,12 +396,19 @@ def _dials_sigma_multiplier(
         keep = np.isfinite(partiality) & (partiality >= 0.90)
         ios_raw = _finite_i_over_sigma(iobs, sigma, keep)
         median_ios = float(np.nanmedian(ios_raw)) if len(ios_raw) else None
+        p95_ios = float(np.nanpercentile(ios_raw, 95)) if len(ios_raw) else None
         if requested == "detector_gain":
             mult = math.sqrt(gain)
             source = "detector_gain"
-        elif gain > 1.01 and median_ios is not None and median_ios > 3.0:
+        elif (
+            gain > 1.01
+            and median_ios is not None
+            and p95_ios is not None
+            and median_ios > 50.0
+            and p95_ios > 250.0
+        ):
             mult = math.sqrt(gain)
-            source = "auto_detector_gain"
+            source = "auto_detector_gain_gross_overprecision"
         else:
             mult = 1.0
             source = "auto_raw"
@@ -418,7 +426,11 @@ def _dials_sigma_multiplier(
         "i_over_sigma_after_median": float(np.nanmedian(ios_after)) if len(ios_after) else None,
         "i_over_sigma_before_p95": float(np.nanpercentile(ios_before, 95)) if len(ios_before) else None,
         "i_over_sigma_after_p95": float(np.nanpercentile(ios_after, 95)) if len(ios_after) else None,
-        "note": "DIALS detector-gain sigma scaling is applied to the bridge sigma only; intensities are unchanged.",
+        "note": (
+            "DIALS sigma values are passed through unchanged; intensities are unchanged."
+            if float(mult) == 1.0
+            else "DIALS detector-gain sigma scaling is applied to the bridge sigma only; intensities are unchanged."
+        ),
     }
     return float(mult), summary
 
