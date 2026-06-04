@@ -1,11 +1,14 @@
 import numpy as np
+from scipy.linalg import expm
 
 from grond.legacy.engine.bloch_engine import (
     Config,
     XDSBlochPort,
     _jax_matrix_bucket_size,
+    _real_embedding_generator_batch,
     _stack_square_matrices,
     frozen_kernel_contract,
+    promoted_bethe_effective_hamiltonian,
 )
 
 
@@ -75,9 +78,56 @@ def test_expm_multiply_backend_matches_eigensolver_on_hermitian_matrix():
     assert np.isclose(trial_average, reference_average, rtol=1e-9, atol=1e-11)
 
 
+def test_real_embedding_generator_matches_complex_expm_column():
+    rng = np.random.default_rng(321)
+    raw = 0.001 * (rng.normal(size=(6, 6)) + 1j * rng.normal(size=(6, 6)))
+    H = (raw + raw.conj().T) * 0.5
+    H[np.diag_indices_from(H)] = np.real(np.diag(H))
+    thickness = 350.0
+
+    embedded = _real_embedding_generator_batch(H[None, :, :], thickness, "float64")[0]
+    real_col = expm(embedded)[:, 0]
+    trial = real_col[1] + 1j * real_col[H.shape[0] + 1]
+
+    complex_col = expm((2j * np.pi * thickness) * H)[:, 0]
+    assert np.isclose(abs(trial) ** 2, abs(complex_col[1]) ** 2, rtol=1e-11, atol=1e-13)
+
+
+def test_bethe_backend_is_exact_when_strong_block_contains_all_beams():
+    rng = np.random.default_rng(1234)
+    raw = rng.normal(size=(7, 7)) + 1j * rng.normal(size=(7, 7))
+    H = 0.001 * (raw + raw.conj().T) * 0.5
+    H[np.diag_indices_from(H)] = np.real(np.diag(H))
+
+    port = object.__new__(XDSBlochPort)
+    port.thick = np.asarray([300.0, 600.0, 900.0], dtype=float)
+    port.thick_w = np.asarray([0.2, 0.5, 0.3], dtype=float)
+    port.cfg = Config(compute_backend="scipy")
+    reference = port.propagate_direct_to_target_thickness_average(H)
+
+    port.cfg = Config(compute_backend="scipy_bethe", bethe_strong_count=H.shape[0])
+    trial = port.propagate_direct_to_target_thickness_average(H)
+
+    assert np.isclose(trial, reference, rtol=1e-12, atol=1e-14)
+
+
+def test_bethe_variants_return_finite_effective_hamiltonians():
+    rng = np.random.default_rng(4321)
+    raw = rng.normal(size=(10, 10)) + 1j * rng.normal(size=(10, 10))
+    H = 0.001 * (raw + raw.conj().T) * 0.5
+    H[np.diag_indices_from(H)] = np.real(np.diag(H))
+
+    for variant in ["truncate", "schur0", "schur_target", "schur_mean"]:
+        cfg = Config(bethe_strong_count=4, bethe_variant=variant, bethe_promote_denom=0.0)
+        effective = promoted_bethe_effective_hamiltonian(H, cfg)
+        assert effective.shape == (4, 4)
+        assert np.all(np.isfinite(effective))
+
+
 def test_padded_jax_backend_defaults_to_eight_beam_buckets():
     assert _jax_matrix_bucket_size(Config(compute_backend="jax_cpu"), "jax_cpu") == 0
     assert _jax_matrix_bucket_size(Config(compute_backend="jax_cpu_padded"), "jax_cpu_padded") == 8
+    assert _jax_matrix_bucket_size(Config(compute_backend="jax_mps_real_expm_padded"), "jax_mps_real_expm_padded") == 8
     assert (
         _jax_matrix_bucket_size(
             Config(compute_backend="jax_cpu_padded", jax_matrix_bucket_size=16),

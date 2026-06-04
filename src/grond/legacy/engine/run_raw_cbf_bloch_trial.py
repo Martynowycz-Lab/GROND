@@ -297,9 +297,13 @@ def main() -> None:
     ap.add_argument("--chunksize", type=int, default=8)
     ap.add_argument("--prediction-cache-dir", default="")
     ap.add_argument("--cache-compression", choices=["compressed", "none"], default="none")
-    ap.add_argument("--compute-backend", choices=["scipy", "scipy_bethe", "scipy_expm", "scipy_expm_multiply", "jax", "jax_auto", "jax_cpu", "jax_mps", "jax_cuda", "jax_padded", "jax_auto_padded", "jax_cpu_padded", "jax_mps_padded", "jax_cuda_padded"], default="scipy")
+    ap.add_argument("--compute-backend", choices=["scipy", "scipy_bethe", "scipy_expm", "scipy_expm_multiply", "jax", "jax_auto", "jax_cpu", "jax_mps", "jax_cuda", "jax_padded", "jax_auto_padded", "jax_cpu_padded", "jax_mps_padded", "jax_cuda_padded", "jax_cpu_real_expm", "jax_mps_real_expm", "jax_mps_real_expm_padded"], default="scipy")
     ap.add_argument("--jax-batch-size", type=int, default=0)
     ap.add_argument("--jax-matrix-bucket-size", type=int, default=0)
+    ap.add_argument("--bethe-strong-count", type=int, default=48)
+    ap.add_argument("--bethe-variant", choices=["truncate", "schur0", "schur_target", "schur_mean"], default="schur_target")
+    ap.add_argument("--bethe-promote-denom", type=float, default=0.005)
+    ap.add_argument("--bethe-denom-eps", type=float, default=1e-5)
     ap.add_argument(
         "--include-nonpositive",
         action="store_true",
@@ -569,6 +573,14 @@ def main() -> None:
                                     str(args.jax_batch_size),
                                     "--jax-matrix-bucket-size",
                                     str(args.jax_matrix_bucket_size),
+                                    "--bethe-strong-count",
+                                    str(args.bethe_strong_count),
+                                    "--bethe-variant",
+                                    args.bethe_variant,
+                                    "--bethe-promote-denom",
+                                    str(args.bethe_promote_denom),
+                                    "--bethe-denom-eps",
+                                    str(args.bethe_denom_eps),
                                 ]
                                 fit_cmd.append("--include-nonpositive" if args.include_nonpositive else "--positive-only")
                                 if args.baseline_hkl:

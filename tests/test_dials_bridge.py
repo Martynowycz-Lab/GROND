@@ -68,6 +68,37 @@ def test_dials_sigma_auto_applies_detector_gain_for_grossly_overprecise_rows():
     assert summary["i_over_sigma_after_median"] < summary["i_over_sigma_before_median"]
 
 
+def test_dials_sigma_auto_prefers_empirical_duplicate_scatter_when_available():
+    hkl = []
+    iobs = []
+    sigma = []
+    for h in range(1, 36):
+        hkl.extend([(h, 0, 0), (-h, 0, 0)])
+        iobs.extend([100.0 + h, 112.0 + h])
+        sigma.extend([1.0, 1.0])
+    arrays = {
+        "hkl": np.asarray(hkl, dtype=int),
+        "partiality": np.full(len(iobs), 0.99, dtype=float),
+        "integrated_sum": np.ones(len(iobs), dtype=bool),
+    }
+    metadata = {"detector": {"gain": 204.0}, "space_group": "P 2 2 2"}
+
+    multiplier, summary = _dials_sigma_multiplier(
+        arrays,
+        metadata,
+        np.asarray(iobs, dtype=float),
+        np.asarray(sigma, dtype=float),
+        mode="sum_complete",
+        sigma_mode="auto",
+        sigma_scale=None,
+    )
+
+    assert summary["source"] == "auto_empirical_replicate_variance"
+    assert multiplier > 1.0
+    assert summary["empirical_variance_model"]["usable_groups"] == 35
+    assert np.nanmedian(summary["_sigma_effective"]) > 1.0
+
+
 def test_dials_sigma_raw_keeps_variances_unchanged():
     arrays = {"partiality": np.array([0.99, 0.99], dtype=float)}
     metadata = {"detector": {"gain": 204.0}}

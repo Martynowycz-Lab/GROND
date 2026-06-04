@@ -35,16 +35,30 @@ for _name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "VEC
 
 import numpy as np
 
-from bloch_engine import (
-    Config,
-    XDSBlochPort,
-    XDSData,
-    frozen_kernel_contract,
-    coordinate_polarity_model,
-    parse_model,
-    sha256,
-    split_masks,
-)
+try:  # Package import.
+    from .bloch_engine import (
+        Config,
+        XDSBlochPort,
+        XDSData,
+        frozen_kernel_contract,
+        coordinate_polarity_model,
+        parse_model,
+        sha256,
+        split_masks,
+    )
+    from .post_bloch_sigma import fit_uniform_z_rms_sigma_scale, scale_row_sigmas
+except ImportError:  # Direct script execution from this directory.
+    from bloch_engine import (
+        Config,
+        XDSBlochPort,
+        XDSData,
+        frozen_kernel_contract,
+        coordinate_polarity_model,
+        parse_model,
+        sha256,
+        split_masks,
+    )
+    from post_bloch_sigma import fit_uniform_z_rms_sigma_scale, scale_row_sigmas
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -903,6 +917,10 @@ def export_corrected_endpoint(
     endpoint_b: float = 0.0,
     keep_exti: bool = False,
     shelxl_iterations: int = 1,
+    post_bloch_sigma_policy: str = "none",
+    post_bloch_sigma_holdout_fraction: float = 0.20,
+    post_bloch_sigma_min_scale: float = 0.25,
+    post_bloch_sigma_max_scale: float = 4.0,
 ):
     out_dir.mkdir(parents=True, exist_ok=True)
     arrays = best_eval["arrays"]
@@ -941,6 +959,32 @@ def export_corrected_endpoint(
         if hkl_safe_factor < 1.0:
             rows_merged = [(h, k, l, I * hkl_safe_factor, s * hkl_safe_factor) for h, k, l, I, s in rows_merged]
             rows_unmerged = [(h, k, l, I * hkl_safe_factor, s * hkl_safe_factor) for h, k, l, I, s in rows_unmerged]
+    post_bloch_sigma = {"policy": str(post_bloch_sigma_policy), "status": "not_requested"}
+    if str(post_bloch_sigma_policy) == "uniform_z_rms":
+        try:
+            current_model = parse_model(res_path)
+            post_bloch_sigma = fit_uniform_z_rms_sigma_scale(
+                rows_merged,
+                current_model,
+                holdout_fraction=float(post_bloch_sigma_holdout_fraction),
+                min_scale=float(post_bloch_sigma_min_scale),
+                max_scale=float(post_bloch_sigma_max_scale),
+            )
+            if str(post_bloch_sigma.get("status", "")).startswith("ok"):
+                sigma_scale = float(post_bloch_sigma["sigma_scale"])
+                rows_merged = scale_row_sigmas(rows_merged, sigma_scale)
+                rows_unmerged = scale_row_sigmas(rows_unmerged, sigma_scale)
+        except Exception as exc:
+            post_bloch_sigma = {
+                "policy": "uniform_z_rms",
+                "status": "failed",
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+    elif str(post_bloch_sigma_policy) != "none":
+        post_bloch_sigma = {
+            "policy": str(post_bloch_sigma_policy),
+            "status": "unknown_policy",
+        }
     write_hkl(hkl, rows_merged, hkl_format)
     write_hkl(out_dir / "dyn_nuisance_corrected_unmerged.hkl", rows_unmerged, hkl_format)
     write_endpoint_ins(res_path, out_dir / "dyn_nuisance_corrected.ins", hkl_name="dyn_nuisance_corrected.hkl", keep_exti=keep_exti)
@@ -956,6 +1000,7 @@ def export_corrected_endpoint(
         **modulation_meta,
         "keep_exti": bool(keep_exti),
         "shelxl_iterations": int(max(1, shelxl_iterations)),
+        "post_bloch_sigma": post_bloch_sigma,
         "rows_unmerged": len(rows_unmerged),
         "rows_merged_exact_hkl": len(rows_merged),
         "q_median": float(np.nanmedian(q_clip[valid])),
@@ -1122,15 +1167,23 @@ def main():
     ap.add_argument("--endpoint-b-grid", default="0.0", help="Diagnostic endpoint resolution-scale grid in intensity B units: Icorr *= exp(B*(1/4d^2 - median(1/4d^2))). Nonzero values are not promoted over a neutral B=0 endpoint.")
     ap.add_argument("--endpoint-exti-grid", default="off", help="Comma grid of endpoint EXTI modes: off,on. Off removes EXTI from the corrected endpoint; on keeps/regularizes the source EXTI term.")
     ap.add_argument("--shelxl-iterations", type=int, default=1, help="Number of SHELXL polish passes per corrected endpoint. Later passes feed .res back into .ins.")
+    ap.add_argument("--post-bloch-sigma-policy", choices=["none", "uniform_z_rms"], default="none", help="Endpoint uncertainty policy applied after Bloch correction and before SHELXL. uniform_z_rms fits one residual RMS(z) scalar from the current model and scales endpoint sigmas only.")
+    ap.add_argument("--post-bloch-sigma-holdout-fraction", type=float, default=0.20, help="Deterministic HKL holdout fraction reported for uniform_z_rms diagnostics.")
+    ap.add_argument("--post-bloch-sigma-min-scale", type=float, default=0.25, help="Lower guardrail for the uniform_z_rms sigma multiplier.")
+    ap.add_argument("--post-bloch-sigma-max-scale", type=float, default=4.0, help="Upper guardrail for the uniform_z_rms sigma multiplier.")
     ap.add_argument("--rescale", choices=["median-iobs", "none"], default="median-iobs")
     ap.add_argument("--hkl-float-format", choices=["shelx_fixed", "wide"], default="shelx_fixed")
     ap.add_argument("--workers", type=int, default=1)
     ap.add_argument("--chunksize", type=int, default=8)
     ap.add_argument("--prediction-cache-dir", default=str(ROOT / "engine/pred_cache"))
     ap.add_argument("--cache-compression", choices=["compressed", "none"], default="compressed", help="Use none for faster local SSD caches; compressed saves disk on slow/limited storage.")
-    ap.add_argument("--compute-backend", choices=["scipy", "scipy_bethe", "scipy_expm", "scipy_expm_multiply", "jax", "jax_auto", "jax_cpu", "jax_mps", "jax_cuda", "jax_padded", "jax_auto_padded", "jax_cpu_padded", "jax_mps_padded", "jax_cuda_padded"], default="scipy", help="Prediction backend. SciPy eigensolver is the production reference; scipy_bethe uses an opt-in promoted Bethe/Schur strong-beam reduction; SciPy expm/expm_multiply and JAX backends are experimental parity/speed probes. *_padded JAX backends pad matrix dimensions into small buckets to reduce compilation churn.")
+    ap.add_argument("--compute-backend", choices=["scipy", "scipy_bethe", "scipy_expm", "scipy_expm_multiply", "jax", "jax_auto", "jax_cpu", "jax_mps", "jax_cuda", "jax_padded", "jax_auto_padded", "jax_cpu_padded", "jax_mps_padded", "jax_cuda_padded", "jax_cpu_real_expm", "jax_mps_real_expm", "jax_mps_real_expm_padded"], default="scipy", help="Prediction backend. SciPy eigensolver is the production reference; scipy_bethe uses an opt-in promoted Bethe/Schur strong-beam reduction; SciPy expm/expm_multiply, real-embedded JAX expm, and JAX eigensolver backends are experimental parity/speed probes. *_padded JAX backends pad matrix dimensions into small buckets to reduce compilation churn.")
     ap.add_argument("--jax-batch-size", type=int, default=0, help="JAX matrix batch size. 0 chooses a conservative size from matrix dimension and device count.")
     ap.add_argument("--jax-matrix-bucket-size", type=int, default=0, help="Pad JAX matrix dimensions to this multiple. 0 keeps exact sizes unless a *_padded backend is selected, where 0 means 8.")
+    ap.add_argument("--bethe-strong-count", type=int, default=48, help="Strong-beam block size for scipy_bethe. Values >= n_basis recover the dense SciPy matrix.")
+    ap.add_argument("--bethe-variant", choices=["truncate", "schur0", "schur_target", "schur_mean"], default="schur_target", help="Strong/weak-beam reduction used by scipy_bethe.")
+    ap.add_argument("--bethe-promote-denom", type=float, default=0.005, help="Promote weak beams whose diagonal denominator is this close to the Schur energy.")
+    ap.add_argument("--bethe-denom-eps", type=float, default=1e-5, help="Small-denominator floor for scipy_bethe Schur corrections.")
     ap.add_argument("--max-rows", type=int, default=0)
     ap.add_argument("--make-maps", action="store_true")
     ap.add_argument("--coordinate-polarity-alt", action="store_true", help="Use alternate fractional xyz before building U_g for a native polarity-control run.")
@@ -1233,6 +1286,10 @@ def main():
                                                             compute_backend=args.compute_backend,
                                                             jax_batch_size=args.jax_batch_size,
                                                             jax_matrix_bucket_size=args.jax_matrix_bucket_size,
+                                                            bethe_strong_count=args.bethe_strong_count,
+                                                            bethe_variant=args.bethe_variant,
+                                                            bethe_promote_denom=args.bethe_promote_denom,
+                                                            bethe_denom_eps=args.bethe_denom_eps,
                                                             matrix_convention=args.matrix_convention,
                                                             free_fraction=args.free_fraction,
                                                             split_seed=args.split_seed,
@@ -1387,6 +1444,10 @@ def main():
                         endpoint_b=endpoint_b,
                         keep_exti=keep_exti,
                         shelxl_iterations=args.shelxl_iterations,
+                        post_bloch_sigma_policy=args.post_bloch_sigma_policy,
+                        post_bloch_sigma_holdout_fraction=args.post_bloch_sigma_holdout_fraction,
+                        post_bloch_sigma_min_scale=args.post_bloch_sigma_min_scale,
+                        post_bloch_sigma_max_scale=args.post_bloch_sigma_max_scale,
                     )
                 )
     endpoint_results = sorted(endpoint_results, key=lambda r: (r["shelxl"].get("wR2_all", 999), r["shelxl"].get("R1_all", 999)))
@@ -1594,13 +1655,17 @@ def main():
         "",
         "## Corrected-HKL Endpoint",
         "",
-        "| lambda_q | endpoint B | EXTI | R1gt % | R1all % | wR2all % | GooF | Ngt/Nall | unique | q p05/median/p95 |",
-        "|---:|---:|:---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| lambda_q | endpoint B | EXTI | post-Bloch sigma | z RMS held-out | R1gt % | R1all % | wR2all % | GooF | Ngt/Nall | unique | q p05/median/p95 |",
+        "|---:|---:|:---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ])
     for ep in endpoint_results:
         sh = ep["shelxl"]
+        sig_meta = ep.get("post_bloch_sigma") or {}
+        sig_scale = sig_meta.get("sigma_scale", 1.0 if sig_meta.get("status") == "not_requested" else float("nan"))
+        heldout_z = sig_meta.get("heldout_rms_z_after", sig_meta.get("all_rms_z_after", float("nan")))
         lines.append(
             f"| {ep['lambda_q']:.2f} | {ep.get('endpoint_b', 0.0):.2f} | {'on' if ep.get('keep_exti') else 'off'} | "
+            f"{sig_scale:.3f} | {heldout_z:.3f} | "
             f"{100*sh.get('R1_gt', float('nan')):.2f} | {100*sh.get('R1_all', float('nan')):.2f} | "
             f"{100*sh.get('wR2_all', float('nan')):.2f} | {sh.get('GooF', float('nan')):.3f} | "
             f"{sh.get('N_gt', '')}/{sh.get('N_all', '')} | {sh.get('unique', '')} | "

@@ -9,6 +9,7 @@ from grond.cli import (
     parse_numeric_grid,
     publication_report_cmd,
     required_external_tool_errors,
+    resolved_post_bloch_sigma_policy,
     resolve_structure_update_strategy,
     resolved_sg_window_mode,
     transform_scout_job_count,
@@ -89,6 +90,10 @@ def test_run_parser_exposes_staged_feature_grids():
     assert args.shelxl_feedback_cycles == 5
     assert args.shelxl_feedback_shelxl_iterations == 1
     assert args.shelxl_iterations == 5
+    assert args.post_bloch_sigma_policy == "auto"
+    assert args.post_bloch_sigma_holdout_fraction == 0.20
+    assert args.post_bloch_sigma_min_scale == 0.25
+    assert args.post_bloch_sigma_max_scale == 4.0
 
 
 def test_utility_commands_parse():
@@ -202,6 +207,29 @@ def test_structure_update_strategy_can_force_shelxl_feedback():
     assert resolve_structure_update_strategy(args, multi_dataset=True) == "shelxl_feedback"
 
 
+def test_post_bloch_sigma_auto_is_final_endpoint_only():
+    args = build_parser().parse_args(["auto", "--out-dir", "out", "--xds-dir", "xds", "--structure", "model.res"])
+
+    assert resolved_post_bloch_sigma_policy(args) == "none"
+    assert resolved_post_bloch_sigma_policy(args, final_endpoint=True) == "uniform_z_rms"
+    assert resolved_post_bloch_sigma_policy(args, feedback_loop=True) == "uniform_z_rms"
+
+    args = build_parser().parse_args(
+        [
+            "auto",
+            "--out-dir",
+            "out",
+            "--xds-dir",
+            "xds",
+            "--structure",
+            "model.res",
+            "--post-bloch-sigma-policy",
+            "none",
+        ]
+    )
+    assert resolved_post_bloch_sigma_policy(args, final_endpoint=True) == "none"
+
+
 def test_auto_parser_accepts_cuda_jax_backend_explicitly():
     args = build_parser().parse_args(
         [
@@ -223,6 +251,82 @@ def test_auto_parser_accepts_cuda_jax_backend_explicitly():
     assert args.compute_backend == "jax_cuda_padded"
     assert args.jax_batch_size == 192
     assert args.jax_matrix_bucket_size == 8
+
+
+def test_auto_parser_accepts_mps_real_expm_backend_explicitly():
+    args = build_parser().parse_args(
+        [
+            "auto",
+            "--out-dir",
+            "out",
+            "--xds-dir",
+            "xds",
+            "--structure",
+            "model.res",
+            "--compute-backend",
+            "jax_mps_real_expm_padded",
+            "--jax-batch-size",
+            "32",
+            "--jax-matrix-bucket-size",
+            "8",
+        ]
+    )
+    assert args.compute_backend == "jax_mps_real_expm_padded"
+    assert args.jax_batch_size == 32
+    assert args.jax_matrix_bucket_size == 8
+
+
+def test_auto_parser_accepts_bethe_backend_controls():
+    args = build_parser().parse_args(
+        [
+            "auto",
+            "--out-dir",
+            "out",
+            "--xds-dir",
+            "xds",
+            "--structure",
+            "model.res",
+            "--compute-backend",
+            "scipy_bethe",
+            "--bethe-strong-count",
+            "64",
+            "--bethe-variant",
+            "schur_target",
+            "--bethe-promote-denom",
+            "0.004",
+            "--bethe-denom-eps",
+            "1e-6",
+        ]
+    )
+    assert args.compute_backend == "scipy_bethe"
+    assert args.bethe_strong_count == 64
+    assert args.bethe_variant == "schur_target"
+    assert args.bethe_promote_denom == 0.004
+    assert args.bethe_denom_eps == 1e-6
+
+
+def test_raw_polish_parser_accepts_bethe_backend_controls():
+    args = build_parser().parse_args(
+        [
+            "raw-polish",
+            "--hkl",
+            "INTEGRATE.HKL",
+            "--structure",
+            "model.res",
+            "--out-dir",
+            "raw",
+            "--compute-backend",
+            "scipy_bethe",
+            "--bethe-strong-count",
+            "64",
+            "--bethe-variant",
+            "schur_target",
+        ]
+    )
+    assert args.command == "raw-polish"
+    assert args.compute_backend == "scipy_bethe"
+    assert args.bethe_strong_count == 64
+    assert args.bethe_variant == "schur_target"
 
 
 def test_full_fast_parser_exposes_middle_profile():

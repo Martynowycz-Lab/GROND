@@ -45,6 +45,7 @@ DEFAULT_RES = Path("model.res")
 _WORKER_PORT = None
 _JAX_MODULES = {}
 _JAX_PROPAGATORS = {}
+_JAX_REAL_EXPM_PROPAGATORS = {}
 JAX_BACKENDS = {"jax", "jax_auto", "jax_cpu", "jax_mps", "jax_cuda", "jax_gpu"}
 JAX_PADDED_BACKENDS = {
     "jax_padded",
@@ -54,7 +55,9 @@ JAX_PADDED_BACKENDS = {
     "jax_cuda_padded",
     "jax_gpu_padded",
 }
-ALL_JAX_BACKENDS = JAX_BACKENDS | JAX_PADDED_BACKENDS
+JAX_REAL_EXPM_BACKENDS = {"jax_cpu_real_expm", "jax_mps_real_expm"}
+JAX_REAL_EXPM_PADDED_BACKENDS = {"jax_mps_real_expm_padded"}
+ALL_JAX_BACKENDS = JAX_BACKENDS | JAX_PADDED_BACKENDS | JAX_REAL_EXPM_BACKENDS | JAX_REAL_EXPM_PADDED_BACKENDS
 COMPUTE_BACKENDS = [
     "scipy",
     "scipy_bethe",
@@ -70,6 +73,9 @@ COMPUTE_BACKENDS = [
     "jax_cpu_padded",
     "jax_mps_padded",
     "jax_cuda_padded",
+    "jax_cpu_real_expm",
+    "jax_mps_real_expm",
+    "jax_mps_real_expm_padded",
 ]
 COMPUTE_BACKEND_HELP = ", ".join(COMPUTE_BACKENDS)
 
@@ -85,6 +91,8 @@ def _jax_backend_base(backend: str) -> str:
     key = str(backend or "jax").lower()
     if key.endswith("_padded"):
         key = key[: -len("_padded")]
+    if key.endswith("_real_expm"):
+        key = key[: -len("_real_expm")]
     if key == "jax_auto":
         key = "jax"
     if key == "jax_gpu":
@@ -95,7 +103,13 @@ def _jax_backend_base(backend: str) -> str:
 def _jax_backend_uses_matrix_padding(backend: str) -> bool:
     """Return whether the backend should bucket/pad matrix dimensions for JAX."""
 
-    return str(backend or "").lower() in JAX_PADDED_BACKENDS
+    return str(backend or "").lower() in (JAX_PADDED_BACKENDS | JAX_REAL_EXPM_PADDED_BACKENDS)
+
+
+def _jax_backend_uses_real_expm(backend: str) -> bool:
+    """Return whether the backend uses the experimental real embedded expm path."""
+
+    return str(backend or "").lower() in (JAX_REAL_EXPM_BACKENDS | JAX_REAL_EXPM_PADDED_BACKENDS)
 
 
 def _jax_matrix_bucket_size(cfg: Config | None, backend: str) -> int:
@@ -184,6 +198,129 @@ def _auto_jax_batch_size(n: int, n_devices: int) -> int:
     return max(n_devices, int(math.ceil(base / n_devices)) * n_devices)
 
 
+def _jax_real_expm_order() -> int:
+    """Fixed Taylor order for the experimental real-embedded JAX expm backend."""
+
+    return max(4, int(os.environ.get("GROND_JAX_REAL_EXPM_ORDER", "24")))
+
+
+def _jax_real_expm_theta() -> float:
+    """Scaling threshold for the experimental real-embedded JAX expm backend."""
+
+    return max(1e-6, float(os.environ.get("GROND_JAX_REAL_EXPM_THETA", "0.5")))
+
+
+def _jax_real_dtype_name(backend: str) -> str:
+    """Use float32 on MPS because current JAX-Metal rejects float64."""
+
+    return "float32" if _jax_backend_base(backend) == "jax_mps" else "float64"
+
+
+def _real_embedding_generator_batch(H_batch: np.ndarray, thickness: float, dtype_name: str) -> np.ndarray:
+    """Return real matrices for exp((2*pi*i*thickness)*H).
+
+    For K = A + iB, the block matrix [[A, -B], [B, A]] propagates the real and
+    imaginary parts of the complex wavefunction without asking the accelerator
+    for complex eigensolvers.  This is an experimental Apple-Metal route, not a
+    replacement for the SciPy eigensolver reference.
+    """
+
+    H_batch = np.asarray(H_batch, dtype=np.complex128)
+    if H_batch.ndim != 3 or H_batch.shape[1] != H_batch.shape[2]:
+        raise ValueError(f"expected a stack of square matrices, got shape {H_batch.shape}")
+    n_batch, n, _ = H_batch.shape
+    dtype = np.float32 if dtype_name == "float32" else np.float64
+    factor = 2.0 * math.pi * float(thickness)
+    real_part = (-factor * H_batch.imag).astype(dtype, copy=False)
+    imag_part = (factor * H_batch.real).astype(dtype, copy=False)
+    out = np.zeros((n_batch, 2 * n, 2 * n), dtype=dtype)
+    out[:, :n, :n] = real_part
+    out[:, :n, n:] = -imag_part
+    out[:, n:, :n] = imag_part
+    out[:, n:, n:] = real_part
+    return out
+
+
+def _jax_real_expm_scale_steps(real_batch: np.ndarray) -> int:
+    """Choose conservative scaling steps for a fixed Taylor expm approximation."""
+
+    if real_batch.size == 0:
+        return 0
+    norm_inf = float(np.max(np.sum(np.abs(real_batch), axis=2)))
+    if not np.isfinite(norm_inf) or norm_inf <= 0.0:
+        return 0
+    return max(0, int(math.ceil(math.log2(norm_inf / _jax_real_expm_theta()))))
+
+
+def _jax_real_expm_column0_batch(real_batch, backend: str, scale_steps: int, order: int, batch_size: int = 0):
+    """Evaluate target-beam intensity using real scaling/squaring expm batches."""
+
+    key = _jax_module_key(backend)
+    jax, jnp = _jax_modules(key)
+    devices = tuple(jax.devices())
+    if not devices:
+        raise NotImplementedError(f"compute_backend={backend!r} found no JAX devices")
+    real_batch = np.asarray(real_batch)
+    if real_batch.ndim != 3 or real_batch.shape[1] != real_batch.shape[2]:
+        raise ValueError(f"expected a stack of square real matrices, got shape {real_batch.shape}")
+    n_real = int(real_batch.shape[0])
+    if n_real == 0:
+        return np.zeros(0, dtype=float)
+    n2 = int(real_batch.shape[1])
+    if n2 < 4 or n2 % 2:
+        raise ValueError(f"real embedded matrix dimension must be even and at least 4, got {n2}")
+    dtype_name = "float32" if real_batch.dtype == np.float32 else "float64"
+    cache_key = (key, "real_expm", n2, int(scale_steps), int(order), dtype_name)
+
+    if cache_key not in _JAX_REAL_EXPM_PROPAGATORS:
+        dtype = jnp.float32 if dtype_name == "float32" else jnp.float64
+        inv_scale = dtype(1.0 / float(2**int(scale_steps)))
+
+        def _eval(Rs):
+            A = Rs * inv_scale
+            eye = jnp.eye(n2, dtype=dtype)
+            term = jnp.broadcast_to(eye, Rs.shape)
+            result = term
+            for k in range(1, int(order) + 1):
+                term = jnp.matmul(term, A) / dtype(k)
+                result = result + term
+            for _ in range(int(scale_steps)):
+                result = jnp.matmul(result, result)
+            n = n2 // 2
+            real_target = result[:, 1, 0]
+            imag_target = result[:, n + 1, 0]
+            return real_target * real_target + imag_target * imag_target
+
+        _JAX_REAL_EXPM_PROPAGATORS[cache_key] = jax.jit(_eval)
+
+    fn = _JAX_REAL_EXPM_PROPAGATORS[cache_key]
+    chunk = int(batch_size) if int(batch_size or 0) > 0 else _auto_jax_batch_size(n2 // 2, len(devices))
+    chunk = max(1, int(chunk))
+    out = np.zeros(n_real, dtype=float)
+    for start in range(0, n_real, chunk):
+        sub = real_batch[start : start + chunk]
+        vals = np.asarray(fn(jnp.asarray(sub, dtype=jnp.float32 if dtype_name == "float32" else jnp.float64)))
+        out[start : start + len(sub)] = vals[: len(sub)]
+    return out
+
+
+def _jax_real_expm_propagate_batch(H_batch, thick, thick_w, backend: str, batch_size: int = 0):
+    """Experimental real-embedded JAX matrix exponential propagation."""
+
+    H_batch = np.asarray(H_batch, dtype=np.complex128)
+    if H_batch.ndim != 3 or H_batch.shape[1] != H_batch.shape[2]:
+        raise ValueError(f"expected a stack of square matrices, got shape {H_batch.shape}")
+    out = np.zeros(int(H_batch.shape[0]), dtype=float)
+    dtype_name = _jax_real_dtype_name(backend)
+    order = _jax_real_expm_order()
+    for t, w in zip(np.asarray(thick, dtype=float), np.asarray(thick_w, dtype=float)):
+        real_batch = _real_embedding_generator_batch(H_batch, float(t), dtype_name)
+        scale_steps = _jax_real_expm_scale_steps(real_batch)
+        vals = _jax_real_expm_column0_batch(real_batch, backend, scale_steps, order, batch_size)
+        out += float(w) * vals
+    return out
+
+
 def _jax_propagate_batch(H_batch, thick, thick_w, backend: str, absorption: bool, batch_size: int = 0):
     """Return thickness-averaged direct-to-target intensities for a matrix batch.
 
@@ -192,6 +329,9 @@ def _jax_propagate_batch(H_batch, thick, thick_w, backend: str, absorption: bool
     over its shard.  This is intentionally isolated from the SciPy reference path
     so a failing accelerator cannot silently alter production calculations.
     """
+
+    if _jax_backend_uses_real_expm(backend):
+        return _jax_real_expm_propagate_batch(H_batch, thick, thick_w, backend, batch_size=batch_size)
 
     key = _jax_module_key(backend)
     jax, jnp = _jax_modules(key)
@@ -255,6 +395,21 @@ def jax_bloch_available(backend: str = "jax") -> dict:
         jax, jnp = _jax_modules(backend)
         out["default_backend"] = str(jax.default_backend())
         out["devices"] = [str(d) for d in jax.devices()]
+        if _jax_backend_uses_real_expm(backend):
+            H = np.eye(4, dtype=np.complex128)
+            H[0, 1] = 0.001 + 0.002j
+            H[1, 0] = np.conj(H[0, 1])
+            vals = _jax_real_expm_propagate_batch(
+                H[None, :, :],
+                np.asarray([100.0], dtype=float),
+                np.asarray([1.0], dtype=float),
+                backend,
+                batch_size=1,
+            )
+            out["available"] = True
+            out["real_expm_dtype"] = _jax_real_dtype_name(backend)
+            out["real_expm_test"] = float(vals[0])
+            return out
         H = jnp.asarray(np.eye(4, dtype=np.complex128) + (0.01 + 0.02j) * np.ones((4, 4), dtype=np.complex128))
         Hh = H + jnp.conj(H.T)
         vals_h, _ = jnp.linalg.eigh(Hh)
@@ -1092,6 +1247,17 @@ class XDSData:
         self.starting_angle = float(self.header["STARTING_ANGLE"].split()[0])
         self.oscillation_range = float(self.header["OSCILLATION_RANGE"].split()[0])
         self.axis = np.array([float(x) for x in self.header["ROTATION_AXIS"].split()[:3]], dtype=float)
+        self.axis = self.axis / max(float(np.linalg.norm(self.axis)), 1e-30)
+        self.axis_cross = np.array(
+            [
+                [0.0, -self.axis[2], self.axis[1]],
+                [self.axis[2], 0.0, -self.axis[0]],
+                [-self.axis[1], self.axis[0], 0.0],
+            ],
+            dtype=float,
+        )
+        self.axis_cross2 = self.axis_cross @ self.axis_cross
+        self.axis_eye = np.eye(3, dtype=float)
         beam_dir = np.array([float(x) for x in self.header["INCIDENT_BEAM_DIRECTION"].split()[:3]], dtype=float)
         self.s0 = self.k * beam_dir / np.linalg.norm(beam_dir)
         cell_vals = [float(x) for x in self.header["UNIT_CELL_CONSTANTS"].split()[:6]]
@@ -1354,8 +1520,11 @@ class XDSBlochPort:
         return self.data.omega_from_z(float(z) + float(self.cfg.frame_offset))
 
     def gvecs(self, hkls, omega_deg):
-        R = rotation_matrix(self.data.axis, omega_deg)
         A = self.data.A_for_omega(omega_deg)
+        theta = np.radians(float(omega_deg))
+        c = float(np.cos(theta))
+        s = float(np.sin(theta))
+        R = self.data.axis_eye + s * self.data.axis_cross + (1.0 - c) * self.data.axis_cross2
         return (R @ A @ np.asarray(hkls, dtype=float).T).T
 
     def sg_for_hkls(self, hkls, omega_deg):
@@ -1635,10 +1804,18 @@ class XDSBlochPort:
             return eta * (1.0 - np.exp(-0.25 * b_tds * inv_d2))
         return np.zeros(diffs.shape[:-1], dtype=float)
 
-    def hamiltonian(self, basis, sg_basis, absorb: bool = True, row_idx=None):
+    def hamiltonian_static_part(self, basis, absorb: bool = True, row_idx=None):
+        """Return the row-static Hamiltonian terms for a fixed beam basis.
+
+        For a given row and support basis the off-diagonal Fourier-potential
+        couplings do not depend on the target-Sg quadrature point.  Only the
+        diagonal excitation errors change as the crystal is rocked through the
+        profile.  Keeping this static part separate avoids rebuilding the same
+        dense U(h_j-h_i) block for every profile sample.
+        """
+
         n = len(basis)
         H = np.zeros((n, n), dtype=np.complex128)
-        np.fill_diagonal(H, np.asarray(sg_basis, dtype=float))
         mode = str(getattr(self.cfg, "absorption_mode", "none") or "none").lower()
         if absorb and mode in {"mean", "midgley_like", "midgley"}:
             # Positive imaginary diagonal gives exp(2*pi*i*(S+i*mu)*t),
@@ -1671,6 +1848,16 @@ class XDSBlochPort:
         H += u_mat / (2.0 * self.data.k)
         return H
 
+    def hamiltonian_from_static(self, static_H, sg_basis):
+        H = np.array(static_H, dtype=np.complex128, copy=True)
+        diag = np.diag_indices(H.shape[0])
+        H[diag] += np.asarray(sg_basis, dtype=float)
+        return H
+
+    def hamiltonian(self, basis, sg_basis, absorb: bool = True, row_idx=None):
+        static_H = self.hamiltonian_static_part(basis, absorb=absorb, row_idx=row_idx)
+        return self.hamiltonian_from_static(static_H, sg_basis)
+
     def propagate_direct_to_target(self, H, thickness):
         backend = str(getattr(self.cfg, "compute_backend", "scipy") or "scipy").lower()
         if backend in BETHE_BACKENDS:
@@ -1700,6 +1887,15 @@ class XDSBlochPort:
             psi = expm_multiply((2j * np.pi * float(thickness)) * H, psi0)
             return float(abs(psi[1]) ** 2)
         if backend in ALL_JAX_BACKENDS:
+            if _jax_backend_uses_real_expm(backend):
+                vals = _jax_real_expm_propagate_batch(
+                    np.asarray(H, dtype=np.complex128)[None, :, :],
+                    np.asarray([float(thickness)], dtype=float),
+                    np.asarray([1.0], dtype=float),
+                    backend,
+                    int(getattr(self.cfg, "jax_batch_size", 0)),
+                )
+                return float(vals[0])
             try:
                 _jax, jnp = _jax_modules(_jax_module_key(backend))
                 Hj = jnp.asarray(H, dtype=jnp.complex128)
@@ -1782,22 +1978,23 @@ class XDSBlochPort:
             raise RuntimeError("Frozen kernel basis contract violated: basis must start with direct beam then exact signed target hkl.")
         sg_window_i, sg_width_meta = self.row_sg_window(row_idx, hkl, omega_bragg)
         requested, profile_weights, jitter_meta = self.row_profile_sg_points(row_idx, hkl, sg_window_i)
+        H_dyn_static = self.hamiltonian_static_part(basis, absorb=True, row_idx=row_idx)
+        if self.absorption_enabled():
+            H_born_static = self.hamiltonian_static_part(basis, absorb=False, row_idx=row_idx)
+        else:
+            H_born_static = H_dyn_static
+        h10_born = H_born_static[1, 0]
         dyn_matrices, born_vals, sg_resid = [], [], []
         for target_sg in requested:
             omega = self.solve_omega_for_sg(hkl, omega_bragg, target_sg)
             sg_basis = self.sg_for_hkls(basis, omega)
             sg_resid.append(float(sg_basis[1] - target_sg))
-            H = self.hamiltonian(basis, sg_basis, absorb=True, row_idx=row_idx)
-            H_born = self.hamiltonian(basis, sg_basis, absorb=False, row_idx=row_idx)
+            H = self.hamiltonian_from_static(H_dyn_static, sg_basis)
             dyn_matrices.append(H)
-            h10 = H_born[1, 0]
-            delta = float(np.real(H_born[1, 1] - H_born[0, 0]))
-            born_t = []
-            for t in self.thick:
-                arg = np.pi * delta * t
-                sinc = 1.0 if abs(arg) < 1e-12 else math.sin(arg) / arg
-                born_t.append((2.0 * math.pi) ** 2 * (abs(h10) ** 2) * (t**2) * (sinc**2))
-            born_vals.append(float(np.sum(self.thick_w * np.asarray(born_t))))
+            delta = float(np.real(sg_basis[1] - sg_basis[0]))
+            sinc = np.sinc(delta * self.thick)
+            born_t = (2.0 * math.pi) ** 2 * (abs(h10_born) ** 2) * (self.thick**2) * (sinc**2)
+            born_vals.append(float(np.sum(self.thick_w * born_t)))
         return {
             "_dyn_matrices": dyn_matrices,
             "_profile_weights": np.asarray(profile_weights, dtype=float),
@@ -2284,6 +2481,10 @@ def main():
     ap.add_argument("--compute-backend", choices=COMPUTE_BACKENDS, default="scipy")
     ap.add_argument("--jax-batch-size", type=int, default=0, help="JAX matrix batch size. 0 chooses a conservative size from matrix dimension and device count.")
     ap.add_argument("--jax-matrix-bucket-size", type=int, default=0, help="Pad JAX matrix dimensions to this multiple. 0 keeps exact sizes unless a *_padded backend is selected, where 0 means 8.")
+    ap.add_argument("--bethe-strong-count", type=int, default=48, help="Strong-beam block size for scipy_bethe. Values >= n_basis recover the dense SciPy matrix.")
+    ap.add_argument("--bethe-variant", choices=["truncate", "schur0", "schur_target", "schur_mean"], default="schur_target", help="Strong/weak-beam reduction used by scipy_bethe.")
+    ap.add_argument("--bethe-promote-denom", type=float, default=0.005, help="Promote weak beams whose diagonal denominator is this close to the Schur energy.")
+    ap.add_argument("--bethe-denom-eps", type=float, default=1e-5, help="Small-denominator floor for scipy_bethe Schur corrections.")
     ap.add_argument("--positive-only", action="store_true", help="Ignore non-positive XDS IOBS rows for fitting/evaluation.")
     ap.add_argument("--min-peak", type=float, default=90.0, help="Default PEAK/partiality cutoff for XDS row selection. Use 0 for a true full-row diagnostic.")
     ap.add_argument("--min-corr", type=float, default=-999.0)
@@ -2333,6 +2534,10 @@ def main():
         compute_backend=args.compute_backend,
         jax_batch_size=args.jax_batch_size,
         jax_matrix_bucket_size=args.jax_matrix_bucket_size,
+        bethe_strong_count=args.bethe_strong_count,
+        bethe_variant=args.bethe_variant,
+        bethe_promote_denom=args.bethe_promote_denom,
+        bethe_denom_eps=args.bethe_denom_eps,
         matrix_convention=args.matrix_convention,
         free_fraction=args.free_fraction,
         split_seed=args.split_seed,

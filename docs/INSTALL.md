@@ -124,7 +124,7 @@ More detail is in [XDS_WORKFLOW.md](XDS_WORKFLOW.md).
 
 ## DIALS Input Preparation
 
-DIALS users should keep the row-preserving `integrated.refl` and matching `integrated.expt` from `dials.integrate`. GROND uses `intensity.sum.value` by default, so DIALS profile fitting does not need to be disabled, although `integration.profile.fitting=False` makes a cleaner summation-only table when that is what you want to test. Do not merge the data before GROND and do not rely on an exported HKL file when the `.refl` and `.expt` files are available. For electron-diffraction CBF data, check `dials_bridge_summary.json` after import: GROND records whether detector-gain sigma scaling was applied, how many DIALS quality-flagged rows were removed, and whether the scan-varying geometry reproduces near-zero predicted-row excitation errors.
+DIALS users should keep the row-preserving `integrated.refl` and matching `integrated.expt` from `dials.integrate`. GROND uses `intensity.sum.value` by default, so DIALS profile fitting does not need to be disabled, although `integration.profile.fitting=False` makes a cleaner summation-only table when that is what you want to test. Do not merge the data before GROND and do not rely on an exported HKL file when the `.refl` and `.expt` files are available. For electron-diffraction CBF data, check `dials_bridge_summary.json` after import: GROND records the empirical sigma calibration, how many DIALS quality-flagged rows were removed, and whether the scan-varying geometry reproduces near-zero predicted-row excitation errors.
 
 If DIALS is installed in a separate environment, pass its Python executable with `--dials-python`:
 

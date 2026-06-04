@@ -490,6 +490,15 @@ def shelxl_feedback_current_model(run_dir: Path) -> Path | None:
     return None
 
 
+def resolved_post_bloch_sigma_policy(args: argparse.Namespace, *, final_endpoint: bool = False, feedback_loop: bool = False) -> str:
+    """Resolve the endpoint sigma calibration policy for a workflow stage."""
+
+    requested = getattr(args, "post_bloch_sigma_policy", "auto")
+    if requested == "auto":
+        return "uniform_z_rms" if (final_endpoint or feedback_loop) else "none"
+    return str(requested)
+
+
 def should_run_endpoint_feedback(run_dir: Path, args: argparse.Namespace) -> tuple[bool, dict]:
     """Decide whether a promoted endpoint factor should trigger one more cycle."""
 
@@ -1486,6 +1495,7 @@ def native_stage_cmd(
     endpoint_exti_grid = args.endpoint_exti_grid if endpoint_ok and not fast else "off"
     shelxl_iterations = args.shelxl_iterations if endpoint_ok and not fast else 1
     finalish_stage = stage in {"final", "noH", "polarity", "adaptive_final"} or stage.endswith("_final")
+    post_bloch_sigma_policy = resolved_post_bloch_sigma_policy(args, final_endpoint=bool(endpoint_ok and finalish_stage and not fast))
     thickness_grid = grid_from_nuisance(pinned, "thickness_A", "1200") if pinned else ("1000,1200,1400" if fast else args.thickness_grid)
     grad_grid = grid_from_nuisance(pinned, "thickness_grad_frac", "0.4") if pinned else ("0.0,0.4" if fast else args.thickness_grad_grid)
     frame_grid = grid_from_nuisance(pinned, "frame_offset", "0.0") if pinned else ("0.0" if fast else args.frame_offset_grid)
@@ -1606,6 +1616,14 @@ def native_stage_cmd(
         endpoint_exti_grid,
         "--shelxl-iterations",
         str(shelxl_iterations),
+        "--post-bloch-sigma-policy",
+        post_bloch_sigma_policy,
+        "--post-bloch-sigma-holdout-fraction",
+        f"{args.post_bloch_sigma_holdout_fraction:g}",
+        "--post-bloch-sigma-min-scale",
+        f"{args.post_bloch_sigma_min_scale:g}",
+        "--post-bloch-sigma-max-scale",
+        f"{args.post_bloch_sigma_max_scale:g}",
         "--workers",
         str(args.workers if workers_override is None else max(1, int(workers_override))),
         "--chunksize",
@@ -1620,6 +1638,14 @@ def native_stage_cmd(
         str(args.jax_batch_size),
         "--jax-matrix-bucket-size",
         str(args.jax_matrix_bucket_size),
+        "--bethe-strong-count",
+        str(args.bethe_strong_count),
+        "--bethe-variant",
+        args.bethe_variant,
+        "--bethe-promote-denom",
+        f"{args.bethe_promote_denom:g}",
+        "--bethe-denom-eps",
+        f"{args.bethe_denom_eps:g}",
         "--matrix-convention",
         args.matrix_convention,
         "--hkl-float-format",
@@ -1857,6 +1883,14 @@ def structure_cmd(python: str, ds: DatasetSpec, structure: str, baseline_hkl: st
         str(args.jax_batch_size),
         "--jax-matrix-bucket-size",
         str(args.jax_matrix_bucket_size),
+        "--bethe-strong-count",
+        str(args.bethe_strong_count),
+        "--bethe-variant",
+        args.bethe_variant,
+        "--bethe-promote-denom",
+        f"{args.bethe_promote_denom:g}",
+        "--bethe-denom-eps",
+        f"{args.bethe_denom_eps:g}",
         "--profile-quadrature",
         args.profile_quadrature,
         "--profile-accumulation",
@@ -1948,6 +1982,14 @@ def shelxl_feedback_cmd(
         args.shelxl,
         "--shelxl-iterations",
         str(args.shelxl_feedback_shelxl_iterations),
+        "--post-bloch-sigma-policy",
+        resolved_post_bloch_sigma_policy(args, feedback_loop=True),
+        "--post-bloch-sigma-holdout-fraction",
+        f"{args.post_bloch_sigma_holdout_fraction:g}",
+        "--post-bloch-sigma-min-scale",
+        f"{args.post_bloch_sigma_min_scale:g}",
+        "--post-bloch-sigma-max-scale",
+        f"{args.post_bloch_sigma_max_scale:g}",
         "--lambda-grid",
         first(args.lambda_grid, "1.0"),
         "--rescale",
@@ -1960,6 +2002,14 @@ def shelxl_feedback_cmd(
         str(args.jax_batch_size),
         "--jax-matrix-bucket-size",
         str(args.jax_matrix_bucket_size),
+        "--bethe-strong-count",
+        str(args.bethe_strong_count),
+        "--bethe-variant",
+        args.bethe_variant,
+        "--bethe-promote-denom",
+        f"{args.bethe_promote_denom:g}",
+        "--bethe-denom-eps",
+        f"{args.bethe_denom_eps:g}",
         "--min-d-spacing",
         f"{ds.min_d_spacing:g}",
         "--topup-d-min",
@@ -3643,6 +3693,14 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
             str(args.jax_batch_size),
             "--jax-matrix-bucket-size",
             str(args.jax_matrix_bucket_size),
+            "--bethe-strong-count",
+            str(args.bethe_strong_count),
+            "--bethe-variant",
+            args.bethe_variant,
+            "--bethe-promote-denom",
+            f"{args.bethe_promote_denom:g}",
+            "--bethe-denom-eps",
+            f"{args.bethe_denom_eps:g}",
             "--profile-quadrature",
             args.profile_quadrature,
             "--profile-accumulation",
@@ -3970,6 +4028,14 @@ def cmd_run(args: argparse.Namespace) -> int:
             "shelxl_feedback_cycles": args.shelxl_feedback_cycles,
             "shelxl_feedback_shelxl_iterations": args.shelxl_feedback_shelxl_iterations,
         },
+        "post_bloch_sigma": {
+            "policy": args.post_bloch_sigma_policy,
+            "resolved_final_endpoint": resolved_post_bloch_sigma_policy(args, final_endpoint=True),
+            "resolved_feedback_loop": resolved_post_bloch_sigma_policy(args, feedback_loop=True),
+            "holdout_fraction": args.post_bloch_sigma_holdout_fraction,
+            "min_scale": args.post_bloch_sigma_min_scale,
+            "max_scale": args.post_bloch_sigma_max_scale,
+        },
         "scale_polish": {
             "mode": args.scale_polish,
             "frame_models": args.scale_polish_frame_models,
@@ -4257,6 +4323,14 @@ def cmd_raw_polish(args: argparse.Namespace) -> int:
         str(args.jax_batch_size),
         "--jax-matrix-bucket-size",
         str(args.jax_matrix_bucket_size),
+        "--bethe-strong-count",
+        str(args.bethe_strong_count),
+        "--bethe-variant",
+        args.bethe_variant,
+        "--bethe-promote-denom",
+        f"{args.bethe_promote_denom:g}",
+        "--bethe-denom-eps",
+        f"{args.bethe_denom_eps:g}",
     ]
     if args.images:
         cmd += ["--images", args.images]
@@ -4415,7 +4489,7 @@ def add_common_run_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--dials-expt", default="", help="DIALS integrated.expt/scaled.expt file matching --dials-refl.")
     ap.add_argument("--dials-python", default="", help="Python executable that can import dials and dxtbx. Leave blank when the active Python already can.")
     ap.add_argument("--dials-intensity-mode", choices=["sum_complete", "sum_raw", "scale"], default="sum_complete", help="DIALS intensity mapping for the GROND row contract.")
-    ap.add_argument("--dials-sigma-mode", choices=["auto", "raw", "detector_gain"], default="auto", help="DIALS sigma bridge policy. auto keeps raw DIALS sigmas unless rows look grossly overconfident; detector_gain forces sqrt(gain) scaling.")
+    ap.add_argument("--dials-sigma-mode", choices=["auto", "raw", "detector_gain"], default="auto", help="DIALS sigma bridge policy. auto fits an empirical duplicate-scatter variance model when possible; detector_gain forces sqrt(gain) scaling.")
     ap.add_argument("--dials-sigma-scale", type=float, default=None, help="Explicit DIALS sigma multiplier. Overrides --dials-sigma-mode when positive.")
     ap.add_argument("--dials-min-partiality-write", type=float, default=1e-6, help="Minimum DIALS partiality written into the converted row file. GROND's --min-peak still controls production row selection.")
     ap.add_argument("--dials-drop-dont-integrate", action="store_true", help="Deprecated alias for the default production behavior. Rows flagged dont_integrate are dropped unless --dials-keep-dont-integrate is used.")
@@ -4445,9 +4519,13 @@ def add_common_run_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--prediction-cache-dir", default="", help="Optional root for prediction caches. Default is OUT/cache.")
     ap.add_argument("--prediction-cache-scope", choices=["shared", "stage"], default="shared", help="Shared reuses safe hash-keyed predictions across adaptive stages; stage isolates every run.")
     ap.add_argument("--prediction-cache-compression", choices=["compressed", "none"], default="none", help="Use none for fastest local SSD/NVMe caches; compressed saves disk on slow or limited storage.")
-    ap.add_argument("--compute-backend", choices=["scipy", "scipy_bethe", "scipy_expm", "scipy_expm_multiply", "jax", "jax_auto", "jax_cpu", "jax_mps", "jax_cuda", "jax_padded", "jax_auto_padded", "jax_cpu_padded", "jax_mps_padded", "jax_cuda_padded"], default="scipy", help="Bloch prediction backend. SciPy eigensolver is the production reference; scipy_bethe uses an opt-in promoted Bethe/Schur strong-beam reduction; SciPy expm/expm_multiply and JAX backends are experimental parity/speed probes. *_padded JAX backends pad matrix dimensions into small buckets to reduce compilation churn.")
+    ap.add_argument("--compute-backend", choices=["scipy", "scipy_bethe", "scipy_expm", "scipy_expm_multiply", "jax", "jax_auto", "jax_cpu", "jax_mps", "jax_cuda", "jax_padded", "jax_auto_padded", "jax_cpu_padded", "jax_mps_padded", "jax_cuda_padded", "jax_cpu_real_expm", "jax_mps_real_expm", "jax_mps_real_expm_padded"], default="scipy", help="Bloch prediction backend. SciPy eigensolver is the production reference; scipy_bethe uses an opt-in promoted Bethe/Schur strong-beam reduction; SciPy expm/expm_multiply, real-embedded JAX expm, and JAX eigensolver backends are experimental parity/speed probes. *_padded JAX backends pad matrix dimensions into small buckets to reduce compilation churn.")
     ap.add_argument("--jax-batch-size", type=int, default=0, help="JAX matrix batch size for accelerator backends. 0 chooses a conservative size from matrix dimension and device count.")
     ap.add_argument("--jax-matrix-bucket-size", type=int, default=0, help="Pad JAX matrix dimensions to this multiple. 0 keeps exact sizes unless a *_padded backend is selected, where 0 means 8.")
+    ap.add_argument("--bethe-strong-count", type=int, default=48, help="Strong-beam block size for scipy_bethe. Values >= final N recover the dense SciPy matrix.")
+    ap.add_argument("--bethe-variant", choices=["truncate", "schur0", "schur_target", "schur_mean"], default="schur_target", help="Strong/weak-beam reduction used by scipy_bethe.")
+    ap.add_argument("--bethe-promote-denom", type=float, default=0.005, help="Promote weak beams whose diagonal denominator is this close to the Schur energy.")
+    ap.add_argument("--bethe-denom-eps", type=float, default=1e-5, help="Small-denominator floor for scipy_bethe Schur corrections.")
     ap.add_argument("--matrix-convention", choices=["j_minus_i", "i_minus_j"], default="j_minus_i", help="Off-diagonal U_g indexing convention. Keep j_minus_i for production; i_minus_j is diagnostic.")
     ap.add_argument("--max-rows", type=int, default=0)
     ap.add_argument("--scout-max-rows", type=int, default=1000, help="Representative row limit for automatic transform/polarity scouts.")
@@ -4541,6 +4619,10 @@ def add_common_run_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--shelxl", default=default_shelxl_executable(), help="SHELXL executable used for corrected-HKL endpoints and SHELXL feedback loops.")
     ap.add_argument("--shelxl-feedback-cycles", type=int, default=5, help="Number of high-N/Q Bloch -> one-SHELXL-LS feedback cycles used by the automatic SHELXL structure-update strategy.")
     ap.add_argument("--shelxl-feedback-shelxl-iterations", type=int, default=1, help="SHELXL passes per feedback cycle. Default 1 keeps each feedback update to one least-squares model update.")
+    ap.add_argument("--post-bloch-sigma-policy", choices=["auto", "none", "uniform_z_rms"], default="auto", help="Endpoint uncertainty policy. Auto uses uniform_z_rms only for final corrected endpoints and SHELXL feedback cycles, leaving early physics-selection endpoints uncalibrated.")
+    ap.add_argument("--post-bloch-sigma-holdout-fraction", type=float, default=0.20, help="Deterministic HKL holdout fraction reported for uniform_z_rms endpoint sigma calibration.")
+    ap.add_argument("--post-bloch-sigma-min-scale", type=float, default=0.25, help="Lower guardrail for uniform_z_rms endpoint sigma scaling.")
+    ap.add_argument("--post-bloch-sigma-max-scale", type=float, default=4.0, help="Upper guardrail for uniform_z_rms endpoint sigma scaling.")
     ap.add_argument("--endpoint-feedback", choices=["auto", "on", "off"], default="auto", help="Optionally feed the polished B=0 no-EXTI endpoint model into one more Bloch endpoint cycle. Full auto uses auto; --fast skips it.")
     ap.add_argument("--publication-endpoint-chooser", action=argparse.BooleanOptionalAction, default=True, help="Write the publication endpoint chooser that separates physical and diagnostic corrected-HKL endpoints.")
     ap.add_argument("--publication-endpoint-min-hkl-safe-factor", type=float, default=0.25, help="Minimum fixed-width HKL safety factor for a publication endpoint.")
@@ -4693,9 +4775,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_raw.add_argument("--workers", type=int, default=0)
     p_raw.add_argument("--max-core-fraction", type=float, default=0.85)
     p_raw.add_argument("--chunksize", type=int, default=0)
-    p_raw.add_argument("--compute-backend", choices=["scipy", "scipy_bethe", "scipy_expm", "scipy_expm_multiply", "jax", "jax_auto", "jax_cpu", "jax_mps", "jax_cuda", "jax_padded", "jax_auto_padded", "jax_cpu_padded", "jax_mps_padded", "jax_cuda_padded"], default="scipy")
+    p_raw.add_argument("--compute-backend", choices=["scipy", "scipy_bethe", "scipy_expm", "scipy_expm_multiply", "jax", "jax_auto", "jax_cpu", "jax_mps", "jax_cuda", "jax_padded", "jax_auto_padded", "jax_cpu_padded", "jax_mps_padded", "jax_cuda_padded", "jax_cpu_real_expm", "jax_mps_real_expm", "jax_mps_real_expm_padded"], default="scipy")
     p_raw.add_argument("--jax-batch-size", type=int, default=0)
     p_raw.add_argument("--jax-matrix-bucket-size", type=int, default=0)
+    p_raw.add_argument("--bethe-strong-count", type=int, default=48)
+    p_raw.add_argument("--bethe-variant", choices=["truncate", "schur0", "schur_target", "schur_mean"], default="schur_target")
+    p_raw.add_argument("--bethe-promote-denom", type=float, default=0.005)
+    p_raw.add_argument("--bethe-denom-eps", type=float, default=1e-5)
     p_raw.add_argument("--prediction-cache-dir", default="")
     p_raw.add_argument("--prediction-cache-compression", choices=["compressed", "none"], default="none")
     p_raw.add_argument("--raw-grid", default="small:2,4,2.5,4,6")

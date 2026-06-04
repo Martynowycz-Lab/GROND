@@ -67,8 +67,8 @@ default, stores `100 * partiality` in the `PEAK` column, stores `lp` in `RLP`,
 and keeps the exact signed DIALS `miller_index`. GROND's default `--min-peak 90`
 therefore means DIALS partiality `>= 0.90`. The DIALS bridge also writes
 `!DIALS_SIGMA_MODE` and `!DIALS_SIGMA_MULTIPLIER` header records. In the default
-auto mode, GROND keeps raw DIALS sigmas for plausible integrated data and only
-applies detector-gain sigma scaling when rows look grossly over-precise. The
+auto mode, GROND fits an empirical duplicate-scatter variance model when
+enough symmetry-equivalent rows exist and only falls back to detector-gain checks when duplicate support is insufficient. The
 intensities are not changed by sigma scaling.
 
 The structure file supplies the atomic model. GROND accepts `RES` or `CIF`.
@@ -164,6 +164,12 @@ indices plus corrected intensity or amplitude and uncertainty.
 GROND records how the corrected file was produced, including the selected polarity,
 thickness band, transform, geometry policy, basis size, and accepted nuisance
 terms.
+
+The endpoint `manifest.json` also records any post-Bloch uncertainty policy.
+For the default final endpoint this is usually a `post_bloch_sigma` block with
+`policy=uniform_z_rms`, one fitted `sigma_scale`, and train, held-out, and
+all-reflection RMS(z) diagnostics. The corrected intensities in the HKL are not
+changed by this block; only the endpoint sigmas are scaled.
 
 ## Summary JSON
 

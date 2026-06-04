@@ -93,6 +93,7 @@ def selected_metrics(summary: dict) -> dict:
     all_born = (((best.get("metrics") or {}).get("all") or {}).get("born") or {})
     endpoint = summary.get("best_endpoint") or {}
     shelxl = endpoint.get("shelxl") or {}
+    post_sigma = endpoint.get("post_bloch_sigma") or {}
     return {
         "native_dyn_R1_all": all_dyn.get("R1_all"),
         "native_dyn_R1_gt": all_dyn.get("R1_gt"),
@@ -107,6 +108,11 @@ def selected_metrics(summary: dict) -> dict:
         "endpoint_N_gt": shelxl.get("N_gt"),
         "endpoint_N_all": shelxl.get("N_all"),
         "endpoint_status": shelxl.get("status"),
+        "post_bloch_sigma_policy": post_sigma.get("policy"),
+        "post_bloch_sigma_status": post_sigma.get("status"),
+        "post_bloch_sigma_scale": post_sigma.get("sigma_scale"),
+        "post_bloch_sigma_heldout_rms_z_after": post_sigma.get("heldout_rms_z_after"),
+        "post_bloch_sigma_all_rms_z_after": post_sigma.get("all_rms_z_after"),
     }
 
 
@@ -249,6 +255,14 @@ def native_command(
         "off",
         "--shelxl-iterations",
         str(int(args.shelxl_iterations)),
+        "--post-bloch-sigma-policy",
+        str(args.post_bloch_sigma_policy),
+        "--post-bloch-sigma-holdout-fraction",
+        grid_value(args.post_bloch_sigma_holdout_fraction, "0.20"),
+        "--post-bloch-sigma-min-scale",
+        grid_value(args.post_bloch_sigma_min_scale, "0.25"),
+        "--post-bloch-sigma-max-scale",
+        grid_value(args.post_bloch_sigma_max_scale, "4.0"),
         "--rescale",
         str(args.rescale),
         "--hkl-float-format",
@@ -267,6 +281,14 @@ def native_command(
         str(int(args.jax_batch_size)),
         "--jax-matrix-bucket-size",
         str(int(args.jax_matrix_bucket_size)),
+        "--bethe-strong-count",
+        str(int(args.bethe_strong_count)),
+        "--bethe-variant",
+        str(args.bethe_variant),
+        "--bethe-promote-denom",
+        str(float(args.bethe_promote_denom)),
+        "--bethe-denom-eps",
+        str(float(args.bethe_denom_eps)),
         "--matrix-convention",
         str(nui.get("matrix_convention", summary_value(source_summary, "matrix_convention", "j_minus_i"))),
         "--positive-only",
@@ -343,12 +365,20 @@ def main() -> None:
     ap.add_argument("--chunksize", type=int, default=8)
     ap.add_argument("--shelxl", default=os.environ.get("SHELXL", "shelxl"))
     ap.add_argument("--shelxl-iterations", type=int, default=3)
+    ap.add_argument("--post-bloch-sigma-policy", choices=["none", "uniform_z_rms"], default="uniform_z_rms", help="Endpoint sigma calibration applied before each SHELXL feedback update.")
+    ap.add_argument("--post-bloch-sigma-holdout-fraction", type=float, default=0.20)
+    ap.add_argument("--post-bloch-sigma-min-scale", type=float, default=0.25)
+    ap.add_argument("--post-bloch-sigma-max-scale", type=float, default=4.0)
     ap.add_argument("--lambda-grid", default="1.0")
     ap.add_argument("--rescale", choices=["median-iobs", "none"], default="median-iobs")
     ap.add_argument("--cache-compression", choices=["compressed", "none"], default="none")
-    ap.add_argument("--compute-backend", choices=["scipy", "scipy_bethe", "scipy_expm", "scipy_expm_multiply", "jax", "jax_auto", "jax_cpu", "jax_mps", "jax_cuda", "jax_padded", "jax_auto_padded", "jax_cpu_padded", "jax_mps_padded", "jax_cuda_padded"], default="scipy")
+    ap.add_argument("--compute-backend", choices=["scipy", "scipy_bethe", "scipy_expm", "scipy_expm_multiply", "jax", "jax_auto", "jax_cpu", "jax_mps", "jax_cuda", "jax_padded", "jax_auto_padded", "jax_cpu_padded", "jax_mps_padded", "jax_cuda_padded", "jax_cpu_real_expm", "jax_mps_real_expm", "jax_mps_real_expm_padded"], default="scipy")
     ap.add_argument("--jax-batch-size", type=int, default=0)
     ap.add_argument("--jax-matrix-bucket-size", type=int, default=0)
+    ap.add_argument("--bethe-strong-count", type=int, default=48)
+    ap.add_argument("--bethe-variant", choices=["truncate", "schur0", "schur_target", "schur_mean"], default="schur_target")
+    ap.add_argument("--bethe-promote-denom", type=float, default=0.005)
+    ap.add_argument("--bethe-denom-eps", type=float, default=1e-5)
     ap.add_argument("--min-d-spacing", type=float, default=0.0)
     ap.add_argument("--topup-d-min", type=float, default=0.0)
     ap.add_argument("--min-peak", type=float, default=-1.0)
@@ -369,6 +399,10 @@ def main() -> None:
         "source_summary": str(source_summary_path.resolve()),
         "start_res": str(current_model),
         "shelxl": str(args.shelxl),
+        "post_bloch_sigma_policy": str(args.post_bloch_sigma_policy),
+        "post_bloch_sigma_holdout_fraction": float(args.post_bloch_sigma_holdout_fraction),
+        "post_bloch_sigma_min_scale": float(args.post_bloch_sigma_min_scale),
+        "post_bloch_sigma_max_scale": float(args.post_bloch_sigma_max_scale),
         "cycles_requested": int(args.cycles),
         "fast_n_basis": int(args.n_basis),
         "fast_n_points": int(args.n_points),

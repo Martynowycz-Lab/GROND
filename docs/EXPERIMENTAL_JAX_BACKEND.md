@@ -10,7 +10,8 @@ The backend options are:
 - `jax_cpu`: experimental, mathematically matches SciPy on benchmark rows, but is slower in the current row-by-row kernel.
 - `jax_cuda`: experimental CUDA path. It uses JAX complex128 and `pmap` over visible CUDA devices for same-size Bloch matrix batches. It was correct on an internal three-GPU RTX 2080 Ti test, but slower than optimized SciPy CPU parallelism for the tested N128/Q20 workload.
 - `jax_cpu_padded`, `jax_cuda_padded`, and the other `*_padded` variants: experimental bucketed-shape paths motivated by Takanori Nakane's suggestion to keep matrices the same size where possible. They pad matrices to small size buckets rather than padding every row to the worst-case basis size.
-- `jax`, `jax_auto`, `jax_mps`: experimental. On the tested Apple Silicon/JAX-MPS environment, MPS saw the GPU but failed the required complex `eigh`/`eig` operations, so it is not usable for GROND.
+- `jax_cpu_real_expm`, `jax_mps_real_expm`, and `jax_mps_real_expm_padded`: guarded experimental real-embedded matrix-exponential paths. They rewrite the complex propagation matrix as a real block matrix and evaluate a fixed-order scaling/squaring Taylor exponential, which avoids asking Apple MPS for unsupported complex eigensolvers. The MPS route is limited to float32 by current JAX/MLX behavior, so it is a parity and future-proofing probe rather than a production backend.
+- `jax`, `jax_auto`, `jax_mps`: experimental. On the tested Apple Silicon/JAX-MPS environment, MPS saw the GPU but failed the required complex `eigh`/`eig` operations, so the ordinary complex-eigensolver MPS backend is not usable for GROND.
 
 GROND intentionally raises a backend error if a JAX backend cannot run the complex Hermitian and non-Hermitian eigensolvers. It must not silently fall back to SciPy, because that would make timing comparisons meaningless.
 
@@ -39,6 +40,19 @@ Before promoting any JAX/Metal path, rerun a real parity benchmark and require:
 - End-to-end wall time beats SciPy on realistic row counts, not just a synthetic eigensolver microbenchmark.
 
 The likely useful future path is batched same-size Bloch matrices, not simply replacing each small per-row SciPy eigensolver call with a separate JAX call.
+
+## Apple MPS Real-Expm Snapshot
+
+This backend exists because Apple MPS currently exposes useful matrix multiplication but not the complex eigensolver path GROND needs for the reference Bloch calculation. GROND therefore embeds a complex Hamiltonian `H = A + iB` into the real matrix
+
+```text
+[[Re(iH), -Im(iH)],
+ [Im(iH),  Re(iH)]]
+```
+
+with the `2*pi*thickness` factor applied, then evaluates the first propagated column with a fixed Taylor polynomial plus scaling and squaring. This is mathematically close to `scipy.linalg.expm` on small Hermitian test cases, but it is not the same numerical method as the SciPy eigensolver reference and on MPS it runs in float32.
+
+On the local 370 benchmark with N24/Q10 and 64 rows, `jax_mps_real_expm` matched the displayed residuals but took 2.07 s wall time versus 2.02 s for dense SciPy and 1.19 s for `scipy_bethe`. On a harder N108/Q20, 8-row check, it matched row intensities to roughly `2e-4` maximum relative `dyn_raw` difference but again lost on wall time. It should therefore remain opt-in and guarded. Promotion would require float64 support or a substantially faster same-size batched implementation that beats SciPy on full 370-style runs.
 
 ## Bucketed Matrix Snapshot
 

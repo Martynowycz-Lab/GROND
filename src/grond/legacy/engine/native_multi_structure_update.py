@@ -308,6 +308,10 @@ def build_dataset_state(row: dict, args, wght_a: float, wght_b: float) -> Datase
         compute_backend=args.compute_backend,
         jax_batch_size=args.jax_batch_size,
         jax_matrix_bucket_size=args.jax_matrix_bucket_size,
+        bethe_strong_count=args.bethe_strong_count,
+        bethe_variant=args.bethe_variant,
+        bethe_promote_denom=args.bethe_promote_denom,
+        bethe_denom_eps=args.bethe_denom_eps,
         ug_d_min=args.ug_d_min,
         absorption_mode=nuisance.absorption_mode,
         absorption_mu=nuisance.absorption_mu,
@@ -598,9 +602,13 @@ def main():
     ap.add_argument("--sigma-a", type=float, default=0.06)
     ap.add_argument("--sigma-b-corr", type=float, default=0.0)
     ap.add_argument("--sigma-c-peak", type=float, default=0.0)
-    ap.add_argument("--compute-backend", choices=["scipy", "scipy_bethe", "scipy_expm", "scipy_expm_multiply", "jax", "jax_auto", "jax_cpu", "jax_mps", "jax_cuda", "jax_padded", "jax_auto_padded", "jax_cpu_padded", "jax_mps_padded", "jax_cuda_padded"], default="scipy", help="Bloch propagation backend. SciPy eigensolver is the production reference; scipy_bethe uses an opt-in promoted Bethe/Schur strong-beam reduction; SciPy expm/expm_multiply and JAX are experimental. *_padded JAX backends pad matrix dimensions into small buckets to reduce compilation churn.")
+    ap.add_argument("--compute-backend", choices=["scipy", "scipy_bethe", "scipy_expm", "scipy_expm_multiply", "jax", "jax_auto", "jax_cpu", "jax_mps", "jax_cuda", "jax_padded", "jax_auto_padded", "jax_cpu_padded", "jax_mps_padded", "jax_cuda_padded", "jax_cpu_real_expm", "jax_mps_real_expm", "jax_mps_real_expm_padded"], default="scipy", help="Bloch propagation backend. SciPy eigensolver is the production reference; scipy_bethe uses an opt-in promoted Bethe/Schur strong-beam reduction; SciPy expm/expm_multiply, real-embedded JAX expm, and JAX eigensolver backends are experimental. *_padded JAX backends pad matrix dimensions into small buckets to reduce compilation churn.")
     ap.add_argument("--jax-batch-size", type=int, default=0, help="JAX matrix batch size. 0 chooses a conservative size from matrix dimension and device count.")
     ap.add_argument("--jax-matrix-bucket-size", type=int, default=0, help="Pad JAX matrix dimensions to this multiple. 0 keeps exact sizes unless a *_padded backend is selected, where 0 means 8.")
+    ap.add_argument("--bethe-strong-count", type=int, default=48, help="Strong-beam block size for scipy_bethe. Values >= n_basis recover the dense SciPy matrix.")
+    ap.add_argument("--bethe-variant", choices=["truncate", "schur0", "schur_target", "schur_mean"], default="schur_target", help="Strong/weak-beam reduction used by scipy_bethe.")
+    ap.add_argument("--bethe-promote-denom", type=float, default=0.005, help="Promote weak beams whose diagonal denominator is this close to the Schur energy.")
+    ap.add_argument("--bethe-denom-eps", type=float, default=1e-5, help="Small-denominator floor for scipy_bethe Schur corrections.")
     ap.add_argument("--profile-quadrature", choices=["uniform", "trapezoid", "gauss_legendre"], default="uniform", help="Rocking-profile Sg quadrature rule.")
     ap.add_argument("--profile-accumulation", choices=["sum", "mean"], default="sum", help="Accumulate rocking-profile samples as summed detector sub-exposures or legacy normalized means.")
     ap.add_argument("--sg-jitter-mode", choices=["none", "gaussian", "student_t"], default="none")

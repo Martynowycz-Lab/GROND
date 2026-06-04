@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import subprocess
 import sys
 import tempfile
@@ -25,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from scipy.optimize import nnls
 
 DIALS_HELPER_CODE = r"""
 from __future__ import annotations
@@ -367,6 +369,175 @@ def _finite_i_over_sigma(iobs: np.ndarray, sigma: np.ndarray, keep: np.ndarray) 
     return np.asarray(iobs[mask], dtype=float) / np.asarray(sigma[mask], dtype=float)
 
 
+def _bool_array(arrays: dict[str, np.ndarray], name: str, n: int, default: bool = False) -> np.ndarray:
+    """Return a boolean DIALS flag array, tolerating small synthetic test arrays."""
+
+    if name not in arrays:
+        return np.full(n, default, dtype=bool)
+    arr = np.asarray(arrays[name], dtype=bool)
+    if len(arr) != n:
+        return np.full(n, default, dtype=bool)
+    return arr
+
+
+def _dials_sigma_preflight_keep(
+    arrays: dict[str, np.ndarray],
+    iobs: np.ndarray,
+    sigma: np.ndarray,
+    mode: str,
+) -> np.ndarray:
+    """Rows used to calibrate DIALS sigmas from equivalent-observation scatter."""
+
+    n = len(iobs)
+    partiality = np.asarray(arrays.get("partiality", np.ones(n, dtype=float)), dtype=float)
+    if len(partiality) != n:
+        partiality = np.ones(n, dtype=float)
+    keep = np.isfinite(iobs) & np.isfinite(sigma) & (sigma > 0.0) & np.isfinite(partiality) & (partiality >= 0.90)
+    integrated_sum = _bool_array(arrays, "integrated_sum", n, default=False)
+    if np.any(integrated_sum):
+        keep &= integrated_sum
+    if str(mode).strip().lower() == "scale":
+        keep &= _bool_array(arrays, "scaled", n, default=True)
+    keep &= ~_bool_array(arrays, "dont_integrate", n)
+    for flag in (
+        "overloaded",
+        "in_powder_ring",
+        "background_includes_bad_pixels",
+        "foreground_includes_bad_pixels",
+        "includes_bad_pixels",
+        "bad_shoebox",
+        "failed_during_background_modelling",
+        "failed_during_summation",
+    ):
+        keep &= ~_bool_array(arrays, flag, n)
+    return keep
+
+
+def _space_group_rotations(metadata: dict[str, Any]) -> list[np.ndarray]:
+    """Return integer reciprocal-space rotation matrices from DIALS metadata."""
+
+    try:
+        import gemmi
+    except Exception:
+        return [np.eye(3, dtype=int)]
+
+    name = str(metadata.get("space_group") or "").strip()
+    sg = None
+    if name:
+        try:
+            sg = gemmi.find_spacegroup_by_name(name)
+        except Exception:
+            sg = None
+    if sg is None and name:
+        match = re.search(r"No\.\s*(\d+)", name)
+        if match:
+            try:
+                sg = gemmi.find_spacegroup_by_number(int(match.group(1)))
+            except Exception:
+                sg = None
+    if sg is None:
+        return [np.eye(3, dtype=int)]
+
+    rotations: list[np.ndarray] = []
+    seen: set[tuple[int, ...]] = set()
+    for op in sg.operations():
+        rot = np.rint(np.asarray(op.rot, dtype=float) / float(op.DEN)).astype(int)
+        key = tuple(int(v) for v in rot.reshape(-1))
+        if key not in seen:
+            seen.add(key)
+            rotations.append(rot)
+    return rotations or [np.eye(3, dtype=int)]
+
+
+def _canonical_reciprocal_hkl(hkl: np.ndarray, rotations: list[np.ndarray]) -> tuple[int, int, int]:
+    """Canonical key for symmetry-equivalent observations, without adding Friedel mates."""
+
+    row = np.asarray(hkl, dtype=int)
+    keys: list[tuple[int, int, int]] = []
+    for rot in rotations:
+        for mat in (rot, np.linalg.inv(rot)):
+            equiv = np.rint(row @ mat).astype(int)
+            keys.append(tuple(int(v) for v in equiv))
+    return min(set(keys))
+
+
+def _fit_empirical_sigma_model(
+    arrays: dict[str, np.ndarray],
+    metadata: dict[str, Any],
+    iobs: np.ndarray,
+    sigma: np.ndarray,
+    *,
+    mode: str,
+) -> tuple[np.ndarray, dict[str, Any]] | None:
+    """Fit sigma_eff^2 = m^2 sigma_raw^2 + (a Iobs)^2 + c^2 from duplicate scatter."""
+
+    hkl = np.asarray(arrays.get("hkl", np.empty((0, 3), dtype=int)), dtype=int)
+    if hkl.ndim != 2 or hkl.shape[1] != 3 or len(hkl) != len(iobs):
+        return None
+
+    keep = _dials_sigma_preflight_keep(arrays, iobs, sigma, mode)
+    if int(np.count_nonzero(keep)) < 50:
+        return None
+
+    rotations = _space_group_rotations(metadata)
+    groups: dict[tuple[int, int, int], list[int]] = {}
+    for idx in np.where(keep)[0]:
+        groups.setdefault(_canonical_reciprocal_hkl(hkl[idx], rotations), []).append(int(idx))
+
+    features: list[list[float]] = []
+    target: list[float] = []
+    usable_groups = 0
+    for indices in groups.values():
+        if len(indices) < 2:
+            continue
+        usable_groups += 1
+        y = np.asarray([iobs[i] for i in indices], dtype=float)
+        s = np.asarray([sigma[i] for i in indices], dtype=float)
+        mean = float(np.mean(y))
+        leverage = max(0.0, 1.0 - 1.0 / float(len(indices)))
+        for yy, ss in zip(y, s):
+            features.append([float(ss * ss * leverage), float(yy * yy * leverage), float(leverage)])
+            target.append(float((yy - mean) ** 2))
+
+    dof = len(target) - usable_groups
+    if usable_groups < 20 or dof < 30:
+        return None
+
+    x = np.asarray(features, dtype=float)
+    y = np.asarray(target, dtype=float)
+    coeff, _ = nnls(x, y)
+    coeff[0] = max(float(coeff[0]), 1.0)
+    coeff[1] = max(float(coeff[1]), 0.0)
+    coeff[2] = max(float(coeff[2]), 0.0)
+
+    fitted_var = coeff[0] * sigma * sigma + coeff[1] * iobs * iobs + coeff[2]
+    sigma_eff = np.sqrt(np.maximum(fitted_var, sigma * sigma))
+
+    fit_rows = np.any(x > 0, axis=1)
+    equivalent_multiplier = math.sqrt(float(np.sum(x[fit_rows] @ coeff) / max(np.sum(x[fit_rows, 0]), 1e-30)))
+    ratios = sigma_eff[keep] / np.maximum(sigma[keep], 1e-30)
+    summary = {
+        "status": "ok",
+        "equation": "sigma_eff^2 = m^2*sigma_raw^2 + (a*Iobs)^2 + c^2",
+        "source": "auto_empirical_replicate_variance",
+        "groups": int(len(groups)),
+        "usable_groups": int(usable_groups),
+        "fit_rows": int(len(target)),
+        "dof": int(dof),
+        "space_group": str(metadata.get("space_group") or ""),
+        "m": float(math.sqrt(coeff[0])),
+        "a": float(math.sqrt(coeff[1])),
+        "c": float(math.sqrt(coeff[2])),
+        "coefficient_sigma2": float(coeff[0]),
+        "coefficient_iobs2": float(coeff[1]),
+        "coefficient_constant": float(coeff[2]),
+        "equivalent_global_multiplier": float(equivalent_multiplier),
+        "median_sigma_ratio": float(np.nanmedian(ratios)) if len(ratios) else None,
+        "p90_sigma_ratio": float(np.nanpercentile(ratios, 90)) if len(ratios) else None,
+    }
+    return sigma_eff, summary
+
+
 def _dials_sigma_multiplier(
     arrays: dict[str, np.ndarray],
     metadata: dict[str, Any],
@@ -379,11 +550,11 @@ def _dials_sigma_multiplier(
 ) -> tuple[float, dict[str, Any]]:
     """Choose a DIALS sigma multiplier and explain the decision.
 
-    DIALS stores detector gain on the detector model, and rotation data should
-    normally receive that gain during import.  Auto mode is therefore
-    conservative: it keeps raw DIALS sigmas unless the rows look grossly
-    overconfident, and leaves forced detector-gain scaling as an explicit
-    diagnostic mode.
+    DIALS stores detector gain on the detector model, but rotation-data
+    summation variances can still be too optimistic for electron diffraction.
+    Auto mode first fits an empirical replicate-scatter variance model.  If
+    there are not enough equivalent rows, it falls back to the older conservative
+    detector-gain gross-overprecision gate.
     """
 
     requested = str(sigma_mode or "auto").strip().lower()
@@ -405,6 +576,10 @@ def _dials_sigma_multiplier(
         if requested == "detector_gain":
             mult = math.sqrt(gain)
             source = "detector_gain"
+        elif (empirical := _fit_empirical_sigma_model(arrays, metadata, iobs, sigma, mode=mode)):
+            sigma_eff, empirical_summary = empirical
+            mult = float(empirical_summary["equivalent_global_multiplier"])
+            source = str(empirical_summary["source"])
         elif (
             gain > 1.01
             and median_ios is not None
@@ -417,10 +592,13 @@ def _dials_sigma_multiplier(
         else:
             mult = 1.0
             source = "auto_raw"
-    partiality = np.asarray(arrays["partiality"], dtype=float)
+    partiality = np.asarray(arrays.get("partiality", np.ones(len(iobs), dtype=float)), dtype=float)
+    if len(partiality) != len(iobs):
+        partiality = np.ones(len(iobs), dtype=float)
     keep = np.isfinite(partiality) & (partiality >= 0.90)
+    sigma_after = sigma_eff if "sigma_eff" in locals() else sigma * mult
     ios_before = _finite_i_over_sigma(iobs, sigma, keep)
-    ios_after = _finite_i_over_sigma(iobs, sigma * mult, keep)
+    ios_after = _finite_i_over_sigma(iobs, sigma_after, keep)
     summary = {
         "mode": requested,
         "source": source,
@@ -434,9 +612,12 @@ def _dials_sigma_multiplier(
         "note": (
             "DIALS sigma values are passed through unchanged; intensities are unchanged."
             if float(mult) == 1.0
-            else "DIALS detector-gain sigma scaling is applied to the bridge sigma only; intensities are unchanged."
+            else "DIALS empirical sigma calibration is applied to bridge sigmas only; intensities are unchanged."
         ),
     }
+    if "sigma_eff" in locals():
+        summary["empirical_variance_model"] = empirical_summary
+        summary["_sigma_effective"] = sigma_eff
     return float(mult), summary
 
 
@@ -485,7 +666,8 @@ def convert_dials_to_grond(
         sigma_mode=sigma_mode,
         sigma_scale=sigma_scale,
     )
-    sigma = sigma * sigma_multiplier
+    sigma_effective = sigma_summary.pop("_sigma_effective", None)
+    sigma = np.asarray(sigma_effective, dtype=float) if sigma_effective is not None else sigma * sigma_multiplier
 
     hkl = np.asarray(arrays["hkl"], dtype=int)
     xyzcal = np.asarray(arrays["xyzcal"], dtype=float)
@@ -554,6 +736,16 @@ def convert_dials_to_grond(
         f.write(f"!DIALS_INTENSITY_NOTE= {intensity_note}\n")
         f.write(f"!DIALS_SIGMA_MODE= {sigma_summary['mode']}\n")
         f.write(f"!DIALS_SIGMA_MULTIPLIER= {sigma_summary['sigma_multiplier']:.12g}\n")
+        f.write(f"!DIALS_SIGMA_SOURCE= {sigma_summary['source']}\n")
+        if sigma_summary.get("empirical_variance_model"):
+            model_summary = sigma_summary["empirical_variance_model"]
+            f.write(f"!DIALS_SIGMA_EQUATION= {model_summary['equation']}\n")
+            f.write(
+                "!DIALS_SIGMA_COEFFS= "
+                f"m {model_summary['m']:.12g} "
+                f"a {model_summary['a']:.12g} "
+                f"c {model_summary['c']:.12g}\n"
+            )
         f.write(f"!DIALS_ROWS_READ= {len(hkl)}\n")
         f.write(f"!DIALS_ROWS_WRITTEN= {int(np.count_nonzero(finite))}\n")
         f.write("!DIALS_PARTIALITY_AS_PEAK= TRUE\n")
