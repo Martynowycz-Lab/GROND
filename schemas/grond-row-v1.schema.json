@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Martynowycz-Lab/GROND/schemas/grond-row-v1.schema.json",
+  "title": "GROND portable row contract v1",
+  "description": "A portable row-level observation and geometry contract for GROND.",
+  "type": "object",
+  "required": ["schema_version", "dataset_id", "geometry"],
+  "properties": {
+    "schema_version": {
+      "const": "grond-row-v1"
+    },
+    "dataset_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "description": {
+      "type": "string"
+    },
+    "geometry": {
+      "type": "object",
+      "required": [
+        "wavelength_A",
+        "incident_beam_direction",
+        "rotation_axis",
+        "starting_frame",
+        "starting_angle_deg",
+        "oscillation_range_deg",
+        "unit_cell"
+      ],
+      "properties": {
+        "wavelength_A": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "incident_beam_direction": {
+          "$ref": "#/$defs/vector3"
+        },
+        "rotation_axis": {
+          "$ref": "#/$defs/vector3"
+        },
+        "starting_frame": {
+          "type": "number"
+        },
+        "starting_angle_deg": {
+          "type": "number"
+        },
+        "oscillation_range_deg": {
+          "type": "number"
+        },
+        "unit_cell": {
+          "type": "array",
+          "minItems": 6,
+          "maxItems": 6,
+          "items": {
+            "type": "number"
+          }
+        },
+        "reciprocal_A_matrix": {
+          "$ref": "#/$defs/matrix3"
+        },
+        "real_space_axes_A": {
+          "$ref": "#/$defs/matrix3"
+        },
+        "A_scan_points": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/matrix3"
+          }
+        }
+      },
+      "anyOf": [
+        {
+          "required": ["reciprocal_A_matrix"]
+        },
+        {
+          "required": ["real_space_axes_A"]
+        }
+      ]
+    },
+    "columns": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    }
+  },
+  "$defs": {
+    "vector3": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": {
+        "type": "number"
+      }
+    },
+    "matrix3": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": {
+        "type": "array",
+        "minItems": 3,
+        "maxItems": 3,
+        "items": {
+          "type": "number"
+        }
+      }
+    }
+  }
+}

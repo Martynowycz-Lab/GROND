@@ -25,10 +25,13 @@ src/grond/
   io/
     config.py                    prep JSON and dataset CSV parsing
     dials_bridge.py              DIALS refl/expt to GROND row-contract conversion
+    row_contract.py              portable CSV/TSV/JSONL row contract, metadata validation, XDS-like bridge writer
 
   bloch/
-    contracts.py                 public kernel contracts and row-field expectations
-    matrix.py                    small public matrix helpers used by tests and documentation
+    contract.py                  public kernel-contract helper that exposes the frozen numerical defaults
+
+  refine/
+    endpoints.py                 model-update endpoint registry and custom-command adapter helpers
 
   workflows/
     decision.py                  preflight, transform candidates, and bad-data stop decisions
@@ -64,9 +67,12 @@ flowchart TD
     C --> D["cli.prep_from_args"]
     D --> E["XDS INTEGRATE.HKL or XDS_ASCII.HKL"]
     D --> F["DIALS refl/expt"]
+    D --> Y["portable grond-row-v1 rows"]
     F --> G["io.dials_bridge.convert_dials_to_grond"]
+    Y --> Z["io.row_contract.write_xds_compatibility_dir"]
     E --> H["DatasetSpec row contract"]
     G --> H
+    Z --> H
     H --> I["workflows.decision.preflight_dataset"]
     I --> J["workflows.transform_metadata baseline-HKL prefilter"]
     J --> K["cli.choose_transform_by_scout"]
@@ -107,7 +113,7 @@ flowchart LR
     L --> M["Idyn and Iborn for the row"]
 ```
 
-The row identity is always the signed reflection plus its observation geometry. For XDS input, `XDSData` reads the row, header geometry, detector position, frame number, and intensity columns. For DIALS input, `io.dials_bridge` converts `.refl` and `.expt` into the same row contract and writes the scan-point orientation sidecar that lets `XDSData` evaluate the correct frame-dependent reciprocal basis.
+The row identity is always the signed reflection plus its observation geometry. For XDS input, `XDSData` reads the row, header geometry, detector position, frame number, and intensity columns. For DIALS input, `io.dials_bridge` converts `.refl` and `.expt` into the same row contract and writes the scan-point orientation sidecar that lets `XDSData` evaluate the correct frame-dependent reciprocal basis. For integrations from other software, `io.row_contract` reads the portable `grond-row-v1` CSV/TSV/JSONL row table and metadata sidecar, validates the geometry, and writes a clearly marked `GROND_PORTABLE_XDS_COMPAT` directory for the current engine.
 
 ## Matrix Construction
 
@@ -149,6 +155,8 @@ and returns the squared amplitude transferred from the direct beam into the targ
 `continuous_thickness_polish.py` is the fast thickness polish. It caches eigensystems from a selected row subset, then searches continuous thickness and thickness-gradient values without rebuilding every Hamiltonian for every scalar trial. This is why modern auto runs can report non-round thicknesses rather than only the coarse grid value.
 
 `shelxl_feedback_loop.py` is the default fast single-dataset full-mode structure feedback loop when SHELXL is configured. It runs a high-N/Q Bloch correction, performs one least-squares update, promotes the active weighting line, and repeats. The native finite-difference alternatives are `native_structure_update.py` for one dataset and `native_multi_structure_update.py` for shared multi-dataset regularization.
+
+`src/grond/refine/endpoints.py` is the interface layer for model-update backends. It declares the implemented SHELXL endpoint, the optional Olex2 app endpoint, the no-refiner Bloch-only path, the slow native-gradient diagnostic, and the custom command-template adapter. The registry is intentionally separate from the working numerical path: it tells users what each endpoint must accept and return without pretending every external refiner is already a fully tested `auto` replacement.
 
 `scale_compression_polish.py` is where dense frame scales are replaced by a compact, smooth scale manifold when that does not hurt all-row residuals beyond the accepted penalty. `resolution_limit_audit.py` and `forensics/resolution.py` decide whether the final endpoint should be reported at the requested resolution or a suggested shell-stable resolution. `row_mr_report.py` writes the manuscript-facing raw and merged residual tables.
 

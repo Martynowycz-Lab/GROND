@@ -9,8 +9,8 @@ from grond.cli import (
     parse_numeric_grid,
     publication_report_cmd,
     required_external_tool_errors,
-    resolved_post_bloch_sigma_policy,
     resolve_structure_update_strategy,
+    resolved_post_bloch_sigma_policy,
     resolved_sg_window_mode,
     transform_scout_job_count,
 )
@@ -104,6 +104,12 @@ def test_utility_commands_parse():
     cfg = build_parser().parse_args(["init-config", "--out", "grond.config.json"])
     assert cfg.command == "init-config"
     assert cfg.format == "json"
+    row_template = build_parser().parse_args(["row-template", "--rows-out", "rows.csv", "--metadata-out", "rows_metadata.json"])
+    assert row_template.command == "row-template"
+    row_validate = build_parser().parse_args(["row-validate", "--rows", "rows.csv", "--metadata", "rows_metadata.json"])
+    assert row_validate.command == "row-validate"
+    endpoints = build_parser().parse_args(["endpoints", "--json"])
+    assert endpoints.command == "endpoints"
     audit = build_parser().parse_args(["forensics", "--row-table", "native_dyn_calc.csv", "--hkl", "INTEGRATE.HKL", "--res", "model.res", "--out-dir", "audit", "--forensic-depth", "full"])
     assert audit.command == "forensics"
     assert audit.forensic_depth == "full"

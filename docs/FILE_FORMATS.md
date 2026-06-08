@@ -71,6 +71,46 @@ auto mode, GROND fits an empirical duplicate-scatter variance model when
 enough symmetry-equivalent rows exist and only falls back to detector-gain checks when duplicate support is insufficient. The
 intensities are not changed by sigma scaling.
 
+For integrations from other software, use the portable row contract documented
+in [PORTABLE_INPUTS_AND_ENDPOINTS.md](PORTABLE_INPUTS_AND_ENDPOINTS.md). The row
+table can be CSV, TSV, or JSON Lines. The smallest useful CSV table looks like
+this:
+
+```csv
+row_id,dataset_id,h,k,l,Iobs,sigma_Iobs,frame,x_px,y_px,partiality,lp,profile_correlation,bbox_z0,bbox_z1
+0,crystal_a,1,0,2,1284.5,42.1,18.0,1912.4,2105.7,1.00,1.0,91.4,17.5,18.5
+1,crystal_a,0,1,3,422.8,27.6,18.0,2063.9,1988.2,0.95,1.0,88.7,17.4,18.6
+```
+
+The matching metadata sidecar supplies the geometry that a merged HKL cannot
+carry:
+
+```json
+{
+  "schema_version": "grond-row-v1",
+  "dataset_id": "crystal_a",
+  "geometry": {
+    "wavelength_A": 0.02508,
+    "incident_beam_direction": [0.0, 0.0, 1.0],
+    "rotation_axis": [1.0, 0.0, 0.0],
+    "starting_frame": 1.0,
+    "starting_angle_deg": 0.0,
+    "oscillation_range_deg": 0.5,
+    "unit_cell": [7.0, 8.0, 9.0, 90.0, 90.0, 90.0],
+    "reciprocal_A_matrix": [
+      [0.1428571429, 0.0, 0.0],
+      [0.0, 0.125, 0.0],
+      [0.0, 0.0, 0.1111111111]
+    ]
+  }
+}
+```
+
+`GROND row-validate --rows rows.csv --metadata metadata.json --write-xds-dir
+portable_bridge` validates the files and writes a `GROND_PORTABLE_XDS_COMPAT`
+directory that the current engine can process. This bridge is only a compatibility
+layer; it keeps the original source and row-contract manifest in the output.
+
 The structure file supplies the atomic model. GROND accepts `RES` or `CIF`.
 For a CIF, the atom loop has the usual atom labels, element types, fractional
 coordinates, and displacement values.

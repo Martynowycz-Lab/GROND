@@ -33,6 +33,7 @@ from .io.tool_config import (
 )
 from .paths import LEGACY_ROOT, engine_script
 from .progress import ProgressState, format_seconds
+from .refine.endpoints import endpoint_report
 from .runtime import apply_thread_limits, auto_chunksize, auto_worker_count
 from .workflows.dataset_policy import (
     build_dataset_policy,
@@ -3933,6 +3934,60 @@ def cmd_init_config(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_row_template(args: argparse.Namespace) -> int:
+    """CLI entrypoint that writes portable row-contract template files."""
+
+    from .io.row_contract import write_template
+
+    rows_path, metadata_path = write_template(args.rows_out, args.metadata_out, overwrite=bool(args.overwrite))
+    print(json.dumps({"rows": str(rows_path), "metadata": str(metadata_path)}, indent=2))
+    return 0
+
+
+def cmd_row_validate(args: argparse.Namespace) -> int:
+    """CLI entrypoint that validates portable row-contract files."""
+
+    from dataclasses import asdict
+
+    from .io.row_contract import (
+        load_row_metadata,
+        read_row_table,
+        validate_row_contract,
+        write_xds_compatibility_dir,
+    )
+
+    rows = read_row_table(args.rows)
+    metadata = load_row_metadata(args.metadata)
+    summary = validate_row_contract(rows, metadata)
+    payload: dict[str, object] = {"status": "ok", "summary": asdict(summary)}
+    if args.write_xds_dir:
+        hkl_path = write_xds_compatibility_dir(rows, metadata, args.write_xds_dir, overwrite=bool(args.overwrite))
+        payload["xds_compatibility"] = {"integrate_hkl": str(hkl_path)}
+    print(json.dumps(payload, indent=2))
+    return 0
+
+
+def cmd_endpoints(args: argparse.Namespace) -> int:
+    """CLI entrypoint that reports configured model-update endpoint adapters."""
+
+    payload = endpoint_report(getattr(args, "tool_config", {}) or {})
+    if args.json:
+        print(json.dumps(payload, indent=2))
+        return 0
+    for row in payload["endpoints"]:
+        marker = "available" if row.get("available") else "missing"
+        print(f"{row['name']}: {row['status']} ({marker})")
+        print(f"  {row['description']}")
+        resolved = ((row.get("executable") or {}).get("resolved") or "").strip()
+        if resolved:
+            print(f"  executable: {resolved}")
+        if row.get("configured_command_template"):
+            print("  command: configured from grond.config.json")
+        if row.get("notes"):
+            print(f"  {row['notes']}")
+    return 0
+
+
 def cmd_import_dials(args: argparse.Namespace) -> int:
     """CLI entrypoint for converting DIALS `.refl`/`.expt` files into GROND rows."""
 
@@ -4729,6 +4784,24 @@ def build_parser() -> argparse.ArgumentParser:
     p_cfg.add_argument("--format", choices=["json", "yaml"], default="json")
     p_cfg.add_argument("--overwrite", action="store_true")
     p_cfg.set_defaults(func=cmd_init_config)
+
+    p_row_template = sub.add_parser("row-template", help="Write portable GROND row-contract CSV and metadata templates.")
+    p_row_template.add_argument("--rows-out", default="grond_rows.csv")
+    p_row_template.add_argument("--metadata-out", default="grond_rows_metadata.json")
+    p_row_template.add_argument("--overwrite", action="store_true")
+    p_row_template.set_defaults(func=cmd_row_template)
+
+    p_row_validate = sub.add_parser("row-validate", help="Validate a portable GROND row table and optional geometry sidecar.")
+    p_row_validate.add_argument("--rows", required=True, help="Portable row CSV, TSV, JSONL, or NDJSON file.")
+    p_row_validate.add_argument("--metadata", required=True, help="Portable row metadata JSON file.")
+    p_row_validate.add_argument("--write-xds-dir", default="", help="Optional output directory for an XDS-like compatibility INTEGRATE.HKL.")
+    p_row_validate.add_argument("--overwrite", action="store_true")
+    p_row_validate.set_defaults(func=cmd_row_validate)
+
+    p_endpoints = sub.add_parser("endpoints", help="List GROND model-update endpoint adapters and configured tool availability.")
+    add_tool_config_args(p_endpoints)
+    p_endpoints.add_argument("--json", action="store_true")
+    p_endpoints.set_defaults(func=cmd_endpoints)
 
     p_dials = sub.add_parser("import-dials", help="Convert DIALS integrated.refl/integrated.expt into a GROND row directory.")
     p_dials.add_argument("--refl", required=True, help="DIALS integrated.refl or scaled.refl file.")

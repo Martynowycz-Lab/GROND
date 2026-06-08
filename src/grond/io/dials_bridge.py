@@ -495,7 +495,7 @@ def _fit_empirical_sigma_model(
         s = np.asarray([sigma[i] for i in indices], dtype=float)
         mean = float(np.mean(y))
         leverage = max(0.0, 1.0 - 1.0 / float(len(indices)))
-        for yy, ss in zip(y, s):
+        for yy, ss in zip(y, s, strict=True):
             features.append([float(ss * ss * leverage), float(yy * yy * leverage), float(leverage)])
             target.append(float((yy - mean) ** 2))
 

@@ -22,6 +22,12 @@ TOOL_ENV_VARS = {
     "shelxt": "SHELXT",
     "xds": "XDS",
     "xdsconv": "XDSCONV",
+    "olex2_console": "GROND_OLEX2_CONSOLE",
+    "custom_refiner": "GROND_CUSTOM_REFINER",
+}
+
+TOOL_PATH_ENV_VARS = {
+    "olex2_app_dir": "GROND_OLEX2_APP_DIR",
 }
 
 TOOL_ALIASES = {
@@ -30,6 +36,8 @@ TOOL_ALIASES = {
     "shelxt": ("shelxt",),
     "xds": ("xds",),
     "xdsconv": ("xdsconv",),
+    "olex2_console": ("olex2c_exe",),
+    "custom_refiner": (),
 }
 
 
@@ -134,7 +142,7 @@ def configured_tools(config: Mapping[str, Any] | None) -> dict[str, str]:
         normalized = _normalized_key(str(key))
         if normalized in {"tools", "executables", "programs"}:
             continue
-        if normalized in {"python", *TOOL_ENV_VARS.keys()}:
+        if normalized in {"python", *TOOL_ENV_VARS.keys(), *TOOL_PATH_ENV_VARS.keys()}:
             expanded = _expand_path_text(value)
             if expanded:
                 tools[normalized] = expanded
@@ -146,6 +154,52 @@ def tool_env_updates(config: Mapping[str, Any] | None) -> dict[str, str]:
 
     tools = configured_tools(config)
     return {env_name: tools[key] for key, env_name in TOOL_ENV_VARS.items() if tools.get(key)}
+
+
+def resolve_path(
+    name: str,
+    *,
+    configured: str = "",
+    envvar: str = "",
+    default_candidates: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    """Resolve one configured directory or file path without requiring executability."""
+
+    checked: list[str] = []
+
+    def resolve_candidate(candidate: str, source: str) -> dict[str, Any]:
+        text = _expand_path_text(candidate)
+        checked.append(text)
+        path = Path(text)
+        if path.exists():
+            return {"available": True, "resolved": str(path.resolve()), "source": source}
+        return {"available": False, "resolved": "", "source": source, "error": f"path does not exist: {text}"}
+
+    env_value = os.environ.get(envvar, "") if envvar else ""
+    payload: dict[str, Any] = {
+        "name": name,
+        "configured": _expand_path_text(configured),
+        "envvar": envvar,
+        "env_value": _expand_path_text(env_value),
+        "checked": checked,
+        "available": False,
+        "resolved": "",
+        "source": "",
+    }
+
+    result: dict[str, Any] | None = None
+    if configured:
+        result = resolve_candidate(configured, "config")
+    elif env_value:
+        result = resolve_candidate(env_value, f"env:{envvar}")
+    else:
+        for candidate in default_candidates:
+            result = resolve_candidate(candidate, "default")
+            if result.get("available"):
+                break
+    if result:
+        payload.update(result)
+    return payload
 
 
 def resolve_executable(
@@ -214,6 +268,8 @@ def tool_statuses(config: Mapping[str, Any] | None) -> dict[str, dict[str, Any]]
             envvar=envvar,
             aliases=TOOL_ALIASES.get(name, (name,)),
         )
+    for name, envvar in TOOL_PATH_ENV_VARS.items():
+        statuses[name] = resolve_path(name, configured=tools.get(name, ""), envvar=envvar)
     return statuses
 
 
@@ -228,6 +284,20 @@ def config_template() -> dict[str, Any]:
             "shelxt": "",
             "xds": "",
             "xdsconv": "",
+            "olex2_app_dir": "",
+            "olex2_console": "",
+            "custom_refiner": "",
+        },
+        "endpoints": {
+            "olex2_app": {
+                "app_dir": "",
+                "note": "Optional Olex2.app console directory, for example /Applications/olex2.app/Contents/MacOS.",
+            },
+            "custom": {
+                "command": "",
+                "output_model": "",
+                "note": "Optional command template using {model}, {reflections}, {out_dir}, and {cycles}.",
+            },
         },
         "notes": "Use absolute paths on shared servers. Empty values mean GROND will try environment variables and PATH.",
     }
@@ -252,6 +322,17 @@ def write_config_template(path: str | Path, *, fmt: str = "json", overwrite: boo
             '  shelxt: ""',
             '  xds: ""',
             '  xdsconv: ""',
+            '  olex2_app_dir: ""',
+            '  olex2_console: ""',
+            '  custom_refiner: ""',
+            "endpoints:",
+            "  olex2_app:",
+            '    app_dir: ""',
+            '    note: "Optional Olex2.app console directory, for example /Applications/olex2.app/Contents/MacOS."',
+            "  custom:",
+            '    command: ""',
+            '    output_model: ""',
+            '    note: "Optional command template using {model}, {reflections}, {out_dir}, and {cycles}."',
             'notes: "Use absolute paths on shared servers. Empty values mean GROND will try environment variables and PATH."',
             "",
         ]

@@ -11,6 +11,7 @@ GROND is a normal Python package. The recommended installation is a clean Python
 - A baseline solved-model HKL file when available. This is strongly recommended because GROND uses it to reduce transform ambiguity before running Bloch scouts.
 - Optional: SHELXL for corrected-HKL endpoint polishing/statistics.
 - Optional: `shelx2map` for map generation.
+- Optional: an Olex2 app installation or a configured custom endpoint if you are deliberately testing a non-default model-update adapter.
 - Optional: a LaTeX engine if you want PDF tables; Markdown and TeX outputs are written without it.
 
 Native row-level Bloch calculations are Python-first. The full default endpoint path needs SHELXL, and maps need `shelx2map`. Those programs are not bundled with GROND.
@@ -75,7 +76,21 @@ Fill in absolute paths for tools that are not already on `PATH`:
     "shelx2map": "/programs/x86_64-linux/system/sbgrid_bin/shelx2map",
     "shelxt": "",
     "xds": "",
-    "xdsconv": ""
+    "xdsconv": "",
+    "olex2_app_dir": "",
+    "olex2_console": "",
+    "custom_refiner": ""
+  },
+  "endpoints": {
+    "olex2_app": {
+      "app_dir": "",
+      "note": "Optional Olex2.app console directory, for example /Applications/olex2.app/Contents/MacOS."
+    },
+    "custom": {
+      "command": "",
+      "output_model": "",
+      "note": "Optional command template using {model}, {reflections}, {out_dir}, and {cycles}."
+    }
   }
 }
 ```
@@ -84,6 +99,7 @@ Check the resolved environment:
 
 ```bash
 GROND doctor --config grond.config.json --probe-bloch
+GROND endpoints --config grond.config.json
 ```
 
 Use the config explicitly:
@@ -101,6 +117,8 @@ export GROND_CONFIG=/path/to/grond.config.json
 `GROND auto` stops early if a full endpoint workflow needs SHELXL or map generation needs `shelx2map` and neither is configured nor discoverable on `PATH`. Use `--native-only` for row-level Bloch statistics without corrected-HKL endpoint polishing, `--no-maps` for endpoint statistics without maps, or `--allow-missing-tools` only for an intentional incomplete diagnostic run.
 
 YAML configs are accepted when `PyYAML` is installed with `python -m pip install "grond[config]"`; JSON works with no extra dependency.
+
+The supported model-update endpoints today are SHELXL, an installed Olex2 app console, and a custom command template. SHELXL is the production default for full automatic feedback. Olex2 app support expects the app console directory, for example `/Applications/olex2.app/Contents/MacOS` on macOS; GROND will run the app console directly and set the app library path for that process. The custom endpoint is for labs that can provide a tested one-cycle command and a declared output model path. If none of those are available, use `--native-only`: GROND will still run the Bloch-wave simulation, thickness and nuisance decisions, residual diagnostics, corrected-HKL exports, and polarity checks from the supplied model, but it will not perform the external least-squares model-update loop.
 
 ## XDS Input Preparation
 
@@ -139,3 +157,14 @@ GROND auto \
 ```
 
 More detail is in [DIALS_WORKFLOW.md](DIALS_WORKFLOW.md).
+
+## Portable Row Input
+
+If your integration did not come from XDS or DIALS, write the portable `grond-row-v1` row table and metadata sidecar described in [PORTABLE_INPUTS_AND_ENDPOINTS.md](PORTABLE_INPUTS_AND_ENDPOINTS.md):
+
+```bash
+GROND row-template --rows-out rows.csv --metadata-out rows_metadata.json
+GROND row-validate --rows rows.csv --metadata rows_metadata.json --write-xds-dir portable_bridge
+```
+
+The resulting `portable_bridge/INTEGRATE.HKL` is a GROND compatibility file, not an XDS claim. It carries the signed rows and geometry in the shape that the current engine consumes.

@@ -35,7 +35,30 @@ GROND auto \
   --out-dir grond_dials_out
 ```
 
-Create the config with `GROND init-config --out grond.config.json`, then fill in any external executables that are not already on `PATH`. The important ones for the default full endpoint are `shelxl` for corrected-HKL polishing/statistics and `shelx2map` for maps. The command can omit `--config` when those programs are already discoverable, or when `GROND_CONFIG` points to the file.
+For other integration programs, first write the portable row-contract files and
+turn them into a GROND compatibility directory:
+
+```bash
+GROND row-validate \
+  --rows /data/my_dataset/rows.csv \
+  --metadata /data/my_dataset/rows_metadata.json \
+  --write-xds-dir /data/my_dataset/grond_bridge
+
+GROND auto \
+  --xds-dir /data/my_dataset/grond_bridge \
+  --structure /data/my_dataset/model.res \
+  --baseline-hkl /data/my_dataset/model.hkl \
+  --out-dir grond_portable_out
+```
+
+See [PORTABLE_INPUTS_AND_ENDPOINTS.md](PORTABLE_INPUTS_AND_ENDPOINTS.md) before
+writing a wrapper. The signed indices and orientation matrix have to be in the
+same solved-model basis, otherwise GROND can compute a very precise answer for
+the wrong geometry.
+
+Create the config with `GROND init-config --out grond.config.json`, then fill in any external executables that are not already on `PATH`. The important ones for the default full endpoint are `shelxl` for corrected-HKL polishing/statistics and `shelx2map` for maps. If you want to use an installed Olex2 app endpoint, set `tools.olex2_app_dir` to the app console directory, for example `/Applications/olex2.app/Contents/MacOS`. The command can omit `--config` when the needed programs are already discoverable, or when `GROND_CONFIG` points to the file.
+
+Use `GROND endpoints --config grond.config.json` to see the available model-update endpoints. SHELXL is the implemented production endpoint. Olex2 app installations are supported when the app directory is configured. `custom` is a command-template adapter for a lab-specific one-cycle refiner. `bloch_only` is always available and means GROND will simulate Bloch intensities, optimize nuisance terms, write diagnostics, and report polarity/residual behavior without updating the model through an external refiner.
 
 This is the recommended production command. It automatically uses the solved/XSCALE/SHELX baseline HKL to prefilter indexing transforms when that metadata is available, then tests any surviving common transforms with a cheap pass followed by a better N/Q rerank of the top candidates. It also checks the alternate polarity when appropriate, thickness and geometry terms, raw-row resolution envelopes, absorption-like terms, jitter, sigma/weak-row behavior, detector-position scale fields, adaptive final basis size, no-EXTI endpoint lambda candidates, active SHELXL `WGHT` promotion, maps, forensic reports, adaptive frame-scale compression, a publication endpoint chooser, and publication tables. The final polish keeps Q=20 and chooses N from the observed rowwise support scan as `max_observed_basis + 10`, limited to 500 by default, with support top-up at least as deep as the selected data resolution. Multi-dataset endpoints get one overlap-derived post-dynamical scale per crystal before merging, so arbitrary raw integration scales do not survive into the final combined HKL. The default endpoint-B grid is `0.0`; nonzero endpoint-B scans are available only when explicitly requested with `--endpoint-b-grid`, and GROND treats them as diagnostic rather than final because they can improve endpoint R factors while making ADPs and maps worse.
 
