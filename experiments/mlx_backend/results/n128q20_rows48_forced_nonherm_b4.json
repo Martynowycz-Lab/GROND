@@ -1,0 +1,200 @@
+{
+  "absorption_enabled": true,
+  "capabilities": {
+    "default_device": "Device(gpu, 0)",
+    "metal_available": true,
+    "ops": {
+      "batched_real_matmul_gpu": {
+        "ok": true,
+        "seconds": 0.005845708015840501
+      },
+      "eig_cpu": {
+        "ok": true,
+        "seconds": 0.0007895830203779042
+      },
+      "eig_gpu": {
+        "error": "ValueError: [linalg::eig] This op is not yet supported on the GPU. Explicitly pass a CPU stream to run it.",
+        "ok": false
+      },
+      "eigh_cpu": {
+        "ok": true,
+        "seconds": 5.2499992307275534e-05
+      },
+      "eigh_gpu": {
+        "error": "ValueError: [linalg::eigh] This op is not yet supported on the GPU. Explicitly pass a CPU stream to run it.",
+        "ok": false
+      },
+      "eigvals_cpu": {
+        "ok": true,
+        "seconds": 3.170897252857685e-05
+      },
+      "eigvals_gpu": {
+        "error": "ValueError: [linalg::eigvals] This op is not yet supported on the GPU. Explicitly pass a CPU stream to run it.",
+        "ok": false
+      },
+      "inv_cpu": {
+        "error": "ValueError: [linalg::inv] Arrays must have type float32 or float64. Received array with type complex64.",
+        "ok": false
+      },
+      "inv_gpu": {
+        "error": "ValueError: [linalg::inv] This op is not yet supported on the GPU. Explicitly pass a CPU stream to run it.",
+        "ok": false
+      },
+      "solve_cpu": {
+        "error": "ValueError: [linalg::solve] Input arrays must promote to float32 or float64.  Received arrays with type complex64 and complex64.",
+        "ok": false
+      },
+      "solve_gpu": {
+        "error": "ValueError: [linalg::solve] This op is not yet supported on the GPU. Explicitly pass a CPU stream to run it.",
+        "ok": false
+      }
+    }
+  },
+  "config": {
+    "absorption_frac": 0.05,
+    "absorption_mode": "midgley_like",
+    "absorption_mu": 0.0,
+    "absorption_mu_g2": 0.0,
+    "absorption_mu_theta2": 0.0,
+    "absorption_tds_b": 0.0,
+    "bethe_denom_eps": 1e-05,
+    "bethe_promote_denom": 0.005,
+    "bethe_strong_count": 48,
+    "bethe_variant": "schur_target",
+    "compute_backend": "scipy",
+    "dose_b_mode": "none",
+    "dose_b_per_frame": 0.0,
+    "dose_b_ref_frame": NaN,
+    "frame_offset": 0.0,
+    "free_fraction": 0.1,
+    "gamma": 1.3914,
+    "group_width_deg": 3.0,
+    "jax_batch_size": 0,
+    "jax_matrix_bucket_size": 0,
+    "matrix_convention": "j_minus_i",
+    "max_support_sg": 0.05,
+    "n_basis": 128,
+    "n_points": 20,
+    "profile_accumulation": "sum",
+    "profile_quadrature": "uniform",
+    "sg_jitter_mode": "none",
+    "sg_jitter_points": 5,
+    "sg_jitter_sigma0": 0.0,
+    "sg_jitter_sigma_d_inv": 0.0,
+    "sg_jitter_sigma_frame": 0.0,
+    "sg_jitter_student_df": 4.0,
+    "sg_jitter_width_factor": 3.0,
+    "sg_window": 0.006,
+    "sg_window_frame_floor": 0.5,
+    "sg_window_max": 0.012,
+    "sg_window_min": 0.003,
+    "sg_window_mode": "fixed",
+    "sg_window_scale": 1.0,
+    "split_seed": 42,
+    "thickness_A": 1240.0,
+    "thickness_grad_frac": 0.25,
+    "thickness_model": "uniform_gradient",
+    "thickness_points": 7,
+    "thickness_sigma_frac": 0.0,
+    "topup_d_min": 0.8,
+    "ug_d_min": 0.3,
+    "variance_a": 0.0,
+    "variance_b_corr": 0.0,
+    "variance_c_peak": 0.0
+  },
+  "created_at": "2026-06-09T10:57:26-0400",
+  "inputs": {
+    "hkl": "/Users/Mike/Desktop/MartynowyczLab/data_processing/2026.04.10/370/cbf_v7/xds20230630_1x/no_prf20260511/INTEGRATE.HKL",
+    "hkl_transform": null,
+    "res": "/Users/Mike/Desktop/MartynowyczLab/data_processing/2026.04.10/370/cbf_v7/xds20230630_1x/temp_a.res"
+  },
+  "jobs": {
+    "matrix_count": 960,
+    "matrix_dimensions": {
+      "128": 960
+    },
+    "plan_seconds": 0.14429858297808096
+  },
+  "mlx": {
+    "available": true,
+    "version": "unknown"
+  },
+  "platform": "macOS-26.5.1-arm64-arm-64bit",
+  "python": "/opt/anaconda3/bin/python",
+  "results": {
+    "mlx_gpu_real_expm_order_12": {
+      "matrix_group_meta": [
+        {
+          "batch_size": 4,
+          "chunks": 240,
+          "matrices": 960,
+          "order": 12,
+          "scale_steps_max": 12,
+          "scale_steps_median": 10.0,
+          "scale_steps_min": 10,
+          "seconds": 2.429743761604186,
+          "size": 128,
+          "theta": 0.5
+        }
+      ],
+      "matrix_rate": 395.10339121775564,
+      "ok": true,
+      "row_error_vs_scipy": {
+        "max_abs": 0.0014025674157496226,
+        "max_rel": 0.0008366351771861181,
+        "median_abs": 0.00038075645520302404,
+        "median_rel": 0.0005460893925063936,
+        "p95_abs": 0.0010003768635024944,
+        "p95_rel": 0.0007394966981841476
+      },
+      "row_rate_including_plan": 18.647711876624065,
+      "seconds": 2.429743761604186
+    },
+    "mlx_gpu_real_expm_order_18": {
+      "matrix_group_meta": [
+        {
+          "batch_size": 4,
+          "chunks": 240,
+          "matrices": 960,
+          "order": 18,
+          "scale_steps_max": 12,
+          "scale_steps_median": 10.0,
+          "scale_steps_min": 10,
+          "seconds": 2.824865468137432,
+          "size": 128,
+          "theta": 0.5
+        }
+      ],
+      "matrix_rate": 339.83919263701205,
+      "ok": true,
+      "row_error_vs_scipy": {
+        "max_abs": 0.0014025674157496226,
+        "max_rel": 0.0008366351771861181,
+        "median_abs": 0.00038075645520302404,
+        "median_rel": 0.0005460893925063936,
+        "p95_abs": 0.0010003768635024944,
+        "p95_rel": 0.0007394966981841476
+      },
+      "row_rate_including_plan": 16.166166359843416,
+      "seconds": 2.824865468137432
+    },
+    "scipy_reference": {
+      "matrix_rate": 54.93644741103611,
+      "row_rate": 2.724326101575986,
+      "seconds": 17.47473754204111
+    }
+  },
+  "row_selection": {
+    "first_index": 2133,
+    "last_index": 3404,
+    "rows": 48,
+    "top_isigma": true,
+    "total_available_rows": 5094
+  },
+  "verdict": {
+    "best_mlx": "mlx_gpu_real_expm_order_12",
+    "promote": true,
+    "reason": "Promote only if speedup is >10% and parity thresholds are met.",
+    "speedup_vs_scipy_propagation_only": 7.192008399479866
+  }
+}

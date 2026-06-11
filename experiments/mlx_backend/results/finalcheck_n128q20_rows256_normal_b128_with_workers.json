@@ -1,0 +1,269 @@
+{
+  "absorption_enabled": true,
+  "capabilities": {
+    "default_device": "Device(gpu, 0)",
+    "metal_available": true,
+    "ops": {
+      "batched_real_matmul_gpu": {
+        "ok": true,
+        "seconds": 0.1288332919939421
+      },
+      "eig_cpu": {
+        "ok": true,
+        "seconds": 0.0007712909718975425
+      },
+      "eig_gpu": {
+        "error": "ValueError: [linalg::eig] This op is not yet supported on the GPU. Explicitly pass a CPU stream to run it.",
+        "ok": false
+      },
+      "eigh_cpu": {
+        "ok": true,
+        "seconds": 6.437499541789293e-05
+      },
+      "eigh_gpu": {
+        "error": "ValueError: [linalg::eigh] This op is not yet supported on the GPU. Explicitly pass a CPU stream to run it.",
+        "ok": false
+      },
+      "eigvals_cpu": {
+        "ok": true,
+        "seconds": 4.416698357090354e-05
+      },
+      "eigvals_gpu": {
+        "error": "ValueError: [linalg::eigvals] This op is not yet supported on the GPU. Explicitly pass a CPU stream to run it.",
+        "ok": false
+      },
+      "inv_cpu": {
+        "error": "ValueError: [linalg::inv] Arrays must have type float32 or float64. Received array with type complex64.",
+        "ok": false
+      },
+      "inv_gpu": {
+        "error": "ValueError: [linalg::inv] This op is not yet supported on the GPU. Explicitly pass a CPU stream to run it.",
+        "ok": false
+      },
+      "solve_cpu": {
+        "error": "ValueError: [linalg::solve] Input arrays must promote to float32 or float64.  Received arrays with type complex64 and complex64.",
+        "ok": false
+      },
+      "solve_gpu": {
+        "error": "ValueError: [linalg::solve] This op is not yet supported on the GPU. Explicitly pass a CPU stream to run it.",
+        "ok": false
+      }
+    }
+  },
+  "config": {
+    "absorption_frac": 0.05,
+    "absorption_mode": "midgley_like",
+    "absorption_mu": 0.0,
+    "absorption_mu_g2": 0.0,
+    "absorption_mu_theta2": 0.0,
+    "absorption_tds_b": 0.0,
+    "bethe_denom_eps": 1e-05,
+    "bethe_promote_denom": 0.005,
+    "bethe_strong_count": 48,
+    "bethe_variant": "schur_target",
+    "compute_backend": "scipy",
+    "dose_b_mode": "none",
+    "dose_b_per_frame": 0.0,
+    "dose_b_ref_frame": NaN,
+    "frame_offset": 0.0,
+    "free_fraction": 0.1,
+    "gamma": 1.3914,
+    "group_width_deg": 3.0,
+    "jax_batch_size": 0,
+    "jax_matrix_bucket_size": 0,
+    "matrix_convention": "j_minus_i",
+    "max_support_sg": 0.005,
+    "n_basis": 128,
+    "n_points": 20,
+    "profile_accumulation": "sum",
+    "profile_quadrature": "uniform",
+    "sg_jitter_mode": "none",
+    "sg_jitter_points": 5,
+    "sg_jitter_sigma0": 0.0,
+    "sg_jitter_sigma_d_inv": 0.0,
+    "sg_jitter_sigma_frame": 0.0,
+    "sg_jitter_student_df": 4.0,
+    "sg_jitter_width_factor": 3.0,
+    "sg_window": 0.006,
+    "sg_window_frame_floor": 0.5,
+    "sg_window_max": 0.012,
+    "sg_window_min": 0.003,
+    "sg_window_mode": "fixed",
+    "sg_window_scale": 1.0,
+    "split_seed": 42,
+    "thickness_A": 1240.0,
+    "thickness_grad_frac": 0.25,
+    "thickness_model": "uniform_gradient",
+    "thickness_points": 7,
+    "thickness_sigma_frac": 0.0,
+    "topup_d_min": 0.8,
+    "ug_d_min": 0.3,
+    "variance_a": 0.0,
+    "variance_b_corr": 0.0,
+    "variance_c_peak": 0.0
+  },
+  "created_at": "2026-06-09T11:06:57-0400",
+  "inputs": {
+    "hkl": "/Users/Mike/Desktop/MartynowyczLab/data_processing/2026.04.10/370/cbf_v7/xds20230630_1x/no_prf20260511/INTEGRATE.HKL",
+    "hkl_transform": null,
+    "res": "/Users/Mike/Desktop/MartynowyczLab/data_processing/2026.04.10/370/cbf_v7/xds20230630_1x/temp_a.res"
+  },
+  "jobs": {
+    "matrix_count": 5120,
+    "matrix_dimensions": {
+      "32": 160,
+      "40": 900,
+      "48": 3660,
+      "56": 280,
+      "64": 80,
+      "72": 20,
+      "80": 20
+    },
+    "plan_seconds": 0.6377661250298843
+  },
+  "mlx": {
+    "available": true,
+    "version": "unknown"
+  },
+  "platform": "macOS-26.5.1-arm64-arm-64bit",
+  "python": "/opt/anaconda3/bin/python",
+  "results": {
+    "mlx_gpu_real_expm_order_12": {
+      "matrix_group_meta": [
+        {
+          "batch_size": 128,
+          "chunks": 2,
+          "matrices": 160,
+          "order": 12,
+          "scale_steps_max": 10,
+          "scale_steps_median": 9.0,
+          "scale_steps_min": 8,
+          "seconds": 0.12992991408100352,
+          "size": 32,
+          "theta": 0.5
+        },
+        {
+          "batch_size": 128,
+          "chunks": 8,
+          "matrices": 900,
+          "order": 12,
+          "scale_steps_max": 10,
+          "scale_steps_median": 9.0,
+          "scale_steps_min": 8,
+          "seconds": 0.26891724904999137,
+          "size": 40,
+          "theta": 0.5
+        },
+        {
+          "batch_size": 128,
+          "chunks": 29,
+          "matrices": 3660,
+          "order": 12,
+          "scale_steps_max": 11,
+          "scale_steps_median": 9.0,
+          "scale_steps_min": 8,
+          "seconds": 1.471225677523762,
+          "size": 48,
+          "theta": 0.5
+        },
+        {
+          "batch_size": 128,
+          "chunks": 3,
+          "matrices": 280,
+          "order": 12,
+          "scale_steps_max": 10,
+          "scale_steps_median": 9.0,
+          "scale_steps_min": 8,
+          "seconds": 0.14809508284088224,
+          "size": 56,
+          "theta": 0.5
+        },
+        {
+          "batch_size": 128,
+          "chunks": 1,
+          "matrices": 80,
+          "order": 12,
+          "scale_steps_max": 9,
+          "scale_steps_median": 9.0,
+          "scale_steps_min": 8,
+          "seconds": 0.05051304097287357,
+          "size": 64,
+          "theta": 0.5
+        },
+        {
+          "batch_size": 128,
+          "chunks": 1,
+          "matrices": 20,
+          "order": 12,
+          "scale_steps_max": 11,
+          "scale_steps_median": 11.0,
+          "scale_steps_min": 10,
+          "seconds": 0.03612420900026336,
+          "size": 72,
+          "theta": 0.5
+        },
+        {
+          "batch_size": 128,
+          "chunks": 1,
+          "matrices": 20,
+          "order": 12,
+          "scale_steps_max": 9,
+          "scale_steps_median": 9.0,
+          "scale_steps_min": 8,
+          "seconds": 0.03353774995775893,
+          "size": 80,
+          "theta": 0.5
+        }
+      ],
+      "matrix_rate": 2394.377414355777,
+      "ok": true,
+      "row_error_vs_scipy": {
+        "max_abs": 0.0012936261571796503,
+        "max_rel": 0.0007065212304111791,
+        "median_abs": 5.5702667514465065e-05,
+        "median_rel": 0.00013767048192511304,
+        "p95_abs": 0.0004520598509226703,
+        "p95_rel": 0.0005628825549854426
+      },
+      "row_rate_including_plan": 92.2153977136964,
+      "seconds": 2.138342923426535
+    },
+    "scipy_production_workers": {
+      "basis_size_max": 74,
+      "basis_size_median": 43.0,
+      "chunksize": 2,
+      "pred_seconds": 3.8743648329982534,
+      "row_error_vs_serial_reference": {
+        "max_abs": 1.4432899320127035e-15,
+        "max_rel": 2.2279398242919237e-15,
+        "median_abs": 5.551115123125783e-17,
+        "median_rel": 1.3913043453050882e-16,
+        "p95_abs": 2.220446049250313e-16,
+        "p95_rel": 4.874265330961924e-16
+      },
+      "row_rate": 66.07264163162809,
+      "seconds": 3.8745234590023756,
+      "workers": 10
+    },
+    "scipy_reference": {
+      "matrix_rate": 908.5903066334707,
+      "row_rate": 40.81067103764119,
+      "seconds": 5.635103041073307
+    }
+  },
+  "row_selection": {
+    "first_index": 2133,
+    "last_index": 1059,
+    "rows": 256,
+    "top_isigma": true,
+    "total_available_rows": 5094
+  },
+  "verdict": {
+    "best_mlx": "mlx_gpu_real_expm_order_12",
+    "mlx_end_to_end_seconds": 2.7761090484564193,
+    "promote": true,
+    "reason": "Promote only if parity thresholds are met and MLX beats both single-core propagation and the production CPU-worker path when that reference is measured.",
+    "speedup_vs_scipy_propagation_only": 2.635266298654977,
+    "speedup_vs_scipy_workers_end_to_end": 1.3956668817302764
+  }
+}

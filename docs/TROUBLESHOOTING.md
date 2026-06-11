@@ -1,6 +1,6 @@
 # Troubleshooting
 
-If `GROND doctor --probe-bloch` fails, the Python environment is not ready. Reinstall the package in a clean Python 3.11 or 3.12 environment and check that NumPy, SciPy, and Gemmi import correctly.
+If `GROND doctor --probe-bloch` fails, the Python environment is not ready. Reinstall the package in a clean Python 3.11 to 3.13 environment and check that NumPy, SciPy, and Gemmi import correctly. Python 3.12 remains the easiest default on most laptops and shared servers.
 
 If the run stops during preflight, inspect `decisions/<dataset>/preflight.json`. Common causes are missing numeric reflection rows, too few positive intensities, non-positive sigmas, or geometry columns that are absent or badly tailed.
 
@@ -8,7 +8,7 @@ If endpoint statistics or maps are missing, check whether external crystallograp
 
 If `GROND auto` stops immediately with a missing-tool message, run `GROND init-config --out grond.config.json`, fill in absolute paths for `shelxl` and `shelx2map`, and rerun with `--config grond.config.json`. `GROND doctor --config grond.config.json --probe-bloch` prints the resolved executable path, whether it came from config, environment, or `PATH`, and what aliases were checked. For a deliberate row-only run, add `--native-only`; for endpoint statistics without maps, add `--no-maps`; for incomplete diagnostics only, add `--allow-missing-tools`.
 
-If DIALS import fails with an error about `dials` or `dxtbx`, pass the DIALS Python executable explicitly with `--dials-python /path/to/dials/python`. GROND itself can live in a separate Python 3.11/3.12 environment; the import bridge launches the DIALS Python only to read `.refl` and `.expt` files.
+If DIALS import fails with an error about `dials` or `dxtbx`, pass the DIALS Python executable explicitly with `--dials-python /path/to/dials/python`. GROND itself can live in a separate supported Python environment; the import bridge launches the DIALS Python only to read `.refl` and `.expt` files.
 
 If a DIALS run imports but gives implausible row geometry, inspect `prepared/dials_<name>/dials_bridge_summary.json`. The `sg_validation.median_abs_sg_inv_A` value should be close to zero for predicted row positions. A large value usually means the wrong `.expt` was paired with the `.refl`, the scan-varying crystal model was not preserved, or the reflection table came from a different integration/regularization stage.
 

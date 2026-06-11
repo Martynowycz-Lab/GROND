@@ -103,7 +103,7 @@ The reason to use GROND at all is therefore not simply to lower a table value. T
 
 ## Quick Install
 
-For a fresh user, the safest route is Python 3.11 or 3.12 in a clean environment:
+For a fresh user, the safest route is Python 3.11 to 3.13 in a clean environment. Python 3.12 is the recommended default today, with 3.11 and 3.12 the most heavily tested:
 
 ```bash
 git clone https://github.com/Martynowycz-Lab/GROND.git
@@ -152,7 +152,42 @@ GROND auto \
 
 The config file is optional when `shelxl`, `shelx2map`, and other external programs are already on `PATH`, but it is the recommended route on shared servers. `GROND doctor --config /path/to/grond.config.json --probe-bloch` reports exactly which executable will be used. Full endpoint workflows stop early if SHELXL is missing, and map-making workflows stop early if `shelx2map` is missing; use `--native-only`, `--no-maps`, or `--allow-missing-tools` only when that incomplete output is intentional.
 
-GROND can also accept a portable row-contract input for data that did not come from XDS or DIALS. Wrapper authors should target `grond-row-v1`: one CSV/TSV/JSONL table of signed observation rows plus one JSON sidecar with wavelength, incident beam, rotation axis, scan convention, unit cell, and the reciprocal orientation matrix. The command below validates the contract and writes the current engine compatibility directory:
+GROND can also accept a portable row-contract input for data that did not come from XDS or DIALS. Wrapper authors should target `grond-row-v1`: one CSV/TSV/JSONL table of signed observation rows plus one JSON sidecar with wavelength, incident beam, rotation axis, scan convention, unit cell, and the reciprocal orientation matrix. A minimal row table looks like this:
+
+```csv
+row_id,dataset_id,h,k,l,Iobs,sigma_Iobs,frame,x_px,y_px,partiality,lp
+0,crystal_a,1,0,2,1284.5,42.1,18.0,1912.4,2105.7,1.00,1.0
+1,crystal_a,0,1,3,422.8,27.6,18.0,2063.9,1988.2,0.95,1.0
+```
+
+The required row fields are `h`, `k`, `l`, `Iobs`, and `sigma_Iobs`, plus either `frame` or `alpha_deg`. The Miller indices must be signed observation indices in the same basis as the supplied structure after any known reindexing transform. `Iobs` should be the background-subtracted summation-style integrated intensity, and `sigma_Iobs` must be the standard uncertainty of that same intensity on the same scale. `frame` is the calculated or centroid frame coordinate in the scan convention from the metadata sidecar; use `alpha_deg` instead if the integration program reports the goniometer angle directly. Recommended optional fields are `row_id`, `dataset_id`, `x_px`, `y_px`, `frame_obs`, `partiality`, `lp`, `profile_correlation`, `rlp`, `peak`, `corr`, `bbox_z0`, `bbox_z1`, and `panel`.
+
+The matching metadata sidecar tells GROND how to turn a signed row into reciprocal geometry and excitation error:
+
+```json
+{
+  "schema_version": "grond-row-v1",
+  "dataset_id": "crystal_a",
+  "geometry": {
+    "wavelength_A": 0.02508,
+    "incident_beam_direction": [0.0, 0.0, 1.0],
+    "rotation_axis": [1.0, 0.0, 0.0],
+    "starting_frame": 1.0,
+    "starting_angle_deg": 0.0,
+    "oscillation_range_deg": 0.5,
+    "unit_cell": [7.0, 8.0, 9.0, 90.0, 90.0, 90.0],
+    "reciprocal_A_matrix": [
+      [0.1428571429, 0.0, 0.0],
+      [0.0, 0.125, 0.0],
+      [0.0, 0.0, 0.1111111111]
+    ]
+  }
+}
+```
+
+`reciprocal_A_matrix` is a 3 by 3 matrix that maps the signed column vector `(h,k,l)` into a laboratory reciprocal-space vector before the goniometer rotation for that frame is applied. If an integration program naturally stores real-space unit-cell axes in the same laboratory basis, write those axes as `real_space_axes_A` instead and GROND will invert them. For scan-varying orientation models, add `A_scan_points` as a list of 3 by 3 reciprocal matrices; GROND interpolates them by frame. With those fields, GROND computes `alpha(frame)`, then `g_h(alpha) = R(axis, alpha) A(frame) h`, then `Sg(alpha) = (k^2 - |s0 + g_h(alpha)|^2)/(2k)`.
+
+The command below validates the contract and writes the current engine compatibility directory:
 
 ```bash
 GROND row-validate \
@@ -171,11 +206,15 @@ For a faster automatic regularization that still exercises the decision tree, us
 
 On multi-core machines, transform scouting is parallel at the outer decision level. GROND first tries to eliminate the scout with baseline-HKL metadata; if candidates remain, `--transform-scout-jobs 0` automatically queues transform candidates across datasets using the core budget implied by `--workers`, while each scout subprocess defaults to `--transform-scout-workers-per-job 1`. For a 100-core server, `--workers 85` therefore means up to 85 one-core transform scouts instead of one transform at a time or 85 workers multiplied by every transform.
 
+If the signed HKL alignment is already known from the integration, scaling, and solution path, pin it explicitly and skip the transform scout with `--hkl-transform identity --trust-hkl-transform` or the corresponding non-identity transform. This keeps preflight, thickness, nuisance, polarity, resolution, endpoint, and reporting automation active; it only says that GROND should not spend Bloch calculations rediscovering the indexing transform. This is appropriate when the solved structure and the summation `INTEGRATE.HKL` are known to share the same basis, for example when SHELXT reports `Orientation as input` and the no-profile and profile-fitted XDS paths reused the same indexing contract. When that provenance is uncertain, leave the scout on or provide `--baseline-hkl` so GROND can test the overlap cheaply before running the expensive candidates.
+
 ## Endpoint Uncertainties
 
 The sigmas from XDS or DIALS describe the uncertainty of the integrated observations. GROND then applies a deterministic Bloch regularization, row scales, nuisance corrections, and endpoint merging before those observations become the corrected HKL file given to SHELXL. Carrying the original sigmas through that whole path without checking the final residual scale is usually too literal: equivalent measured intensities disagree because of counting noise, background modelling, radiation damage, absorption, partiality, and small geometry errors, and the corrected endpoint is now a transformed observation rather than the untouched integration table.
 
 For full `auto` endpoints, GROND therefore uses a deliberately simple post-Bloch policy named `uniform_z_rms`. It fits one intensity scale between the corrected endpoint and the current model, measures the RMS of the normalized residuals `(Iobs - K Fc^2)/sigma`, and multiplies every endpoint sigma by that one scalar. Intensities, Bloch ratios, thickness, frame scales, resolution limits, and nuisance parameters are not changed. This makes `wR2all` and GooF refer to a declared endpoint uncertainty model, while leaving `R1gt`, `R1all`, maps, row/MR factors, and residual trends as the primary checks that the structure and physics remain honest. The policy is used at final endpoint and SHELXL feedback boundaries; it is not used to pick the transform, thickness, absorption, jitter, or other physical branches.
+
+The same logic applies to compact scale factors. GROND does not choose the final scale manifold by simply asking for the lowest R factor with the fewest parameters. It first requires the compact scale model to preserve all-row GROND row/MR and native row-space residuals relative to the full fitted scale curve. Only inside that acceptable set does it report AIC/BIC-style information criteria and the scale-parameter savings. A fixed `WGHT 0 0` endpoint replay is useful for diagnosing how much SHELXL's model-dependent weighting is shaping `wR2all` and GooF, but a better-looking endpoint weight statistic is not allowed to overrule a damaged row model.
 
 ## What You Get
 

@@ -361,14 +361,43 @@ def native_metrics(obs: np.ndarray, sig: np.ndarray, pred: np.ndarray, mask: np.
     w = shelx_weights(obs_m, sig_m, pred_m, wght_a, wght_b)
     res = obs_m - pred_m
     dof = max(1, len(obs_m) - int(n_params))
+    chi2 = float(np.sum(w * res * res))
     return {
         "n": int(len(obs_m)),
         "n_gt": int(np.count_nonzero(gt)),
         "R1_all": r1(np.ones_like(gt, dtype=bool)),
         "R1_gt": r1(gt),
-        "wR2_all": float(np.sqrt(np.sum(w * res * res) / max(np.sum(w * obs_m * obs_m), 1e-30))),
-        "GooF": float(np.sqrt(np.sum(w * res * res) / dof)),
+        "wR2_all": float(np.sqrt(chi2 / max(np.sum(w * obs_m * obs_m), 1e-30))),
+        "GooF": float(np.sqrt(chi2 / dof)),
+        "chi2": chi2,
+        "reduced_chi2": float(chi2 / dof),
         "dof": int(dof),
+    }
+
+
+def information_criteria(native: dict, n_params: int) -> dict[str, float]:
+    """Return Gaussian information criteria for a candidate scale contract.
+
+    The known-sigma form treats the supplied endpoint sigmas as calibrated.  The
+    variance-fitted form is more conservative when absolute sigmas are still
+    under audit and compares relative residual compression while estimating one
+    global residual variance.  GROND uses these as diagnostics; final promotion
+    should still require the holdout/strict residual gates to pass.
+    """
+
+    n = max(1, int(native.get("n", 0)))
+    k = max(0, int(n_params))
+    chi2 = max(float(native.get("chi2", float("nan"))), 1e-30)
+    logn = math.log(max(float(n), 2.0))
+    aic_known = chi2 + 2.0 * k
+    bic_known = chi2 + logn * k
+    aic_variance = float(n) * math.log(chi2 / float(n)) + 2.0 * k
+    bic_variance = float(n) * math.log(chi2 / float(n)) + logn * k
+    return {
+        "aic_known_sigma": float(aic_known),
+        "bic_known_sigma": float(bic_known),
+        "aic_fitted_variance": float(aic_variance),
+        "bic_fitted_variance": float(bic_variance),
     }
 
 
@@ -564,6 +593,7 @@ def within_tolerance(delta: dict, metrics: tuple[str, ...], tolerance: float) ->
 def candidate_row(candidate: dict) -> dict[str, object]:
     delta = candidate["delta_vs_baseline"]
     native = candidate["native"]
+    info = candidate.get("information", {})
     return {
         "name": candidate["name"],
         "frame_model": candidate.get("frame_model", ""),
@@ -587,6 +617,12 @@ def candidate_row(candidate: dict) -> dict[str, object]:
         "native_R1_gt": native["R1_gt"],
         "native_R1_all": native["R1_all"],
         "native_wR2_all": native["wR2_all"],
+        "native_GooF": native.get("GooF", ""),
+        "native_chi2": native.get("chi2", ""),
+        "aic_known_sigma": info.get("aic_known_sigma", ""),
+        "bic_known_sigma": info.get("bic_known_sigma", ""),
+        "aic_fitted_variance": info.get("aic_fitted_variance", ""),
+        "bic_fitted_variance": info.get("bic_fitted_variance", ""),
         "native_dR1_gt": delta["native_R1_gt"],
         "native_dR1_all": delta["native_R1_all"],
         "native_dwR2_all": delta["native_wR2_all"],
@@ -623,6 +659,7 @@ def write_report(path: Path, payload: dict) -> None:
     selected = payload["selected"]
     widest = payload.get("selected_widest")
     r_only = payload["selected_r_only"]
+    selected_ic = payload.get("selected_information")
     lines = [
         f"# {payload['title']}",
         "",
@@ -633,7 +670,7 @@ def write_report(path: Path, payload: dict) -> None:
         f"Baseline row table: `{payload['row_table']}`",
         f"Baseline scale parameters: `{baseline['scale_params']}`; total nuisance/scale parameters used for dof accounting: `{baseline['total_params']}`.",
         f"Baseline GROND row/MR dynamical metrics: Robs `{fmt(baseline['Robs'])}`, Rall `{fmt(baseline['Rall'])}`, wRall `{fmt(baseline['wRall'])}`.",
-        f"Baseline native metrics: R1gt `{fmt(baseline['native']['R1_gt'])}`, R1all `{fmt(baseline['native']['R1_all'])}`, wR2all `{fmt(baseline['native']['wR2_all'])}`.",
+        f"Baseline native metrics: R1gt `{fmt(baseline['native']['R1_gt'])}`, R1all `{fmt(baseline['native']['R1_all'])}`, wR2all `{fmt(baseline['native']['wR2_all'])}`, GooF `{fmt(baseline['native'].get('GooF'))}`.",
         "",
         "## Selected Strict Model",
         "",
@@ -645,7 +682,7 @@ def write_report(path: Path, payload: dict) -> None:
                 f"Physical scale-window width: `{fmt(selected.get('window_deg'))}` deg; group offset: `{selected.get('group_offset', 0)}`.",
                 f"Scale parameters: `{selected['scale_params']}`; total parameters: `{selected['total_params']}`.",
                 f"GROND row/MR metrics: Robs `{fmt(selected['Robs'])}` ({fmt(selected['delta_vs_baseline']['Robs'])}), Rall `{fmt(selected['Rall'])}` ({fmt(selected['delta_vs_baseline']['Rall'])}), wRall `{fmt(selected['wRall'])}` ({fmt(selected['delta_vs_baseline']['wRall'])}).",
-                f"Native metrics: R1gt `{fmt(selected['native']['R1_gt'])}` ({fmt(selected['delta_vs_baseline']['native_R1_gt'])}), R1all `{fmt(selected['native']['R1_all'])}` ({fmt(selected['delta_vs_baseline']['native_R1_all'])}), wR2all `{fmt(selected['native']['wR2_all'])}` ({fmt(selected['delta_vs_baseline']['native_wR2_all'])}).",
+                f"Native metrics: R1gt `{fmt(selected['native']['R1_gt'])}` ({fmt(selected['delta_vs_baseline']['native_R1_gt'])}), R1all `{fmt(selected['native']['R1_all'])}` ({fmt(selected['delta_vs_baseline']['native_R1_all'])}), wR2all `{fmt(selected['native']['wR2_all'])}` ({fmt(selected['delta_vs_baseline']['native_wR2_all'])}), GooF `{fmt(selected['native'].get('GooF'))}`.",
             ]
         )
     else:
@@ -675,6 +712,20 @@ def write_report(path: Path, payload: dict) -> None:
         )
     else:
         lines.append("No candidate satisfied the R-only tolerance either.")
+    lines.extend(["", "## Information-Criterion Selection", ""])
+    if selected_ic:
+        lines.extend(
+            [
+                "Among candidates that pass the strict residual gates, GROND also reports an information-criterion choice. This does not replace the residual gates; it answers how many scale parameters are justified after the candidate is already close enough to the full-scale result.",
+                f"Selected information model: `{selected_ic['name']}`.",
+                f"Scale parameters: `{selected_ic['scale_params']}`; total parameters: `{selected_ic['total_params']}`.",
+                f"BIC with fitted residual variance: `{fmt(selected_ic.get('information', {}).get('bic_fitted_variance'))}`; AIC with fitted residual variance: `{fmt(selected_ic.get('information', {}).get('aic_fitted_variance'))}`.",
+                f"Known-sigma BIC: `{fmt(selected_ic.get('information', {}).get('bic_known_sigma'))}`; known-sigma AIC: `{fmt(selected_ic.get('information', {}).get('aic_known_sigma'))}`.",
+                f"Recommended compact scale contract for automatic output: `{selected_ic['name']}`. This is the strict-gated model with the best information score, not the lowest-parameter model overall.",
+            ]
+        )
+    else:
+        lines.append("No strict candidate was available for information-criterion selection.")
     lines.extend(
         [
             "",
@@ -685,6 +736,7 @@ def write_report(path: Path, payload: dict) -> None:
             f"Window scan: `{payload.get('window_scan', {})}`; scan offsets: `{payload.get('scan_offsets', False)}`.",
             f"Frame-scale models tested: `{payload.get('frame_models', ())}`; adaptive segment counts: `{payload.get('adaptive_frame_counts', ())}`.",
             "Positive deltas mean the compressed model is worse than the baseline. Negative deltas mean the compressed refit improved that metric.",
+            "AIC/BIC values are computed from the native row-space weighted chi-square and total nuisance/scale parameter count. Because endpoint sigmas are still audited separately, GROND uses information criteria as a parsimony diagnostic inside the strict residual gate rather than as the only promotion rule.",
             f"Candidate CSV: `{payload['candidate_csv']}`",
             f"Selected run-like directory: `{payload['selected_run_dir']}`",
             "",
@@ -766,6 +818,7 @@ def main() -> None:
         "total_params": base_total_params,
         **baseline_row_mr,
         "native": baseline_native,
+        "information": information_criteria(baseline_native, base_total_params),
         "delta_vs_baseline": {"Robs": 0.0, "Rall": 0.0, "wRall": 0.0, "native_R1_gt": 0.0, "native_R1_all": 0.0, "native_wR2_all": 0.0},
         "within_strict": True,
         "within_r_only": True,
@@ -827,6 +880,7 @@ def main() -> None:
                 "detector_scales": det_scales,
                 **metrics,
                 "native": native,
+                "information": information_criteria(native, total_params),
                 "arrays": {"dyn": dyn_scaled},
             }
             candidate["delta_vs_baseline"] = metric_delta(candidate, baseline)
@@ -871,10 +925,19 @@ def main() -> None:
     strict = [c for c in non_baseline if c["within_strict"]]
     r_only = [c for c in non_baseline if c["within_r_only"]]
     selected = min(strict, key=lambda c: (c["scale_params"], c["total_params"], c["wRall"], c["Rall"])) if strict else None
+    selected_information = min(
+        strict,
+        key=lambda c: (
+            safe_float(c.get("information", {}).get("bic_fitted_variance"), float("inf")),
+            safe_float(c.get("information", {}).get("bic_known_sigma"), float("inf")),
+            c["scale_params"],
+            c["wRall"],
+        ),
+    ) if strict else None
     selected_r_only = min(r_only, key=lambda c: (c["scale_params"], c["total_params"], c["Rall"], c["wRall"])) if r_only else None
     selected_widest = max(strict, key=lambda c: (safe_float(c.get("window_deg"), -1.0), c["group_stride"], -c["scale_params"], -c["wRall"])) if strict else None
     selected_widest_r_only = max(r_only, key=lambda c: (safe_float(c.get("window_deg"), -1.0), c["group_stride"], -c["scale_params"], -c["wRall"])) if r_only else None
-    selected_for_output = selected or selected_r_only or min(non_baseline, key=lambda c: (max(0.0, c["delta_vs_baseline"]["Rall"]), c["scale_params"]))
+    selected_for_output = selected_information or selected or selected_r_only or min(non_baseline, key=lambda c: (max(0.0, c["delta_vs_baseline"]["Rall"]), c["scale_params"]))
     if selected_for_output.get("frame_model") == "adaptive":
         selected_groups, _ = adaptive_segment_groups(
             groups0,
@@ -927,6 +990,7 @@ def main() -> None:
         "scan_offsets": bool(args.scan_offsets),
         "baseline": {k: v for k, v in baseline.items() if k not in {"arrays", "frame_scales", "detector_scales"}},
         "selected_strict": {k: v for k, v in (selected or {}).items() if k not in {"arrays", "frame_scales", "detector_scales"}} if selected else None,
+        "selected_information": {k: v for k, v in (selected_information or {}).items() if k not in {"arrays", "frame_scales", "detector_scales"}} if selected_information else None,
         "selected_r_only": {k: v for k, v in (selected_r_only or {}).items() if k not in {"arrays", "frame_scales", "detector_scales"}} if selected_r_only else None,
         "selected_widest_strict": {k: v for k, v in (selected_widest or {}).items() if k not in {"arrays", "frame_scales", "detector_scales"}} if selected_widest else None,
         "selected_widest_r_only": {k: v for k, v in (selected_widest_r_only or {}).items() if k not in {"arrays", "frame_scales", "detector_scales"}} if selected_widest_r_only else None,
@@ -970,6 +1034,7 @@ def main() -> None:
         "scan_offsets": bool(args.scan_offsets),
         "baseline": {k: v for k, v in baseline.items() if k not in {"arrays", "frame_scales", "detector_scales"}},
         "selected": {k: v for k, v in (selected or {}).items() if k not in {"arrays", "frame_scales", "detector_scales"}} if selected else None,
+        "selected_information": {k: v for k, v in (selected_information or {}).items() if k not in {"arrays", "frame_scales", "detector_scales"}} if selected_information else None,
         "selected_r_only": {k: v for k, v in (selected_r_only or {}).items() if k not in {"arrays", "frame_scales", "detector_scales"}} if selected_r_only else None,
         "selected_widest": {k: v for k, v in (selected_widest or {}).items() if k not in {"arrays", "frame_scales", "detector_scales"}} if selected_widest else None,
         "selected_widest_r_only": {k: v for k, v in (selected_widest_r_only or {}).items() if k not in {"arrays", "frame_scales", "detector_scales"}} if selected_widest_r_only else None,

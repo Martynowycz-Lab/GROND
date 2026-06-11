@@ -181,7 +181,7 @@ def estimate_run_steps(prep: PrepConfig, args: argparse.Namespace) -> int:
 
     total = 0
     for ds in prep.datasets:
-        if getattr(args, "auto_decide", True):
+        if getattr(args, "auto_decide", True) and not getattr(args, "trust_hkl_transform", False):
             transform_candidates = expand_transform_candidates(ds.hkl_transform, args.transform_candidates)
             total += len(transform_candidates)
             rerank_top = max(0, int(getattr(args, "transform_rerank_top", 0)))
@@ -497,6 +497,24 @@ def resolved_post_bloch_sigma_policy(args: argparse.Namespace, *, final_endpoint
     requested = getattr(args, "post_bloch_sigma_policy", "auto")
     if requested == "auto":
         return "uniform_z_rms" if (final_endpoint or feedback_loop) else "none"
+    return str(requested)
+
+
+def resolved_dataset_sigma_policy(args: argparse.Namespace, *, multi_dataset: bool = False) -> str:
+    """Resolve per-dataset endpoint sigma calibration for combination stages."""
+
+    requested = getattr(args, "dataset_sigma_policy", "auto")
+    if requested == "auto":
+        return "uniform_z_rms" if multi_dataset else "none"
+    return str(requested)
+
+
+def resolved_merge_sigma_policy(args: argparse.Namespace, *, multi_dataset: bool = False) -> str:
+    """Resolve the sigma model used when corrected endpoint rows are merged."""
+
+    requested = getattr(args, "merge_sigma_policy", "auto")
+    if requested == "auto":
+        return "chisq_overdispersion" if multi_dataset else "formal"
     return str(requested)
 
 
@@ -1963,8 +1981,7 @@ def shelxl_feedback_cmd(
         ds.hkl,
         "--baseline-hkl",
         baseline_hkl or "",
-        "--hkl-transform",
-        ds.hkl_transform,
+        f"--hkl-transform={ds.hkl_transform}",
         "--cycles",
         str(args.shelxl_feedback_cycles),
         "--n-basis",
@@ -2043,7 +2060,27 @@ def combine_cmd(python: str, runs: dict[str, Path], structure: str, out_dir: Pat
         "native",
         "--interdataset-scale",
         "overlap",
+        "--dataset-sigma-policy",
+        resolved_dataset_sigma_policy(args, multi_dataset=True),
+        "--dataset-sigma-holdout-fraction",
+        f"{args.dataset_sigma_holdout_fraction:g}",
+        "--dataset-sigma-min-scale",
+        f"{args.dataset_sigma_min_scale:g}",
+        "--dataset-sigma-max-scale",
+        f"{args.dataset_sigma_max_scale:g}",
+        "--merge-sigma-policy",
+        resolved_merge_sigma_policy(args, multi_dataset=True),
+        "--post-bloch-sigma-policy",
+        resolved_post_bloch_sigma_policy(args, final_endpoint=True),
+        "--post-bloch-sigma-holdout-fraction",
+        f"{args.post_bloch_sigma_holdout_fraction:g}",
+        "--post-bloch-sigma-min-scale",
+        f"{args.post_bloch_sigma_min_scale:g}",
+        "--post-bloch-sigma-max-scale",
+        f"{args.post_bloch_sigma_max_scale:g}",
     ]
+    if args.dataset_sigma_holdout_floor:
+        cmd.append("--dataset-sigma-holdout-floor")
     for name, run in runs.items():
         cmd += ["--run", f"{name}={run}"]
     return cmd
@@ -2712,6 +2749,35 @@ def choose_transform_by_scout(
     """Choose the HKL alignment using cheap all-candidate scouts, then rerank top hits."""
 
     candidates = expand_transform_candidates(ds.hkl_transform, args.transform_candidates)
+    if getattr(args, "trust_hkl_transform", False):
+        selected_transform = ds.hkl_transform or "identity"
+        selected = {
+            "transform": selected_transform,
+            "status": "trusted_input",
+            "score": None,
+            "reason": "user supplied --trust-hkl-transform; transform scouting was skipped",
+        }
+        payload = {
+            "records": [],
+            "coarse_records": [],
+            "rerank_records": [],
+            "coarse_selected": selected,
+            "selected": selected,
+            "rerank_top": 0,
+            "metadata_transform_decision": {},
+            "scout_parallelism": {
+                "max_concurrent_scout_jobs": 0,
+                "workers_per_scout_job": 0,
+                "coarse_candidate_count": 0,
+                "coarse_parallel_jobs": 0,
+                "reranked_candidate_count": 0,
+                "reranked_parallel_jobs": 0,
+            },
+            "rule": "trusted user-supplied HKL transform; no Bloch transform scout was run",
+        }
+        write_json(root / "decisions" / ds.name / "transform_decision.json", payload)
+        return dataset_with_transform(ds, selected_transform), payload
+
     metadata_transform_decision: dict = {}
     baseline_hkl = dataset_baseline_hkl(prep, ds)
     if getattr(args, "transform_metadata_prefilter", "auto") != "off" and baseline_hkl:
@@ -2822,8 +2888,8 @@ def choose_polarity_by_scout(
             dataset_baseline_hkl(prep, ds),
             polarity_dir,
                 args,
-                n_basis=args.scout_n_basis,
-                n_points=args.scout_n_points,
+                n_basis=20 if args.fast else args.polarity_n_basis,
+                n_points=5 if args.fast else args.polarity_n_points,
                 stage="scout_polarity",
                 pinned=nui,
                 coordinate_polarity_alt=True,
@@ -4091,6 +4157,16 @@ def cmd_run(args: argparse.Namespace) -> int:
             "min_scale": args.post_bloch_sigma_min_scale,
             "max_scale": args.post_bloch_sigma_max_scale,
         },
+        "multi_dataset_sigma": {
+            "dataset_policy": args.dataset_sigma_policy,
+            "resolved_dataset_policy": resolved_dataset_sigma_policy(args, multi_dataset=len(prep.datasets) > 1),
+            "dataset_holdout_fraction": args.dataset_sigma_holdout_fraction,
+            "dataset_min_scale": args.dataset_sigma_min_scale,
+            "dataset_max_scale": args.dataset_sigma_max_scale,
+            "dataset_holdout_floor": args.dataset_sigma_holdout_floor,
+            "merge_policy": args.merge_sigma_policy,
+            "resolved_merge_policy": resolved_merge_sigma_policy(args, multi_dataset=len(prep.datasets) > 1),
+        },
         "scale_polish": {
             "mode": args.scale_polish,
             "frame_models": args.scale_polish_frame_models,
@@ -4534,6 +4610,71 @@ def cmd_scale_polish(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_scale_replay(args: argparse.Namespace) -> int:
+    """CLI entrypoint for replaying compact scale contracts through endpoints."""
+
+    out_dir = Path(args.out_dir).expanduser().resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    logs = out_dir / "logs"
+    python = choose_python(args.python)
+    cmd = [
+        python,
+        str(engine_script("scale_contract_replay.py")),
+        "--row-table",
+        str(Path(args.row_table).expanduser().resolve()),
+        "--out-dir",
+        str(out_dir),
+        "--specs",
+        args.specs,
+        "--fit-split",
+        args.fit_split,
+        "--lambda-q",
+        str(args.lambda_q),
+        "--rescale",
+        args.rescale,
+        "--hkl-float-format",
+        args.hkl_float_format,
+        "--post-bloch-sigma-policy",
+        args.post_bloch_sigma_policy,
+        "--post-bloch-sigma-holdout-fraction",
+        str(args.post_bloch_sigma_holdout_fraction),
+        "--post-bloch-sigma-min-scale",
+        str(args.post_bloch_sigma_min_scale),
+        "--post-bloch-sigma-max-scale",
+        str(args.post_bloch_sigma_max_scale),
+        "--shelxl",
+        args.shelxl,
+        "--shelxl-iterations",
+        str(args.shelxl_iterations),
+        "--wght-modes",
+        args.wght_modes,
+        "--instability-u",
+        str(args.instability_u),
+    ]
+    if args.summary:
+        cmd += ["--summary", str(Path(args.summary).expanduser().resolve())]
+    if args.res:
+        cmd += ["--res", str(Path(args.res).expanduser().resolve())]
+    if args.native_wght_a is not None:
+        cmd += ["--native-wght-a", str(args.native_wght_a)]
+    if args.native_wght_b is not None:
+        cmd += ["--native-wght-b", str(args.native_wght_b)]
+    run_logged(cmd, logs, "scale_contract_replay", dry_run=args.dry_run)
+    summary = try_read_json(out_dir / "summary.json")
+    print(
+        json.dumps(
+            {
+                "out_dir": str(out_dir),
+                "endpoint_csv": str((out_dir / "scale_contract_endpoint_replay.csv").resolve()),
+                "rows": summary.get("rows", []),
+            },
+            indent=2,
+            allow_nan=True,
+        )
+    )
+    return 0
+
+
 def add_common_run_args(ap: argparse.ArgumentParser) -> None:
     """Attach the shared run/auto options to an argparse subcommand."""
 
@@ -4599,6 +4740,7 @@ def add_common_run_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--transform-metadata-min-correlation", type=float, default=0.70, help="Minimum log-intensity correlation required before metadata can prefilter transform scouts.")
     ap.add_argument("--transform-metadata-min-correlation-gap", type=float, default=0.05, help="Correlation gap required for auto mode to promote a single transform without Bloch-transform scouting.")
     ap.add_argument("--transform-metadata-max-rows", type=int, default=0, help="Maximum INTEGRATE/XDS rows used by metadata transform ranking; 0 uses all rows.")
+    ap.add_argument("--trust-hkl-transform", action="store_true", help="Trust the supplied --hkl-transform or prep-file transform and skip Bloch transform scouting while keeping the rest of auto-decision enabled.")
     ap.add_argument("--polarity-accept-delta", type=float, default=0.015, help="Adaptive score margin required before switching to the alternate coordinate-polarity.")
     ap.add_argument("--stop-on-bad-preflight", action="store_true", default=False)
     ap.add_argument("--stop-on-bad-fit", action="store_true", default=False)
@@ -4674,6 +4816,12 @@ def add_common_run_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--shelxl", default=default_shelxl_executable(), help="SHELXL executable used for corrected-HKL endpoints and SHELXL feedback loops.")
     ap.add_argument("--shelxl-feedback-cycles", type=int, default=5, help="Number of high-N/Q Bloch -> one-SHELXL-LS feedback cycles used by the automatic SHELXL structure-update strategy.")
     ap.add_argument("--shelxl-feedback-shelxl-iterations", type=int, default=1, help="SHELXL passes per feedback cycle. Default 1 keeps each feedback update to one least-squares model update.")
+    ap.add_argument("--dataset-sigma-policy", choices=["auto", "none", "uniform_z_rms"], default="auto", help="Per-dataset endpoint sigma policy for multi-dataset combination. Auto calibrates each crystal independently before merging.")
+    ap.add_argument("--dataset-sigma-holdout-fraction", type=float, default=0.20, help="Deterministic HKL holdout fraction reported for per-dataset endpoint sigma calibration.")
+    ap.add_argument("--dataset-sigma-min-scale", type=float, default=0.25, help="Lower guardrail for per-dataset endpoint sigma scaling.")
+    ap.add_argument("--dataset-sigma-max-scale", type=float, default=4.0, help="Upper guardrail for per-dataset endpoint sigma scaling.")
+    ap.add_argument("--dataset-sigma-holdout-floor", action=argparse.BooleanOptionalAction, default=True, help="For multi-dataset auto, prevent a dataset from being assigned tighter sigmas than its held-out normalized residuals support.")
+    ap.add_argument("--merge-sigma-policy", choices=["auto", "formal", "chisq_overdispersion"], default="auto", help="Sigma policy used when corrected rows are merged. Auto inflates merged sigmas when independent datasets disagree beyond formal errors.")
     ap.add_argument("--post-bloch-sigma-policy", choices=["auto", "none", "uniform_z_rms"], default="auto", help="Endpoint uncertainty policy. Auto uses uniform_z_rms only for final corrected endpoints and SHELXL feedback cycles, leaving early physics-selection endpoints uncalibrated.")
     ap.add_argument("--post-bloch-sigma-holdout-fraction", type=float, default=0.20, help="Deterministic HKL holdout fraction reported for uniform_z_rms endpoint sigma calibration.")
     ap.add_argument("--post-bloch-sigma-min-scale", type=float, default=0.25, help="Lower guardrail for uniform_z_rms endpoint sigma scaling.")
@@ -4929,6 +5077,31 @@ def build_parser() -> argparse.ArgumentParser:
     p_scale.add_argument("--native-wght-a", type=float, default=None)
     p_scale.add_argument("--native-wght-b", type=float, default=None)
     p_scale.set_defaults(func=cmd_scale_polish)
+
+    p_scale_replay = sub.add_parser("scale-replay", help="Replay compact scale contracts through corrected-HKL refinement endpoints.")
+    p_scale_replay.add_argument("--row-table", required=True)
+    p_scale_replay.add_argument("--summary", default="")
+    p_scale_replay.add_argument("--res", default="", help="Source RES file. Defaults to the RES path recorded in the row summary.")
+    p_scale_replay.add_argument("--out-dir", required=True)
+    p_scale_replay.add_argument("--python", default="")
+    add_tool_config_args(p_scale_replay)
+    p_scale_replay.add_argument("--dry-run", action="store_true")
+    p_scale_replay.add_argument("--specs", default="baseline,adaptive:293:det8,adaptive:200:det8,window:1.0:det8,window:1.5:det8,window:3.0:det8,window:5.0:det8", help="Comma list of scale contracts: baseline, adaptive:N:det8, window:DEG:det8, or stride:N:det8.")
+    p_scale_replay.add_argument("--fit-split", default="all")
+    p_scale_replay.add_argument("--lambda-q", type=float, default=1.0)
+    p_scale_replay.add_argument("--rescale", choices=["median-iobs", "none"], default="median-iobs")
+    p_scale_replay.add_argument("--hkl-float-format", choices=["shelx_fixed", "wide"], default="shelx_fixed")
+    p_scale_replay.add_argument("--post-bloch-sigma-policy", choices=["none", "uniform_z_rms"], default="uniform_z_rms")
+    p_scale_replay.add_argument("--post-bloch-sigma-holdout-fraction", type=float, default=0.20)
+    p_scale_replay.add_argument("--post-bloch-sigma-min-scale", type=float, default=0.25)
+    p_scale_replay.add_argument("--post-bloch-sigma-max-scale", type=float, default=4.0)
+    p_scale_replay.add_argument("--shelxl", default="shelxl")
+    p_scale_replay.add_argument("--shelxl-iterations", type=int, default=5)
+    p_scale_replay.add_argument("--wght-modes", default="promote,freeze-zero", help="Comma list of endpoint weight policies; freeze-zero keeps active WGHT 0 0.")
+    p_scale_replay.add_argument("--instability-u", type=float, default=0.01)
+    p_scale_replay.add_argument("--native-wght-a", type=float, default=None)
+    p_scale_replay.add_argument("--native-wght-b", type=float, default=None)
+    p_scale_replay.set_defaults(func=cmd_scale_replay)
 
     p_val = sub.add_parser("validate", help="Compile the vendored engine scripts with the selected Python.")
     p_val.add_argument("--python", default="")

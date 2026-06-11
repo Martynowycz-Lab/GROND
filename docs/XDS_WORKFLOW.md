@@ -121,4 +121,6 @@ If GROND stops during preflight, inspect `decisions/<dataset>/preflight.json`. C
 
 If transform scouting is slow, provide `--baseline-hkl`. GROND can often use the solved-model HKL to reduce the candidate transform list before running Bloch calculations.
 
+If you know the solved structure and the summation `INTEGRATE.HKL` are already in the same signed HKL basis, use `--hkl-transform identity --trust-hkl-transform`. For a non-identity known reindexing, replace `identity` with the transform, for example `l,-k,h`. This skips only the transform scout. The rest of `GROND auto` still runs, including preflight, thickness and nuisance decisions, polarity checks, endpoint polishing, maps, and reports. A SHELXT header that says `Orientation as input` is useful evidence for this choice, but it should be paired with ordinary provenance: the profile-fitted solve, summation re-integration, XDSCONV/XSCALE path, and model should all come from the same indexing setting.
+
 If endpoint statistics or maps are missing, run `GROND doctor --config grond.config.json --probe-bloch`. Full corrected-HKL endpoint polishing requires SHELXL, and map generation requires `shelx2map`.

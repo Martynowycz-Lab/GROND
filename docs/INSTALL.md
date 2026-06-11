@@ -1,10 +1,10 @@
 # Install
 
-GROND is a normal Python package. The recommended installation is a clean Python 3.11 or 3.12 environment with NumPy, SciPy, Pandas, and Gemmi installed from wheels.
+GROND is a normal Python package. The recommended installation is a clean Python 3.11 to 3.13 environment with NumPy, SciPy, Pandas, and Gemmi installed from wheels. Python 3.12 is the recommended default today because it is widely supported by scientific wheels and is one of the most heavily tested GROND environments.
 
 ## Prerequisites
 
-- Python 3.11 or 3.12.
+- Python 3.11, 3.12, or 3.13. Prefer 3.12 unless your local or server environment already standardizes on another supported version.
 - Git, if installing from GitHub.
 - A working XDS processing directory, or a DIALS `integrated.refl`/`integrated.expt` pair, for each dataset you want to regularize.
 - A solved starting structure, usually SHELX `model.res` or CIF.
@@ -28,7 +28,7 @@ python -m pip install .
 GROND doctor --probe-bloch
 ```
 
-If `python3.12` is not available but `python3.11` is, use `python3.11 -m venv .venv`.
+If `python3.12` is not available but `python3.11` or `python3.13` is, use that executable for the `venv` command.
 
 ## Developer Install
 

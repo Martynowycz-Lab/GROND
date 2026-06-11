@@ -5,10 +5,13 @@ from grond.cli import (
     apply_speed_profile,
     apply_tool_config,
     build_parser,
+    combine_cmd,
     estimate_model_nonh_atoms,
     parse_numeric_grid,
     publication_report_cmd,
     required_external_tool_errors,
+    resolved_dataset_sigma_policy,
+    resolved_merge_sigma_policy,
     resolve_structure_update_strategy,
     resolved_post_bloch_sigma_policy,
     resolved_sg_window_mode,
@@ -89,6 +92,12 @@ def test_run_parser_exposes_staged_feature_grids():
     assert args.allow_missing_tools is False
     assert args.shelxl_feedback_cycles == 5
     assert args.shelxl_feedback_shelxl_iterations == 1
+    assert args.dataset_sigma_policy == "auto"
+    assert args.dataset_sigma_holdout_fraction == 0.20
+    assert args.dataset_sigma_min_scale == 0.25
+    assert args.dataset_sigma_max_scale == 4.0
+    assert args.dataset_sigma_holdout_floor is True
+    assert args.merge_sigma_policy == "auto"
     assert args.shelxl_iterations == 5
     assert args.post_bloch_sigma_policy == "auto"
     assert args.post_bloch_sigma_holdout_fraction == 0.20
@@ -116,6 +125,9 @@ def test_utility_commands_parse():
     assert audit.forensic_gate is True
     assert audit.observation_polish == "auto"
     assert audit.observation_polish_combine == "ensemble"
+    replay = build_parser().parse_args(["scale-replay", "--row-table", "native_dyn_calc.csv", "--out-dir", "replay"])
+    assert replay.command == "scale-replay"
+    assert replay.post_bloch_sigma_policy == "uniform_z_rms"
 
 
 def test_auto_parser_is_simple_run_alias():
@@ -234,6 +246,50 @@ def test_post_bloch_sigma_auto_is_final_endpoint_only():
         ]
     )
     assert resolved_post_bloch_sigma_policy(args, final_endpoint=True) == "none"
+
+
+def test_multi_dataset_sigma_auto_uses_conservative_combination_defaults():
+    args = build_parser().parse_args(["auto", "--out-dir", "out", "--xds-dir", "xds", "--structure", "model.res"])
+
+    assert resolved_dataset_sigma_policy(args, multi_dataset=False) == "none"
+    assert resolved_dataset_sigma_policy(args, multi_dataset=True) == "uniform_z_rms"
+    assert resolved_merge_sigma_policy(args, multi_dataset=False) == "formal"
+    assert resolved_merge_sigma_policy(args, multi_dataset=True) == "chisq_overdispersion"
+
+    args = build_parser().parse_args(
+        [
+            "auto",
+            "--out-dir",
+            "out",
+            "--xds-dir",
+            "xds",
+            "--structure",
+            "model.res",
+            "--dataset-sigma-policy",
+            "none",
+            "--merge-sigma-policy",
+            "formal",
+        ]
+    )
+    assert resolved_dataset_sigma_policy(args, multi_dataset=True) == "none"
+    assert resolved_merge_sigma_policy(args, multi_dataset=True) == "formal"
+
+
+def test_combine_cmd_forwards_promoted_multi_dataset_sigma_policies(tmp_path: Path):
+    args = build_parser().parse_args(["auto", "--out-dir", "out", "--xds-dir", "xds", "--structure", "model.res"])
+
+    cmd = combine_cmd(
+        "python",
+        {"a": tmp_path / "run_a", "b": tmp_path / "run_b"},
+        "model.res",
+        tmp_path / "combined",
+        args,
+    )
+
+    assert cmd[cmd.index("--dataset-sigma-policy") + 1] == "uniform_z_rms"
+    assert cmd[cmd.index("--merge-sigma-policy") + 1] == "chisq_overdispersion"
+    assert cmd[cmd.index("--post-bloch-sigma-policy") + 1] == "uniform_z_rms"
+    assert "--dataset-sigma-holdout-floor" in cmd
 
 
 def test_auto_parser_accepts_cuda_jax_backend_explicitly():

@@ -21,6 +21,13 @@ from pathlib import Path
 
 import numpy as np
 
+try:  # Package import.
+    from .bloch_engine import parse_model
+    from .post_bloch_sigma import fit_uniform_z_rms_sigma_scale, scale_row_sigmas
+except ImportError:  # Direct script execution from this directory.
+    from bloch_engine import parse_model
+    from post_bloch_sigma import fit_uniform_z_rms_sigma_scale, scale_row_sigmas
+
 
 def read_json(path: Path) -> dict:
     return json.loads(path.read_text()) if path.exists() else {}
@@ -142,6 +149,15 @@ def write_hkl(path: Path, rows):
         f.write(f"{0:4d}{0:4d}{0:4d}{0.0:8.2f}{0.0:8.2f}\n")
 
 
+def safe_fixed_width_factor(rows) -> float:
+    """Return a common multiplier that keeps HKLF4 8.2 fields in range."""
+
+    max_abs = max((max(abs(float(I)), abs(float(sig))) for _, _, _, I, sig in rows), default=0.0)
+    if max_abs <= 0.0 or max_abs < 9999.995:
+        return 1.0
+    return 9000.0 / max_abs
+
+
 def endpoint_rows_from_native(rows: list[dict], lambda_q: float):
     hkl = [(int(r["h"]), int(r["k"]), int(r["l"])) for r in rows]
     target = np.asarray([safe_float(r["target_I"]) for r in rows], dtype=float)
@@ -173,6 +189,37 @@ def apply_hkl_weight(rows, weight: float):
 def scale_hkl_rows(rows, scale: float):
     scale = float(scale)
     return [(h, k, l, I * scale, sig * abs(scale)) for h, k, l, I, sig in rows]
+
+
+def apply_sigma_holdout_floor(meta: dict) -> dict:
+    """Avoid making a dataset tighter than its own held-out residual scatter."""
+
+    out = dict(meta)
+    if not str(out.get("status", "")).startswith("ok"):
+        return out
+    current = safe_float(out.get("sigma_scale"))
+    holdout_before = safe_float(out.get("heldout_rms_z_before"))
+    if not (math.isfinite(current) and current > 0.0 and math.isfinite(holdout_before) and holdout_before > 0.0):
+        return out
+    new_scale = max(current, holdout_before)
+    if new_scale <= current + max(1e-12, 1e-9 * abs(current)):
+        out["holdout_floor_applied"] = False
+        return out
+    out["sigma_scale_pre_holdout_floor"] = current
+    out["sigma_scale"] = float(new_scale)
+    out["holdout_floor_applied"] = True
+    for key in ("train", "all", "heldout"):
+        before_key = f"{key}_rms_z_before"
+        after_key = f"{key}_rms_z_after"
+        before = safe_float(out.get(before_key))
+        if math.isfinite(before):
+            out[after_key] = float(before / new_scale)
+        med_before_key = f"{key}_median_abs_z_before"
+        med_after_key = f"{key}_median_abs_z_after"
+        med_before = safe_float(out.get(med_before_key))
+        if math.isfinite(med_before):
+            out[med_after_key] = float(med_before / new_scale)
+    return out
 
 
 def estimate_overlap_scales(rows_by_dataset: dict[str, list[tuple]], iterations: int = 6) -> dict:
@@ -218,21 +265,45 @@ def estimate_overlap_scales(rows_by_dataset: dict[str, list[tuple]], iterations:
     }
 
 
-def merge_hkl_rows(rows):
+def merge_hkl_rows(rows, sigma_policy: str = "formal"):
     bins: dict[tuple[int, int, int], dict[str, float]] = {}
     for h, k, l, I, sig in rows:
         key = (int(h), int(k), int(l))
         sig = max(abs(float(sig)), 1e-6)
         w = 1.0 / (sig * sig)
-        b = bins.setdefault(key, {"w": 0.0, "wI": 0.0, "n": 0})
+        b = bins.setdefault(key, {"w": 0.0, "wI": 0.0, "n": 0, "values": [], "weights": []})
         b["w"] += w
         b["wI"] += w * float(I)
         b["n"] += 1
+        b["values"].append(float(I))
+        b["weights"].append(float(w))
     out = []
+    inflations = []
     for key, b in bins.items():
-        out.append((*key, b["wI"] / max(b["w"], 1e-30), (1.0 / max(b["w"], 1e-30)) ** 0.5))
+        mean = b["wI"] / max(b["w"], 1e-30)
+        sigma = (1.0 / max(b["w"], 1e-30)) ** 0.5
+        inflation = 1.0
+        if sigma_policy == "chisq_overdispersion" and b["n"] > 1:
+            values = np.asarray(b["values"], dtype=float)
+            weights = np.asarray(b["weights"], dtype=float)
+            chi2 = float(np.sum(weights * (values - mean) ** 2) / max(int(b["n"]) - 1, 1))
+            if math.isfinite(chi2) and chi2 > 1.0:
+                inflation = math.sqrt(chi2)
+                sigma *= inflation
+        inflations.append(inflation)
+        out.append((*key, mean, sigma))
     out.sort(key=lambda x: (x[0], x[1], x[2]))
-    return out
+    inflations_arr = np.asarray(inflations, dtype=float) if inflations else np.asarray([], dtype=float)
+    meta = {
+        "policy": sigma_policy,
+        "merged_rows": int(len(out)),
+        "rows_with_multiple_observations": int(sum(1 for b in bins.values() if b["n"] > 1)),
+        "inflated_rows": int(np.count_nonzero(inflations_arr > 1.0)) if inflations_arr.size else 0,
+        "inflation_median": float(np.median(inflations_arr)) if inflations_arr.size else float("nan"),
+        "inflation_p95": float(np.percentile(inflations_arr, 95)) if inflations_arr.size else float("nan"),
+        "inflation_max": float(np.max(inflations_arr)) if inflations_arr.size else float("nan"),
+    }
+    return out, meta
 
 
 def write_no_exti_ins(src_res: Path, dst_ins: Path, hkl_name: str):
@@ -385,8 +456,46 @@ def main():
         default="overlap",
         help="Fit one scalar per dataset from overlapping corrected reflections before merging the multi-dataset endpoint.",
     )
+    ap.add_argument(
+        "--dataset-sigma-policy",
+        choices=("none", "uniform_z_rms"),
+        default="none",
+        help=(
+            "Endpoint uncertainty policy applied independently to each dataset before interdataset scaling and merging. "
+            "This keeps a weak crystal from setting the sigma scale for stronger crystals."
+        ),
+    )
+    ap.add_argument("--dataset-sigma-holdout-fraction", type=float, default=0.20)
+    ap.add_argument("--dataset-sigma-min-scale", type=float, default=0.25)
+    ap.add_argument("--dataset-sigma-max-scale", type=float, default=4.0)
+    ap.add_argument(
+        "--dataset-sigma-holdout-floor",
+        action="store_true",
+        help="For per-dataset uniform_z_rms, do not deflate sigmas below that dataset's held-out RMS(z).",
+    )
+    ap.add_argument(
+        "--merge-sigma-policy",
+        choices=("formal", "chisq_overdispersion"),
+        default="formal",
+        help=(
+            "How to assign sigmas after merging corrected endpoint rows. formal uses propagated inverse-variance errors; "
+            "chisq_overdispersion inflates a merged reflection when its contributors disagree more than their sigmas predict."
+        ),
+    )
     ap.add_argument("--shelxl", default="")
     ap.add_argument("--shelxl-iterations", type=int, default=5)
+    ap.add_argument(
+        "--post-bloch-sigma-policy",
+        choices=("none", "uniform_z_rms"),
+        default="none",
+        help=(
+            "Endpoint uncertainty policy applied after multi-dataset merging and before SHELXL. "
+            "uniform_z_rms fits one residual RMS(z) scalar from the supplied model and scales endpoint sigmas only."
+        ),
+    )
+    ap.add_argument("--post-bloch-sigma-holdout-fraction", type=float, default=0.20)
+    ap.add_argument("--post-bloch-sigma-min-scale", type=float, default=0.25)
+    ap.add_argument("--post-bloch-sigma-max-scale", type=float, default=4.0)
     args = ap.parse_args()
 
     out = Path(args.out_dir)
@@ -394,6 +503,7 @@ def main():
     all_rows = []
     dataset_summaries = []
     endpoint_rows_by_dataset: dict[str, list[tuple]] = {}
+    dataset_sigma_by_name: dict[str, dict] = {}
     wght_a = args.wght_a
     wght_b = args.wght_b
     for item in args.run:
@@ -452,6 +562,30 @@ def main():
             endpoint_rows_by_dataset[name] = apply_hkl_weight(hkl_rows, endpoint_weight)
         else:
             endpoint_rows_by_dataset[name] = endpoint_rows_from_native(endpoint_input_rows, float(args.endpoint_lambda))
+        dataset_sigma_by_name[name] = {"policy": args.dataset_sigma_policy, "status": "not_requested"}
+
+    if args.dataset_sigma_policy == "uniform_z_rms":
+        model = parse_model(Path(args.res))
+        for name, rows_for_dataset in list(endpoint_rows_by_dataset.items()):
+            try:
+                sigma_meta = fit_uniform_z_rms_sigma_scale(
+                    rows_for_dataset,
+                    model,
+                    holdout_fraction=float(args.dataset_sigma_holdout_fraction),
+                    min_scale=float(args.dataset_sigma_min_scale),
+                    max_scale=float(args.dataset_sigma_max_scale),
+                )
+                if args.dataset_sigma_holdout_floor:
+                    sigma_meta = apply_sigma_holdout_floor(sigma_meta)
+                if str(sigma_meta.get("status", "")).startswith("ok"):
+                    endpoint_rows_by_dataset[name] = scale_row_sigmas(rows_for_dataset, float(sigma_meta["sigma_scale"]))
+                dataset_sigma_by_name[name] = sigma_meta
+            except Exception as exc:
+                dataset_sigma_by_name[name] = {
+                    "policy": "uniform_z_rms",
+                    "status": "failed",
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
 
     wght_a = 0.126534 if wght_a is None else float(wght_a)
     wght_b = 0.0 if wght_b is None else float(wght_b)
@@ -482,9 +616,34 @@ def main():
         "born": split_metrics(all_rows, "born_scaled", wght_a, wght_b),
     }
     merged_endpoint = []
+    merge_sigma = {"policy": args.merge_sigma_policy, "status": "skipped_no_endpoint_rows"}
     shelxl = {}
     if endpoint_rows:
-        merged_endpoint = merge_hkl_rows(endpoint_rows)
+        merged_endpoint, merge_sigma = merge_hkl_rows(endpoint_rows, args.merge_sigma_policy)
+        merge_sigma["status"] = "ok"
+        post_bloch_sigma = {"policy": args.post_bloch_sigma_policy, "status": "not_requested"}
+        if args.post_bloch_sigma_policy == "uniform_z_rms":
+            try:
+                post_bloch_sigma = fit_uniform_z_rms_sigma_scale(
+                    merged_endpoint,
+                    parse_model(Path(args.res)),
+                    holdout_fraction=float(args.post_bloch_sigma_holdout_fraction),
+                    min_scale=float(args.post_bloch_sigma_min_scale),
+                    max_scale=float(args.post_bloch_sigma_max_scale),
+                )
+                if str(post_bloch_sigma.get("status", "")).startswith("ok"):
+                    merged_endpoint = scale_row_sigmas(merged_endpoint, float(post_bloch_sigma["sigma_scale"]))
+                    endpoint_rows = scale_row_sigmas(endpoint_rows, float(post_bloch_sigma["sigma_scale"]))
+            except Exception as exc:
+                post_bloch_sigma = {
+                    "policy": "uniform_z_rms",
+                    "status": "failed",
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+        hkl_safe_factor = min(safe_fixed_width_factor(endpoint_rows), safe_fixed_width_factor(merged_endpoint))
+        if hkl_safe_factor < 1.0:
+            endpoint_rows = [(h, k, l, I * hkl_safe_factor, sig * hkl_safe_factor) for h, k, l, I, sig in endpoint_rows]
+            merged_endpoint = [(h, k, l, I * hkl_safe_factor, sig * hkl_safe_factor) for h, k, l, I, sig in merged_endpoint]
         ep_dir = out / f"combined_endpoint_lam_{args.endpoint_lambda.replace('.', 'p')}"
         ep_dir.mkdir(exist_ok=True)
         hkl_name = "multi_dyn_corrected.hkl"
@@ -509,6 +668,10 @@ def main():
             "lambda_q": args.endpoint_lambda,
             "input_unmerged_rows": len(endpoint_rows),
             "merged_exact_hkl_rows": len(merged_endpoint),
+            "hkl_safe_factor": hkl_safe_factor if endpoint_rows else 1.0,
+            "dataset_sigma": dataset_sigma_by_name,
+            "merge_sigma": merge_sigma,
+            "post_bloch_sigma": post_bloch_sigma if endpoint_rows else {"policy": args.post_bloch_sigma_policy, "status": "skipped_no_endpoint_rows"},
             "shelxl": shelxl,
         },
     }
@@ -554,10 +717,30 @@ def main():
     if shelxl:
         scale_bits = ", ".join(f"{name}={safe_float(scale):.3g}" for name, scale in sorted(interdataset_scale.get("scales", {}).items()))
         lines.append(f"Inter-dataset endpoint scaling: `{args.interdataset_scale}`. Scale factors: {scale_bits or 'n/a'}.")
+        if args.dataset_sigma_policy == "uniform_z_rms":
+            dataset_bits = ", ".join(
+                f"{name}: {safe_float(meta.get('sigma_scale')):.3f} ({meta.get('status')})"
+                for name, meta in sorted(dataset_sigma_by_name.items())
+            )
+            lines.append(f"Per-dataset endpoint sigma calibration: {dataset_bits or 'n/a'}.")
+        lines.append(
+            f"Merge sigma policy `{args.merge_sigma_policy}`; inflated rows `{merge_sigma.get('inflated_rows', 0)}`/"
+            f"`{merge_sigma.get('merged_rows', 0)}`, median/p95/max inflation "
+            f"`{safe_float(merge_sigma.get('inflation_median')):.3f}`/"
+            f"`{safe_float(merge_sigma.get('inflation_p95')):.3f}`/"
+            f"`{safe_float(merge_sigma.get('inflation_max')):.3f}`."
+        )
         lines.append("")
         lines.append(
             f"Lambda `{args.endpoint_lambda}` merged `{len(endpoint_rows)}` unmerged endpoint rows to `{len(merged_endpoint)}` exact signed HKL rows. SHELXL status `{shelxl.get('status')}`; `R1gt={100*safe_float(shelxl.get('R1_gt')):.2f}%`, `R1all={100*safe_float(shelxl.get('R1_all')):.2f}%`, `wR2all={100*safe_float(shelxl.get('wR2_all')):.2f}%`, `GooF={safe_float(shelxl.get('GooF')):.3f}`."
         )
+        sig_meta = result["combined_endpoint"].get("post_bloch_sigma") or {}
+        if sig_meta.get("policy") == "uniform_z_rms":
+            lines.append(
+                f"Post-Bloch combined endpoint sigma calibration status `{sig_meta.get('status')}`; "
+                f"sigma scale `{safe_float(sig_meta.get('sigma_scale')):.3f}`, "
+                f"held-out RMS(z) after `{safe_float(sig_meta.get('heldout_rms_z_after', sig_meta.get('all_rms_z_after'))):.3f}`."
+            )
     else:
         lines.append("No endpoint HKL rows were found for the requested lambda.")
     (out / "REPORT.md").write_text("\n".join(lines) + "\n")

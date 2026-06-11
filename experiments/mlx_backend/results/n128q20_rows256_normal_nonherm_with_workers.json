@@ -1,0 +1,267 @@
+{
+  "absorption_enabled": true,
+  "capabilities": {
+    "default_device": "Device(gpu, 0)",
+    "metal_available": true,
+    "ops": {
+      "batched_real_matmul_gpu": {
+        "ok": true,
+        "seconds": 0.005686667049303651
+      },
+      "eig_cpu": {
+        "ok": true,
+        "seconds": 0.0007065419922582805
+      },
+      "eig_gpu": {
+        "error": "ValueError: [linalg::eig] This op is not yet supported on the GPU. Explicitly pass a CPU stream to run it.",
+        "ok": false
+      },
+      "eigh_cpu": {
+        "ok": true,
+        "seconds": 6.033299723640084e-05
+      },
+      "eigh_gpu": {
+        "error": "ValueError: [linalg::eigh] This op is not yet supported on the GPU. Explicitly pass a CPU stream to run it.",
+        "ok": false
+      },
+      "eigvals_cpu": {
+        "ok": true,
+        "seconds": 4.0207989513874054e-05
+      },
+      "eigvals_gpu": {
+        "error": "ValueError: [linalg::eigvals] This op is not yet supported on the GPU. Explicitly pass a CPU stream to run it.",
+        "ok": false
+      },
+      "inv_cpu": {
+        "error": "ValueError: [linalg::inv] Arrays must have type float32 or float64. Received array with type complex64.",
+        "ok": false
+      },
+      "inv_gpu": {
+        "error": "ValueError: [linalg::inv] This op is not yet supported on the GPU. Explicitly pass a CPU stream to run it.",
+        "ok": false
+      },
+      "solve_cpu": {
+        "error": "ValueError: [linalg::solve] Input arrays must promote to float32 or float64.  Received arrays with type complex64 and complex64.",
+        "ok": false
+      },
+      "solve_gpu": {
+        "error": "ValueError: [linalg::solve] This op is not yet supported on the GPU. Explicitly pass a CPU stream to run it.",
+        "ok": false
+      }
+    }
+  },
+  "config": {
+    "absorption_frac": 0.05,
+    "absorption_mode": "midgley_like",
+    "absorption_mu": 0.0,
+    "absorption_mu_g2": 0.0,
+    "absorption_mu_theta2": 0.0,
+    "absorption_tds_b": 0.0,
+    "bethe_denom_eps": 1e-05,
+    "bethe_promote_denom": 0.005,
+    "bethe_strong_count": 48,
+    "bethe_variant": "schur_target",
+    "compute_backend": "scipy",
+    "dose_b_mode": "none",
+    "dose_b_per_frame": 0.0,
+    "dose_b_ref_frame": NaN,
+    "frame_offset": 0.0,
+    "free_fraction": 0.1,
+    "gamma": 1.3914,
+    "group_width_deg": 3.0,
+    "jax_batch_size": 0,
+    "jax_matrix_bucket_size": 0,
+    "matrix_convention": "j_minus_i",
+    "max_support_sg": 0.005,
+    "n_basis": 128,
+    "n_points": 20,
+    "profile_accumulation": "sum",
+    "profile_quadrature": "uniform",
+    "sg_jitter_mode": "none",
+    "sg_jitter_points": 5,
+    "sg_jitter_sigma0": 0.0,
+    "sg_jitter_sigma_d_inv": 0.0,
+    "sg_jitter_sigma_frame": 0.0,
+    "sg_jitter_student_df": 4.0,
+    "sg_jitter_width_factor": 3.0,
+    "sg_window": 0.006,
+    "sg_window_frame_floor": 0.5,
+    "sg_window_max": 0.012,
+    "sg_window_min": 0.003,
+    "sg_window_mode": "fixed",
+    "sg_window_scale": 1.0,
+    "split_seed": 42,
+    "thickness_A": 1240.0,
+    "thickness_grad_frac": 0.25,
+    "thickness_model": "uniform_gradient",
+    "thickness_points": 7,
+    "thickness_sigma_frac": 0.0,
+    "topup_d_min": 0.8,
+    "ug_d_min": 0.3,
+    "variance_a": 0.0,
+    "variance_b_corr": 0.0,
+    "variance_c_peak": 0.0
+  },
+  "created_at": "2026-06-09T11:00:35-0400",
+  "inputs": {
+    "hkl": "/Users/Mike/Desktop/MartynowyczLab/data_processing/2026.04.10/370/cbf_v7/xds20230630_1x/no_prf20260511/INTEGRATE.HKL",
+    "hkl_transform": null,
+    "res": "/Users/Mike/Desktop/MartynowyczLab/data_processing/2026.04.10/370/cbf_v7/xds20230630_1x/temp_a.res"
+  },
+  "jobs": {
+    "matrix_count": 5120,
+    "matrix_dimensions": {
+      "32": 160,
+      "40": 900,
+      "48": 3660,
+      "56": 280,
+      "64": 80,
+      "72": 20,
+      "80": 20
+    },
+    "plan_seconds": 0.6039034580462612
+  },
+  "mlx": {
+    "available": true,
+    "version": "unknown"
+  },
+  "platform": "macOS-26.5.1-arm64-arm-64bit",
+  "python": "/opt/anaconda3/bin/python",
+  "results": {
+    "mlx_gpu_real_expm_order_12": {
+      "matrix_group_meta": [
+        {
+          "batch_size": 8,
+          "chunks": 20,
+          "matrices": 160,
+          "order": 12,
+          "scale_steps_max": 10,
+          "scale_steps_median": 8.0,
+          "scale_steps_min": 7,
+          "seconds": 0.11959141812985763,
+          "size": 32,
+          "theta": 0.5
+        },
+        {
+          "batch_size": 8,
+          "chunks": 113,
+          "matrices": 900,
+          "order": 12,
+          "scale_steps_max": 10,
+          "scale_steps_median": 8.0,
+          "scale_steps_min": 7,
+          "seconds": 0.5257988491212018,
+          "size": 40,
+          "theta": 0.5
+        },
+        {
+          "batch_size": 8,
+          "chunks": 458,
+          "matrices": 3660,
+          "order": 12,
+          "scale_steps_max": 11,
+          "scale_steps_median": 8.0,
+          "scale_steps_min": 7,
+          "seconds": 2.224996222066693,
+          "size": 48,
+          "theta": 0.5
+        },
+        {
+          "batch_size": 8,
+          "chunks": 35,
+          "matrices": 280,
+          "order": 12,
+          "scale_steps_max": 10,
+          "scale_steps_median": 8.0,
+          "scale_steps_min": 7,
+          "seconds": 0.1990797517937608,
+          "size": 56,
+          "theta": 0.5
+        },
+        {
+          "batch_size": 8,
+          "chunks": 10,
+          "matrices": 80,
+          "order": 12,
+          "scale_steps_max": 9,
+          "scale_steps_median": 8.0,
+          "scale_steps_min": 7,
+          "seconds": 0.057305580063257366,
+          "size": 64,
+          "theta": 0.5
+        },
+        {
+          "batch_size": 8,
+          "chunks": 3,
+          "matrices": 20,
+          "order": 12,
+          "scale_steps_max": 11,
+          "scale_steps_median": 10.0,
+          "scale_steps_min": 9,
+          "seconds": 0.020758000027853996,
+          "size": 72,
+          "theta": 0.5
+        },
+        {
+          "batch_size": 8,
+          "chunks": 3,
+          "matrices": 20,
+          "order": 12,
+          "scale_steps_max": 9,
+          "scale_steps_median": 8.0,
+          "scale_steps_min": 8,
+          "seconds": 0.020848875166848302,
+          "size": 80,
+          "theta": 0.5
+        }
+      ],
+      "matrix_rate": 1615.9684465328646,
+      "ok": true,
+      "row_error_vs_scipy": {
+        "max_abs": 0.0001768818632295055,
+        "max_rel": 0.00044076490157123565,
+        "median_abs": 1.1384344659942647e-05,
+        "median_rel": 3.06352682605246e-05,
+        "p95_abs": 7.831812537256733e-05,
+        "p95_rel": 0.00015483743184805683
+      },
+      "row_rate_including_plan": 67.86342842895067,
+      "seconds": 3.168378696369473
+    },
+    "scipy_production_workers": {
+      "basis_size_max": 74,
+      "basis_size_median": 43.0,
+      "chunksize": 1,
+      "pred_seconds": 3.652168999949936,
+      "row_error_vs_serial_reference": {
+        "max_abs": 1.4432899320127035e-15,
+        "max_rel": 2.2279398242919237e-15,
+        "median_abs": 5.551115123125783e-17,
+        "median_rel": 1.3913043453050882e-16,
+        "p95_abs": 2.220446049250313e-16,
+        "p95_rel": 4.874265330961924e-16
+      },
+      "row_rate": 70.09236722830495,
+      "seconds": 3.6523235000204295,
+      "workers": 10
+    },
+    "scipy_reference": {
+      "matrix_rate": 958.513009423384,
+      "row_rate": 43.05769754419238,
+      "seconds": 5.3416072078980505
+    }
+  },
+  "row_selection": {
+    "first_index": 2133,
+    "last_index": 1059,
+    "rows": 256,
+    "top_isigma": true,
+    "total_available_rows": 5094
+  },
+  "verdict": {
+    "best_mlx": "mlx_gpu_real_expm_order_12",
+    "promote": true,
+    "reason": "Promote only if speedup is >10% and parity thresholds are met.",
+    "speedup_vs_scipy_propagation_only": 1.6859118558077666
+  }
+}
