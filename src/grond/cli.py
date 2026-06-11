@@ -2433,6 +2433,117 @@ def run_publication_endpoint_chooser(prep: PrepConfig, result: dict, args: argpa
     )
 
 
+def _endpoint_calibration_lambda(summary: Mapping[str, object], args: argparse.Namespace) -> float:
+    """Return the endpoint lambda to replay for a frozen row table."""
+
+    explicit = safe_float(getattr(args, "endpoint_calibration_lambda_q", 0.0), 0.0)
+    if explicit > 0.0:
+        return explicit
+    for block_name in ("best_endpoint", "endpoint_factor_decision"):
+        block = summary.get(block_name)
+        if not isinstance(block, Mapping):
+            continue
+        for key in ("lambda_q", "balanced_lambda_q", "final_lambda_q", "best_lambda_q"):
+            value = safe_float(block.get(key), float("nan"))
+            if value == value and value > 0.0:
+                return value
+    config = summary.get("config")
+    if isinstance(config, Mapping):
+        values = parse_numeric_grid(str(config.get("lambda_grid", "")))
+        if values:
+            return float(values[0])
+    return 1.0
+
+
+def run_endpoint_calibration(prep: PrepConfig, result: dict, args: argparse.Namespace, python: str, logs: Path) -> dict:
+    """Replay the final frozen row table through the conservative endpoint chooser."""
+
+    mode = getattr(args, "endpoint_calibration", "auto")
+    if mode == "off":
+        return {"status": "disabled"}
+    if mode == "auto" and getattr(args, "fast", False):
+        return {"status": "disabled_fast_mode"}
+    if args.dry_run:
+        return {"status": "dry_run", "out_dir": str(Path(args.out_dir) / "endpoint_calibration")}
+    label = "combined"
+    run_dir: Path | None = None
+    if result.get("combined"):
+        run_dir = Path(str(result["combined"]))
+    elif result.get("primary_run"):
+        label = prep.datasets[0].name if prep.datasets else "dataset"
+        run_dir = Path(str(result["primary_run"]))
+    if run_dir is None:
+        return {"status": "no_frozen_row_table"}
+    row_table = run_dir / "native_dyn_calc.csv"
+    summary_path = run_dir / "summary.json"
+    if not row_table.exists() or not summary_path.exists():
+        return {
+            "status": "missing_frozen_row_table",
+            "row_table": str(row_table),
+            "summary": str(summary_path),
+        }
+    summary = try_read_json(summary_path)
+    lambda_q = _endpoint_calibration_lambda(summary, args)
+    out_dir = Path(args.out_dir) / "endpoint_calibration" / safe_label(label)
+    cmd = [
+        python,
+        str(engine_script("scale_contract_replay.py")),
+        "--row-table",
+        str(row_table),
+        "--summary",
+        str(summary_path),
+        "--out-dir",
+        str(out_dir),
+        "--specs",
+        str(getattr(args, "endpoint_calibration_specs", "")),
+        "--lambda-q",
+        f"{lambda_q:g}",
+        "--post-bloch-sigma-policy",
+        resolved_post_bloch_sigma_policy(args, final_endpoint=True),
+        "--post-bloch-sigma-holdout-fraction",
+        f"{args.post_bloch_sigma_holdout_fraction:g}",
+        "--post-bloch-sigma-min-scale",
+        f"{getattr(args, 'endpoint_calibration_sigma_min_scale', 0.05):g}",
+        "--post-bloch-sigma-max-scale",
+        f"{getattr(args, 'endpoint_calibration_sigma_max_scale', 4.0):g}",
+        "--shelxl",
+        args.shelxl,
+        "--shelxl-iterations",
+        str(getattr(args, "endpoint_calibration_shelxl_iterations", 1)),
+        "--wght-modes",
+        str(getattr(args, "endpoint_calibration_wght_modes", "freeze-zero,promote")),
+        "--publication-goof-min",
+        f"{getattr(args, 'endpoint_calibration_goof_min', 0.85):g}",
+        "--publication-goof-max",
+        f"{getattr(args, 'endpoint_calibration_goof_max', 1.15):g}",
+        "--publication-max-r1-cost",
+        f"{getattr(args, 'endpoint_calibration_max_r1_cost', 0.010):g}",
+        "--publication-free-wr2-tolerance",
+        f"{getattr(args, 'endpoint_calibration_free_wr2_tolerance', 0.040):g}",
+        "--publication-prefer-wght-mode",
+        str(getattr(args, "endpoint_calibration_prefer_wght_mode", "freeze-zero")),
+        "--instability-u",
+        f"{args.instability_u:g}",
+    ]
+    try:
+        run_logged(cmd, logs, f"{safe_label(label)}_endpoint_calibration", dry_run=False)
+    except subprocess.CalledProcessError as exc:
+        if mode == "on":
+            raise
+        return {"status": "failed", "returncode": exc.returncode, "command": exc.cmd, "out_dir": str(out_dir)}
+    replay_summary = try_read_json(out_dir / "summary.json")
+    return {
+        "status": "ok",
+        "label": label,
+        "run_dir": str(run_dir),
+        "lambda_q": lambda_q,
+        "out_dir": str(out_dir),
+        "report": str((out_dir / "REPORT.md").resolve()),
+        "endpoint_csv": str((out_dir / "scale_contract_endpoint_replay.csv").resolve()),
+        "publication_selection": replay_summary.get("publication_selection", {}),
+    }
+
+
 def run_scale_window_polish(python: str, run_dir: Path, out_dir: Path, logs: Path, label: str, args: argparse.Namespace) -> dict:
     """Run the post-hoc scale-window compression gate for a finished row table."""
 
@@ -4253,9 +4364,23 @@ def cmd_run(args: argparse.Namespace) -> int:
             "min_hkl_safe_factor": args.publication_endpoint_min_hkl_safe_factor,
             "max_modulation_p95": args.publication_endpoint_max_modulation_p95,
         },
+        "endpoint_calibration": {
+            "mode": args.endpoint_calibration,
+            "specs": args.endpoint_calibration_specs,
+            "lambda_q": args.endpoint_calibration_lambda_q,
+            "wght_modes": args.endpoint_calibration_wght_modes,
+            "preferred_wght_mode": args.endpoint_calibration_prefer_wght_mode,
+            "goof_min": args.endpoint_calibration_goof_min,
+            "goof_max": args.endpoint_calibration_goof_max,
+            "max_r1_cost": args.endpoint_calibration_max_r1_cost,
+            "free_wr2_tolerance": args.endpoint_calibration_free_wr2_tolerance,
+            "sigma_min_scale": args.endpoint_calibration_sigma_min_scale,
+            "sigma_max_scale": args.endpoint_calibration_sigma_max_scale,
+        },
     }
     (Path(args.out_dir) / "run_config.json").write_text(json.dumps(config, indent=2) + "\n")
     result = run_single(prep, args, python, logs) if len(prep.datasets) == 1 else run_multi(prep, args, python, logs)
+    result["endpoint_calibration"] = run_endpoint_calibration(prep, result, args, python, logs)
     result["publication_endpoint_chooser"] = run_publication_endpoint_chooser(prep, result, args)
     result["publication_tables"] = run_publication_report(python, prep, result, args, logs)
     (Path(args.out_dir) / "grond_summary.json").write_text(json.dumps(result, indent=2) + "\n")
@@ -4998,6 +5123,18 @@ def add_common_run_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--publication-endpoint-chooser", action=argparse.BooleanOptionalAction, default=True, help="Write the publication endpoint chooser that separates physical and diagnostic corrected-HKL endpoints.")
     ap.add_argument("--publication-endpoint-min-hkl-safe-factor", type=float, default=0.25, help="Minimum fixed-width HKL safety factor for a publication endpoint.")
     ap.add_argument("--publication-endpoint-max-modulation-p95", type=float, default=20.0, help="Maximum 95th-percentile endpoint intensity modulation for a publication endpoint.")
+    ap.add_argument("--endpoint-calibration", choices=["auto", "on", "off"], default="auto", help="Replay the final frozen row table through conservative corrected-HKL endpoint calibration after auto completes.")
+    ap.add_argument("--endpoint-calibration-specs", default="baseline,adaptive:293:det8,adaptive:200:det8,adaptive:120:det8,adaptive:80:det8,window:0.5:det8,window:1.0:det8,window:1.5:det8,window:3.0:det8,window:5.0:det8,window:1.0:det4,window:3.0:det4,window:5.0:det4,window:3.0:det1")
+    ap.add_argument("--endpoint-calibration-lambda-q", type=float, default=0.0, help="Override endpoint-calibration lambda. The default 0 reuses the lambda selected in the frozen row summary.")
+    ap.add_argument("--endpoint-calibration-wght-modes", default="freeze-zero,promote", help="Endpoint-calibration weight branches. The default tests fixed WGHT 0 0 before the compatibility branch.")
+    ap.add_argument("--endpoint-calibration-prefer-wght-mode", default="freeze-zero")
+    ap.add_argument("--endpoint-calibration-goof-min", type=float, default=0.85)
+    ap.add_argument("--endpoint-calibration-goof-max", type=float, default=1.15)
+    ap.add_argument("--endpoint-calibration-max-r1-cost", type=float, default=0.010)
+    ap.add_argument("--endpoint-calibration-free-wr2-tolerance", type=float, default=0.040)
+    ap.add_argument("--endpoint-calibration-sigma-min-scale", type=float, default=0.05)
+    ap.add_argument("--endpoint-calibration-sigma-max-scale", type=float, default=4.0)
+    ap.add_argument("--endpoint-calibration-shelxl-iterations", type=int, default=1)
     ap.add_argument("--scale-polish", choices=["auto", "on", "off"], default="auto", help="Run a post-hoc scale-window compression gate after the final Bloch row table.")
     ap.add_argument("--scale-polish-window-deg", type=float, default=5.0, help="Maximum physical frame-window width tested by the scale-polish gate.")
     ap.add_argument("--scale-polish-frame-models", default="adaptive,fixed", help="Frame-scale compression models tested by the scale-polish gate.")

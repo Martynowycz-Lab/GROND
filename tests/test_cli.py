@@ -44,6 +44,17 @@ def test_run_parser_exposes_staged_feature_grids():
     assert args.publication_endpoint_chooser is True
     assert args.publication_endpoint_min_hkl_safe_factor == 0.25
     assert args.publication_endpoint_max_modulation_p95 == 20.0
+    assert args.endpoint_calibration == "auto"
+    assert "adaptive:120:det8" in args.endpoint_calibration_specs
+    assert args.endpoint_calibration_lambda_q == 0.0
+    assert args.endpoint_calibration_wght_modes == "freeze-zero,promote"
+    assert args.endpoint_calibration_prefer_wght_mode == "freeze-zero"
+    assert args.endpoint_calibration_goof_min == 0.85
+    assert args.endpoint_calibration_goof_max == 1.15
+    assert args.endpoint_calibration_max_r1_cost == 0.010
+    assert args.endpoint_calibration_free_wr2_tolerance == 0.040
+    assert args.endpoint_calibration_sigma_min_scale == 0.05
+    assert args.endpoint_calibration_shelxl_iterations == 1
     assert args.fast is False
     assert args.full_fast is False
     assert args.full_fast_n_basis == 24
