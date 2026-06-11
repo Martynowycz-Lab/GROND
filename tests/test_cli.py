@@ -31,6 +31,7 @@ def test_run_parser_exposes_staged_feature_grids():
     assert args.prediction_cache_scope == "shared"
     assert args.prediction_cache_compression == "none"
     assert args.compute_backend == "scipy"
+    assert args.row_plan_cache == "off"
     assert args.jax_batch_size == 0
     assert args.jax_matrix_bucket_size == 0
     assert args.matrix_convention == "j_minus_i"
@@ -128,6 +129,29 @@ def test_utility_commands_parse():
     replay = build_parser().parse_args(["scale-replay", "--row-table", "native_dyn_calc.csv", "--out-dir", "replay"])
     assert replay.command == "scale-replay"
     assert replay.post_bloch_sigma_policy == "uniform_z_rms"
+    ls1 = build_parser().parse_args(
+        [
+            "validate-ls1",
+            "--source-summary",
+            "summary.json",
+            "--start-res",
+            "model.res",
+            "--out-dir",
+            "validate_ls1",
+            "--native-polish",
+        ]
+    )
+    assert ls1.command == "validate-ls1"
+    assert ls1.cycles == 5
+    assert ls1.n_basis == 30
+    assert ls1.n_points == 20
+    assert ls1.compute_backend == "scipy_bethe"
+    assert ls1.row_plan_cache == "off"
+    assert ls1.q_control_seed == 12345
+    assert ls1.q_control_shells == 10
+    assert ls1.wrong_polarity_control is True
+    assert ls1.native_polish is True
+    assert ls1.native_polish_blocks == "adp_ueq,xyz"
 
 
 def test_auto_parser_is_simple_run_alias():
@@ -138,6 +162,53 @@ def test_auto_parser_is_simple_run_alias():
     assert args.detector_scale_bins == "8"
     assert args.final_basis_max == 500
     assert args.scale_polish_detector_bins == "exact"
+
+
+def test_experimental_row_plan_cache_flags_parse():
+    auto = build_parser().parse_args(
+        [
+            "auto",
+            "--out-dir",
+            "out",
+            "--xds-dir",
+            "xds",
+            "--structure",
+            "model.res",
+            "--row-plan-cache",
+            "readwrite",
+        ]
+    )
+    assert auto.row_plan_cache == "readwrite"
+
+    raw = build_parser().parse_args(
+        [
+            "raw-polish",
+            "--out-dir",
+            "out",
+            "--hkl",
+            "INTEGRATE.HKL",
+            "--structure",
+            "model.res",
+            "--row-plan-cache",
+            "rebuild",
+        ]
+    )
+    assert raw.row_plan_cache == "rebuild"
+
+    ls1 = build_parser().parse_args(
+        [
+            "validate-ls1",
+            "--source-summary",
+            "summary.json",
+            "--start-res",
+            "model.res",
+            "--out-dir",
+            "validate_ls1",
+            "--row-plan-cache",
+            "readwrite",
+        ]
+    )
+    assert ls1.row_plan_cache == "readwrite"
 
 
 def test_auto_parser_accepts_dials_input_pair():

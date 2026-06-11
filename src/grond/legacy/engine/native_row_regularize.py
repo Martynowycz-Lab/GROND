@@ -560,7 +560,89 @@ def predict_with_cache(data, model, res_hash, hkl_path, res_path, cfg, indices, 
     return pred
 
 
-def evaluate_trial(data, target, base_sig, pred, indices, masks, nui: Nuisance, wght_a, wght_b, scale_fit_split: str = "work"):
+def resolution_shell_bins(data: XDSData, valid, shell_count: int) -> np.ndarray:
+    """Assign rows to approximately equal-population resolution bins."""
+
+    bins = np.full(len(data.hkl), -1, dtype=int)
+    valid = np.asarray(valid, dtype=bool)
+    n_shells = max(1, int(shell_count))
+    if not np.any(valid):
+        return bins
+    dvals = np.asarray([data.cell.calculate_d(tuple(int(v) for v in h)) for h in data.hkl], dtype=float)
+    inv_d = np.full(len(dvals), np.nan, dtype=float)
+    finite = valid & np.isfinite(dvals) & (dvals > 0.0)
+    inv_d[finite] = 1.0 / dvals[finite]
+    values = inv_d[finite]
+    if values.size == 0:
+        return bins
+    if values.size < n_shells:
+        n_shells = max(1, values.size)
+    quantiles = np.linspace(0.0, 1.0, n_shells + 1)
+    edges = np.quantile(values, quantiles)
+    edges = np.maximum.accumulate(edges)
+    for i, val in zip(np.where(finite)[0], inv_d[finite]):
+        shell = int(np.searchsorted(edges, val, side="right") - 1)
+        bins[i] = min(max(shell, 0), n_shells - 1)
+    return bins
+
+
+def apply_q_control(data: XDSData, dyn: np.ndarray, born: np.ndarray, valid, groups: np.ndarray, q_control_args=None) -> tuple[np.ndarray, dict]:
+    """Apply an explicit row-space q null control before ordinary scale fitting."""
+
+    mode = str(getattr(q_control_args, "q_control", "real") if q_control_args is not None else "real")
+    meta = {
+        "mode": mode,
+        "description": "real row-wise Bloch/Born q" if mode == "real" else "row-space permutation of log(Idyn/Iborn)",
+    }
+    if mode == "real":
+        return dyn, meta
+    valid = np.asarray(valid, dtype=bool) & np.isfinite(dyn) & np.isfinite(born) & (dyn > 0.0) & (born > 0.0)
+    out = np.array(dyn, dtype=float, copy=True)
+    q = np.full(len(dyn), np.nan, dtype=float)
+    q[valid] = dyn[valid] / np.maximum(born[valid], 1e-30)
+    logq = np.full(len(dyn), np.nan, dtype=float)
+    logq[valid] = np.log(np.clip(q[valid], 1e-30, np.inf))
+    seed = int(getattr(q_control_args, "q_control_seed", 12345) if q_control_args is not None else 12345)
+    rng = np.random.default_rng(seed)
+    shell_count = int(getattr(q_control_args, "q_control_shells", 10) if q_control_args is not None else 10)
+    shell_bins = resolution_shell_bins(data, valid, shell_count)
+    if mode == "shuffle_global":
+        keys = np.zeros(len(dyn), dtype=int)
+    elif mode == "shuffle_shell":
+        keys = shell_bins
+    elif mode == "shuffle_shell_scan":
+        scan_groups = np.asarray(groups, dtype=int)
+        keys = shell_bins.astype(np.int64) * 1000003 + scan_groups.astype(np.int64)
+    else:
+        raise ValueError(f"unknown q_control {mode!r}")
+    shuffled_logq = np.array(logq, dtype=float, copy=True)
+    shuffled_rows = 0
+    singleton_bins = 0
+    active_bins = 0
+    for key in np.unique(keys[valid]):
+        idx = np.where(valid & (keys == key))[0]
+        if idx.size < 2:
+            singleton_bins += int(idx.size == 1)
+            continue
+        active_bins += 1
+        shuffled_logq[idx] = rng.permutation(shuffled_logq[idx])
+        shuffled_rows += int(idx.size)
+    out[valid] = born[valid] * np.exp(shuffled_logq[valid])
+    meta.update(
+        {
+            "seed": seed,
+            "shell_count": shell_count,
+            "valid_rows": int(np.count_nonzero(valid)),
+            "shuffled_rows": int(shuffled_rows),
+            "active_bins": int(active_bins),
+            "singleton_bins": int(singleton_bins),
+            "logq_corr_original_shuffled": float(np.corrcoef(logq[valid], shuffled_logq[valid])[0, 1]) if np.count_nonzero(valid) > 2 else float("nan"),
+        }
+    )
+    return out, meta
+
+
+def evaluate_trial(data, target, base_sig, pred, indices, masks, nui: Nuisance, wght_a, wght_b, scale_fit_split: str = "work", q_control_args=None):
     dyn = np.full(len(target), np.nan, dtype=float)
     born = np.full(len(target), np.nan, dtype=float)
     basis_size = np.zeros(len(target), dtype=int)
@@ -574,7 +656,9 @@ def evaluate_trial(data, target, base_sig, pred, indices, masks, nui: Nuisance, 
     sig = sigma_eff(data, target, base_sig, nui)
     use_wght_a = float(nui.native_wght_a) if np.isfinite(float(nui.native_wght_a)) else float(wght_a)
     use_wght_b = float(nui.native_wght_b) if np.isfinite(float(nui.native_wght_b)) else float(wght_b)
+    q_control_meta = {}
     valid = np.isfinite(dyn) & np.isfinite(born) & (dyn > 0.0) & (born > 0.0)
+    dyn, q_control_meta = apply_q_control(data, dyn, born, valid, groups, q_control_args)
     row_mod, row_mod_meta = row_resolution_modulation(data, valid, nui.row_resolution_b)
     dyn = dyn * row_mod
     valid = np.isfinite(dyn) & np.isfinite(born) & (dyn > 0.0) & (born > 0.0)
@@ -622,6 +706,7 @@ def evaluate_trial(data, target, base_sig, pred, indices, masks, nui: Nuisance, 
         "scale_count": int(n_scales),
         "scale_fit_split": scale_fit_split,
         "row_resolution": row_mod_meta,
+        "q_control": q_control_meta,
         "basis_size_stats": {
             "min": int(np.min(basis_size[valid])) if np.count_nonzero(valid) else 0,
             "median": float(np.median(basis_size[valid])) if np.count_nonzero(valid) else 0.0,
@@ -1064,8 +1149,13 @@ def write_row_table(path: Path, data: XDSData, target, best_eval, masks):
 def metric_row(trial):
     m = trial["metrics"]
     n = trial["nuisance"]
+    q_control = trial.get("q_control") or {}
     return {
         **n,
+        "q_control": q_control.get("mode", "real"),
+        "q_control_shuffled_rows": q_control.get("shuffled_rows", 0),
+        "q_control_active_bins": q_control.get("active_bins", 0),
+        "q_control_logq_corr": q_control.get("logq_corr_original_shuffled", float("nan")),
         "valid_rows": trial["valid_rows"],
         "scale_count": trial["scale_count"],
         "work_dyn_wR2": m["work"]["dyn"]["wR2_all"],
@@ -1136,8 +1226,16 @@ def main():
         "--matrix-convention",
         choices=["j_minus_i", "i_minus_j"],
         default="j_minus_i",
-        help="Off-diagonal U_g indexing convention. j_minus_i is the reference-parity production default; i_minus_j is a diagnostic.",
+        help="Off-diagonal U_g indexing convention. j_minus_i is the production signed-row default; i_minus_j is a diagnostic.",
     )
+    ap.add_argument(
+        "--q-control",
+        choices=["real", "shuffle_global", "shuffle_shell", "shuffle_shell_scan"],
+        default="real",
+        help="Diagnostic null that permutes log(Idyn/Iborn) before normal scale fitting and endpoint export.",
+    )
+    ap.add_argument("--q-control-seed", type=int, default=12345)
+    ap.add_argument("--q-control-shells", type=int, default=10, help="Resolution shells used by shell and shell+scan q-shuffle controls.")
     ap.add_argument(
         "--group-width-grid",
         default="auto",
@@ -1177,7 +1275,8 @@ def main():
     ap.add_argument("--chunksize", type=int, default=8)
     ap.add_argument("--prediction-cache-dir", default=str(ROOT / "engine/pred_cache"))
     ap.add_argument("--cache-compression", choices=["compressed", "none"], default="compressed", help="Use none for faster local SSD caches; compressed saves disk on slow/limited storage.")
-    ap.add_argument("--compute-backend", choices=["scipy", "scipy_bethe", "scipy_expm", "scipy_expm_multiply", "jax", "jax_auto", "jax_cpu", "jax_mps", "jax_cuda", "jax_padded", "jax_auto_padded", "jax_cpu_padded", "jax_mps_padded", "jax_cuda_padded", "jax_cpu_real_expm", "jax_mps_real_expm", "jax_mps_real_expm_padded"], default="scipy", help="Prediction backend. SciPy eigensolver is the production reference; scipy_bethe uses an opt-in promoted Bethe/Schur strong-beam reduction; SciPy expm/expm_multiply, real-embedded JAX expm, and JAX eigensolver backends are experimental parity/speed probes. *_padded JAX backends pad matrix dimensions into small buckets to reduce compilation churn.")
+    ap.add_argument("--compute-backend", choices=["scipy", "scipy_bethe", "scipy_expm", "scipy_expm_multiply", "jax", "jax_auto", "jax_cpu", "jax_mps", "jax_cuda", "jax_padded", "jax_auto_padded", "jax_cpu_padded", "jax_mps_padded", "jax_cuda_padded", "jax_cpu_real_expm", "jax_mps_real_expm", "jax_mps_real_expm_padded"], default="scipy", help="Prediction backend. SciPy eigensolver is the production reference; scipy_bethe uses an opt-in promoted Bethe/Schur strong-beam reduction; SciPy expm/expm_multiply, real-embedded JAX expm, and JAX eigensolver backends are experimental agreement/speed probes. *_padded JAX backends pad matrix dimensions into small buckets to reduce compilation churn.")
+    ap.add_argument("--row-plan-cache", choices=["off", "readwrite", "rebuild"], default="off", help="Experimental frozen row-geometry cache. It reuses basis/Sg/difference-HKL plans across model updates while recomputing current U_g values.")
     ap.add_argument("--jax-batch-size", type=int, default=0, help="JAX matrix batch size. 0 chooses a conservative size from matrix dimension and device count.")
     ap.add_argument("--jax-matrix-bucket-size", type=int, default=0, help="Pad JAX matrix dimensions to this multiple. 0 keeps exact sizes unless a *_padded backend is selected, where 0 means 8.")
     ap.add_argument("--bethe-strong-count", type=int, default=48, help="Strong-beam block size for scipy_bethe. Values >= n_basis recover the dense SciPy matrix.")
@@ -1291,6 +1390,7 @@ def main():
                                                             bethe_promote_denom=args.bethe_promote_denom,
                                                             bethe_denom_eps=args.bethe_denom_eps,
                                                             matrix_convention=args.matrix_convention,
+                                                            row_plan_cache=args.row_plan_cache,
                                                             free_fraction=args.free_fraction,
                                                             split_seed=args.split_seed,
                                                             **abs_par,
@@ -1381,7 +1481,7 @@ def main():
                                                                 scale_smoothness=args.scale_smoothness,
                                                                 **abs_par,
                                                             )
-                                                            ev = evaluate_trial(data, target, base_sig, pred, indices, masks, nui, wght_a, wght_b, scale_fit_split=args.scale_fit_split)
+                                                            ev = evaluate_trial(data, target, base_sig, pred, indices, masks, nui, wght_a, wght_b, scale_fit_split=args.scale_fit_split, q_control_args=args)
                                                             ev["prediction_cache"] = {"status": pred.get("cache_status"), "path": pred.get("cache_path")}
                                                             all_trials.append(ev)
 

@@ -767,6 +767,19 @@ def main():
     ap.add_argument("--frame-offset", type=float, default=0.0)
     ap.add_argument("--row-resolution-b", type=float, default=0.0, help="Raw-row dynamical resolution-envelope B from nuisance regularization.")
     ap.add_argument("--ug-d-min", type=float, default=0.55, help="Speed/accuracy limit for the model-dependent U_g cache during finite-difference structure update.")
+    ap.add_argument("--sg-jitter-mode", choices=["none", "gaussian", "student_t"], default="none", help="Accepted rocking-profile Sg jitter model from the production row regularizer.")
+    ap.add_argument("--sg-jitter-sigma0", type=float, default=0.0, help="Base Sg jitter sigma in inverse Angstrom.")
+    ap.add_argument("--sg-jitter-sigma-d-inv", type=float, default=0.0, help="Resolution-dependent Sg jitter coefficient.")
+    ap.add_argument("--sg-jitter-sigma-frame", type=float, default=0.0, help="Frame-dependent Sg jitter coefficient.")
+    ap.add_argument("--sg-jitter-points", type=int, default=1, help="Quadrature points used for the accepted Sg jitter convolution.")
+    ap.add_argument("--sg-jitter-student-df", type=float, default=4.0, help="Student-t degrees of freedom for student_t Sg jitter.")
+    ap.add_argument("--sg-jitter-width-factor", type=float, default=3.0, help="Finite support width in sigma units for the Sg jitter convolution.")
+    ap.add_argument("--absorption-mode", choices=["none", "mean", "beam_dependent", "offdiag_fraction", "offdiag_tds", "midgley_like"], default="none", help="Accepted absorptive Bloch Hamiltonian mode from the production row regularizer.")
+    ap.add_argument("--absorption-mu", type=float, default=0.0, help="Uniform imaginary diagonal damping in inverse Angstrom.")
+    ap.add_argument("--absorption-frac", type=float, default=0.0, help="Imaginary absorptive off-diagonal fraction.")
+    ap.add_argument("--absorption-mu-g2", type=float, default=0.0, help="Beam-dependent diagonal damping slope versus |g|^2.")
+    ap.add_argument("--absorption-mu-theta2", type=float, default=0.0, help="Beam-dependent diagonal damping slope versus Bragg-angle^2.")
+    ap.add_argument("--absorption-tds-b", type=float, default=0.0, help="B_TDS parameter for offdiag_tds absorption.")
     ap.add_argument("--sigma-a", type=float, default=0.0)
     ap.add_argument("--sigma-b-corr", type=float, default=0.0)
     ap.add_argument("--sigma-c-peak", type=float, default=0.05)
@@ -859,6 +872,19 @@ def main():
         bethe_denom_eps=args.bethe_denom_eps,
         profile_quadrature=args.profile_quadrature,
         profile_accumulation=args.profile_accumulation,
+        sg_jitter_mode=args.sg_jitter_mode,
+        sg_jitter_sigma0=args.sg_jitter_sigma0,
+        sg_jitter_sigma_d_inv=args.sg_jitter_sigma_d_inv,
+        sg_jitter_sigma_frame=args.sg_jitter_sigma_frame,
+        sg_jitter_points=args.sg_jitter_points,
+        sg_jitter_student_df=args.sg_jitter_student_df,
+        sg_jitter_width_factor=args.sg_jitter_width_factor,
+        absorption_mode=args.absorption_mode,
+        absorption_mu=args.absorption_mu,
+        absorption_frac=args.absorption_frac,
+        absorption_mu_g2=args.absorption_mu_g2,
+        absorption_mu_theta2=args.absorption_mu_theta2,
+        absorption_tds_b=args.absorption_tds_b,
         ug_d_min=args.ug_d_min,
     )
     objective_cfg = copy.deepcopy(cfg)

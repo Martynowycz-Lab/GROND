@@ -1653,6 +1653,8 @@ def native_stage_cmd(
         args.prediction_cache_compression,
         "--compute-backend",
         args.compute_backend,
+        "--row-plan-cache",
+        getattr(args, "row_plan_cache", "off"),
         "--jax-batch-size",
         str(args.jax_batch_size),
         "--jax-matrix-bucket-size",
@@ -1898,6 +1900,8 @@ def structure_cmd(python: str, ds: DatasetSpec, structure: str, baseline_hkl: st
         str(args.structure_max_nfev),
         "--compute-backend",
         args.compute_backend,
+        "--row-plan-cache",
+        getattr(args, "row_plan_cache", "off"),
         "--jax-batch-size",
         str(args.jax_batch_size),
         "--jax-matrix-bucket-size",
@@ -1930,6 +1934,32 @@ def structure_cmd(python: str, ds: DatasetSpec, structure: str, baseline_hkl: st
         grid_from_nuisance(nui, "frame_offset", "0.0"),
         "--row-resolution-b",
         grid_from_nuisance(nui, "row_resolution_b", "0.0"),
+        "--sg-jitter-mode",
+        str(nui.get("sg_jitter_mode", "none")),
+        "--sg-jitter-sigma0",
+        grid_from_nuisance(nui, "sg_jitter_sigma0", "0.0"),
+        "--sg-jitter-sigma-d-inv",
+        grid_from_nuisance(nui, "sg_jitter_sigma_d_inv", "0.0"),
+        "--sg-jitter-sigma-frame",
+        grid_from_nuisance(nui, "sg_jitter_sigma_frame", "0.0"),
+        "--sg-jitter-points",
+        str(int(float(nui.get("sg_jitter_points", 1)))),
+        "--sg-jitter-student-df",
+        grid_from_nuisance(nui, "sg_jitter_student_df", "4.0"),
+        "--sg-jitter-width-factor",
+        grid_from_nuisance(nui, "sg_jitter_width_factor", "3.0"),
+        "--absorption-mode",
+        str(nui.get("absorption_mode", "none")),
+        "--absorption-mu",
+        grid_from_nuisance(nui, "absorption_mu", "0.0"),
+        "--absorption-frac",
+        grid_from_nuisance(nui, "absorption_frac", "0.0"),
+        "--absorption-mu-g2",
+        grid_from_nuisance(nui, "absorption_mu_g2", "0.0"),
+        "--absorption-mu-theta2",
+        grid_from_nuisance(nui, "absorption_mu_theta2", "0.0"),
+        "--absorption-tds-b",
+        grid_from_nuisance(nui, "absorption_tds_b", "0.0"),
         "--group-width-deg",
         grid_from_nuisance(nui, "group_width_deg", "1.0"),
         "--detector-scale-bins",
@@ -2016,6 +2046,8 @@ def shelxl_feedback_cmd(
         args.prediction_cache_compression,
         "--compute-backend",
         args.compute_backend,
+        "--row-plan-cache",
+        getattr(args, "row_plan_cache", "off"),
         "--jax-batch-size",
         str(args.jax_batch_size),
         "--jax-matrix-bucket-size",
@@ -4259,6 +4291,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
         engine_script("build_dynrows_xds.py"),
         engine_script("dynrow_contract.py"),
         engine_script("support_basis_scan.py"),
+        engine_script("ls1_validation_suite.py"),
         engine_script("native_structure_update.py"),
         engine_script("native_multi_structure_update.py"),
         engine_script("combine_native_nuisance_runs.py"),
@@ -4276,6 +4309,122 @@ def cmd_validate(args: argparse.Namespace) -> int:
             indent=2,
         )
     )
+    return 0
+
+
+def cmd_validate_ls1(args: argparse.Namespace) -> int:
+    """Run the LS1 fixed-point validation suite for a pinned nuisance contract."""
+
+    python = choose_python(args.python)
+    cmd = [
+        python,
+        str(engine_script("ls1_validation_suite.py")),
+        "--source-summary",
+        args.source_summary,
+        "--start-res",
+        args.start_res,
+        "--out-dir",
+        args.out_dir,
+        "--python",
+        python,
+        "--cycles",
+        str(args.cycles),
+        "--n-basis",
+        str(args.n_basis),
+        "--n-points",
+        str(args.n_points),
+        "--shelxl-iterations",
+        str(args.shelxl_iterations),
+        "--shelxl",
+        args.shelxl,
+        "--workers",
+        str(args.workers),
+        "--chunksize",
+        str(args.chunksize),
+        "--compute-backend",
+        args.compute_backend,
+        "--row-plan-cache",
+        args.row_plan_cache,
+        "--jax-batch-size",
+        str(args.jax_batch_size),
+        "--jax-matrix-bucket-size",
+        str(args.jax_matrix_bucket_size),
+        "--bethe-strong-count",
+        str(args.bethe_strong_count),
+        "--bethe-variant",
+        args.bethe_variant,
+        "--bethe-promote-denom",
+        f"{args.bethe_promote_denom:g}",
+        "--bethe-denom-eps",
+        f"{args.bethe_denom_eps:g}",
+        "--min-d-spacing",
+        f"{args.min_d_spacing:g}",
+        "--topup-d-min",
+        f"{args.topup_d_min:g}",
+        "--min-peak",
+        f"{args.min_peak:g}",
+        "--geometry-percentile",
+        f"{args.geometry_percentile:g}",
+        "--max-rows",
+        str(args.max_rows),
+        "--post-bloch-sigma-policy",
+        args.post_bloch_sigma_policy,
+        "--post-bloch-sigma-holdout-fraction",
+        f"{args.post_bloch_sigma_holdout_fraction:g}",
+        "--post-bloch-sigma-min-scale",
+        f"{args.post_bloch_sigma_min_scale:g}",
+        "--post-bloch-sigma-max-scale",
+        f"{args.post_bloch_sigma_max_scale:g}",
+        "--rescale",
+        args.rescale,
+        "--cache-compression",
+        args.prediction_cache_compression,
+        "--best-cycle-tolerance",
+        f"{args.best_cycle_tolerance:g}",
+        "--q-control-seed",
+        str(args.q_control_seed),
+        "--q-control-shells",
+        str(args.q_control_shells),
+        "--native-polish-rows",
+        str(args.native_polish_rows),
+        "--native-polish-n-basis",
+        str(args.native_polish_n_basis),
+        "--native-polish-n-points",
+        str(args.native_polish_n_points),
+        "--native-polish-blocks",
+        args.native_polish_blocks,
+        "--native-polish-atom-selection",
+        args.native_polish_atom_selection,
+        "--native-polish-max-nfev",
+        str(args.native_polish_max_nfev),
+        "--native-polish-early-stop-window",
+        str(args.native_polish_early_stop_window),
+        "--native-polish-early-stop-min-evals",
+        str(args.native_polish_early_stop_min_evals),
+        "--native-polish-early-stop-min-improvement",
+        f"{args.native_polish_early_stop_min_improvement:g}",
+        "--native-polish-free-wR2-tolerance",
+        f"{args.native_polish_free_wR2_tolerance:g}",
+    ]
+    if args.hkl:
+        cmd += ["--hkl", args.hkl]
+    if args.baseline_hkl:
+        cmd += ["--baseline-hkl", args.baseline_hkl]
+    if args.hkl_transform:
+        cmd += [f"--hkl-transform={args.hkl_transform}"]
+    if args.skip_controls:
+        cmd.append("--skip-controls")
+    if not args.wrong_polarity_control:
+        cmd.append("--no-wrong-polarity-control")
+    if args.native_polish:
+        cmd.append("--native-polish")
+    if args.dry_run:
+        Path(args.out_dir).mkdir(parents=True, exist_ok=True)
+        plan = {"command": cmd, "tool_config": getattr(args, "tool_config_path", ""), "external_tools": external_tool_statuses(args)}
+        (Path(args.out_dir) / "validate_ls1_plan.json").write_text(json.dumps(plan, indent=2) + "\n")
+        print(json.dumps(plan, indent=2))
+        return 0
+    subprocess.run(cmd, check=True)
     return 0
 
 
@@ -4715,7 +4864,8 @@ def add_common_run_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--prediction-cache-dir", default="", help="Optional root for prediction caches. Default is OUT/cache.")
     ap.add_argument("--prediction-cache-scope", choices=["shared", "stage"], default="shared", help="Shared reuses safe hash-keyed predictions across adaptive stages; stage isolates every run.")
     ap.add_argument("--prediction-cache-compression", choices=["compressed", "none"], default="none", help="Use none for fastest local SSD/NVMe caches; compressed saves disk on slow or limited storage.")
-    ap.add_argument("--compute-backend", choices=["scipy", "scipy_bethe", "scipy_expm", "scipy_expm_multiply", "jax", "jax_auto", "jax_cpu", "jax_mps", "jax_cuda", "jax_padded", "jax_auto_padded", "jax_cpu_padded", "jax_mps_padded", "jax_cuda_padded", "jax_cpu_real_expm", "jax_mps_real_expm", "jax_mps_real_expm_padded"], default="scipy", help="Bloch prediction backend. SciPy eigensolver is the production reference; scipy_bethe uses an opt-in promoted Bethe/Schur strong-beam reduction; SciPy expm/expm_multiply, real-embedded JAX expm, and JAX eigensolver backends are experimental parity/speed probes. *_padded JAX backends pad matrix dimensions into small buckets to reduce compilation churn.")
+    ap.add_argument("--compute-backend", choices=["scipy", "scipy_bethe", "scipy_expm", "scipy_expm_multiply", "jax", "jax_auto", "jax_cpu", "jax_mps", "jax_cuda", "jax_padded", "jax_auto_padded", "jax_cpu_padded", "jax_mps_padded", "jax_cuda_padded", "jax_cpu_real_expm", "jax_mps_real_expm", "jax_mps_real_expm_padded"], default="scipy", help="Bloch prediction backend. SciPy eigensolver is the production reference; scipy_bethe uses an opt-in promoted Bethe/Schur strong-beam reduction; SciPy expm/expm_multiply, real-embedded JAX expm, and JAX eigensolver backends are experimental agreement/speed probes. *_padded JAX backends pad matrix dimensions into small buckets to reduce compilation churn.")
+    ap.add_argument("--row-plan-cache", choices=["off", "readwrite", "rebuild"], default="off", help="Experimental frozen row-geometry cache. Off is default until full workflow benchmarks show a clear win.")
     ap.add_argument("--jax-batch-size", type=int, default=0, help="JAX matrix batch size for accelerator backends. 0 chooses a conservative size from matrix dimension and device count.")
     ap.add_argument("--jax-matrix-bucket-size", type=int, default=0, help="Pad JAX matrix dimensions to this multiple. 0 keeps exact sizes unless a *_padded backend is selected, where 0 means 8.")
     ap.add_argument("--bethe-strong-count", type=int, default=48, help="Strong-beam block size for scipy_bethe. Values >= final N recover the dense SciPy matrix.")
@@ -4997,6 +5147,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_raw.add_argument("--max-core-fraction", type=float, default=0.85)
     p_raw.add_argument("--chunksize", type=int, default=0)
     p_raw.add_argument("--compute-backend", choices=["scipy", "scipy_bethe", "scipy_expm", "scipy_expm_multiply", "jax", "jax_auto", "jax_cpu", "jax_mps", "jax_cuda", "jax_padded", "jax_auto_padded", "jax_cpu_padded", "jax_mps_padded", "jax_cuda_padded", "jax_cpu_real_expm", "jax_mps_real_expm", "jax_mps_real_expm_padded"], default="scipy")
+    p_raw.add_argument("--row-plan-cache", choices=["off", "readwrite", "rebuild"], default="off", help="Experimental frozen row-geometry cache. Off is default until full workflow benchmarks show a clear win.")
     p_raw.add_argument("--jax-batch-size", type=int, default=0)
     p_raw.add_argument("--jax-matrix-bucket-size", type=int, default=0)
     p_raw.add_argument("--bethe-strong-count", type=int, default=48)
@@ -5102,6 +5253,60 @@ def build_parser() -> argparse.ArgumentParser:
     p_scale_replay.add_argument("--native-wght-a", type=float, default=None)
     p_scale_replay.add_argument("--native-wght-b", type=float, default=None)
     p_scale_replay.set_defaults(func=cmd_scale_replay)
+
+    p_validate_ls1 = sub.add_parser("validate-ls1", help="Run LS1 fixed-point controls and optional matched native finite-difference polish.")
+    p_validate_ls1.add_argument("--source-summary", required=True, help="Existing native_row_regularize summary whose selected nuisance values should be pinned.")
+    p_validate_ls1.add_argument("--start-res", required=True, help="Initial RES model for updated-q cycle 1.")
+    p_validate_ls1.add_argument("--out-dir", required=True)
+    p_validate_ls1.add_argument("--python", default="")
+    add_tool_config_args(p_validate_ls1)
+    p_validate_ls1.add_argument("--dry-run", action="store_true")
+    p_validate_ls1.add_argument("--hkl", default="", help="Override HKL path if the source summary does not record it.")
+    p_validate_ls1.add_argument("--baseline-hkl", default="", help="Optional conventional HKL for baseline/reference endpoint comparisons.")
+    p_validate_ls1.add_argument("--hkl-transform", default="", help="Override signed HKL transform. Defaults to the source summary.")
+    p_validate_ls1.add_argument("--cycles", type=int, default=5, help="Updated-q LS1 macrocycles to run.")
+    p_validate_ls1.add_argument("--n-basis", type=int, default=30, help="Bloch basis for validation cycles. Use the final adaptive basis for publication adjudication.")
+    p_validate_ls1.add_argument("--n-points", type=int, default=20)
+    p_validate_ls1.add_argument("--shelxl", default=default_shelxl_executable())
+    p_validate_ls1.add_argument("--shelxl-iterations", type=int, default=1, help="SHELXL iterations per updated-q macrocycle.")
+    p_validate_ls1.add_argument("--workers", type=int, default=auto_worker_count(0, 0.85))
+    p_validate_ls1.add_argument("--chunksize", type=int, default=0)
+    p_validate_ls1.add_argument("--compute-backend", choices=["scipy", "scipy_bethe", "scipy_expm", "scipy_expm_multiply", "jax", "jax_auto", "jax_cpu", "jax_mps", "jax_cuda", "jax_padded", "jax_auto_padded", "jax_cpu_padded", "jax_mps_padded", "jax_cuda_padded", "jax_cpu_real_expm", "jax_mps_real_expm", "jax_mps_real_expm_padded"], default="scipy_bethe")
+    p_validate_ls1.add_argument("--row-plan-cache", choices=["off", "readwrite", "rebuild"], default="off", help="Experimental frozen row-geometry cache. Off is default until full workflow benchmarks show a clear win.")
+    p_validate_ls1.add_argument("--jax-batch-size", type=int, default=0)
+    p_validate_ls1.add_argument("--jax-matrix-bucket-size", type=int, default=0)
+    p_validate_ls1.add_argument("--bethe-strong-count", type=int, default=48)
+    p_validate_ls1.add_argument("--bethe-variant", choices=["truncate", "schur0", "schur_target", "schur_mean"], default="schur_target")
+    p_validate_ls1.add_argument("--bethe-promote-denom", type=float, default=0.005)
+    p_validate_ls1.add_argument("--bethe-denom-eps", type=float, default=1e-5)
+    p_validate_ls1.add_argument("--min-d-spacing", type=float, default=0.0)
+    p_validate_ls1.add_argument("--topup-d-min", type=float, default=0.0)
+    p_validate_ls1.add_argument("--min-peak", type=float, default=-1.0)
+    p_validate_ls1.add_argument("--geometry-percentile", type=float, default=0.0)
+    p_validate_ls1.add_argument("--max-rows", type=int, default=0)
+    p_validate_ls1.add_argument("--post-bloch-sigma-policy", choices=["none", "uniform_z_rms"], default="uniform_z_rms")
+    p_validate_ls1.add_argument("--post-bloch-sigma-holdout-fraction", type=float, default=0.20)
+    p_validate_ls1.add_argument("--post-bloch-sigma-min-scale", type=float, default=0.25)
+    p_validate_ls1.add_argument("--post-bloch-sigma-max-scale", type=float, default=4.0)
+    p_validate_ls1.add_argument("--rescale", choices=["median-iobs", "none"], default="median-iobs")
+    p_validate_ls1.add_argument("--prediction-cache-compression", choices=["compressed", "none"], default="none")
+    p_validate_ls1.add_argument("--best-cycle-tolerance", type=float, default=0.001, help="Pick the earliest cycle within this native wR2all fraction of the best cycle.")
+    p_validate_ls1.add_argument("--q-control-seed", type=int, default=12345)
+    p_validate_ls1.add_argument("--q-control-shells", type=int, default=10)
+    p_validate_ls1.add_argument("--skip-controls", action="store_true")
+    p_validate_ls1.add_argument("--wrong-polarity-control", action=argparse.BooleanOptionalAction, default=True)
+    p_validate_ls1.add_argument("--native-polish", action=argparse.BooleanOptionalAction, default=False)
+    p_validate_ls1.add_argument("--native-polish-rows", type=int, default=200)
+    p_validate_ls1.add_argument("--native-polish-n-basis", type=int, default=0)
+    p_validate_ls1.add_argument("--native-polish-n-points", type=int, default=0)
+    p_validate_ls1.add_argument("--native-polish-blocks", default="adp_ueq,xyz")
+    p_validate_ls1.add_argument("--native-polish-atom-selection", choices=["nonh", "all", "labels"], default="nonh")
+    p_validate_ls1.add_argument("--native-polish-max-nfev", type=int, default=12)
+    p_validate_ls1.add_argument("--native-polish-early-stop-window", type=int, default=32)
+    p_validate_ls1.add_argument("--native-polish-early-stop-min-evals", type=int, default=0)
+    p_validate_ls1.add_argument("--native-polish-early-stop-min-improvement", type=float, default=1e-4)
+    p_validate_ls1.add_argument("--native-polish-free-wR2-tolerance", type=float, default=0.02)
+    p_validate_ls1.set_defaults(func=cmd_validate_ls1)
 
     p_val = sub.add_parser("validate", help="Compile the vendored engine scripts with the selected Python.")
     p_val.add_argument("--python", default="")

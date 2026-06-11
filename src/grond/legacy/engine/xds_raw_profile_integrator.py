@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Extract raw rocking-profile dynrows from XDS spot predictions.
 
-This is deliberately conservative.  It does not claim external/row contract integration
-parity.  It uses XDS `INTEGRATE.HKL` as a spot-position contract, reads the raw
+This is deliberately conservative.  It does not claim equivalence to any external
+integration route.  It uses XDS `INTEGRATE.HKL` as a spot-position contract, reads the raw
 CBF frames, sums a small circular aperture over a frame window around ZCAL, and
 subtracts an annular local background.
 

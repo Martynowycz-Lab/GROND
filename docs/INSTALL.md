@@ -11,7 +11,7 @@ GROND is a normal Python package. The recommended installation is a clean Python
 - A baseline solved-model HKL file when available. This is strongly recommended because GROND uses it to reduce transform ambiguity before running Bloch scouts.
 - Optional: SHELXL for corrected-HKL endpoint polishing/statistics.
 - Optional: `shelx2map` for map generation.
-- Optional: an Olex2 app installation or a configured custom endpoint if you are deliberately testing a non-default model-update adapter.
+- Optional: a configured custom endpoint if you are deliberately testing a non-default model-update adapter.
 - Optional: a LaTeX engine if you want PDF tables; Markdown and TeX outputs are written without it.
 
 Native row-level Bloch calculations are Python-first. The full default endpoint path needs SHELXL, and maps need `shelx2map`. Those programs are not bundled with GROND.
@@ -77,15 +77,9 @@ Fill in absolute paths for tools that are not already on `PATH`:
     "shelxt": "",
     "xds": "",
     "xdsconv": "",
-    "olex2_app_dir": "",
-    "olex2_console": "",
     "custom_refiner": ""
   },
   "endpoints": {
-    "olex2_app": {
-      "app_dir": "",
-      "note": "Optional Olex2.app console directory, for example /Applications/olex2.app/Contents/MacOS."
-    },
     "custom": {
       "command": "",
       "output_model": "",
@@ -118,7 +112,7 @@ export GROND_CONFIG=/path/to/grond.config.json
 
 YAML configs are accepted when `PyYAML` is installed with `python -m pip install "grond[config]"`; JSON works with no extra dependency.
 
-The supported model-update endpoints today are SHELXL, an installed Olex2 app console, and a custom command template. SHELXL is the production default for full automatic feedback. Olex2 app support expects the app console directory, for example `/Applications/olex2.app/Contents/MacOS` on macOS; GROND will run the app console directly and set the app library path for that process. The custom endpoint is for labs that can provide a tested one-cycle command and a declared output model path. If none of those are available, use `--native-only`: GROND will still run the Bloch-wave simulation, thickness and nuisance decisions, residual diagnostics, corrected-HKL exports, and polarity checks from the supplied model, but it will not perform the external least-squares model-update loop.
+The supported model-update endpoints today are SHELXL and a custom command template. SHELXL is the production default for full automatic feedback. The custom endpoint is for labs that can provide a tested one-cycle command and a declared output model path. If none of those are available, use `--native-only`: GROND will still run the Bloch-wave simulation, thickness and nuisance decisions, residual diagnostics, corrected-HKL exports, and polarity checks from the supplied model, but it will not perform the external least-squares model-update loop.
 
 ## XDS Input Preparation
 

@@ -2,7 +2,7 @@
 
 The scientific point of this module is narrow: observation builders and native
 audits must carry the same frozen row identity and Bloch-kernel assumptions
-that were used for the reference/reference parity work.  It is not a place to add
+that were accepted for the audited signed-row production path.  It is not a place to add
 new Hamiltonian options.
 """
 
@@ -13,7 +13,7 @@ from typing import Any
 
 
 DYNROW_SCHEMA_VERSION = "row_contract_signed_dynrow_v1.0"
-FROZEN_ENGINE_CONTRACT_VERSION = "reference_parity_simple_cycles_v1.0"
+FROZEN_ENGINE_CONTRACT_VERSION = "audited_signed_row_simple_cycles_v1.0"
 
 
 FROZEN_ENGINE_CONTRACT: dict[str, Any] = {

@@ -22,13 +22,10 @@ TOOL_ENV_VARS = {
     "shelxt": "SHELXT",
     "xds": "XDS",
     "xdsconv": "XDSCONV",
-    "olex2_console": "GROND_OLEX2_CONSOLE",
     "custom_refiner": "GROND_CUSTOM_REFINER",
 }
 
-TOOL_PATH_ENV_VARS = {
-    "olex2_app_dir": "GROND_OLEX2_APP_DIR",
-}
+TOOL_PATH_ENV_VARS: dict[str, str] = {}
 
 TOOL_ALIASES = {
     "shelxl": ("shelxl", "shelxl2019"),
@@ -36,7 +33,6 @@ TOOL_ALIASES = {
     "shelxt": ("shelxt",),
     "xds": ("xds",),
     "xdsconv": ("xdsconv",),
-    "olex2_console": ("olex2c_exe",),
     "custom_refiner": (),
 }
 
@@ -284,15 +280,9 @@ def config_template() -> dict[str, Any]:
             "shelxt": "",
             "xds": "",
             "xdsconv": "",
-            "olex2_app_dir": "",
-            "olex2_console": "",
             "custom_refiner": "",
         },
         "endpoints": {
-            "olex2_app": {
-                "app_dir": "",
-                "note": "Optional Olex2.app console directory, for example /Applications/olex2.app/Contents/MacOS.",
-            },
             "custom": {
                 "command": "",
                 "output_model": "",
@@ -322,13 +312,8 @@ def write_config_template(path: str | Path, *, fmt: str = "json", overwrite: boo
             '  shelxt: ""',
             '  xds: ""',
             '  xdsconv: ""',
-            '  olex2_app_dir: ""',
-            '  olex2_console: ""',
             '  custom_refiner: ""',
             "endpoints:",
-            "  olex2_app:",
-            '    app_dir: ""',
-            '    note: "Optional Olex2.app console directory, for example /Applications/olex2.app/Contents/MacOS."',
             "  custom:",
             '    command: ""',
             '    output_model: ""',

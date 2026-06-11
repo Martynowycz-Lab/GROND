@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Standalone XDS Bloch-wave port.
 
-This deliberately does not edit the reference/row contract parity code.  It reuses the
-lessons from that work in a separate XDS-facing calculator:
+This keeps the audited row-contract conventions explicit in the XDS-facing
+calculator:
 
 * signed observation HKLs are preserved;
 * off-diagonal coupling uses U(h_j - h_i), not U(h_i - h_j);
@@ -428,6 +428,12 @@ def _predict_row_worker(idx):
     if _WORKER_PORT is None:
         raise RuntimeError("prediction worker was not initialized")
     return int(idx), _WORKER_PORT.row_prediction(int(idx))
+
+
+def _predict_row_cache_worker(pos):
+    if _WORKER_PORT is None:
+        raise RuntimeError("prediction worker was not initialized")
+    return _WORKER_PORT.row_prediction_from_active_cache(int(pos))
 
 
 def sha256(path: Path) -> str:
@@ -1045,20 +1051,21 @@ class Config:
     bethe_promote_denom: float = 0.005
     bethe_denom_eps: float = 1e-5
     matrix_convention: str = "j_minus_i"
+    row_plan_cache: str = "off"
 
 
 def frozen_kernel_contract(cfg: Config | None = None):
-    """Machine-readable record of the reference-parity Bloch convention.
+    """Machine-readable record of the audited Bloch convention.
 
     This is intentionally descriptive rather than configurable.  The XDS raw
     dynrow work should test observation contracts, not silently mutate the
-    parity-proven Bloch kernel.
+    production Bloch kernel.
     """
     convention = str(getattr(cfg, "matrix_convention", "j_minus_i") if cfg is not None else "j_minus_i")
     offdiag_expr = "U(h_j - h_i) / (2*k)" if convention == "j_minus_i" else "U(h_i - h_j) / (2*k)"
     offdiag_sign = "basis[j] - basis[i]" if convention == "j_minus_i" else "basis[i] - basis[j]"
     return {
-        "name": "reference_parity_simple_hermitian",
+        "name": "audited_signed_row_simple_hermitian",
         "geometry": {
             "g(alpha)": "R(alpha) @ UB @ h",
             "Sg": "(k^2 - |s0 + g(alpha)|^2) / (2*k)",
@@ -1075,7 +1082,7 @@ def frozen_kernel_contract(cfg: Config | None = None):
             "diagonal": "H_ii = S_i",
             "offdiagonal": offdiag_expr,
             "offdiagonal_sign": offdiag_sign,
-            "default_convention_note": "j_minus_i is the reference-parity convention; i_minus_j is an explicit raw-forward-model diagnostic.",
+            "default_convention_note": "j_minus_i is the production signed-row convention; i_minus_j is an explicit raw-forward-model diagnostic.",
             "dose_b": "optional frame-dependent isotropic Debye-Waller attenuation U_g -> U_g exp(-DeltaB/(4d_g^2)); default none",
             "hermitian_fill": "H_ji = conj(H_ij)",
             "propagation": "psi(t) = exp(2*pi*i*H*t) psi(0)",
@@ -1129,7 +1136,7 @@ def promoted_bethe_effective_hamiltonian(H: np.ndarray, cfg: Config) -> np.ndarr
 
     The strong/weak-beam split follows a practical suggestion from Takanori
     Nakane; this implementation is GROND's independent Schur-complement
-    realization and is kept as an explicit backend for parity testing.
+    realization and is kept as an explicit backend for agreement testing.
     """
 
     H = np.asarray(H, dtype=np.complex128)
@@ -1557,7 +1564,7 @@ class XDSBlochPort:
     def row_sg_window(self, row_idx, hkl, omega_bragg):
         """Return an auditable per-row target-Sg window.
 
-        The default remains the reference-parity fixed window.  Adaptive modes are
+        The default remains the audited fixed window.  Adaptive modes are
         deliberately simple XDS metadata probes, not fitted scale parameters.
         They alter which part of the synthetic rocking curve is averaged.
         """
@@ -1828,7 +1835,7 @@ class XDSBlochPort:
             raise ValueError(
                 f"unknown matrix_convention={convention!r}; expected j_minus_i or i_minus_j"
             )
-        # reference parity lesson: the production path uses U(h_j - h_i).
+        # Production signed-row convention: use U(h_j - h_i).
         # The alternate sign is kept as an auditable raw-forward-model test.
         diffs = basis[None, :, :] - basis[:, None, :] if convention == "j_minus_i" else basis[:, None, :] - basis[None, :, :]
         u_mat = self.ug_array(diffs) if row_idx is None else self.ug_for_row_array(diffs, row_idx)
@@ -2033,6 +2040,364 @@ class XDSBlochPort:
         dyn_vals = [self.propagate_direct_to_target_thickness_average(H) for H in plan["_dyn_matrices"]]
         return self.finish_row_prediction_plan(plan, dyn_vals)
 
+    def row_plan_cache_mode(self) -> str:
+        """Return the requested frozen row-plan cache mode."""
+
+        mode = str(getattr(self.cfg, "row_plan_cache", "off") or "off").lower()
+        if mode in {"0", "false", "no", "none"}:
+            return "off"
+        if mode in {"1", "true", "yes", "on"}:
+            return "readwrite"
+        if mode not in {"off", "readwrite", "rebuild"}:
+            raise ValueError(f"unknown row_plan_cache={mode!r}; expected off, readwrite, or rebuild")
+        return mode
+
+    def row_plan_cache_key(self, indices):
+        """Return a geometry/config cache key for frozen row plans.
+
+        The key intentionally omits the current structural model.  The stored
+        basis is selected by the model that first builds the cache, then reused
+        by later macrocycles while the Fourier coefficients are recomputed from
+        the current model.  The builder model hash is saved in metadata so this
+        frozen-basis choice is auditable.
+        """
+
+        indices = np.asarray(indices, dtype=np.int64)
+        cfg_fields = {
+            "cache_schema": 1,
+            "hkl_sha256": sha256(self.data.path),
+            "hkl_transform": self.data.hkl_transform_spec,
+            "indices_sha256": hashlib.sha256(indices.tobytes()).hexdigest(),
+            "n_basis": int(self.cfg.n_basis),
+            "n_points": int(self.cfg.n_points),
+            "sg_window": float(self.cfg.sg_window),
+            "sg_window_mode": str(self.cfg.sg_window_mode),
+            "sg_window_min": float(self.cfg.sg_window_min),
+            "sg_window_max": float(self.cfg.sg_window_max),
+            "sg_window_scale": float(self.cfg.sg_window_scale),
+            "sg_window_frame_floor": float(self.cfg.sg_window_frame_floor),
+            "sg_jitter_mode": str(self.cfg.sg_jitter_mode),
+            "sg_jitter_sigma0": float(self.cfg.sg_jitter_sigma0),
+            "sg_jitter_sigma_d_inv": float(self.cfg.sg_jitter_sigma_d_inv),
+            "sg_jitter_sigma_frame": float(self.cfg.sg_jitter_sigma_frame),
+            "sg_jitter_points": int(self.cfg.sg_jitter_points),
+            "sg_jitter_student_df": float(self.cfg.sg_jitter_student_df),
+            "sg_jitter_width_factor": float(self.cfg.sg_jitter_width_factor),
+            "profile_quadrature": str(self.cfg.profile_quadrature),
+            "profile_accumulation": str(self.cfg.profile_accumulation),
+            "topup_d_min": float(self.cfg.topup_d_min),
+            "max_support_sg": float(self.cfg.max_support_sg),
+            "frame_offset": float(self.cfg.frame_offset),
+            "matrix_convention": str(self.cfg.matrix_convention),
+            "dose_b_mode": str(self.cfg.dose_b_mode),
+            "dose_b_per_frame": float(self.cfg.dose_b_per_frame),
+            "dose_b_ref_frame": float(self.dose_ref_frame),
+            "cell": [float(v) for v in self.model["cell"]],
+            "wavelength": float(self.data.wavelength),
+        }
+        text = json.dumps(cfg_fields, sort_keys=True, allow_nan=True)
+        return hashlib.sha256(text.encode()).hexdigest()[:20], cfg_fields
+
+    def row_plan_cache_path(self, key: str) -> Path:
+        if self.cache_dir is None:
+            raise ValueError("row-plan cache requires cache_dir")
+        return self.cache_dir / "row_plans" / f"row_plan_{key}.npz"
+
+    def build_row_plan_cache(self, indices):
+        """Build immutable row geometry and basis plans for later reuse."""
+
+        indices = np.asarray(indices, dtype=int)
+        key, meta = self.row_plan_cache_key(indices)
+        meta = dict(meta)
+        meta.update(
+            {
+                "key": key,
+                "basis_model_content_sha256": model_content_hash(self.model),
+                "basis_res_sha256": self.res_hash,
+                "basis_policy": "frozen_from_cache_builder_model",
+            }
+        )
+        unique_diff_index: dict[tuple[int, int, int], int] = {}
+        unique_diffs: list[tuple[int, int, int]] = []
+        basis_offsets = [0]
+        basis_flat = []
+        profile_offsets = [0]
+        profile_weights_flat = []
+        sg_offsets = [0]
+        sg_basis_flat = []
+        diff_offsets = [0]
+        diff_idx_flat = []
+        center_sg = []
+        omega_center = []
+        omega_bragg = []
+        omega_delta = []
+        sg_window = []
+        sg_domega = []
+        sg_dframe = []
+        sg_window_raw = []
+        sg_window_half_frames = []
+        sg_window_clipped = []
+        sg_jitter_sigma = []
+        sg_jitter_d_inv = []
+        sg_jitter_frame_fraction = []
+        sg_jitter_kernel_points = []
+        sg_profile_points_total = []
+        sg_profile_weight_sum = []
+        sg_residual_max = []
+        dose_delta_b = []
+        convention = str(getattr(self.cfg, "matrix_convention", "j_minus_i") or "j_minus_i")
+        if convention not in {"j_minus_i", "i_minus_j"}:
+            raise ValueError(f"unknown matrix_convention={convention!r}; expected j_minus_i or i_minus_j")
+
+        t0 = time.perf_counter()
+        for pos, row_idx in enumerate(indices):
+            row_idx = int(row_idx)
+            hkl = self.data.hkl[row_idx]
+            zcal = self.data.zcal[row_idx]
+            omega_c = self.omega_from_z(zcal)
+            c_sg = float(self.sg_for_hkls(np.asarray([hkl], dtype=int), omega_c)[0])
+            omega_b = self.solve_omega_for_sg(hkl, omega_c, 0.0)
+            basis = self.select_basis(hkl, omega_b, row_idx=row_idx)
+            if not np.array_equal(basis[0], np.asarray([0, 0, 0], dtype=int)) or not np.array_equal(basis[1], np.asarray(hkl, dtype=int)):
+                raise RuntimeError("Frozen row-plan basis contract violated: basis must start with direct beam then exact signed target hkl.")
+            sg_window_i, sg_width_meta = self.row_sg_window(row_idx, hkl, omega_b)
+            requested, profile_weights, jitter_meta = self.row_profile_sg_points(row_idx, hkl, sg_window_i)
+            sg_basis_rows = []
+            sg_resid = []
+            for target_sg in requested:
+                omega = self.solve_omega_for_sg(hkl, omega_b, target_sg)
+                sg_basis = self.sg_for_hkls(basis, omega)
+                sg_basis_rows.append(np.asarray(sg_basis, dtype=float))
+                sg_resid.append(float(sg_basis[1] - target_sg))
+
+            diffs = basis[None, :, :] - basis[:, None, :] if convention == "j_minus_i" else basis[:, None, :] - basis[None, :, :]
+            row_diff_idx = []
+            for diff in diffs.reshape(-1, 3):
+                tup = tuple(int(v) for v in diff)
+                idx = unique_diff_index.get(tup)
+                if idx is None:
+                    idx = len(unique_diffs)
+                    unique_diff_index[tup] = idx
+                    unique_diffs.append(tup)
+                row_diff_idx.append(idx)
+
+            basis_flat.extend(tuple(int(v) for v in b) for b in basis)
+            basis_offsets.append(len(basis_flat))
+            profile_weights_flat.extend(float(v) for v in profile_weights)
+            profile_offsets.append(len(profile_weights_flat))
+            sg_basis_arr = np.asarray(sg_basis_rows, dtype=float)
+            sg_basis_flat.extend(float(v) for v in sg_basis_arr.reshape(-1))
+            sg_offsets.append(len(sg_basis_flat))
+            diff_idx_flat.extend(int(v) for v in row_diff_idx)
+            diff_offsets.append(len(diff_idx_flat))
+
+            center_sg.append(c_sg)
+            omega_center.append(float(omega_c))
+            omega_bragg.append(float(omega_b))
+            omega_delta.append(float(omega_b - omega_c))
+            sg_window.append(float(sg_window_i))
+            sg_domega.append(float(sg_width_meta["sg_dSg_domega_inv_A_per_deg"]))
+            sg_dframe.append(float(sg_width_meta["sg_dSg_dframe_inv_A"]))
+            sg_window_raw.append(float(sg_width_meta["sg_window_raw_inv_A"]))
+            sg_window_half_frames.append(float(sg_width_meta["sg_window_half_frames"]))
+            sg_window_clipped.append(bool(sg_width_meta["sg_window_clipped"]))
+            sg_jitter_sigma.append(float(jitter_meta["sg_jitter_sigma_inv_A"]))
+            sg_jitter_d_inv.append(float(jitter_meta["sg_jitter_d_inv_A"]))
+            sg_jitter_frame_fraction.append(float(jitter_meta["sg_jitter_frame_fraction"]))
+            sg_jitter_kernel_points.append(int(jitter_meta["sg_jitter_kernel_points"]))
+            sg_profile_points_total.append(int(jitter_meta["sg_profile_points_total"]))
+            sg_profile_weight_sum.append(float(jitter_meta["sg_profile_weight_sum"]))
+            sg_residual_max.append(float(np.max(np.abs(sg_resid))) if len(sg_resid) else 0.0)
+            dose_delta_b.append(float(self.row_delta_b(row_idx)))
+            if (pos + 1) % 500 == 0 or pos + 1 == len(indices):
+                elapsed = time.perf_counter() - t0
+                rate = (pos + 1) / max(elapsed, 1e-12)
+                eta = (len(indices) - (pos + 1)) / max(rate, 1e-12)
+                print(f"built row plans {pos + 1}/{len(indices)} | rate={rate:.2f}/s | ETA={eta/60:.1f}m", flush=True)
+
+        unique_diffs_arr = np.asarray(unique_diffs, dtype=np.int32).reshape(-1, 3)
+        unique_inv_d2 = self.inv_d2_for_hkls(unique_diffs_arr) if len(unique_diffs_arr) else np.zeros(0, dtype=float)
+        return {
+            "meta": meta,
+            "indices": indices.astype(np.int64),
+            "basis_offsets": np.asarray(basis_offsets, dtype=np.int64),
+            "basis_flat": np.asarray(basis_flat, dtype=np.int32).reshape(-1, 3),
+            "profile_offsets": np.asarray(profile_offsets, dtype=np.int64),
+            "profile_weights_flat": np.asarray(profile_weights_flat, dtype=float),
+            "sg_offsets": np.asarray(sg_offsets, dtype=np.int64),
+            "sg_basis_flat": np.asarray(sg_basis_flat, dtype=float),
+            "diff_offsets": np.asarray(diff_offsets, dtype=np.int64),
+            "diff_idx_flat": np.asarray(diff_idx_flat, dtype=np.int64),
+            "unique_diffs": unique_diffs_arr,
+            "unique_inv_d2": np.asarray(unique_inv_d2, dtype=float),
+            "center_sg": np.asarray(center_sg, dtype=float),
+            "omega_center": np.asarray(omega_center, dtype=float),
+            "omega_bragg": np.asarray(omega_bragg, dtype=float),
+            "omega_delta": np.asarray(omega_delta, dtype=float),
+            "sg_window": np.asarray(sg_window, dtype=float),
+            "sg_domega": np.asarray(sg_domega, dtype=float),
+            "sg_dframe": np.asarray(sg_dframe, dtype=float),
+            "sg_window_raw": np.asarray(sg_window_raw, dtype=float),
+            "sg_window_half_frames": np.asarray(sg_window_half_frames, dtype=float),
+            "sg_window_clipped": np.asarray(sg_window_clipped, dtype=bool),
+            "sg_jitter_sigma": np.asarray(sg_jitter_sigma, dtype=float),
+            "sg_jitter_d_inv": np.asarray(sg_jitter_d_inv, dtype=float),
+            "sg_jitter_frame_fraction": np.asarray(sg_jitter_frame_fraction, dtype=float),
+            "sg_jitter_kernel_points": np.asarray(sg_jitter_kernel_points, dtype=np.int32),
+            "sg_profile_points_total": np.asarray(sg_profile_points_total, dtype=np.int32),
+            "sg_profile_weight_sum": np.asarray(sg_profile_weight_sum, dtype=float),
+            "sg_residual_max": np.asarray(sg_residual_max, dtype=float),
+            "dose_delta_b": np.asarray(dose_delta_b, dtype=float),
+        }
+
+    def save_row_plan_cache(self, path: Path, cache: dict) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f"{path.stem}.{os.getpid()}.tmp.npz")
+        save = {k: v for k, v in cache.items() if k != "meta"}
+        np.savez_compressed(tmp, **save, meta_json=json.dumps(cache.get("meta", {}), sort_keys=True, allow_nan=True))
+        os.replace(tmp, path)
+
+    def load_row_plan_cache_file(self, path: Path) -> dict:
+        loaded = np.load(path, allow_pickle=False)
+        cache = {k: loaded[k] for k in loaded.files if k != "meta_json"}
+        cache["meta"] = json.loads(str(loaded["meta_json"]))
+        return cache
+
+    def load_or_build_row_plan_cache(self, indices):
+        mode = self.row_plan_cache_mode()
+        if mode == "off":
+            return None
+        key, _meta = self.row_plan_cache_key(indices)
+        path = self.row_plan_cache_path(key)
+        if mode == "readwrite" and path.exists():
+            cache = self.load_row_plan_cache_file(path)
+            cache["status"] = {"status": "hit", "path": str(path), "key": key}
+            return cache
+        cache = self.build_row_plan_cache(indices)
+        self.save_row_plan_cache(path, cache)
+        cache["status"] = {"status": "built" if mode == "readwrite" else "rebuilt", "path": str(path), "key": key}
+        return cache
+
+    def current_unique_ug(self, unique_diffs: np.ndarray) -> np.ndarray:
+        """Compute current-model U_g only for the cache's unique differences."""
+
+        unique_diffs = np.asarray(unique_diffs, dtype=int).reshape(-1, 3)
+        out = np.zeros(len(unique_diffs), dtype=np.complex128)
+        if len(unique_diffs) == 0:
+            return out
+        h = unique_diffs[:, 0]
+        k = unique_diffs[:, 1]
+        l = unique_diffs[:, 2]
+        ok = (
+            (h >= -self.h_lim)
+            & (h <= self.h_lim)
+            & (k >= -self.k_lim)
+            & (k <= self.k_lim)
+            & (l >= -self.l_lim)
+            & (l <= self.l_lim)
+        )
+        if np.any(ok):
+            factor = float(self.cfg.gamma) / (math.pi * self.data.cell.volume)
+            out[ok] = factor * fcalc_res_grid(self.model, h[ok], k[ok], l[ok])
+        return out
+
+    def cached_static_hamiltonian(self, basis, diff_idx, unique_diffs, unique_inv_d2, unique_ug, row_idx, absorb: bool):
+        n = len(basis)
+        H = np.zeros((n, n), dtype=np.complex128)
+        mode = str(getattr(self.cfg, "absorption_mode", "none") or "none").lower()
+        if absorb and mode in {"mean", "midgley_like", "midgley"}:
+            H[np.diag_indices(n)] += 1j * float(getattr(self.cfg, "absorption_mu", 0.0))
+        elif absorb and mode == "beam_dependent":
+            H[np.diag_indices(n)] += 1j * self.beam_absorption_mu(basis)
+        u_mat = np.asarray(unique_ug[diff_idx], dtype=np.complex128).reshape(n, n).copy()
+        delta_b = self.row_delta_b(row_idx)
+        if delta_b != 0.0:
+            inv_d2 = np.asarray(unique_inv_d2[diff_idx], dtype=float).reshape(n, n)
+            u_mat *= np.exp(-0.25 * delta_b * inv_d2)
+        if absorb:
+            diffs = np.asarray(unique_diffs[diff_idx], dtype=int).reshape(n, n, 3)
+            eta = self.offdiag_absorption_eta_array(diffs)
+            if np.any(eta):
+                u_mat = u_mat + 1j * eta * u_mat
+        np.fill_diagonal(u_mat, 0.0 + 0.0j)
+        H += u_mat / (2.0 * self.data.k)
+        return H
+
+    def row_prediction_from_cache(self, cache: dict, pos: int, unique_ug: np.ndarray):
+        row_idx = int(cache["indices"][pos])
+        b0, b1 = int(cache["basis_offsets"][pos]), int(cache["basis_offsets"][pos + 1])
+        p0, p1 = int(cache["profile_offsets"][pos]), int(cache["profile_offsets"][pos + 1])
+        s0, s1 = int(cache["sg_offsets"][pos]), int(cache["sg_offsets"][pos + 1])
+        d0, d1 = int(cache["diff_offsets"][pos]), int(cache["diff_offsets"][pos + 1])
+        basis = np.asarray(cache["basis_flat"][b0:b1], dtype=int)
+        n = len(basis)
+        weights = np.asarray(cache["profile_weights_flat"][p0:p1], dtype=float)
+        sg_basis_rows = np.asarray(cache["sg_basis_flat"][s0:s1], dtype=float).reshape(len(weights), n)
+        diff_idx = np.asarray(cache["diff_idx_flat"][d0:d1], dtype=np.int64)
+        H_dyn_static = self.cached_static_hamiltonian(
+            basis,
+            diff_idx,
+            cache["unique_diffs"],
+            cache["unique_inv_d2"],
+            unique_ug,
+            row_idx,
+            absorb=True,
+        )
+        if self.absorption_enabled():
+            H_born_static = self.cached_static_hamiltonian(
+                basis,
+                diff_idx,
+                cache["unique_diffs"],
+                cache["unique_inv_d2"],
+                unique_ug,
+                row_idx,
+                absorb=False,
+            )
+        else:
+            H_born_static = H_dyn_static
+        h10_born = H_born_static[1, 0]
+        dyn_vals = []
+        born_vals = []
+        for sg_basis in sg_basis_rows:
+            H = self.hamiltonian_from_static(H_dyn_static, sg_basis)
+            dyn_vals.append(self.propagate_direct_to_target_thickness_average(H))
+            delta = float(np.real(sg_basis[1] - sg_basis[0]))
+            sinc = np.sinc(delta * self.thick)
+            born_t = (2.0 * math.pi) ** 2 * (abs(h10_born) ** 2) * (self.thick**2) * (sinc**2)
+            born_vals.append(float(np.sum(self.thick_w * born_t)))
+        dyn = float(np.sum(weights * np.asarray(dyn_vals, dtype=float)))
+        born = float(np.sum(weights * np.asarray(born_vals, dtype=float)))
+        support = [[int(v) for v in row] for row in basis.tolist()]
+        return row_idx, {
+            "dyn": dyn,
+            "born": born,
+            "basis_size": int(n),
+            "support_hkls": support,
+            "max_sg_solve_residual": float(cache["sg_residual_max"][pos]) if "sg_residual_max" in cache else 0.0,
+            "center_sg_inv_A": float(cache["center_sg"][pos]),
+            "omega_center_deg": float(cache["omega_center"][pos]),
+            "omega_bragg_deg": float(cache["omega_bragg"][pos]),
+            "omega_bragg_minus_center_deg": float(cache["omega_delta"][pos]),
+            "sg_window_inv_A": float(cache["sg_window"][pos]),
+            "sg_dSg_domega_inv_A_per_deg": float(cache["sg_domega"][pos]),
+            "sg_dSg_dframe_inv_A": float(cache["sg_dframe"][pos]),
+            "sg_window_raw_inv_A": float(cache["sg_window_raw"][pos]),
+            "sg_window_half_frames": float(cache["sg_window_half_frames"][pos]),
+            "sg_window_clipped": bool(cache["sg_window_clipped"][pos]),
+            "sg_jitter_sigma_inv_A": float(cache["sg_jitter_sigma"][pos]),
+            "sg_jitter_d_inv_A": float(cache["sg_jitter_d_inv"][pos]),
+            "sg_jitter_frame_fraction": float(cache["sg_jitter_frame_fraction"][pos]),
+            "sg_jitter_kernel_points": int(cache["sg_jitter_kernel_points"][pos]),
+            "sg_profile_points_total": int(cache["sg_profile_points_total"][pos]),
+            "sg_profile_weight_sum": float(cache["sg_profile_weight_sum"][pos]),
+            "dose_delta_b_A2": float(cache["dose_delta_b"][pos]),
+            "thickness_model": str(getattr(self.cfg, "thickness_model", "uniform_gradient")),
+            "thickness_sigma_frac": float(getattr(self.cfg, "thickness_sigma_frac", 0.0)),
+        }
+
+    def row_prediction_from_active_cache(self, pos: int):
+        return self.row_prediction_from_cache(self._active_row_plan_cache, int(pos), self._active_unique_ug)
+
     def predict_rows_jax_batched(self, indices, chunksize=8):
         """Predict rows by batching Bloch eigensolvers through JAX."""
 
@@ -2105,6 +2470,90 @@ class XDSBlochPort:
             )
         results = [self.finish_row_prediction_plan(plan, dyn_profile_vals[pos]) for pos, plan in enumerate(plans)]
         return self.pack_prediction_results(indices, results)
+
+    def predict_rows_with_row_cache(self, indices, workers=1, chunksize=8):
+        """Predict rows from an immutable row-geometry cache.
+
+        This freezes row identity, support basis, Sg profiles, quadrature
+        weights, and h_j-h_i lookup indices.  Current-model U_g values are still
+        recomputed before prediction, so this cache is meant for LS1-style
+        macrocycles where the geometry/support contract is held fixed while the
+        structure changes.
+        """
+
+        indices = np.asarray(indices, dtype=int)
+        t0 = time.perf_counter()
+        cache = self.load_or_build_row_plan_cache(indices)
+        if cache is None:
+            return self.predict_rows(indices, workers=workers, chunksize=chunksize)
+        if not np.array_equal(np.asarray(cache["indices"], dtype=int), indices):
+            raise RuntimeError("row-plan cache index order does not match requested row order")
+        unique_ug = self.current_unique_ug(cache["unique_diffs"])
+        self._active_row_plan_cache = cache
+        self._active_unique_ug = unique_ug
+
+        def pool_context_names():
+            import platform
+
+            if platform.system() == "Darwin":
+                return ["forkserver", "spawn"]
+            return ["forkserver", "fork", "spawn"]
+
+        results = [None] * len(indices)
+        position = {int(idx): int(pos) for pos, idx in enumerate(indices)}
+        completed = 0
+
+        def accept(idx, r):
+            nonlocal completed
+            pos = position.get(int(idx))
+            if pos is None:
+                raise RuntimeError(f"cached prediction returned unexpected row index {idx}")
+            results[pos] = r
+            completed += 1
+            if completed % 500 == 0 or completed == len(indices):
+                elapsed = time.perf_counter() - t0
+                rate = completed / max(elapsed, 1e-12)
+                eta = (len(indices) - completed) / max(rate, 1e-12)
+                print(f"cached predicted {completed}/{len(indices)} rows | rate={rate:.2f}/s | ETA={eta/60:.1f}m", flush=True)
+
+        if int(workers) > 1 and len(indices) > 1:
+            ran_parallel = False
+            for context_name in pool_context_names():
+                try:
+                    ctx = multiprocessing.get_context(context_name)
+                except Exception:
+                    continue
+                try:
+                    with ctx.Pool(
+                        processes=int(workers),
+                        initializer=_init_prediction_worker,
+                        initargs=(self,),
+                    ) as pool:
+                        for idx, r in pool.imap_unordered(
+                            _predict_row_cache_worker,
+                            list(range(len(indices))),
+                            chunksize=max(1, int(chunksize)),
+                        ):
+                            accept(idx, r)
+                    ran_parallel = True
+                    break
+                except Exception:
+                    ran_parallel = False
+                    continue
+            if not ran_parallel:
+                for pos in range(len(indices)):
+                    idx, r = self.row_prediction_from_cache(cache, pos, unique_ug)
+                    accept(idx, r)
+        else:
+            for pos in range(len(indices)):
+                idx, r = self.row_prediction_from_cache(cache, pos, unique_ug)
+                accept(idx, r)
+
+        out = self.pack_prediction_results(indices, results)
+        out["seconds"] = time.perf_counter() - t0
+        out["row_plan_cache_status"] = cache.get("status", {})
+        out["row_plan_cache_unique_diffs"] = int(len(cache.get("unique_diffs", [])))
+        return out
 
     def merge_prediction_chunks(self, chunks):
         if not chunks:
@@ -2216,6 +2665,8 @@ class XDSBlochPort:
             indices = np.arange(len(self.data.iobs))
         indices = np.asarray(indices, dtype=int)
         backend = str(getattr(self.cfg, "compute_backend", "scipy") or "scipy").lower()
+        if self.row_plan_cache_mode() != "off" and backend not in ALL_JAX_BACKENDS:
+            return self.predict_rows_with_row_cache(indices, workers=workers, chunksize=chunksize)
         if backend in ALL_JAX_BACKENDS and len(indices) > 1:
             if int(workers) > 1:
                 print("JAX backend requested; ignoring multiprocessing workers and batching in one process.", flush=True)
@@ -2467,7 +2918,7 @@ def main():
         "--matrix-convention",
         choices=["j_minus_i", "i_minus_j"],
         default="j_minus_i",
-        help="Off-diagonal U_g indexing convention. j_minus_i is the reference-parity production default; i_minus_j is a diagnostic.",
+        help="Off-diagonal U_g indexing convention. j_minus_i is the production signed-row default; i_minus_j is a diagnostic.",
     )
     ap.add_argument("--coordinate-polarity-alt", action="store_true", help="Use alternate fractional coordinates as a dynamical polarity-control run.")
     ap.add_argument("--free-fraction", type=float, default=0.10)
@@ -2485,6 +2936,7 @@ def main():
     ap.add_argument("--bethe-variant", choices=["truncate", "schur0", "schur_target", "schur_mean"], default="schur_target", help="Strong/weak-beam reduction used by scipy_bethe.")
     ap.add_argument("--bethe-promote-denom", type=float, default=0.005, help="Promote weak beams whose diagonal denominator is this close to the Schur energy.")
     ap.add_argument("--bethe-denom-eps", type=float, default=1e-5, help="Small-denominator floor for scipy_bethe Schur corrections.")
+    ap.add_argument("--row-plan-cache", choices=["off", "readwrite", "rebuild"], default="off", help="Freeze row geometry, basis, Sg profiles, and h_j-h_i indices for reuse across model updates.")
     ap.add_argument("--positive-only", action="store_true", help="Ignore non-positive XDS IOBS rows for fitting/evaluation.")
     ap.add_argument("--min-peak", type=float, default=90.0, help="Default PEAK/partiality cutoff for XDS row selection. Use 0 for a true full-row diagnostic.")
     ap.add_argument("--min-corr", type=float, default=-999.0)
@@ -2539,6 +2991,7 @@ def main():
         bethe_promote_denom=args.bethe_promote_denom,
         bethe_denom_eps=args.bethe_denom_eps,
         matrix_convention=args.matrix_convention,
+        row_plan_cache=args.row_plan_cache,
         free_fraction=args.free_fraction,
         split_seed=args.split_seed,
     )
@@ -2796,6 +3249,8 @@ def main():
         "timing": {"prediction_seconds": pred_subset["seconds"], "wall_seconds": wall_seconds},
         "diagnostics": {
             "ug_cache": getattr(port, "ug_cache_status", {"status": "disabled"}),
+            "row_plan_cache": pred_subset.get("row_plan_cache_status", {"status": "off"}),
+            "row_plan_cache_unique_diffs": int(pred_subset.get("row_plan_cache_unique_diffs", 0)),
             "basis_size_min": int(np.min(pred_subset["basis_size"])) if len(indices) else 0,
             "basis_size_median": float(np.median(pred_subset["basis_size"])) if len(indices) else 0.0,
             "basis_size_max": int(np.max(pred_subset["basis_size"])) if len(indices) else 0,

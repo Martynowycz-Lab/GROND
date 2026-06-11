@@ -23,7 +23,7 @@ local background.  A second `gaussian_profile` mode uses the same pixels and
 background but estimates a profile-fit intensity from a 3D Gaussian matched
 profile.  A third `bloch_profile_fit` mode fits raw pixels directly to a local
 background plane plus a Gaussian detector-plane profile multiplied by the
-Bloch-predicted rocking profile.  None is claimed to be raw-image parity; these
+Bloch-predicted rocking profile.  None is claimed to be raw-image equivalence; these
 are explicit raw-image observation contracts that can be audited row by row.
 """
 

@@ -89,18 +89,32 @@ def selected_metrics(summary: dict) -> dict:
     """Extract compact native and endpoint metrics for one cycle."""
 
     best = summary.get("best_native") or {}
-    all_dyn = (((best.get("metrics") or {}).get("all") or {}).get("dyn") or {})
-    all_born = (((best.get("metrics") or {}).get("all") or {}).get("born") or {})
+    metrics = best.get("metrics") or {}
+    all_dyn = ((metrics.get("all") or {}).get("dyn") or {})
+    all_born = ((metrics.get("all") or {}).get("born") or {})
+    work_dyn = ((metrics.get("work") or {}).get("dyn") or {})
+    free_dyn = ((metrics.get("free") or {}).get("dyn") or {})
+    work_born = ((metrics.get("work") or {}).get("born") or {})
+    free_born = ((metrics.get("free") or {}).get("born") or {})
     endpoint = summary.get("best_endpoint") or {}
     shelxl = endpoint.get("shelxl") or {}
     post_sigma = endpoint.get("post_bloch_sigma") or {}
+    q_control = best.get("q_control") or {}
     return {
         "native_dyn_R1_all": all_dyn.get("R1_all"),
         "native_dyn_R1_gt": all_dyn.get("R1_gt"),
         "native_dyn_wR2_all": all_dyn.get("wR2_all"),
         "native_dyn_CC": all_dyn.get("CC"),
+        "native_dyn_work_R1_all": work_dyn.get("R1_all"),
+        "native_dyn_work_wR2_all": work_dyn.get("wR2_all"),
+        "native_dyn_work_CC": work_dyn.get("CC"),
+        "native_dyn_free_R1_all": free_dyn.get("R1_all"),
+        "native_dyn_free_wR2_all": free_dyn.get("wR2_all"),
+        "native_dyn_free_CC": free_dyn.get("CC"),
         "native_born_R1_all": all_born.get("R1_all"),
         "native_born_wR2_all": all_born.get("wR2_all"),
+        "native_born_work_wR2_all": work_born.get("wR2_all"),
+        "native_born_free_wR2_all": free_born.get("wR2_all"),
         "endpoint_R1_gt": shelxl.get("R1_gt"),
         "endpoint_R1_all": shelxl.get("R1_all"),
         "endpoint_wR2_all": shelxl.get("wR2_all"),
@@ -113,6 +127,10 @@ def selected_metrics(summary: dict) -> dict:
         "post_bloch_sigma_scale": post_sigma.get("sigma_scale"),
         "post_bloch_sigma_heldout_rms_z_after": post_sigma.get("heldout_rms_z_after"),
         "post_bloch_sigma_all_rms_z_after": post_sigma.get("all_rms_z_after"),
+        "q_control": q_control.get("mode", "real"),
+        "q_control_shuffled_rows": q_control.get("shuffled_rows", 0),
+        "q_control_active_bins": q_control.get("active_bins", 0),
+        "q_control_logq_corr": q_control.get("logq_corr_original_shuffled"),
     }
 
 
@@ -276,6 +294,8 @@ def native_command(
         str(args.cache_compression),
         "--compute-backend",
         str(args.compute_backend),
+        "--row-plan-cache",
+        str(getattr(args, "row_plan_cache", "off")),
         "--jax-batch-size",
         str(int(args.jax_batch_size)),
         "--jax-matrix-bucket-size",
@@ -372,6 +392,7 @@ def main() -> None:
     ap.add_argument("--rescale", choices=["median-iobs", "none"], default="median-iobs")
     ap.add_argument("--cache-compression", choices=["compressed", "none"], default="none")
     ap.add_argument("--compute-backend", choices=["scipy", "scipy_bethe", "scipy_expm", "scipy_expm_multiply", "jax", "jax_auto", "jax_cpu", "jax_mps", "jax_cuda", "jax_padded", "jax_auto_padded", "jax_cpu_padded", "jax_mps_padded", "jax_cuda_padded", "jax_cpu_real_expm", "jax_mps_real_expm", "jax_mps_real_expm_padded"], default="scipy")
+    ap.add_argument("--row-plan-cache", choices=["off", "readwrite", "rebuild"], default="off")
     ap.add_argument("--jax-batch-size", type=int, default=0)
     ap.add_argument("--jax-matrix-bucket-size", type=int, default=0)
     ap.add_argument("--bethe-strong-count", type=int, default=48)

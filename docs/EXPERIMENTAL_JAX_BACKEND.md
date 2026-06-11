@@ -10,7 +10,7 @@ The backend options are:
 - `jax_cpu`: experimental, mathematically matches SciPy on benchmark rows, but is slower in the current row-by-row kernel.
 - `jax_cuda`: experimental CUDA path. It uses JAX complex128 and `pmap` over visible CUDA devices for same-size Bloch matrix batches. It was correct on an internal three-GPU RTX 2080 Ti test, but slower than optimized SciPy CPU parallelism for the tested N128/Q20 workload.
 - `jax_cpu_padded`, `jax_cuda_padded`, and the other `*_padded` variants: experimental bucketed-shape paths motivated by Takanori Nakane's suggestion to keep matrices the same size where possible. They pad matrices to small size buckets rather than padding every row to the worst-case basis size.
-- `jax_cpu_real_expm`, `jax_mps_real_expm`, and `jax_mps_real_expm_padded`: guarded experimental real-embedded matrix-exponential paths. They rewrite the complex propagation matrix as a real block matrix and evaluate a fixed-order scaling/squaring Taylor exponential, which avoids asking Apple MPS for unsupported complex eigensolvers. The MPS route is limited to float32 by current JAX/MLX behavior, so it is a parity and future-proofing probe rather than a production backend.
+- `jax_cpu_real_expm`, `jax_mps_real_expm`, and `jax_mps_real_expm_padded`: guarded experimental real-embedded matrix-exponential paths. They rewrite the complex propagation matrix as a real block matrix and evaluate a fixed-order scaling/squaring Taylor exponential, which avoids asking Apple MPS for unsupported complex eigensolvers. The MPS route is limited to float32 by current JAX/MLX behavior, so it is an agreement and future-proofing probe rather than a production backend.
 - `jax`, `jax_auto`, `jax_mps`: experimental. On the tested Apple Silicon/JAX-MPS environment, MPS saw the GPU but failed the required complex `eigh`/`eig` operations, so the ordinary complex-eigensolver MPS backend is not usable for GROND.
 
 GROND intentionally raises a backend error if a JAX backend cannot run the complex Hermitian and non-Hermitian eigensolvers. It must not silently fall back to SciPy, because that would make timing comparisons meaningless.
@@ -30,7 +30,7 @@ Bounded high-level smoke:
 
 ## Reactivation Criteria
 
-Before promoting any JAX/Metal path, rerun a real parity benchmark and require:
+Before promoting any JAX/Metal path, rerun a real agreement benchmark and require:
 
 - Complex Hermitian `eigh` works on the intended device.
 - Complex non-Hermitian `eig` works on the intended device.
@@ -75,6 +75,6 @@ The N128/Q20 direct Bloch benchmark used 4,816 selected rows, `l,-k,h`, no absor
 | SciPy, vectorized Hamiltonian | 10 CPU workers | 15.03 s | 320.4 rows/s | production winner |
 | JAX CUDA batched `pmap` | 3 GPUs | 121.45 s | 39.7 rows/s | correct but not promoted |
 
-The JAX full-run R factors matched the SciPy full-run endpoint to displayed precision. On the bounded 96-row N128/Q20 parity check, JAX matched SciPy with maximum relative `dyn_raw` difference `2.04e-13`, identical `born_raw`, identical basis sizes, and maximum relative `dyn_scaled` difference `2.10e-13`.
+The JAX full-run R factors matched the SciPy full-run endpoint to displayed precision. On the bounded 96-row N128/Q20 agreement check, JAX matched SciPy with maximum relative `dyn_raw` difference `2.04e-13`, identical `born_raw`, identical basis sizes, and maximum relative `dyn_scaled` difference `2.10e-13`.
 
 The largest performance win in this test was not CUDA; it was vectorizing Hamiltonian construction and diagonalizing only once per profile point before applying thickness quadrature. That changed the 96-row N128/Q20 SciPy single-worker wall time from 27.90 s to 4.10 s with identical row output. Keep SciPy CPU parallelism as the default until a future accelerator moves more of row setup, basis selection, Hamiltonian construction, and same-size batching onto the accelerator.
