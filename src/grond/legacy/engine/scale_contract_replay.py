@@ -336,7 +336,27 @@ def build_replay_rows(
         scale_params, group_scale_params, detector_scale_params = count_scale_params(groups, det_bins, fit_good, int(spec.get("detector_bins", detector_base)))
     total_params = int(scale_params + physical_params)
     row_metrics = row_mr_metrics(obs, sig, dyn_scaled, masks["all"], instability_u, 3.0)
+    row_metrics_work = row_mr_metrics(obs, sig, dyn_scaled, masks["work"], instability_u, 3.0)
+    row_metrics_free = row_mr_metrics(obs, sig, dyn_scaled, masks["free"], instability_u, 3.0)
     native = native_metrics(obs, sig, dyn_scaled, masks["all"], native_wght_a, native_wght_b, n_params=total_params)
+    native_work = native_metrics(
+        obs,
+        sig,
+        dyn_scaled,
+        masks["work"],
+        native_wght_a,
+        native_wght_b,
+        n_params=total_params,
+    )
+    native_free = native_metrics(
+        obs,
+        sig,
+        dyn_scaled,
+        masks["free"],
+        native_wght_a,
+        native_wght_b,
+        n_params=total_params,
+    )
     candidate = {
         "name": spec["name"],
         "frame_model": str(spec["kind"]),
@@ -353,7 +373,11 @@ def build_replay_rows(
         "total_params": int(total_params),
         "fit_scale_log_step_rms": log_scale_step_rms(frame_scales),
         **row_metrics,
+        "row_work": row_metrics_work,
+        "row_free": row_metrics_free,
         "native": native,
+        "native_work": native_work,
+        "native_free": native_free,
         "information": information_criteria(native, total_params),
     }
     updated = []
@@ -370,6 +394,229 @@ def build_replay_rows(
         new["scale_replay_model"] = str(spec["name"])
         updated.append(new)
     return updated, {"candidate": candidate, "fieldnames": fields}
+
+
+def _finite_float(value, default: float = float("nan")) -> float:
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return default
+    return out if math.isfinite(out) else default
+
+
+def _percent_or_blank(value) -> str:
+    val = _finite_float(value)
+    if not math.isfinite(val):
+        return ""
+    return f"{100.0 * val:.2f}%"
+
+
+def choose_publication_endpoint(
+    rows_out: list[dict[str, object]],
+    *,
+    goof_min: float,
+    goof_max: float,
+    max_r1_cost: float,
+    free_wr2_tolerance: float,
+    prefer_wght_mode: str,
+) -> dict[str, object]:
+    """Choose a conservative publication endpoint from replayed scale contracts.
+
+    The low-R branch is kept as a diagnostic.  The publication branch must pass
+    the conventional endpoint GooF gate and stay close to the low-R endpoint,
+    while keeping the held-out row-space loss near the best held-out row result.
+    Among passing candidates, GROND picks the smallest scale model.
+    """
+
+    finite = [
+        row for row in rows_out
+        if math.isfinite(_finite_float(row.get("shelxl_R1all")))
+        and math.isfinite(_finite_float(row.get("shelxl_GooF")))
+    ]
+    if not finite:
+        return {
+            "status": "no_finite_endpoints",
+            "publication_endpoint": None,
+            "low_r_diagnostic": None,
+            "rejections": [],
+        }
+
+    low_r = min(finite, key=lambda r: (_finite_float(r.get("shelxl_R1all"), float("inf")), int(r.get("scale_params", 10**9))))
+    best_free = min(
+        finite,
+        key=lambda r: (
+            _finite_float(r.get("native_free_wR2_all"), float("inf")),
+            _finite_float(r.get("native_wR2_all"), float("inf")),
+            int(r.get("scale_params", 10**9)),
+        ),
+    )
+    low_r_r1 = _finite_float(low_r.get("shelxl_R1all"), float("inf"))
+    best_free_wr2 = _finite_float(best_free.get("native_free_wR2_all"), float("inf"))
+    prefer = str(prefer_wght_mode)
+    passing: list[dict[str, object]] = []
+    rejections: list[dict[str, object]] = []
+    for row in finite:
+        reasons = []
+        goof = _finite_float(row.get("shelxl_GooF"), float("inf"))
+        r1 = _finite_float(row.get("shelxl_R1all"), float("inf"))
+        free_wr2 = _finite_float(row.get("native_free_wR2_all"), float("inf"))
+        if str(row.get("wght_mode")) != prefer:
+            reasons.append(f"not preferred weight mode {prefer!r}")
+        if goof < float(goof_min) or goof > float(goof_max):
+            reasons.append(f"GooF {goof:.3g} outside {goof_min:.3g}-{goof_max:.3g}")
+        if r1 > low_r_r1 + float(max_r1_cost):
+            reasons.append(f"R1all cost {100.0 * (r1 - low_r_r1):.2f}% exceeds {100.0 * max_r1_cost:.2f}%")
+        if free_wr2 > best_free_wr2 + float(free_wr2_tolerance):
+            reasons.append(
+                f"held-out row wR2 cost {100.0 * (free_wr2 - best_free_wr2):.2f}% exceeds "
+                f"{100.0 * free_wr2_tolerance:.2f}%"
+            )
+        if reasons:
+            rejections.append(
+                {
+                    "spec": row.get("spec"),
+                    "wght_mode": row.get("wght_mode"),
+                    "reasons": reasons,
+                    "shelxl_R1all": row.get("shelxl_R1all"),
+                    "shelxl_GooF": row.get("shelxl_GooF"),
+                    "native_free_wR2_all": row.get("native_free_wR2_all"),
+                    "scale_params": row.get("scale_params"),
+                    "endpoint_dir": row.get("endpoint_dir"),
+                }
+            )
+        else:
+            passing.append(row)
+
+    if passing:
+        selected = min(
+            passing,
+            key=lambda r: (
+                int(r.get("scale_params", 10**9)),
+                _finite_float(r.get("native_free_wR2_all"), float("inf")),
+                _finite_float(r.get("shelxl_R1all"), float("inf")),
+            ),
+        )
+        status = "passed"
+    else:
+        selected = min(
+            [r for r in finite if str(r.get("wght_mode")) == prefer] or finite,
+            key=lambda r: (
+                max(float(goof_min) - _finite_float(r.get("shelxl_GooF"), 0.0), 0.0)
+                + max(_finite_float(r.get("shelxl_GooF"), float("inf")) - float(goof_max), 0.0),
+                max(_finite_float(r.get("shelxl_R1all"), float("inf")) - low_r_r1 - float(max_r1_cost), 0.0),
+                int(r.get("scale_params", 10**9)),
+            ),
+        )
+        status = "no_candidate_passed_all_gates"
+
+    return {
+        "status": status,
+        "publication_endpoint": selected,
+        "low_r_diagnostic": low_r,
+        "best_heldout_row": best_free,
+        "gates": {
+            "goof_min": float(goof_min),
+            "goof_max": float(goof_max),
+            "max_r1_cost": float(max_r1_cost),
+            "free_wr2_tolerance": float(free_wr2_tolerance),
+            "preferred_wght_mode": prefer,
+        },
+        "passing_count": len(passing),
+        "candidate_count": len(finite),
+        "rejections": rejections,
+    }
+
+
+def write_publication_report(path: Path, selection: dict[str, object], rows_out: list[dict[str, object]], elapsed_s: float) -> None:
+    selected = selection.get("publication_endpoint") or {}
+    low_r = selection.get("low_r_diagnostic") or {}
+    best_free = selection.get("best_heldout_row") or {}
+    lines = [
+        "# GROND Endpoint Calibration Report",
+        "",
+        "This report separates the low-R diagnostic corrected-HKL export from the conservative publication export. "
+        "The publication branch uses fixed row corrections, a declared compact scale contract, endpoint sigma calibration, "
+        "and a fixed `WGHT 0 0` branch unless requested otherwise.",
+        "",
+        f"Runtime: `{elapsed_s:.2f}` seconds.",
+        f"Selection status: `{selection.get('status')}`.",
+        "",
+        "## Selected Publication Endpoint",
+        "",
+    ]
+    if selected:
+        lines += [
+            f"Spec: `{selected.get('spec')}`; weight mode: `{selected.get('wght_mode')}`.",
+            f"Scale parameters: `{selected.get('scale_params')}`; total row-model parameters: `{selected.get('total_params')}`.",
+            f"SHELXL: R1gt `{_percent_or_blank(selected.get('shelxl_R1gt'))}`, "
+            f"R1all `{_percent_or_blank(selected.get('shelxl_R1all'))}`, "
+            f"wR2all `{_percent_or_blank(selected.get('shelxl_wR2all'))}`, "
+            f"GooF `{_finite_float(selected.get('shelxl_GooF')):.3f}`.",
+            f"Row-space all: R1all `{_percent_or_blank(selected.get('native_R1_all'))}`, "
+            f"wR2all `{_percent_or_blank(selected.get('native_wR2_all'))}`, "
+            f"S_GROND `{_finite_float(selected.get('native_GooF')):.3f}`.",
+            f"Row-space held-out: R1all `{_percent_or_blank(selected.get('native_free_R1_all'))}`, "
+            f"wR2all `{_percent_or_blank(selected.get('native_free_wR2_all'))}`, "
+            f"S_GROND_free `{_finite_float(selected.get('native_free_GooF')):.3f}`.",
+            f"Endpoint sigma scale: `{_finite_float(selected.get('sigma_scale')):.4g}`; "
+            f"held-out RMS(z) after calibration `{_finite_float(selected.get('heldout_rms_z_after')):.3f}`.",
+            f"Files: `{selected.get('endpoint_dir')}`.",
+            "",
+        ]
+    else:
+        lines.append("No finite publication endpoint was available.")
+        lines.append("")
+
+    if low_r:
+        r_cost = _finite_float(selected.get("shelxl_R1all")) - _finite_float(low_r.get("shelxl_R1all")) if selected else float("nan")
+        lines += [
+            "## Low-R Diagnostic Endpoint",
+            "",
+            f"Spec: `{low_r.get('spec')}`; weight mode: `{low_r.get('wght_mode')}`.",
+            f"SHELXL: R1all `{_percent_or_blank(low_r.get('shelxl_R1all'))}`, "
+            f"wR2all `{_percent_or_blank(low_r.get('shelxl_wR2all'))}`, "
+            f"GooF `{_finite_float(low_r.get('shelxl_GooF')):.3f}`.",
+            f"Publication R1all cost versus this low-R branch: `{100.0 * r_cost:.2f}%`.",
+            f"Files: `{low_r.get('endpoint_dir')}`.",
+            "",
+        ]
+    if best_free:
+        lines += [
+            "## Best Held-Out Row Endpoint",
+            "",
+            f"Spec: `{best_free.get('spec')}`; weight mode: `{best_free.get('wght_mode')}`; "
+            f"held-out row wR2all `{_percent_or_blank(best_free.get('native_free_wR2_all'))}`.",
+            "",
+        ]
+
+    lines += [
+        "## Candidate Table",
+        "",
+        "| spec | WGHT mode | scale params | R1all | wR2all | GooF | row free wR2all | sigma scale | endpoint |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---|",
+    ]
+    for row in sorted(
+        rows_out,
+        key=lambda r: (
+            str(r.get("wght_mode")) != str((selection.get("gates") or {}).get("preferred_wght_mode", "freeze-zero")),
+            _finite_float(r.get("shelxl_R1all"), float("inf")),
+            int(r.get("scale_params", 10**9)),
+        ),
+    ):
+        lines.append(
+            f"| `{row.get('spec')}` | `{row.get('wght_mode')}` | {row.get('scale_params')} | "
+            f"{_percent_or_blank(row.get('shelxl_R1all'))} | {_percent_or_blank(row.get('shelxl_wR2all'))} | "
+            f"{_finite_float(row.get('shelxl_GooF')):.3f} | {_percent_or_blank(row.get('native_free_wR2_all'))} | "
+            f"{_finite_float(row.get('sigma_scale')):.4g} | `{row.get('endpoint_dir')}` |"
+        )
+
+    if selection.get("rejections"):
+        lines += ["", "## Gate Rejections", ""]
+        for rejection in selection["rejections"][:30]:
+            reasons = "; ".join(str(r) for r in rejection.get("reasons", []))
+            lines.append(f"- `{rejection.get('spec')}` / `{rejection.get('wght_mode')}`: {reasons}")
+
+    path.write_text("\n".join(lines).rstrip() + "\n")
 
 
 def main() -> None:
@@ -390,10 +637,16 @@ def main() -> None:
     ap.add_argument("--shelxl", default="shelxl")
     ap.add_argument("--shelxl-iterations", type=int, default=5)
     ap.add_argument("--wght-modes", default="promote,freeze-zero")
+    ap.add_argument("--publication-goof-min", type=float, default=0.85)
+    ap.add_argument("--publication-goof-max", type=float, default=1.15)
+    ap.add_argument("--publication-max-r1-cost", type=float, default=0.010)
+    ap.add_argument("--publication-free-wr2-tolerance", type=float, default=0.040)
+    ap.add_argument("--publication-prefer-wght-mode", default="freeze-zero")
     ap.add_argument("--instability-u", type=float, default=0.01)
     ap.add_argument("--native-wght-a", type=float, default=float("nan"))
     ap.add_argument("--native-wght-b", type=float, default=float("nan"))
     args = ap.parse_args()
+    t0 = __import__("time").perf_counter()
 
     row_table = Path(args.row_table).expanduser().resolve()
     summary_path = Path(args.summary).expanduser().resolve() if args.summary else row_table.parent / "summary.json"
@@ -472,6 +725,14 @@ def main() -> None:
                 "native_wR2_all": meta["candidate"]["native"]["wR2_all"],
                 "native_GooF": meta["candidate"]["native"]["GooF"],
                 "native_chi2": meta["candidate"]["native"]["chi2"],
+                "native_work_R1_gt": meta["candidate"]["native_work"]["R1_gt"],
+                "native_work_R1_all": meta["candidate"]["native_work"]["R1_all"],
+                "native_work_wR2_all": meta["candidate"]["native_work"]["wR2_all"],
+                "native_work_GooF": meta["candidate"]["native_work"]["GooF"],
+                "native_free_R1_gt": meta["candidate"]["native_free"]["R1_gt"],
+                "native_free_R1_all": meta["candidate"]["native_free"]["R1_all"],
+                "native_free_wR2_all": meta["candidate"]["native_free"]["wR2_all"],
+                "native_free_GooF": meta["candidate"]["native_free"]["GooF"],
                 "bic_fitted_variance": meta["candidate"]["information"]["bic_fitted_variance"],
                 "shelxl_R1gt": sh.get("R1_gt", ""),
                 "shelxl_Ngt": sh.get("N_gt", ""),
@@ -487,8 +748,23 @@ def main() -> None:
             })
     fieldnames = list(rows_out[0].keys()) if rows_out else []
     write_rows(out / "scale_contract_endpoint_replay.csv", rows_out, fieldnames)
-    (out / "summary.json").write_text(json.dumps({"rows": rows_out}, indent=2, allow_nan=True) + "\n")
-    print(json.dumps({"rows": rows_out}, indent=2, allow_nan=True))
+    elapsed = float(__import__("time").perf_counter() - t0)
+    selection = choose_publication_endpoint(
+        rows_out,
+        goof_min=float(args.publication_goof_min),
+        goof_max=float(args.publication_goof_max),
+        max_r1_cost=float(args.publication_max_r1_cost),
+        free_wr2_tolerance=float(args.publication_free_wr2_tolerance),
+        prefer_wght_mode=str(args.publication_prefer_wght_mode),
+    )
+    summary_out = {
+        "rows": rows_out,
+        "publication_selection": selection,
+        "wall_seconds": elapsed,
+    }
+    (out / "summary.json").write_text(json.dumps(summary_out, indent=2, allow_nan=True) + "\n")
+    write_publication_report(out / "REPORT.md", selection, rows_out, elapsed)
+    print(json.dumps(summary_out, indent=2, allow_nan=True))
 
 
 if __name__ == "__main__":

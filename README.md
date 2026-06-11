@@ -220,6 +220,17 @@ For full `auto` endpoints, GROND therefore uses a deliberately simple post-Bloch
 
 The same logic applies to compact scale factors. GROND does not choose the final scale manifold by simply asking for the lowest R factor with the fewest parameters. It first requires the compact scale model to preserve all-row GROND row/MR and native row-space residuals relative to the full fitted scale curve. Only inside that acceptable set does it report AIC/BIC-style information criteria and the scale-parameter savings. A fixed `WGHT 0 0` endpoint replay is useful for diagnosing how much SHELXL's model-dependent weighting is shaping `wR2all` and GooF, but a better-looking endpoint weight statistic is not allowed to overrule a damaged row model.
 
+For a finished single-dataset row table, `GROND calibrate-endpoint` runs this final decision explicitly. It replays a small tournament of scale contracts from the frozen row-wise `q = Idyn/Iborn` correction, writes corrected HKL endpoints, calibrates endpoint sigmas with the declared `uniform_z_rms` policy, and tries both a clean `WGHT 0 0` branch and a conventional SHELXL-weight branch. The promoted publication endpoint must pass a conventional GooF gate, stay within a configured R1all cost of the lowest-R diagnostic branch, and preserve held-out row-space residuals. The low-R branch is still written and reported, but it is labeled diagnostic when its GooF or scale complexity would make the public Table 1 endpoint hard to defend.
+
+```bash
+GROND calibrate-endpoint \
+  --row-table grond_out/final/native_dyn_calc.csv \
+  --summary grond_out/final/summary.json \
+  --out-dir grond_out/endpoint_calibration \
+  --lambda-q 1.0 \
+  --shelxl shelxl
+```
+
 ## Validating the LS1 Approximation
 
 The high-speed structure-update path in GROND is intentionally described as an alternating Bloch/LS1 surrogate, not as exact native dynamical least squares. For fixed row-wise `q = Idyn/Iborn`, the corrected-HKL least-squares step is a valid frozen-q surrogate. It is not identical to a native dynamical optimizer because SHELXL sees the `q dBorn/dp` part of the derivative but not the `Born dq/dp` part inside each LS1 step. GROND therefore treats row-level null controls and optional native finite-difference polish as part of the scientific validation rather than as decoration.

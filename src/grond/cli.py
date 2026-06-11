@@ -4799,6 +4799,16 @@ def cmd_scale_replay(args: argparse.Namespace) -> int:
         args.wght_modes,
         "--instability-u",
         str(args.instability_u),
+        "--publication-goof-min",
+        str(args.publication_goof_min),
+        "--publication-goof-max",
+        str(args.publication_goof_max),
+        "--publication-max-r1-cost",
+        str(args.publication_max_r1_cost),
+        "--publication-free-wr2-tolerance",
+        str(args.publication_free_wr2_tolerance),
+        "--publication-prefer-wght-mode",
+        args.publication_prefer_wght_mode,
     ]
     if args.summary:
         cmd += ["--summary", str(Path(args.summary).expanduser().resolve())]
@@ -4814,7 +4824,9 @@ def cmd_scale_replay(args: argparse.Namespace) -> int:
         json.dumps(
             {
                 "out_dir": str(out_dir),
+                "report": str((out_dir / "REPORT.md").resolve()),
                 "endpoint_csv": str((out_dir / "scale_contract_endpoint_replay.csv").resolve()),
+                "publication_selection": summary.get("publication_selection", {}),
                 "rows": summary.get("rows", []),
             },
             indent=2,
@@ -4822,6 +4834,12 @@ def cmd_scale_replay(args: argparse.Namespace) -> int:
         )
     )
     return 0
+
+
+def cmd_calibrate_endpoint(args: argparse.Namespace) -> int:
+    """Production-facing alias for conservative endpoint calibration."""
+
+    return cmd_scale_replay(args)
 
 
 def add_common_run_args(ap: argparse.ArgumentParser) -> None:
@@ -5249,10 +5267,49 @@ def build_parser() -> argparse.ArgumentParser:
     p_scale_replay.add_argument("--shelxl", default="shelxl")
     p_scale_replay.add_argument("--shelxl-iterations", type=int, default=5)
     p_scale_replay.add_argument("--wght-modes", default="promote,freeze-zero", help="Comma list of endpoint weight policies; freeze-zero keeps active WGHT 0 0.")
+    p_scale_replay.add_argument("--publication-goof-min", type=float, default=0.85)
+    p_scale_replay.add_argument("--publication-goof-max", type=float, default=1.15)
+    p_scale_replay.add_argument("--publication-max-r1-cost", type=float, default=0.010)
+    p_scale_replay.add_argument("--publication-free-wr2-tolerance", type=float, default=0.040)
+    p_scale_replay.add_argument("--publication-prefer-wght-mode", default="freeze-zero")
     p_scale_replay.add_argument("--instability-u", type=float, default=0.01)
     p_scale_replay.add_argument("--native-wght-a", type=float, default=None)
     p_scale_replay.add_argument("--native-wght-b", type=float, default=None)
     p_scale_replay.set_defaults(func=cmd_scale_replay)
+
+    p_cal_endpoint = sub.add_parser("calibrate-endpoint", help="Choose a conservative corrected-HKL publication endpoint from a frozen GROND row table.")
+    p_cal_endpoint.add_argument("--row-table", required=True)
+    p_cal_endpoint.add_argument("--summary", default="")
+    p_cal_endpoint.add_argument("--res", default="", help="Source RES file. Defaults to the RES path recorded in the row summary.")
+    p_cal_endpoint.add_argument("--out-dir", required=True)
+    p_cal_endpoint.add_argument("--python", default="")
+    add_tool_config_args(p_cal_endpoint)
+    p_cal_endpoint.add_argument("--dry-run", action="store_true")
+    p_cal_endpoint.add_argument(
+        "--specs",
+        default="baseline,adaptive:293:det8,adaptive:200:det8,adaptive:120:det8,adaptive:80:det8,window:0.5:det8,window:1.0:det8,window:1.5:det8,window:3.0:det8,window:5.0:det8,window:1.0:det4,window:3.0:det4,window:5.0:det4,window:3.0:det1",
+        help="Comma list of scale contracts: baseline, adaptive:N:det8, window:DEG:det8, or stride:N:det8.",
+    )
+    p_cal_endpoint.add_argument("--fit-split", default="all")
+    p_cal_endpoint.add_argument("--lambda-q", type=float, default=1.0)
+    p_cal_endpoint.add_argument("--rescale", choices=["median-iobs", "none"], default="median-iobs")
+    p_cal_endpoint.add_argument("--hkl-float-format", choices=["shelx_fixed", "wide"], default="shelx_fixed")
+    p_cal_endpoint.add_argument("--post-bloch-sigma-policy", choices=["none", "uniform_z_rms"], default="uniform_z_rms")
+    p_cal_endpoint.add_argument("--post-bloch-sigma-holdout-fraction", type=float, default=0.20)
+    p_cal_endpoint.add_argument("--post-bloch-sigma-min-scale", type=float, default=0.05)
+    p_cal_endpoint.add_argument("--post-bloch-sigma-max-scale", type=float, default=4.0)
+    p_cal_endpoint.add_argument("--shelxl", default="shelxl")
+    p_cal_endpoint.add_argument("--shelxl-iterations", type=int, default=1)
+    p_cal_endpoint.add_argument("--wght-modes", default="freeze-zero,promote", help="Comma list of endpoint weight policies; freeze-zero keeps active WGHT 0 0.")
+    p_cal_endpoint.add_argument("--publication-goof-min", type=float, default=0.85)
+    p_cal_endpoint.add_argument("--publication-goof-max", type=float, default=1.15)
+    p_cal_endpoint.add_argument("--publication-max-r1-cost", type=float, default=0.010)
+    p_cal_endpoint.add_argument("--publication-free-wr2-tolerance", type=float, default=0.040)
+    p_cal_endpoint.add_argument("--publication-prefer-wght-mode", default="freeze-zero")
+    p_cal_endpoint.add_argument("--instability-u", type=float, default=0.01)
+    p_cal_endpoint.add_argument("--native-wght-a", type=float, default=None)
+    p_cal_endpoint.add_argument("--native-wght-b", type=float, default=None)
+    p_cal_endpoint.set_defaults(func=cmd_calibrate_endpoint)
 
     p_validate_ls1 = sub.add_parser("validate-ls1", help="Run LS1 fixed-point controls and optional matched native finite-difference polish.")
     p_validate_ls1.add_argument("--source-summary", required=True, help="Existing native_row_regularize summary whose selected nuisance values should be pinned.")

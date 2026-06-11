@@ -129,6 +129,16 @@ def test_utility_commands_parse():
     replay = build_parser().parse_args(["scale-replay", "--row-table", "native_dyn_calc.csv", "--out-dir", "replay"])
     assert replay.command == "scale-replay"
     assert replay.post_bloch_sigma_policy == "uniform_z_rms"
+    assert replay.publication_prefer_wght_mode == "freeze-zero"
+    calibrate = build_parser().parse_args(
+        ["calibrate-endpoint", "--row-table", "native_dyn_calc.csv", "--out-dir", "calibrated"]
+    )
+    assert calibrate.command == "calibrate-endpoint"
+    assert calibrate.wght_modes == "freeze-zero,promote"
+    assert calibrate.shelxl_iterations == 1
+    assert calibrate.post_bloch_sigma_min_scale == 0.05
+    assert calibrate.publication_goof_min == 0.85
+    assert calibrate.publication_free_wr2_tolerance == 0.040
     ls1 = build_parser().parse_args(
         [
             "validate-ls1",
