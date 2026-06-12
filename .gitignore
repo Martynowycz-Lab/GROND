@@ -10,6 +10,7 @@ build/
 dist/
 outputs/
 grond_out/
+paper/
 *.log
 *.npz
 *.npy
