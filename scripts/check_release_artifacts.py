@@ -31,6 +31,14 @@ PACKAGE_BOUNDARY_TERMS = (
     "3D-" + "ED",
 )
 
+REQUIRED_SDIST_SUFFIXES = (
+    "docs/DEVELOPMENT.md",
+    "docs/INSTALL.md",
+    "docs/QUICKSTART.md",
+    "scripts/check_release_artifacts.py",
+    "tests/test_package_metadata.py",
+)
+
 
 def text_from_bytes(data: bytes) -> str:
     """Decode archive members defensively for simple token scans."""
@@ -75,9 +83,11 @@ def scan_sdist(artifact: Path, failures: list[str]) -> int:
     """Scan one source distribution and return its member count."""
 
     count = 0
+    names: list[str] = []
     with tarfile.open(artifact) as tf:
         for member in tf.getmembers():
             count += 1
+            names.append(member.name)
             scan_name(artifact, member.name, failures)
             if not member.isfile():
                 continue
@@ -86,6 +96,9 @@ def scan_sdist(artifact: Path, failures: list[str]) -> int:
                 failures.append(f"{artifact.name}: {member.name}: could not read member")
                 continue
             scan_text(artifact, member.name, text_from_bytes(extracted.read()), failures)
+    for suffix in REQUIRED_SDIST_SUFFIXES:
+        if not any(name.endswith(suffix) for name in names):
+            failures.append(f"{artifact.name}: missing required source file {suffix}")
     return count
 
 

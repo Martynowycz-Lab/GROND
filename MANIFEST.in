@@ -8,3 +8,4 @@ include environment.yml
 recursive-include docs *.md *.tex *.pdf
 recursive-include examples *.csv *.json
 recursive-include schemas *.json
+recursive-include scripts *.py
