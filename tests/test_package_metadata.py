@@ -158,6 +158,7 @@ def test_development_check_surface_matches_ci():
     shared_commands = (
         "python -m ruff check src/grond tests scripts --no-cache",
         "python -m pytest",
+        "python -m grond validate",
         "python -m grond doctor --probe-bloch",
         "python -m build",
         "check_release_artifacts.py",
