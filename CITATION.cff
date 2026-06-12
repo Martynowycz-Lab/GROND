@@ -1,5 +1,5 @@
 cff-version: 1.2.0
-title: "GROND: Global Refinement Of Non-kinematical Diffraction"
+title: "GROND: Global Regularization Of Non-kinematical Diffraction"
 type: software
 authors:
   - name: Martynowycz Lab
