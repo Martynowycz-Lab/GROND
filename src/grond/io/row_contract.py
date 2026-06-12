@@ -62,9 +62,12 @@ def _as_int(value: Any, *, field: str, row_number: int) -> int:
     if text == "":
         raise ValueError(f"row {row_number}: required integer field {field!r} is blank")
     try:
-        return int(float(text))
+        number = float(text)
     except ValueError as exc:
         raise ValueError(f"row {row_number}: field {field!r} is not an integer: {value!r}") from exc
+    if not math.isfinite(number) or not number.is_integer():
+        raise ValueError(f"row {row_number}: field {field!r} must be an integer Miller index: {value!r}")
+    return int(number)
 
 
 def _normalized_row(row: dict[str, Any], row_number: int) -> dict[str, Any]:
@@ -78,7 +81,7 @@ def _normalized_row(row: dict[str, Any], row_number: int) -> dict[str, Any]:
     out["k"] = _as_int(out["k"], field="k", row_number=row_number)
     out["l"] = _as_int(out["l"], field="l", row_number=row_number)
     out["Iobs"] = _as_float(out["Iobs"], field="Iobs", row_number=row_number)
-    out["sigma_Iobs"] = abs(_as_float(out["sigma_Iobs"], field="sigma_Iobs", row_number=row_number))
+    out["sigma_Iobs"] = _as_float(out["sigma_Iobs"], field="sigma_Iobs", row_number=row_number)
     for field in OPTIONAL_ROW_FIELDS:
         if field in out and field not in {"row_id", "dataset_id", "source"}:
             out[field] = _as_float(out[field], field=field, row_number=row_number)
@@ -121,7 +124,6 @@ def load_row_metadata(path: str | Path) -> dict[str, Any]:
     metadata = json.loads(Path(path).expanduser().read_text())
     if not isinstance(metadata, dict):
         raise ValueError("row metadata must be a JSON object")
-    metadata.setdefault("schema_version", GROND_ROW_SCHEMA_VERSION)
     return metadata
 
 
@@ -151,6 +153,12 @@ def _real_space_axes_from_metadata(metadata: dict[str, Any]) -> np.ndarray:
 
 
 def _required_geometry(metadata: dict[str, Any]) -> dict[str, Any]:
+    schema_version = str(metadata.get("schema_version", "")).strip()
+    if schema_version != GROND_ROW_SCHEMA_VERSION:
+        raise ValueError(f"row metadata schema_version must be {GROND_ROW_SCHEMA_VERSION!r}")
+    if not str(metadata.get("dataset_id", "")).strip():
+        raise ValueError("row metadata must include a non-empty dataset_id")
+
     geometry = metadata.get("geometry") or {}
     required = (
         "wavelength_A",
@@ -436,4 +444,3 @@ def write_xds_compatibility_dir(
     }
     (out / "GROND_ROW_CONTRACT_MANIFEST.json").write_text(json.dumps(manifest, indent=2) + "\n")
     return hkl_path.resolve()
-

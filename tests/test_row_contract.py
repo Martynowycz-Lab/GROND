@@ -4,6 +4,8 @@ import json
 from importlib.resources import files
 from pathlib import Path
 
+import pytest
+
 from grond.io.row_contract import (
     load_row_metadata,
     read_row_table,
@@ -69,3 +71,39 @@ def test_row_contract_accepts_alpha_degrees(tmp_path: Path):
     hkl = write_xds_compatibility_dir(rows, metadata, tmp_path / "bridge")
     data = XDSData(hkl)
     assert data.zcal[0] == 18.0
+
+
+def test_row_contract_rejects_fractional_miller_indices(tmp_path: Path):
+    rows_path = tmp_path / "rows.csv"
+    rows_path.write_text(
+        "h,k,l,Iobs,sigma_Iobs,frame\n"
+        "1.5,0,2,100.0,5.0,1.0\n"
+    )
+
+    with pytest.raises(ValueError, match="integer Miller index"):
+        read_row_table(rows_path)
+
+
+def test_row_contract_preserves_invalid_sigma_for_validation(tmp_path: Path):
+    rows_path, metadata_path = write_template(tmp_path / "rows.csv", tmp_path / "rows_metadata.json")
+    rows_path.write_text(rows_path.read_text().replace("42.1", "-42.1", 1))
+
+    rows = read_row_table(rows_path)
+    metadata = load_row_metadata(metadata_path)
+    summary = validate_row_contract(rows, metadata)
+
+    assert rows[0]["sigma_Iobs"] == -42.1
+    assert summary.positive_sigma_rows == 1
+    assert summary.warnings == ["some rows have non-positive or non-finite sigma_Iobs and will be unusable for weighted scoring"]
+
+
+def test_row_contract_rejects_wrong_metadata_schema_version(tmp_path: Path):
+    rows_path, metadata_path = write_template(tmp_path / "rows.csv", tmp_path / "rows_metadata.json")
+    metadata = json.loads(metadata_path.read_text())
+    metadata["schema_version"] = "grond-row-v0"
+    metadata_path.write_text(json.dumps(metadata))
+
+    rows = read_row_table(rows_path)
+    metadata = load_row_metadata(metadata_path)
+    with pytest.raises(ValueError, match="schema_version"):
+        validate_row_contract(rows, metadata)
