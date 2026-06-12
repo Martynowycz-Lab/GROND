@@ -84,7 +84,7 @@ GROND row-validate \
   --write-xds-dir grond_portable_bridge
 ```
 
-The compatibility directory contains an `INTEGRATE.HKL` whose header declares `FORMAT=GROND_PORTABLE_XDS_COMPAT`, plus `GROND_ROW_CONTRACT_MANIFEST.json`. This file is XDS-like only as an internal compatibility layer. It is not claiming that the data were processed by XDS. Once the bridge exists, it can be used as the row-preserving dataset path in the same way as an XDS directory:
+The compatibility directory contains an `INTEGRATE.HKL` whose header declares `FORMAT=GROND_PORTABLE_XDS_COMPAT`, plus `GROND_ROW_CONTRACT_MANIFEST.json`. This file is XDS-like only as an internal compatibility layer. It is not claiming that the data were processed by XDS. GROND will not write this bridge unless all rows have finite intensities and positive sigmas. Once the bridge exists, it can be used as the row-preserving dataset path in the same way as an XDS directory:
 
 ```bash
 GROND auto \

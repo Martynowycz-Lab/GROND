@@ -95,6 +95,8 @@ def test_row_contract_preserves_invalid_sigma_for_validation(tmp_path: Path):
     assert rows[0]["sigma_Iobs"] == -42.1
     assert summary.positive_sigma_rows == 1
     assert summary.warnings == ["some rows have non-positive or non-finite sigma_Iobs and will be unusable for weighted scoring"]
+    with pytest.raises(ValueError, match="positive sigma_Iobs"):
+        write_xds_compatibility_dir(rows, metadata, tmp_path / "bridge")
 
 
 def test_row_contract_rejects_wrong_metadata_schema_version(tmp_path: Path):

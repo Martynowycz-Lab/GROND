@@ -4166,13 +4166,17 @@ def cmd_row_validate(args: argparse.Namespace) -> int:
         write_xds_compatibility_dir,
     )
 
-    rows = read_row_table(args.rows)
-    metadata = load_row_metadata(args.metadata)
-    summary = validate_row_contract(rows, metadata)
-    payload: dict[str, object] = {"status": "ok", "summary": asdict(summary)}
-    if args.write_xds_dir:
-        hkl_path = write_xds_compatibility_dir(rows, metadata, args.write_xds_dir, overwrite=bool(args.overwrite))
-        payload["xds_compatibility"] = {"integrate_hkl": str(hkl_path)}
+    try:
+        rows = read_row_table(args.rows)
+        metadata = load_row_metadata(args.metadata)
+        summary = validate_row_contract(rows, metadata)
+        payload: dict[str, object] = {"status": "ok", "summary": asdict(summary)}
+        if args.write_xds_dir:
+            hkl_path = write_xds_compatibility_dir(rows, metadata, args.write_xds_dir, overwrite=bool(args.overwrite))
+            payload["xds_compatibility"] = {"integrate_hkl": str(hkl_path)}
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        print(json.dumps({"status": "error", "error": str(exc)}, indent=2))
+        return 2
     print(json.dumps(payload, indent=2))
     return 0
 

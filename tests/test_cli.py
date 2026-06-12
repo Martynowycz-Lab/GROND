@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 
@@ -301,6 +302,30 @@ def test_auto_parser_accepts_dials_input_pair():
     assert args.dials_drop_dont_integrate is False
     assert args.dials_keep_dont_integrate is False
     assert args.sg_window_mode == "auto"
+
+
+def test_row_validate_reports_bad_portable_rows_without_traceback(tmp_path: Path, capsys):
+    from grond.io.row_contract import write_template
+
+    rows_path, metadata_path = write_template(tmp_path / "rows.csv", tmp_path / "rows_metadata.json")
+    rows_path.write_text(rows_path.read_text().replace("42.1", "-42.1", 1))
+
+    args = build_parser().parse_args(
+        [
+            "row-validate",
+            "--rows",
+            str(rows_path),
+            "--metadata",
+            str(metadata_path),
+            "--write-xds-dir",
+            str(tmp_path / "bridge"),
+        ]
+    )
+    assert args.func(args) == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "error"
+    assert "positive sigma_Iobs" in payload["error"]
+    assert not (tmp_path / "bridge" / "INTEGRATE.HKL").exists()
 
 
 def test_auto_sg_window_mode_keeps_fixed_width_unless_explicit():

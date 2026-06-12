@@ -358,6 +358,12 @@ def write_xds_compatibility_dir(
 ) -> Path:
     """Write an XDS-like compatibility directory consumed by the current engine."""
 
+    summary = validate_row_contract(rows, metadata)
+    if summary.finite_rows != len(rows):
+        raise ValueError("all portable rows must have finite Iobs and sigma_Iobs before writing the compatibility directory")
+    if summary.positive_sigma_rows != len(rows):
+        raise ValueError("all portable rows must have positive sigma_Iobs before writing the compatibility directory")
+
     geometry = _required_geometry(metadata)
     out = Path(out_dir).expanduser()
     out.mkdir(parents=True, exist_ok=True)
