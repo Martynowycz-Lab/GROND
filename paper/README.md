@@ -22,6 +22,8 @@ The paper should not claim that the default GROND loop is exact native dynamical
 | `METHODS_MATH.md` | Methods and SI math outline for the regularization loop. |
 | `REVIEWER_OBJECTIONS.md` | Pre-written answers to predictable concerns. |
 | `REPORT_INDEX.md` | Index of current known run reports and their status. |
+| `DOSSIER_CHECKLIST.md` | Required contents of a paper-ready dataset dossier. |
+| `REPORT_TEMPLATE.md` | Standard template for writing each dataset or method-test report from artifacts. |
 
 ## Current Anchor Artifacts
 

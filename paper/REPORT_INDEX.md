@@ -22,3 +22,5 @@ This index points to current known reports. Entries marked `current anchor` shou
 | Histidine counting mode | Full endpoint and maps. |
 | Histidine linear mode | Full endpoint and maps. |
 | External survey | Standard result schema and failure categories. |
+
+Use `REPORT_TEMPLATE.md` for each report and `DOSSIER_CHECKLIST.md` to decide whether a folder is paper-ready.

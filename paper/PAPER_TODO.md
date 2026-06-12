@@ -31,7 +31,8 @@ This list is ordered to stop the project from sprawling. Each task has an output
 ## Immediate Next Actions
 
 1. Make a clean 370 paper rerun folder from the current package command path.
-2. Copy the promoted endpoint and validation artifacts into a 370 flagship dossier or link them in the manifest.
-3. Fill `TABLE1_MASTER.csv` from the clean rerun rather than hand-transcribing from older exploratory folders.
-4. Build Figure 2 first. If Figure 2 is not convincing, fix the evidence chain before adding more datasets.
-5. Run 366 and 366+370 with no tuning changes.
+2. Write the 370 flagship report using `REPORT_TEMPLATE.md`, with current anchors clearly marked until the clean rerun exists.
+3. Copy the promoted endpoint and validation artifacts into a 370 flagship dossier or link them in the manifest.
+4. Fill `TABLE1_MASTER.csv` from the clean rerun rather than hand-transcribing from older exploratory folders.
+5. Build Figure 2 first. If Figure 2 is not convincing, fix the evidence chain before adding more datasets.
+6. Run 366 and 366+370 with no tuning changes.
