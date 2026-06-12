@@ -37,6 +37,7 @@ REQUIRED_SDIST_SUFFIXES = (
     "docs/QUICKSTART.md",
     "scripts/check_release_artifacts.py",
     "tests/test_package_metadata.py",
+    "tests/test_release_artifact_checker.py",
 )
 
 
@@ -108,16 +109,22 @@ def scan_artifacts(path: Path) -> tuple[list[str], list[str]]:
     artifacts = sorted(path.iterdir())
     summaries: list[str] = []
     failures: list[str] = []
+    saw_wheel = False
+    saw_sdist = False
     for artifact in artifacts:
         if artifact.suffix == ".whl":
+            saw_wheel = True
             count = scan_wheel(artifact, failures)
         elif artifact.name.endswith(".tar.gz"):
+            saw_sdist = True
             count = scan_sdist(artifact, failures)
         else:
             continue
         summaries.append(f"{artifact.name}: {count} files")
     if not summaries:
         failures.append(f"{path}: no .whl or .tar.gz artifacts found")
+    elif not saw_wheel or not saw_sdist:
+        failures.append(f"{path}: release check expects both a wheel and a source distribution")
     return summaries, failures
 
 
