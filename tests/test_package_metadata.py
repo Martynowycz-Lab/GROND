@@ -1,4 +1,5 @@
 import importlib.metadata
+import re
 import shlex
 import subprocess
 import tomllib
@@ -23,6 +24,7 @@ TEXT_SUFFIXES = {
     ".yml",
 }
 DOC_COMMAND_FILES = (ROOT / "README.md", *sorted((ROOT / "docs").glob("*.md")))
+MARKDOWN_LINK_RE = re.compile(r"(?<!!)\[[^\]]+\]\(([^)]+)\)")
 
 
 def tracked_files() -> list[Path]:
@@ -71,6 +73,28 @@ def commands_from_block(path: Path, block_start: int, block: list[str]) -> list[
                 break
         commands.append((path.relative_to(ROOT), command_line, " ".join(command_parts)))
     return commands
+
+
+def local_markdown_links() -> list[tuple[Path, int, str]]:
+    links: list[tuple[Path, int, str]] = []
+    for path in DOC_COMMAND_FILES + (
+        ROOT / "CHANGELOG.md",
+        ROOT / "CONTRIBUTING.md",
+        ROOT / "LIMITATIONS.md",
+        ROOT / "PROVENANCE.md",
+    ):
+        for line_number, line in enumerate(path.read_text().splitlines(), start=1):
+            for match in MARKDOWN_LINK_RE.finditer(line):
+                target = match.group(1).strip()
+                if not target or target.startswith(("http://", "https://", "mailto:", "#")):
+                    continue
+                target = target.split("#", 1)[0].strip()
+                if target.startswith("<") and target.endswith(">"):
+                    target = target[1:-1]
+                if " " in target:
+                    target = target.split(" ", 1)[0]
+                links.append((path.relative_to(ROOT), line_number, target))
+    return links
 
 
 def test_license_metadata_is_mit():
@@ -142,6 +166,19 @@ def test_development_check_surface_matches_ci():
     for command in shared_commands:
         assert command in development_text
         assert command in ci_text
+
+
+def test_documented_local_links_resolve():
+    links = local_markdown_links()
+    failures = []
+
+    for path, line_number, target in links:
+        resolved = (ROOT / path).parent / target
+        if not resolved.exists():
+            failures.append(f"{path}:{line_number}: missing {target}")
+
+    assert len(links) >= 10
+    assert failures == []
 
 
 def test_documented_grond_commands_still_parse():
