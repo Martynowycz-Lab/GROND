@@ -550,20 +550,69 @@ def write_prediction_cache(path: Path, save: dict, payload: dict, compression: s
     os.replace(tmp, path)
 
 
+def cacheable_prediction_arrays(pred: dict) -> dict:
+    """Return the numeric prediction arrays that are safe to store in NPZ.
+
+    Prediction dictionaries can also contain live diagnostics such as row-cache
+    status dictionaries.  NumPy stores those as object arrays, which cannot be
+    reloaded with allow_pickle=False and should not be part of the portable
+    prediction cache.
+    """
+
+    skip = {"support_hkls", "cache_status", "cache_path", "row_plan_cache_status"}
+    save = {}
+    for key, value in pred.items():
+        if key in skip:
+            continue
+        arr = np.asarray(value)
+        if arr.dtype.hasobject:
+            continue
+        if arr.dtype.kind not in {"b", "i", "u", "f", "c"}:
+            continue
+        save[key] = arr
+    return save
+
+
+def read_prediction_cache(path: Path) -> dict:
+    """Read a prediction cache, ignoring stale object-array diagnostics."""
+
+    pred = {}
+    skipped = []
+    with np.load(path, allow_pickle=False) as loaded:
+        for key in loaded.files:
+            if key == "meta_json":
+                continue
+            try:
+                value = loaded[key]
+            except ValueError as exc:
+                if "Object arrays cannot be loaded" in str(exc):
+                    skipped.append(key)
+                    continue
+                raise
+            if key == "seconds" and np.ndim(value) == 0:
+                pred[key] = float(value)
+            elif key == "row_plan_cache_unique_diffs" and np.ndim(value) == 0:
+                pred[key] = int(value)
+            else:
+                pred[key] = value
+    if skipped:
+        pred["prediction_cache_skipped_keys"] = skipped
+    return pred
+
+
 def predict_with_cache(data, model, res_hash, hkl_path, res_path, cfg, indices, cache_dir: Path, workers: int, chunksize: int, model_tag: str = "original", cache_compression: str = "compressed"):
     cache_dir.mkdir(parents=True, exist_ok=True)
     key, payload = prediction_cache_key(data, hkl_path, res_path, cfg, indices, model_tag=model_tag)
     path = cache_dir / f"native_pred_{key}.npz"
     if path.exists():
-        loaded = np.load(path, allow_pickle=False)
-        pred = {k: loaded[k] for k in loaded.files if k != "meta_json"}
+        pred = read_prediction_cache(path)
         pred["cache_status"] = "hit"
         pred["cache_path"] = str(path)
         return pred
     ug_cache_dir = runtime_cache_dir("native_row_regularize", "ug")
     port = XDSBlochPort(data, model, cfg, cache_dir=ug_cache_dir, res_hash=res_hash)
     pred = port.predict_rows(indices, workers=workers, chunksize=chunksize)
-    save = {k: v for k, v in pred.items() if k != "support_hkls"}
+    save = cacheable_prediction_arrays(pred)
     write_prediction_cache(path, save, payload, cache_compression)
     pred["cache_status"] = "built"
     pred["cache_path"] = str(path)
