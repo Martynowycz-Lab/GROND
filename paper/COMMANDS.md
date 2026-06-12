@@ -7,10 +7,12 @@ Commands in this file should be copied from completed runs or filled in before r
 This command is reconstructed from the existing `ls1_validation_summary.json`. Recheck flags against the current CLI before rerunning in the clean paper folder.
 
 ```bash
+export GROND_370_ROOT=/path/to/370/cbf_v7/dials/xds_bloch
+
 grond validate-ls1 \
-  --source-summary /Users/Mike/Desktop/MartynowyczLab/data_processing/2026.04.10/370/cbf_v7/dials/xds_bloch/outputs/20260610_366370_multi_ls1_feedback/long_free_h_stability_50cycle/370_single/cycle_02/370_native/summary.json \
-  --start-res /Users/Mike/Desktop/MartynowyczLab/data_processing/2026.04.10/370/cbf_v7/dials/xds_bloch/outputs/20260610_366370_multi_ls1_feedback/long_free_h_stability_50cycle/370_single/cycle_02/370_native/endpoint_lam_1p0_B_0p0_noexti/dyn_nuisance_corrected.res \
-  --out-dir /Users/Mike/Desktop/MartynowyczLab/data_processing/2026.04.10/370/cbf_v7/dials/xds_bloch/outputs/20260611_validate_ls1_370_N108Q20 \
+  --source-summary "${GROND_370_ROOT}/outputs/20260610_366370_multi_ls1_feedback/long_free_h_stability_50cycle/370_single/cycle_02/370_native/summary.json" \
+  --start-res "${GROND_370_ROOT}/outputs/20260610_366370_multi_ls1_feedback/long_free_h_stability_50cycle/370_single/cycle_02/370_native/endpoint_lam_1p0_B_0p0_noexti/dyn_nuisance_corrected.res" \
+  --out-dir "${GROND_370_ROOT}/outputs/20260611_validate_ls1_370_N108Q20" \
   --cycles 5 \
   --n-basis 108 \
   --n-points 20 \
@@ -30,7 +32,7 @@ Current anchor result: selected cycle 1; native row wR2all 10.76%; q=1/Born endp
 The existing endpoint calibration report is:
 
 ```text
-/Users/Mike/Desktop/MartynowyczLab/data_processing/2026.04.10/370/cbf_v7/dials/xds_bloch/outputs/20260611_endpoint_calibration_370_calibrate_endpoint_verify/REPORT.md
+${GROND_370_ROOT}/outputs/20260611_endpoint_calibration_370_calibrate_endpoint_verify/REPORT.md
 ```
 
 Current anchor result: selected publication endpoint `adaptive_120_det_8`, `WGHT 0 0` branch, 184 scale parameters, total row-model parameters 194, R1gt 5.81%, R1all 10.97%, wR2all 10.07%, GooF 0.906, held-out row wR2all 15.08%. The low-R diagnostic branch used 708 scale parameters and was rejected for publication promotion because GooF and scale complexity failed the declared endpoint logic.
@@ -38,7 +40,7 @@ Current anchor result: selected publication endpoint `adaptive_120_det_8`, `WGHT
 Paste the exact rerun command here after the clean paper-folder replay:
 
 ```bash
-# TODO: grond calibrate-endpoint ...
+# Pending command: grond calibrate-endpoint ...
 ```
 
 ## Clean 370 Paper Rerun
@@ -46,15 +48,15 @@ Paste the exact rerun command here after the clean paper-folder replay:
 Use this section for the clean flagship dossier. The run should create a single folder with auto output, validation output, endpoint calibration output, maps, and command logs.
 
 ```bash
-# TODO: grond auto ...
+# Pending command: grond auto ...
 ```
 
 ```bash
-# TODO: grond validate-ls1 ...
+# Pending command: grond validate-ls1 ...
 ```
 
 ```bash
-# TODO: grond calibrate-endpoint ...
+# Pending command: grond calibrate-endpoint ...
 ```
 
 ## Tyrosine Replication
@@ -62,11 +64,11 @@ Use this section for the clean flagship dossier. The run should create a single 
 Run the same command path without hand tuning.
 
 ```bash
-# TODO: tyrosine 366 XDS command
+# Pending command: tyrosine 366 XDS
 ```
 
 ```bash
-# TODO: tyrosine 366+370 XDS command
+# Pending command: tyrosine 366+370 XDS
 ```
 
 ## DIALS Route
@@ -74,7 +76,7 @@ Run the same command path without hand tuning.
 DIALS should be shown as supported and auditable. It does not need to beat XDS in Paper 1.
 
 ```bash
-# TODO: DIALS bridge or auto command for 370
+# Pending command: DIALS bridge or auto command for 370
 ```
 
 ## Histidine
@@ -82,11 +84,11 @@ DIALS should be shown as supported and auditable. It does not need to beat XDS i
 Run counting-mode and linear-mode datasets through the same frozen path.
 
 ```bash
-# TODO: histidine counting-mode command
+# Pending command: histidine counting-mode
 ```
 
 ```bash
-# TODO: histidine linear-mode command
+# Pending command: histidine linear-mode
 ```
 
 ## External Survey Package
@@ -94,5 +96,5 @@ Run counting-mode and linear-mode datasets through the same frozen path.
 The external survey should use one command and one result schema. It should not become a tuning exercise.
 
 ```bash
-# TODO: grond auto-full --validate-ls1 ...
+# Pending command: grond auto-full --validate-ls1 ...
 ```

@@ -27,14 +27,14 @@ The paper should not claim that the default GROND loop is exact native dynamical
 
 ## Current Anchor Artifacts
 
-These are current working anchors, not a substitute for the clean paper rerun. They seed the manifest and figure plan.
+These are current working anchors, not a substitute for the clean paper rerun. They seed the manifest and figure plan. Paths use `GROND_370_ROOT` for the local 370 project root so the paper workspace does not hard-code one user's filesystem.
 
 | Artifact | Current path |
 |---|---|
-| 370 endpoint calibration report | `/Users/Mike/Desktop/MartynowyczLab/data_processing/2026.04.10/370/cbf_v7/dials/xds_bloch/outputs/20260611_endpoint_calibration_370_calibrate_endpoint_verify/REPORT.md` |
-| 370 LS1 validation, N108/Q20 | `/Users/Mike/Desktop/MartynowyczLab/data_processing/2026.04.10/370/cbf_v7/dials/xds_bloch/outputs/20260611_validate_ls1_370_N108Q20/LS1_VALIDATION_REPORT.md` |
-| 370 LS1 validation summary, N108/Q20 | `/Users/Mike/Desktop/MartynowyczLab/data_processing/2026.04.10/370/cbf_v7/dials/xds_bloch/outputs/20260611_validate_ls1_370_N108Q20/ls1_validation_summary.json` |
-| 370 LS1 validation, N30/Q20 smoke | `/Users/Mike/Desktop/MartynowyczLab/data_processing/2026.04.10/370/cbf_v7/dials/xds_bloch/outputs/20260611_validate_ls1_370_N30Q20/LS1_VALIDATION_REPORT.md` |
+| 370 endpoint calibration report | `${GROND_370_ROOT}/outputs/20260611_endpoint_calibration_370_calibrate_endpoint_verify/REPORT.md` |
+| 370 LS1 validation, N108/Q20 | `${GROND_370_ROOT}/outputs/20260611_validate_ls1_370_N108Q20/LS1_VALIDATION_REPORT.md` |
+| 370 LS1 validation summary, N108/Q20 | `${GROND_370_ROOT}/outputs/20260611_validate_ls1_370_N108Q20/ls1_validation_summary.json` |
+| 370 LS1 validation, N30/Q20 smoke | `${GROND_370_ROOT}/outputs/20260611_validate_ls1_370_N30Q20/LS1_VALIDATION_REPORT.md` |
 
 ## Paper Boundary
 
