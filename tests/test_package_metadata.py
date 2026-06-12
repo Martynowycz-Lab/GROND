@@ -25,6 +25,28 @@ TEXT_SUFFIXES = {
 }
 DOC_COMMAND_FILES = (ROOT / "README.md", *sorted((ROOT / "docs").glob("*.md")))
 MARKDOWN_LINK_RE = re.compile(r"(?<!!)\[[^\]]+\]\(([^)]+)\)")
+CODE_SPAN_RE = re.compile(r"`([^`]+)`")
+REPO_PATH_PREFIXES = (".github/", "docs/", "examples/", "schemas/", "scripts/", "src/", "tests/")
+REPO_ROOT_FILES = {
+    "CHANGELOG.md",
+    "CITATION.cff",
+    "CONTRIBUTING.md",
+    "LICENSE",
+    "LIMITATIONS.md",
+    "MANIFEST.in",
+    "PROVENANCE.md",
+    "README.md",
+    "constraints.txt",
+    "environment.yml",
+    "pyproject.toml",
+}
+NON_PYTHON_PACKAGE_NAMES = {
+    "package.json",
+    "package-lock.json",
+    "pn" + "pm-lock.yaml",
+    "ya" + "rn.lock",
+}
+NON_PYTHON_PACKAGE_SUFFIXES = {".js", ".jsx", ".ts", ".tsx"}
 
 
 def tracked_files() -> list[Path]:
@@ -97,6 +119,24 @@ def local_markdown_links() -> list[tuple[Path, int, str]]:
     return links
 
 
+def documented_repo_paths() -> list[tuple[Path, int, str]]:
+    paths: list[tuple[Path, int, str]] = []
+    for path in DOC_COMMAND_FILES + (
+        ROOT / "CHANGELOG.md",
+        ROOT / "CONTRIBUTING.md",
+        ROOT / "LIMITATIONS.md",
+        ROOT / "PROVENANCE.md",
+    ):
+        for line_number, line in enumerate(path.read_text().splitlines(), start=1):
+            for match in CODE_SPAN_RE.finditer(line):
+                target = match.group(1).strip().rstrip(".,:;")
+                if not target or any(char in target for char in "*${}"):
+                    continue
+                if target.startswith(REPO_PATH_PREFIXES) or target in REPO_ROOT_FILES:
+                    paths.append((path.relative_to(ROOT), line_number, target))
+    return paths
+
+
 def test_license_metadata_is_mit():
     pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text())
     installed = importlib.metadata.metadata("grond")
@@ -134,6 +174,19 @@ def test_tracked_text_is_portable():
         for token in banned:
             if token in text:
                 offenders.append(f"{rel_path}: {token}")
+
+    assert offenders == []
+
+
+def test_no_tracked_non_python_frontend_package_artifacts():
+    offenders = []
+    for rel_path in tracked_files():
+        parts = set(rel_path.parts)
+        if "node_modules" in parts:
+            offenders.append(str(rel_path))
+            continue
+        if rel_path.name in NON_PYTHON_PACKAGE_NAMES or rel_path.suffix.lower() in NON_PYTHON_PACKAGE_SUFFIXES:
+            offenders.append(str(rel_path))
 
     assert offenders == []
 
@@ -199,6 +252,18 @@ def test_documented_local_links_resolve():
             failures.append(f"{path}:{line_number}: missing {target}")
 
     assert len(links) >= 10
+    assert failures == []
+
+
+def test_documented_repo_paths_resolve():
+    paths = documented_repo_paths()
+    failures = []
+
+    for path, line_number, target in paths:
+        if not (ROOT / target).exists():
+            failures.append(f"{path}:{line_number}: missing {target}")
+
+    assert len(paths) >= 15
     assert failures == []
 
 

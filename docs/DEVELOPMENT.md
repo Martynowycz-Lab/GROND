@@ -12,6 +12,8 @@ python -m grond doctor --probe-bloch
 
 Keep public modules in the domain folders. Historical experiments should not be added to the package tree unless they are callable, documented, tested, and free of dataset-specific assumptions.
 
+The test suite also checks the public package boundary. Documented GROND commands must still parse, documented repository paths must point to real files, tracked text must not contain private machine paths, and the tree must not gain non-Python frontend package artifacts. These checks are deliberately strict because a new user should be able to read the docs, install the wheel, and understand that GROND is a Python crystallography package.
+
 ## Release Smoke Test
 
 Before tagging a release, build the package from a clean tree and inspect the artifacts. A clean tree avoids stale editable-install metadata such as `src/*.egg-info`.
