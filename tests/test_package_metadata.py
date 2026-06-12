@@ -169,6 +169,25 @@ def test_development_check_surface_matches_ci():
         assert command in ci_text
 
 
+def test_python_support_surface_matches_ci_matrix():
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    ci_text = (ROOT / ".github" / "workflows" / "tests.yml").read_text()
+    readme_text = (ROOT / "README.md").read_text()
+    install_text = (ROOT / "docs" / "INSTALL.md").read_text()
+    versions = [
+        classifier.rsplit("::", 1)[1].strip()
+        for classifier in pyproject["project"]["classifiers"]
+        if classifier.startswith("Programming Language :: Python :: 3.")
+    ]
+
+    assert versions == ["3.11", "3.12", "3.13"]
+    for version in versions:
+        assert f'"{version}"' in ci_text
+        assert version in readme_text
+        assert version in install_text
+    assert pyproject["project"]["requires-python"] == ">=3.11,<3.14"
+
+
 def test_documented_local_links_resolve():
     links = local_markdown_links()
     failures = []

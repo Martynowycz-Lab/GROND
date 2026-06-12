@@ -103,7 +103,7 @@ The reason to use GROND at all is therefore not simply to lower a table value. T
 
 ## Quick Install
 
-For a fresh user, the safest route is Python 3.11 to 3.13 in a clean environment. Python 3.12 is the recommended default today, with 3.11 and 3.12 the most heavily tested:
+For a fresh user, the safest route is Python 3.11 to 3.13 in a clean environment. Python 3.12 is the recommended default today, and GitHub Actions tests 3.11, 3.12, and 3.13:
 
 ```bash
 git clone https://github.com/Martynowycz-Lab/GROND.git

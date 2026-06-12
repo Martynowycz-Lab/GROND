@@ -1,6 +1,6 @@
 # Install
 
-GROND is a normal Python package. The recommended installation is a clean Python 3.11 to 3.13 environment with NumPy, SciPy, Pandas, and Gemmi installed from wheels. Python 3.12 is the recommended default today because it is widely supported by scientific wheels and is one of the most heavily tested GROND environments.
+GROND is a normal Python package. The recommended installation is a clean Python 3.11 to 3.13 environment with NumPy, SciPy, Pandas, and Gemmi installed from wheels. Python 3.12 is the recommended default today because it is widely supported by scientific wheels. GitHub Actions tests 3.11, 3.12, and 3.13.
 
 ## Prerequisites
 
