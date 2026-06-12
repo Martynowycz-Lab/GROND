@@ -30,6 +30,12 @@ GROND doctor --probe-bloch
 
 If `python3.12` is not available but `python3.11` or `python3.13` is, use that executable for the `venv` command.
 
+The package installs both `GROND` and `grond` console commands. If a shell or managed server environment does not find console scripts reliably, use the module form instead:
+
+```bash
+python -m grond doctor --probe-bloch
+```
+
 ## Developer Install
 
 Use the editable install when modifying GROND:
@@ -41,8 +47,8 @@ python3.12 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -e ".[dev]"
-GROND validate
-pytest
+python -m grond validate
+python -m pytest
 ```
 
 ## Conda Or Mamba
