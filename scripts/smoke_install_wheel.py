@@ -48,7 +48,7 @@ def run_checked(cmd: list[str | Path], *, cwd: Path) -> None:
 def smoke_install_wheel(dist_dir: Path) -> None:
     """Install the built wheel and verify module plus console entry points."""
 
-    wheel = find_one_wheel(dist_dir)
+    wheel = find_one_wheel(dist_dir.resolve())
     with tempfile.TemporaryDirectory(prefix="grond-wheel-smoke-") as tmp:
         tmp_dir = Path(tmp)
         venv_dir = tmp_dir / "venv"
