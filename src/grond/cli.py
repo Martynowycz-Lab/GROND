@@ -7,6 +7,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections.abc import Mapping
@@ -4422,7 +4423,10 @@ def cmd_validate(args: argparse.Namespace) -> int:
         engine_script("combine_native_nuisance_runs.py"),
     ]
     cmd = [python, "-m", "py_compile", *map(str, scripts)]
-    subprocess.run(cmd, check=True)
+    env = os.environ.copy()
+    with tempfile.TemporaryDirectory(prefix="grond-validate-pycache-") as pycache_prefix:
+        env["PYTHONPYCACHEPREFIX"] = pycache_prefix
+        subprocess.run(cmd, check=True, env=env)
     print(
         json.dumps(
             {

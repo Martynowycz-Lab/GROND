@@ -35,6 +35,15 @@ for _name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "VEC
 
 import numpy as np
 
+try:
+    from grond.paths import runtime_cache_dir
+except ImportError:  # Direct script execution from the legacy engine directory.
+
+    def runtime_cache_dir(*parts: str) -> Path:
+        override = os.environ.get("GROND_CACHE_DIR", "").strip()
+        root = Path(override).expanduser() if override else Path.home() / ".cache" / "grond"
+        return root.joinpath(*parts)
+
 try:  # Package import.
     from .bloch_engine import (
         Config,
@@ -551,7 +560,8 @@ def predict_with_cache(data, model, res_hash, hkl_path, res_path, cfg, indices, 
         pred["cache_status"] = "hit"
         pred["cache_path"] = str(path)
         return pred
-    port = XDSBlochPort(data, model, cfg, cache_dir=ROOT / "engine/cache", res_hash=res_hash)
+    ug_cache_dir = runtime_cache_dir("native_row_regularize", "ug")
+    port = XDSBlochPort(data, model, cfg, cache_dir=ug_cache_dir, res_hash=res_hash)
     pred = port.predict_rows(indices, workers=workers, chunksize=chunksize)
     save = {k: v for k, v in pred.items() if k != "support_hkls"}
     write_prediction_cache(path, save, payload, cache_compression)
@@ -1273,7 +1283,7 @@ def main():
     ap.add_argument("--hkl-float-format", choices=["shelx_fixed", "wide"], default="shelx_fixed")
     ap.add_argument("--workers", type=int, default=1)
     ap.add_argument("--chunksize", type=int, default=8)
-    ap.add_argument("--prediction-cache-dir", default=str(ROOT / "engine/pred_cache"))
+    ap.add_argument("--prediction-cache-dir", default=str(runtime_cache_dir("native_row_regularize", "predictions")))
     ap.add_argument("--cache-compression", choices=["compressed", "none"], default="compressed", help="Use none for faster local SSD caches; compressed saves disk on slow/limited storage.")
     ap.add_argument("--compute-backend", choices=["scipy", "scipy_bethe", "scipy_expm", "scipy_expm_multiply", "jax", "jax_auto", "jax_cpu", "jax_mps", "jax_cuda", "jax_padded", "jax_auto_padded", "jax_cpu_padded", "jax_mps_padded", "jax_cuda_padded", "jax_cpu_real_expm", "jax_mps_real_expm", "jax_mps_real_expm_padded"], default="scipy", help="Prediction backend. SciPy eigensolver is the production reference; scipy_bethe uses an opt-in promoted Bethe/Schur strong-beam reduction; SciPy expm/expm_multiply, real-embedded JAX expm, and JAX eigensolver backends are experimental agreement/speed probes. *_padded JAX backends pad matrix dimensions into small buckets to reduce compilation churn.")
     ap.add_argument("--row-plan-cache", choices=["off", "readwrite", "rebuild"], default="off", help="Experimental frozen row-geometry cache. It reuses basis/Sg/difference-HKL plans across model updates while recomputing current U_g values.")

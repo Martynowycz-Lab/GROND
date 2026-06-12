@@ -36,6 +36,15 @@ from scipy.linalg import eig, eigh, expm
 from scipy.optimize import minimize
 from scipy.sparse.linalg import expm_multiply
 
+try:
+    from grond.paths import runtime_cache_dir
+except ImportError:  # Direct script execution from the legacy engine directory.
+
+    def runtime_cache_dir(*parts: str) -> Path:
+        override = os.environ.get("GROND_CACHE_DIR", "").strip()
+        root = Path(override).expanduser() if override else Path.home() / ".cache" / "grond"
+        return root.joinpath(*parts)
+
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_HKL = Path("INTEGRATE.HKL")
@@ -2965,7 +2974,7 @@ def main():
     ap.add_argument("--res", default=str(DEFAULT_RES))
     ap.add_argument("--hkl-transform", default="identity", help="Signed axis permutation mapping XDS HKLs into the model basis, e.g. 'l,-k,h'.")
     ap.add_argument("--out", default=str(ROOT / "outputs/engine_summary.json"))
-    ap.add_argument("--cache-dir", default=str(ROOT / "engine/cache"), help="Local Ug cube cache directory. Use 'none' to disable.")
+    ap.add_argument("--cache-dir", default=str(runtime_cache_dir("legacy_engine")), help="Local Ug cube cache directory. Use 'none' to disable.")
     ap.add_argument("--n-basis", type=int, default=20)
     ap.add_argument("--n-points", type=int, default=20)
     ap.add_argument("--sg-window", type=float, default=0.006)
