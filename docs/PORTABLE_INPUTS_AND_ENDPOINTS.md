@@ -2,6 +2,8 @@
 
 GROND has two native input readers today: XDS `INTEGRATE.HKL` plus `XPARM.XDS`/`GXPARM.XDS`, and DIALS `integrated.refl` plus `integrated.expt`. Those are the supported paths for normal `GROND auto` runs. Other integration programs can still feed GROND if they can write the same information into the portable `grond-row-v1` row contract. The point of this contract is not to make every external file format part of GROND. The point is to give external wrappers, custom scripts, and future readers one small target format that says exactly what GROND needs.
 
+The JSON metadata schema is in `schemas/grond-row-v1.schema.json` in the source tree. Wheel installs also include the same file under `grond/schemas/grond-row-v1.schema.json`.
+
 ## What A GROND Row Means
 
 A row is one signed observation of one reflection in one exposure or rotation-integration support window. It is not a merged unique reflection. GROND needs rows because the Bloch correction depends on the signed index, the crystal orientation at the time that spot was integrated, the excitation error near the rocking condition, and row-level quality information. Once all observations of the same `hkl` are merged, much of that geometry has been thrown away.

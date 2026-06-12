@@ -41,7 +41,7 @@ GROND = "grond.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-grond = ["legacy/**/*.py"]
+grond = ["legacy/**/*.py", "schemas/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

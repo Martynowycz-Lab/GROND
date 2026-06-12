@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from importlib.resources import files
 from pathlib import Path
 
 from grond.io.row_contract import (
@@ -37,6 +39,20 @@ def test_row_contract_template_validates_and_writes_xds_compat(tmp_path: Path):
     assert data.peak[1] == 95.0
 
 
+def test_portable_row_schema_is_shipped_with_source_tree():
+    root = Path(__file__).resolve().parents[1]
+    schema_path = root / "schemas" / "grond-row-v1.schema.json"
+    package_schema_path = files("grond") / "schemas" / "grond-row-v1.schema.json"
+    manifest_path = root / "MANIFEST.in"
+
+    schema = json.loads(schema_path.read_text())
+    package_schema = json.loads(package_schema_path.read_text())
+    assert package_schema == schema
+    assert schema["$id"].endswith("/schemas/grond-row-v1.schema.json")
+    assert schema["properties"]["schema_version"]["const"] == "grond-row-v1"
+    assert "recursive-include schemas *.json" in manifest_path.read_text()
+
+
 def test_row_contract_accepts_alpha_degrees(tmp_path: Path):
     rows_path, metadata_path = write_template(tmp_path / "rows.csv", tmp_path / "rows_metadata.json")
     text = rows_path.read_text().replace(",18.0,", ",,").replace("frame,", "alpha_deg,")
@@ -53,4 +69,3 @@ def test_row_contract_accepts_alpha_degrees(tmp_path: Path):
     hkl = write_xds_compatibility_dir(rows, metadata, tmp_path / "bridge")
     data = XDSData(hkl)
     assert data.zcal[0] == 18.0
-

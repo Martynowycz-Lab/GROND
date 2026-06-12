@@ -198,7 +198,7 @@ GROND row-validate \
   --write-xds-dir grond_portable_bridge
 ```
 
-That bridge can then be used with `GROND auto --xds-dir grond_portable_bridge ...`. This keeps other integration programs and lab-written conversions out of the core code while still giving them a stable target. The exact row and geometry fields are documented in [docs/PORTABLE_INPUTS_AND_ENDPOINTS.md](docs/PORTABLE_INPUTS_AND_ENDPOINTS.md), and a machine-checkable metadata schema is provided in [schemas/grond-row-v1.schema.json](schemas/grond-row-v1.schema.json).
+That bridge can then be used with `GROND auto --xds-dir grond_portable_bridge ...`. This keeps other integration programs and lab-written conversions out of the core code while still giving them a stable target. The exact row and geometry fields are documented in [docs/PORTABLE_INPUTS_AND_ENDPOINTS.md](docs/PORTABLE_INPUTS_AND_ENDPOINTS.md), and a machine-checkable metadata schema is provided in [schemas/grond-row-v1.schema.json](schemas/grond-row-v1.schema.json). Wheel installs also carry the same schema at `grond/schemas/grond-row-v1.schema.json`.
 
 The model-update endpoint is also intentionally a contract rather than a single hardwired ideology. The production default is still SHELXL because it is currently the tested corrected-HKL feedback path. Custom command-line refiners can be declared through a small command template if they accept a model, a corrected reflection file, an output directory, and a cycle count, then write a model file that GROND can read again. The native finite-difference update remains a slow diagnostic, and `bloch_only` is the no-refiner fallback. Use `GROND endpoints --config grond.config.json` to see what is available and what each endpoint expects.
 
