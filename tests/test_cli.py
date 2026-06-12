@@ -1,6 +1,8 @@
 import os
 from pathlib import Path
 
+import pytest
+
 import grond.cli as cli
 from grond.cli import (
     apply_speed_profile,
@@ -19,6 +21,47 @@ from grond.cli import (
     transform_scout_job_count,
 )
 from grond.io.config import DatasetSpec, PrepConfig
+
+EXPECTED_CLI_COMMANDS = {
+    "auto",
+    "calibrate-endpoint",
+    "compile",
+    "doctor",
+    "endpoints",
+    "forensics",
+    "import-dials",
+    "init-config",
+    "prep",
+    "raw-polish",
+    "row-template",
+    "row-validate",
+    "run",
+    "scale-polish",
+    "scale-replay",
+    "validate",
+    "validate-ls1",
+}
+
+
+def cli_command_names(parser):
+    for action in parser._actions:
+        choices = getattr(action, "choices", None)
+        if choices:
+            return set(choices)
+    raise AssertionError("No CLI subcommands found")
+
+
+def test_all_registered_subcommands_have_help(capsys):
+    parser = build_parser()
+    assert cli_command_names(parser) == EXPECTED_CLI_COMMANDS
+
+    for command in sorted(EXPECTED_CLI_COMMANDS):
+        with pytest.raises(SystemExit) as exc:
+            parser.parse_args([command, "--help"])
+        assert exc.value.code == 0
+        captured = capsys.readouterr()
+        assert "usage:" in captured.out
+        assert command in captured.out
 
 
 def test_run_parser_exposes_staged_feature_grids():
