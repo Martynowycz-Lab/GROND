@@ -4574,22 +4574,31 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
 
 def cmd_compile(args: argparse.Namespace) -> int:
-    """CLI entrypoint that precompiles package and vendored Python bytecode."""
+    """CLI entrypoint that compile-checks package and vendored Python modules."""
 
     root = Path(__file__).resolve().parents[1]
-    ok = compileall.compile_dir(str(root), quiet=1, force=bool(args.force), workers=1)
-    if not ok:
-        return 1
     python = choose_python(args.python)
     cmd = [python, "-m", "py_compile", *map(str, sorted(LEGACY_ROOT.rglob("*.py")))]
-    subprocess.run(cmd, check=True)
+    env = os.environ.copy()
+    with tempfile.TemporaryDirectory(prefix="grond-compile-pycache-") as pycache_prefix:
+        old_prefix = sys.pycache_prefix
+        sys.pycache_prefix = pycache_prefix
+        try:
+            ok = compileall.compile_dir(str(root), quiet=1, force=bool(args.force), workers=1)
+        finally:
+            sys.pycache_prefix = old_prefix
+        if not ok:
+            return 1
+        env["PYTHONPYCACHEPREFIX"] = pycache_prefix
+        subprocess.run(cmd, check=True, env=env)
     print(
         json.dumps(
             {
                 "package_root": str(root),
                 "engine_root": str(LEGACY_ROOT),
                 "python": python,
-                "status": "compiled",
+                "bytecode_cache": "temporary",
+                "status": "compile_check_passed",
                 "tool_config": getattr(args, "tool_config_path", ""),
                 "external_tools": external_tool_statuses(args),
             },
@@ -5517,7 +5526,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_doc.add_argument("--probe-bloch", action="store_true", help="Also test complex eig/eigh support needed by the Bloch wave kernel.")
     p_doc.set_defaults(func=cmd_doctor)
 
-    p_compile = sub.add_parser("compile", help="Precompile GROND and vendored engine modules to bytecode.")
+    p_compile = sub.add_parser("compile", help="Compile-check GROND and vendored engine modules without writing bytecode into the source tree.")
     p_compile.add_argument("--python", default="")
     add_tool_config_args(p_compile)
     p_compile.add_argument("--force", action="store_true")

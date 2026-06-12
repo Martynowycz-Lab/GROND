@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 
+import grond.cli as cli
 from grond.cli import (
     apply_speed_profile,
     apply_tool_config,
@@ -623,6 +624,33 @@ def test_raw_polish_parser_exposes_forward_model_knobs():
     assert args.matrix_conventions == "j_minus_i,i_minus_j"
     assert args.prediction_cache_compression == "none"
     assert args.make_maps is False
+
+
+def test_compile_command_uses_temporary_bytecode_cache(monkeypatch, capsys):
+    args = build_parser().parse_args(["compile"])
+    seen = {}
+
+    def fake_compile_dir(root, quiet, force, workers):
+        seen["compile_prefix"] = cli.sys.pycache_prefix
+        return True
+
+    def fake_run(cmd, check, env):
+        seen["run_prefix"] = env.get("PYTHONPYCACHEPREFIX")
+        seen["cmd"] = cmd
+
+    monkeypatch.setattr(cli.compileall, "compile_dir", fake_compile_dir)
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    monkeypatch.setattr(cli, "choose_python", lambda requested: "python-x")
+    monkeypatch.setattr(cli, "external_tool_statuses", lambda args: {})
+
+    assert cli.cmd_compile(args) == 0
+
+    output = capsys.readouterr().out
+    assert "compile_check_passed" in output
+    assert "temporary" in output
+    assert seen["compile_prefix"]
+    assert seen["compile_prefix"] == seen["run_prefix"]
+    assert seen["cmd"][0] == "python-x"
 
 
 def test_tool_config_applies_shelxl_paths(tmp_path: Path, monkeypatch):
