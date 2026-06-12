@@ -53,6 +53,11 @@ def write_tiny_sdist(path: Path, *, include_required: bool = True) -> None:
             tf.addfile(info, io.BytesIO(data))
 
 
+def add_wheel_member(path: Path, name: str, text: str = "ok\n") -> None:
+    with zipfile.ZipFile(path, "a") as zf:
+        zf.writestr(name, text)
+
+
 def test_release_checker_requires_wheel_and_sdist(tmp_path: Path):
     checker = load_checker()
     write_tiny_wheel(tmp_path / "grond-0.2.0-py3-none-any.whl")
@@ -91,3 +96,28 @@ def test_release_checker_reports_missing_required_wheel_file(tmp_path: Path):
     _summaries, failures = checker.scan_artifacts(tmp_path)
 
     assert any("missing required wheel file dist-info/entry_points.txt" in failure for failure in failures)
+
+
+def test_release_checker_rejects_non_python_package_artifact_names(tmp_path: Path):
+    checker = load_checker()
+    wheel = tmp_path / "grond-0.2.0-py3-none-any.whl"
+    write_tiny_wheel(wheel)
+    add_wheel_member(wheel, "grond/package.json")
+    write_tiny_sdist(tmp_path / "grond-0.2.0.tar.gz")
+
+    _summaries, failures = checker.scan_artifacts(tmp_path)
+
+    assert any("package.json" in failure for failure in failures)
+
+
+def test_release_checker_rejects_non_python_package_text(tmp_path: Path):
+    checker = load_checker()
+    wheel = tmp_path / "grond-0.2.0-py3-none-any.whl"
+    write_tiny_wheel(wheel)
+    forbidden_text = "Run " + "n" + "pm install before using GROND.\n"
+    add_wheel_member(wheel, "grond/bad_install.txt", forbidden_text)
+    write_tiny_sdist(tmp_path / "grond-0.2.0.tar.gz")
+
+    _summaries, failures = checker.scan_artifacts(tmp_path)
+
+    assert any("n" + "pm install" in failure for failure in failures)

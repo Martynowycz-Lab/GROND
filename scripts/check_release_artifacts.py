@@ -18,6 +18,29 @@ GENERATED_NAME_TERMS = (
     ".pytest_cache",
 )
 
+NON_PYTHON_PACKAGE_NAME_TERMS = (
+    "package.json",
+    "package-lock.json",
+    "pn" + "pm-lock.yaml",
+    "ya" + "rn.lock",
+    "node_modules/",
+)
+
+NON_PYTHON_PACKAGE_SUFFIXES = (
+    ".js",
+    ".jsx",
+    ".ts",
+    ".tsx",
+)
+
+NON_PYTHON_PACKAGE_TEXT_TERMS = (
+    "Java" + "Script",
+    "java" + "script",
+    "n" + "pm install",
+    "ya" + "rn install",
+    "pn" + "pm install",
+)
+
 PACKAGE_BOUNDARY_TERMS = (
     "pa" + "per" + "/",
     "manu" + "script",
@@ -60,16 +83,18 @@ def text_from_bytes(data: bytes) -> str:
 def scan_name(artifact: Path, name: str, failures: list[str]) -> None:
     """Check an archive member name."""
 
-    for term in GENERATED_NAME_TERMS + PACKAGE_BOUNDARY_TERMS:
+    for term in GENERATED_NAME_TERMS + NON_PYTHON_PACKAGE_NAME_TERMS + PACKAGE_BOUNDARY_TERMS:
         if term in name:
             failures.append(f"{artifact.name}: {name}: name contains {term!r}")
             return
+    if name.endswith(NON_PYTHON_PACKAGE_SUFFIXES):
+        failures.append(f"{artifact.name}: {name}: name has a non-Python package suffix")
 
 
 def scan_text(artifact: Path, name: str, text: str, failures: list[str]) -> None:
     """Check archive member text for private paths and package-boundary terms."""
 
-    for term in PACKAGE_BOUNDARY_TERMS:
+    for term in NON_PYTHON_PACKAGE_TEXT_TERMS + PACKAGE_BOUNDARY_TERMS:
         if term in text:
             failures.append(f"{artifact.name}: {name}: text contains {term!r}")
             return
