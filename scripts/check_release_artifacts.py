@@ -40,6 +40,16 @@ REQUIRED_SDIST_SUFFIXES = (
     "tests/test_release_artifact_checker.py",
 )
 
+REQUIRED_WHEEL_SUFFIXES = (
+    "grond/__init__.py",
+    "grond/cli.py",
+    "grond/io/row_contract.py",
+    "grond/legacy/engine/bloch_engine.py",
+    "grond/schemas/grond-row-v1.schema.json",
+    "dist-info/METADATA",
+    "dist-info/entry_points.txt",
+)
+
 
 def text_from_bytes(data: bytes) -> str:
     """Decode archive members defensively for simple token scans."""
@@ -69,14 +79,19 @@ def scan_wheel(artifact: Path, failures: list[str]) -> int:
     """Scan one wheel and return its member count."""
 
     count = 0
+    names: list[str] = []
     with zipfile.ZipFile(artifact) as zf:
         for name in zf.namelist():
             count += 1
+            names.append(name)
             scan_name(artifact, name, failures)
             try:
                 scan_text(artifact, name, text_from_bytes(zf.read(name)), failures)
             except KeyError:
                 failures.append(f"{artifact.name}: {name}: could not read member")
+    for suffix in REQUIRED_WHEEL_SUFFIXES:
+        if not any(name.endswith(suffix) for name in names):
+            failures.append(f"{artifact.name}: missing required wheel file {suffix}")
     return count
 
 

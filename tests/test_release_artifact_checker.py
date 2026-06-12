@@ -19,10 +19,20 @@ def load_checker():
     return module
 
 
-def write_tiny_wheel(path: Path) -> None:
+def write_tiny_wheel(path: Path, *, include_required: bool = True) -> None:
+    required = (
+        "grond/__init__.py",
+        "grond/cli.py",
+        "grond/io/row_contract.py",
+        "grond/legacy/engine/bloch_engine.py",
+        "grond/schemas/grond-row-v1.schema.json",
+        "grond-0.2.0.dist-info/METADATA",
+        "grond-0.2.0.dist-info/entry_points.txt",
+    )
+    members = required if include_required else required[:-1]
     with zipfile.ZipFile(path, "w") as zf:
-        zf.writestr("grond/__init__.py", "__version__ = '0.2.0'\n")
-        zf.writestr("grond-0.2.0.dist-info/METADATA", "Name: grond\nVersion: 0.2.0\n")
+        for name in members:
+            zf.writestr(name, "ok\n")
 
 
 def write_tiny_sdist(path: Path, *, include_required: bool = True) -> None:
@@ -71,3 +81,13 @@ def test_release_checker_reports_missing_required_sdist_file(tmp_path: Path):
     _summaries, failures = checker.scan_artifacts(tmp_path)
 
     assert any("missing required source file tests/test_release_artifact_checker.py" in failure for failure in failures)
+
+
+def test_release_checker_reports_missing_required_wheel_file(tmp_path: Path):
+    checker = load_checker()
+    write_tiny_wheel(tmp_path / "grond-0.2.0-py3-none-any.whl", include_required=False)
+    write_tiny_sdist(tmp_path / "grond-0.2.0.tar.gz")
+
+    _summaries, failures = checker.scan_artifacts(tmp_path)
+
+    assert any("missing required wheel file dist-info/entry_points.txt" in failure for failure in failures)
