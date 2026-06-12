@@ -59,6 +59,7 @@ REQUIRED_SDIST_SUFFIXES = (
     "docs/INSTALL.md",
     "docs/QUICKSTART.md",
     "scripts/check_release_artifacts.py",
+    "scripts/smoke_install_wheel.py",
     "tests/test_package_metadata.py",
     "tests/test_release_artifact_checker.py",
 )

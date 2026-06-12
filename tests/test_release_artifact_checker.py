@@ -41,6 +41,7 @@ def write_tiny_sdist(path: Path, *, include_required: bool = True) -> None:
         "docs/INSTALL.md",
         "docs/QUICKSTART.md",
         "scripts/check_release_artifacts.py",
+        "scripts/smoke_install_wheel.py",
         "tests/test_package_metadata.py",
         "tests/test_release_artifact_checker.py",
     )

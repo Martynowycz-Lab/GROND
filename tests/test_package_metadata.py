@@ -162,6 +162,7 @@ def test_development_check_surface_matches_ci():
         "python -m grond doctor --probe-bloch",
         "python -m build",
         "check_release_artifacts.py",
+        "smoke_install_wheel.py",
     )
 
     for command in shared_commands:

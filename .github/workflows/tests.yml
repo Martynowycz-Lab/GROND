@@ -41,3 +41,4 @@ jobs:
         run: |
           python -m build --sdist --wheel --outdir dist-check
           python scripts/check_release_artifacts.py dist-check
+          python scripts/smoke_install_wheel.py dist-check

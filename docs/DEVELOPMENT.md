@@ -22,6 +22,8 @@ export GROND_BUILD_AUDIT_OUT=$(mktemp -d)
 git archive HEAD | tar -x -C "$tmp"
 python -m build --no-isolation --sdist --wheel --outdir "$GROND_BUILD_AUDIT_OUT" "$tmp"
 python "$tmp/scripts/check_release_artifacts.py" "$GROND_BUILD_AUDIT_OUT"
+python "$tmp/scripts/smoke_install_wheel.py" "$GROND_BUILD_AUDIT_OUT"
 ```
 
 The wheel and source distribution should contain docs, examples, schemas, tests, and package files. They should not contain bytecode, local caches, generated prediction arrays, benchmark cache files, off-repo writing workspaces, private machine paths, or stale public wording.
+The wheel should also install into a fresh virtual environment and expose both `grond` and `GROND` console commands.
