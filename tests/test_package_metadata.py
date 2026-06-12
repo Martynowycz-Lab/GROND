@@ -45,7 +45,7 @@ def test_citation_title_matches_package_title():
 
 
 def test_no_tracked_paper_workspace():
-    paper_dir = "paper" + "/"
+    paper_dir = "pa" + "per" + "/"
     assert not any(str(path).startswith(paper_dir) for path in tracked_files())
 
 

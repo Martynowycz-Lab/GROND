@@ -60,7 +60,13 @@ Create the config with `GROND init-config --out grond.config.json`, then fill in
 
 Use `GROND endpoints --config grond.config.json` to see the available model-update endpoints. SHELXL is the implemented production endpoint. `custom` is a command-template adapter for a lab-specific one-cycle refiner. `bloch_only` is always available and means GROND will simulate Bloch intensities, optimize nuisance terms, write diagnostics, and report polarity/residual behavior without updating the model through an external refiner.
 
-This is the recommended production command. It automatically uses the solved/XSCALE/SHELX baseline HKL to prefilter indexing transforms when that metadata is available, then tests any surviving common transforms with a cheap pass followed by a better N/Q rerank of the top candidates. It also checks the alternate polarity when appropriate, thickness and geometry terms, raw-row resolution envelopes, absorption-like terms, jitter, sigma/weak-row behavior, detector-position scale fields, adaptive final basis size, no-EXTI endpoint lambda candidates, active SHELXL `WGHT` promotion, maps, forensic reports, adaptive frame-scale compression, a publication endpoint chooser, and publication tables. The final polish keeps Q=20 and chooses N from the observed rowwise support scan as `max_observed_basis + 10`, limited to 500 by default, with support top-up at least as deep as the selected data resolution. Multi-dataset endpoints get one overlap-derived post-dynamical scale per crystal before merging, so arbitrary raw integration scales do not survive into the final combined HKL. The default endpoint-B grid is `0.0`; nonzero endpoint-B scans are available only when explicitly requested with `--endpoint-b-grid`, and GROND treats them as diagnostic rather than final because they can improve endpoint R factors while making ADPs and maps worse.
+This is the recommended production command. It starts with cheap checks and only spends time on expensive Bloch calculations after the data pass those checks.
+
+When a baseline HKL is available, GROND uses it to reduce transform ambiguity before running Bloch scouts. Any remaining transform candidates are tested cheaply first, then the best candidates are rerun with a stronger basis and quadrature.
+
+The automatic path checks polarity, thickness, simple geometry terms, raw-row resolution behavior, absorption-like terms, jitter, sigma behavior, detector-position scales, endpoint lambda values, maps, forensic reports, and adaptive scale compression. The final polish keeps Q=20. It chooses N from the observed rowwise support scan as `max_observed_basis + 10`, with a default cap of 500. The support top-up is at least as deep as the selected data resolution.
+
+For multi-dataset endpoints, GROND applies one overlap-derived post-dynamical scale per crystal before merging. This removes arbitrary raw integration scale differences from the final combined HKL. The default endpoint-B grid is `0.0`. Nonzero endpoint-B scans are only used when you request them with `--endpoint-b-grid`; GROND treats them as diagnostic because they can lower endpoint R factors while making ADPs and maps worse.
 
 On a shared server, set `--workers` to the number of cores you want GROND to consume. Transform scouts use that budget as an outer queue by default, so a multi-dataset job can test remaining transform candidates across crystals concurrently. Leave `--transform-scout-workers-per-job 1` unless you deliberately reduce `--transform-scout-jobs`; otherwise each scout subprocess would compete with the others for the same cores.
 
@@ -88,7 +94,11 @@ GROND auto \
   --full-fast
 ```
 
-`--full-fast` is different from `--fast`. It still runs the automatic transform, polarity, thickness, nuisance-feature, lightweight structure-update, scale-compression, forensic, and endpoint-reporting steps, but it pins final Bloch work to N=24/Q=10 and uses a single endpoint polish pass. The lightweight structure-update budget is chosen automatically from the number of non-hydrogen atoms in the model; explicit `--full-fast-structure-rows` and `--full-fast-structure-max-nfev` values override that schedule. Structure blocks also use the default data-RMS plateau gate, so a run should stop a stale xyz or ADP loop instead of spending days on calls that no longer improve the row objective. For an even cheaper stress test, add `--full-fast-n-basis 10 --full-fast-n-points 5`, then treat the result as a scouting endpoint rather than the preferred default.
+`--full-fast` is different from `--fast`. It still runs the automatic transform, polarity, thickness, nuisance, lightweight structure-update, scale-compression, forensic, and endpoint-reporting steps. It pins final Bloch work to N=24/Q=10 and uses one endpoint polish pass.
+
+The lightweight structure-update budget is chosen from the number of non-hydrogen atoms in the model. Use `--full-fast-structure-rows` and `--full-fast-structure-max-nfev` only when you need to override that schedule. Structure blocks use the default data-RMS plateau gate, so a stale xyz or ADP loop should stop instead of spending days on calls that no longer improve the row objective.
+
+For a cheaper stress test, add `--full-fast-n-basis 10 --full-fast-n-points 5`. Treat that result as a scouting endpoint, not the preferred final answer.
 
 Prepare a reusable multi-dataset file:
 
