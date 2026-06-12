@@ -9,6 +9,7 @@ from grond.legacy.engine.bloch_engine import (
     _stack_square_matrices,
     frozen_kernel_contract,
     promoted_bethe_effective_hamiltonian,
+    row_plan_cache_validation_errors,
 )
 
 
@@ -19,6 +20,92 @@ def test_matrix_convention_is_recorded_in_kernel_contract():
     assert default["hamiltonian"]["offdiagonal_sign"] == "basis[j] - basis[i]"
     assert alternate["hamiltonian"]["matrix_convention"] == "i_minus_j"
     assert alternate["hamiltonian"]["offdiagonal_sign"] == "basis[i] - basis[j]"
+
+
+def test_row_plan_cache_validation_rejects_stale_metadata():
+    indices = np.asarray([3, 7, 11], dtype=np.int64)
+    meta = {
+        "cache_schema": 1,
+        "key": "expected",
+        "hkl_sha256": "abc",
+        "hkl_transform": "as_input",
+        "indices_sha256": "idx",
+        "n_basis": 24,
+        "n_points": 10,
+        "profile_quadrature": "uniform",
+        "profile_accumulation": "sum",
+    }
+    valid_cache = {
+        "meta": dict(meta),
+        "indices": indices.copy(),
+        "basis_offsets": np.asarray([0, 2, 4, 6], dtype=np.int64),
+        "basis_flat": np.zeros((6, 3), dtype=np.int32),
+        "profile_offsets": np.asarray([0, 1, 2, 3], dtype=np.int64),
+        "profile_weights_flat": np.ones(3, dtype=float),
+        "sg_offsets": np.asarray([0, 2, 4, 6], dtype=np.int64),
+        "sg_basis_flat": np.zeros(6, dtype=float),
+        "diff_offsets": np.asarray([0, 4, 8, 12], dtype=np.int64),
+        "diff_idx_flat": np.zeros(12, dtype=np.int64),
+        "unique_diffs": np.zeros((1, 3), dtype=np.int32),
+        "unique_inv_d2": np.zeros(1, dtype=float),
+        "center_sg": np.zeros(3, dtype=float),
+        "omega_center": np.zeros(3, dtype=float),
+        "omega_bragg": np.zeros(3, dtype=float),
+        "omega_delta": np.zeros(3, dtype=float),
+        "sg_window": np.ones(3, dtype=float),
+        "sg_domega": np.ones(3, dtype=float),
+        "sg_dframe": np.ones(3, dtype=float),
+        "sg_window_raw": np.ones(3, dtype=float),
+        "sg_window_half_frames": np.ones(3, dtype=float),
+        "sg_window_clipped": np.zeros(3, dtype=bool),
+        "sg_jitter_sigma": np.zeros(3, dtype=float),
+        "sg_jitter_d_inv": np.zeros(3, dtype=float),
+        "sg_jitter_frame_fraction": np.zeros(3, dtype=float),
+        "sg_jitter_kernel_points": np.ones(3, dtype=np.int32),
+        "sg_profile_points_total": np.ones(3, dtype=np.int32),
+        "sg_profile_weight_sum": np.ones(3, dtype=float),
+        "sg_residual_max": np.zeros(3, dtype=float),
+        "dose_delta_b": np.zeros(3, dtype=float),
+    }
+    assert row_plan_cache_validation_errors(valid_cache, indices, "expected", meta) == []
+
+    stale_cache = dict(valid_cache)
+    stale_cache["meta"] = dict(meta, n_basis=30)
+    errors = row_plan_cache_validation_errors(stale_cache, indices, "expected", meta)
+    assert "metadata mismatch: n_basis" in errors
+
+    broken_cache = dict(valid_cache)
+    broken_cache.pop("sg_basis_flat")
+    broken_cache["basis_offsets"] = np.asarray([0, 1, 3, 5], dtype=np.int64)
+    errors = row_plan_cache_validation_errors(broken_cache, indices, "expected", meta)
+    assert any("missing arrays" in err for err in errors)
+    assert "basis offsets do not contain direct and target beams for every row" in errors
+
+
+def test_cached_static_hamiltonian_uses_frozen_dose_delta_b():
+    port = object.__new__(XDSBlochPort)
+    port.cfg = Config(dose_b_mode="linear_frame", dose_b_per_frame=99.0)
+    port.data = type("DummyData", (), {"k": 2.0})()
+
+    basis = np.asarray([[0, 0, 0], [1, 0, 0]], dtype=int)
+    diff_idx = np.asarray([0, 1, 2, 3], dtype=np.int64)
+    unique_diffs = np.asarray([[0, 0, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 0]], dtype=np.int32)
+    unique_inv_d2 = np.asarray([0.0, 4.0, 4.0, 0.0], dtype=float)
+    unique_ug = np.asarray([0.0, 1.0 + 0.0j, 1.0 + 0.0j, 0.0], dtype=np.complex128)
+
+    H = port.cached_static_hamiltonian(
+        basis,
+        diff_idx,
+        unique_diffs,
+        unique_inv_d2,
+        unique_ug,
+        row_idx=0,
+        absorb=False,
+        dose_delta_b=2.0,
+    )
+    expected = np.exp(-2.0) / (2.0 * port.data.k)
+    assert np.isclose(H[0, 1], expected)
+    assert np.isclose(H[1, 0], expected)
 
 
 def profile_points(cfg: Config):

@@ -78,6 +78,7 @@ COMPUTE_BACKENDS = [
     "jax_mps_real_expm_padded",
 ]
 COMPUTE_BACKEND_HELP = ", ".join(COMPUTE_BACKENDS)
+ROW_PLAN_CACHE_SCHEMA = 1
 
 
 def _init_prediction_worker(port):
@@ -434,6 +435,72 @@ def _predict_row_cache_worker(pos):
     if _WORKER_PORT is None:
         raise RuntimeError("prediction worker was not initialized")
     return _WORKER_PORT.row_prediction_from_active_cache(int(pos))
+
+
+def row_plan_cache_validation_errors(cache: dict, indices, expected_key: str, expected_meta: dict) -> list[str]:
+    """Return reasons a row-plan cache payload cannot be trusted."""
+
+    required = {
+        "indices",
+        "basis_offsets",
+        "basis_flat",
+        "profile_offsets",
+        "profile_weights_flat",
+        "sg_offsets",
+        "sg_basis_flat",
+        "diff_offsets",
+        "diff_idx_flat",
+        "unique_diffs",
+        "unique_inv_d2",
+        "center_sg",
+        "omega_center",
+        "omega_bragg",
+        "omega_delta",
+        "sg_window",
+        "sg_domega",
+        "sg_dframe",
+        "sg_window_raw",
+        "sg_window_half_frames",
+        "sg_window_clipped",
+        "sg_jitter_sigma",
+        "sg_jitter_d_inv",
+        "sg_jitter_frame_fraction",
+        "sg_jitter_kernel_points",
+        "sg_profile_points_total",
+        "sg_profile_weight_sum",
+        "sg_residual_max",
+        "dose_delta_b",
+    }
+    errors: list[str] = []
+    missing = sorted(k for k in required if k not in cache)
+    if missing:
+        errors.append(f"missing arrays: {', '.join(missing[:8])}{'...' if len(missing) > 8 else ''}")
+    meta = cache.get("meta")
+    if not isinstance(meta, dict):
+        errors.append("missing metadata")
+        meta = {}
+    if meta.get("key") != expected_key:
+        errors.append("cache key mismatch")
+    if int(meta.get("cache_schema", -1)) != int(expected_meta.get("cache_schema", ROW_PLAN_CACHE_SCHEMA)):
+        errors.append("cache schema mismatch")
+    for field in ("hkl_sha256", "hkl_transform", "indices_sha256", "n_basis", "n_points", "profile_quadrature", "profile_accumulation"):
+        if meta.get(field) != expected_meta.get(field):
+            errors.append(f"metadata mismatch: {field}")
+    if "indices" in cache and not np.array_equal(np.asarray(cache["indices"], dtype=np.int64), np.asarray(indices, dtype=np.int64)):
+        errors.append("index order mismatch")
+    if "basis_offsets" in cache:
+        offsets = np.asarray(cache["basis_offsets"], dtype=np.int64)
+        if len(offsets) != len(indices) + 1:
+            errors.append("basis offset count mismatch")
+        elif np.any(np.diff(offsets) <= 1):
+            errors.append("basis offsets do not contain direct and target beams for every row")
+    if "profile_offsets" in cache:
+        offsets = np.asarray(cache["profile_offsets"], dtype=np.int64)
+        if len(offsets) != len(indices) + 1:
+            errors.append("profile offset count mismatch")
+        elif np.any(np.diff(offsets) <= 0):
+            errors.append("profile offsets contain an empty row profile")
+    return errors
 
 
 def sha256(path: Path) -> str:
@@ -2064,7 +2131,7 @@ class XDSBlochPort:
 
         indices = np.asarray(indices, dtype=np.int64)
         cfg_fields = {
-            "cache_schema": 1,
+            "cache_schema": ROW_PLAN_CACHE_SCHEMA,
             "hkl_sha256": sha256(self.data.path),
             "hkl_transform": self.data.hkl_transform_spec,
             "indices_sha256": hashlib.sha256(indices.tobytes()).hexdigest(),
@@ -2267,12 +2334,19 @@ class XDSBlochPort:
         mode = self.row_plan_cache_mode()
         if mode == "off":
             return None
-        key, _meta = self.row_plan_cache_key(indices)
+        key, meta = self.row_plan_cache_key(indices)
         path = self.row_plan_cache_path(key)
         if mode == "readwrite" and path.exists():
             cache = self.load_row_plan_cache_file(path)
-            cache["status"] = {"status": "hit", "path": str(path), "key": key}
-            return cache
+            errors = row_plan_cache_validation_errors(cache, indices, key, meta)
+            if not errors:
+                cache["status"] = {"status": "hit", "path": str(path), "key": key}
+                return cache
+            print(
+                "Ignoring stale or incomplete row-plan cache "
+                f"{path}: {'; '.join(errors[:4])}{'; ...' if len(errors) > 4 else ''}",
+                flush=True,
+            )
         cache = self.build_row_plan_cache(indices)
         self.save_row_plan_cache(path, cache)
         cache["status"] = {"status": "built" if mode == "readwrite" else "rebuilt", "path": str(path), "key": key}
@@ -2301,7 +2375,7 @@ class XDSBlochPort:
             out[ok] = factor * fcalc_res_grid(self.model, h[ok], k[ok], l[ok])
         return out
 
-    def cached_static_hamiltonian(self, basis, diff_idx, unique_diffs, unique_inv_d2, unique_ug, row_idx, absorb: bool):
+    def cached_static_hamiltonian(self, basis, diff_idx, unique_diffs, unique_inv_d2, unique_ug, row_idx, absorb: bool, dose_delta_b=None):
         n = len(basis)
         H = np.zeros((n, n), dtype=np.complex128)
         mode = str(getattr(self.cfg, "absorption_mode", "none") or "none").lower()
@@ -2310,7 +2384,7 @@ class XDSBlochPort:
         elif absorb and mode == "beam_dependent":
             H[np.diag_indices(n)] += 1j * self.beam_absorption_mu(basis)
         u_mat = np.asarray(unique_ug[diff_idx], dtype=np.complex128).reshape(n, n).copy()
-        delta_b = self.row_delta_b(row_idx)
+        delta_b = float(self.row_delta_b(row_idx) if dose_delta_b is None else dose_delta_b)
         if delta_b != 0.0:
             inv_d2 = np.asarray(unique_inv_d2[diff_idx], dtype=float).reshape(n, n)
             u_mat *= np.exp(-0.25 * delta_b * inv_d2)
@@ -2342,6 +2416,7 @@ class XDSBlochPort:
             unique_ug,
             row_idx,
             absorb=True,
+            dose_delta_b=float(cache["dose_delta_b"][pos]) if "dose_delta_b" in cache else None,
         )
         if self.absorption_enabled():
             H_born_static = self.cached_static_hamiltonian(
@@ -2352,6 +2427,7 @@ class XDSBlochPort:
                 unique_ug,
                 row_idx,
                 absorb=False,
+                dose_delta_b=float(cache["dose_delta_b"][pos]) if "dose_delta_b" in cache else None,
             )
         else:
             H_born_static = H_dyn_static
@@ -2502,6 +2578,7 @@ class XDSBlochPort:
         results = [None] * len(indices)
         position = {int(idx): int(pos) for pos, idx in enumerate(indices)}
         completed = 0
+        parallel_errors: list[str] = []
 
         def accept(idx, r):
             nonlocal completed
@@ -2516,42 +2593,56 @@ class XDSBlochPort:
                 eta = (len(indices) - completed) / max(rate, 1e-12)
                 print(f"cached predicted {completed}/{len(indices)} rows | rate={rate:.2f}/s | ETA={eta/60:.1f}m", flush=True)
 
-        if int(workers) > 1 and len(indices) > 1:
-            ran_parallel = False
-            for context_name in pool_context_names():
-                try:
-                    ctx = multiprocessing.get_context(context_name)
-                except Exception:
-                    continue
-                try:
-                    with ctx.Pool(
-                        processes=int(workers),
-                        initializer=_init_prediction_worker,
-                        initargs=(self,),
-                    ) as pool:
-                        for idx, r in pool.imap_unordered(
-                            _predict_row_cache_worker,
-                            list(range(len(indices))),
-                            chunksize=max(1, int(chunksize)),
-                        ):
-                            accept(idx, r)
-                    ran_parallel = True
-                    break
-                except Exception:
-                    ran_parallel = False
-                    continue
-            if not ran_parallel:
+        try:
+            if int(workers) > 1 and len(indices) > 1:
+                ran_parallel = False
+                for context_name in pool_context_names():
+                    try:
+                        ctx = multiprocessing.get_context(context_name)
+                    except Exception as exc:
+                        parallel_errors.append(f"{context_name}: {type(exc).__name__}: {str(exc)[:160]}")
+                        continue
+                    try:
+                        with ctx.Pool(
+                            processes=int(workers),
+                            initializer=_init_prediction_worker,
+                            initargs=(self,),
+                        ) as pool:
+                            for idx, r in pool.imap_unordered(
+                                _predict_row_cache_worker,
+                                list(range(len(indices))),
+                                chunksize=max(1, int(chunksize)),
+                            ):
+                                accept(idx, r)
+                        ran_parallel = True
+                        break
+                    except Exception as exc:
+                        parallel_errors.append(f"{context_name}: {type(exc).__name__}: {str(exc)[:160]}")
+                        ran_parallel = False
+                        continue
+                if not ran_parallel:
+                    if parallel_errors:
+                        print(
+                            "Cached row prediction fell back to serial after multiprocessing failures: "
+                            + " | ".join(parallel_errors[:3]),
+                            flush=True,
+                        )
+                    for pos in range(len(indices)):
+                        idx, r = self.row_prediction_from_cache(cache, pos, unique_ug)
+                        accept(idx, r)
+            else:
                 for pos in range(len(indices)):
                     idx, r = self.row_prediction_from_cache(cache, pos, unique_ug)
                     accept(idx, r)
-        else:
-            for pos in range(len(indices)):
-                idx, r = self.row_prediction_from_cache(cache, pos, unique_ug)
-                accept(idx, r)
+        finally:
+            self._active_row_plan_cache = None
+            self._active_unique_ug = None
 
         out = self.pack_prediction_results(indices, results)
         out["seconds"] = time.perf_counter() - t0
         out["row_plan_cache_status"] = cache.get("status", {})
+        if parallel_errors:
+            out["row_plan_cache_status"] = dict(out["row_plan_cache_status"], parallel_errors=parallel_errors[:3])
         out["row_plan_cache_unique_diffs"] = int(len(cache.get("unique_diffs", [])))
         return out
 
