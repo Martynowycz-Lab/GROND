@@ -79,3 +79,10 @@ def test_public_text_avoids_disfavored_dataset_labels():
                 offenders.append(f"{rel_path}: {token}")
 
     assert offenders == []
+
+
+def test_development_lint_surface_matches_ci():
+    lint_command = "python -m ruff check src/grond tests scripts --no-cache"
+
+    assert lint_command in (ROOT / "docs" / "DEVELOPMENT.md").read_text()
+    assert lint_command in (ROOT / ".github" / "workflows" / "tests.yml").read_text()

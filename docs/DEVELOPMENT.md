@@ -4,7 +4,7 @@ Run the public checks before committing:
 
 ```bash
 python -m pip install -e ".[dev]"
-python -m ruff check src/grond tests --no-cache
+python -m ruff check src/grond tests scripts --no-cache
 python -m pytest
 python -m grond validate
 python -m grond doctor --probe-bloch
@@ -21,7 +21,7 @@ tmp=$(mktemp -d)
 export GROND_BUILD_AUDIT_OUT=$(mktemp -d)
 git archive HEAD | tar -x -C "$tmp"
 python -m build --no-isolation --sdist --wheel --outdir "$GROND_BUILD_AUDIT_OUT" "$tmp"
-python scripts/check_release_artifacts.py "$GROND_BUILD_AUDIT_OUT"
+python "$tmp/scripts/check_release_artifacts.py" "$GROND_BUILD_AUDIT_OUT"
 ```
 
 The wheel and source distribution should contain docs, examples, schemas, tests, and package files. They should not contain bytecode, local caches, generated prediction arrays, benchmark cache files, off-repo writing workspaces, private machine paths, or stale public wording.
