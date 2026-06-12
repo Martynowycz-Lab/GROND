@@ -21,9 +21,9 @@ from pathlib import Path
 for _name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
     os.environ.setdefault(_name, "1")
 
-import numpy as np
+import numpy as np  # noqa: E402
 
-from grond.legacy.engine.bloch_engine import Config, XDSBlochPort, XDSData, parse_model, sha256
+from grond.legacy.engine.bloch_engine import Config, XDSBlochPort, XDSData, parse_model, sha256  # noqa: E402
 
 
 def parse_workers(text: str) -> list[int]:

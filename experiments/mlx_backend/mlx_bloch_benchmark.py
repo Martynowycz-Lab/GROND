@@ -39,7 +39,6 @@ from grond.legacy.engine.bloch_engine import (
     sha256,
 )
 
-
 DEFAULT_HKL = Path(
     "/Users/Mike/Desktop/MartynowyczLab/data_processing/2026.04.10/370/cbf_v7/"
     "xds20230630_1x/no_prf20260511/INTEGRATE.HKL"
@@ -264,7 +263,7 @@ def mlx_real_expm_propagate_batch(
     for start in range(0, len(H_batch), int(batch_size)):
         sub = H_batch[start : start + int(batch_size)]
         chunk_out = np.zeros(len(sub), dtype=float)
-        for t, w in zip(thick, thick_w):
+        for t, w in zip(thick, thick_w, strict=True):
             real_batch = real_embedding_generator_batch(sub, float(t), dtype=np.float32)
             vals, meta = mlx_taylor_expm_column0(mx, real_batch, order=order, theta=theta)
             chunk_out += float(w) * vals
@@ -395,7 +394,7 @@ def run_benchmark(args: argparse.Namespace) -> dict:
             vals = scipy_propagate_batch(H_batch, port.thick, port.thick_w, absorption)
             elapsed = time.perf_counter() - t0
             scipy_seconds += elapsed
-            for val, (row_pos, profile_pos, _H) in zip(vals, jobs):
+            for val, (row_pos, profile_pos, _H) in zip(vals, jobs, strict=True):
                 scipy_values_by_key[(row_pos, profile_pos)] = float(val)
             print(f"SciPy size={n} matrices={len(jobs)} wall={elapsed:.3f}s rate={len(jobs)/max(elapsed,1e-12):.2f}/s", flush=True)
         scipy_rows = values_to_rows(plans, scipy_values_by_key)
@@ -455,7 +454,7 @@ def run_benchmark(args: argparse.Namespace) -> dict:
                 )
                 total_seconds += float(meta["seconds"])
                 metas.append({"size": int(n), "matrices": int(len(jobs)), **meta})
-                for val, (row_pos, profile_pos, _H) in zip(vals, jobs):
+                for val, (row_pos, profile_pos, _H) in zip(vals, jobs, strict=True):
                     trial_values_by_key[(row_pos, profile_pos)] = float(val)
                 print(
                     f"MLX real-expm order={order} size={n} matrices={len(jobs)} "
@@ -490,9 +489,12 @@ def run_benchmark(args: argparse.Namespace) -> dict:
         err = result.get("row_error_vs_reference")
         if err is None:
             continue
-        if err["p95_rel"] < float(args.accept_p95_rel) and err["max_rel"] < float(args.accept_max_rel):
-            if best is None or result["seconds"] < summary["results"][best]["seconds"]:
-                best = key
+        if (
+            err["p95_rel"] < float(args.accept_p95_rel)
+            and err["max_rel"] < float(args.accept_max_rel)
+            and (best is None or result["seconds"] < summary["results"][best]["seconds"])
+        ):
+            best = key
     if best is None:
         summary["verdict"] = {
             "promote": False,

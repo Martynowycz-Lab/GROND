@@ -108,13 +108,15 @@ For a fresh user, the safest route is Python 3.11 to 3.13 in a clean environment
 ```bash
 git clone https://github.com/Martynowycz-Lab/GROND.git
 cd GROND
-python -m venv .venv
+python3.12 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install .
 GROND init-config --out grond.config.json
 GROND doctor --probe-bloch
 ```
+
+Use `python3.11` or `python3.13` for the `venv` command if Python 3.12 is not available. Do not use an unsupported interpreter such as Python 3.14 just because it is the default `python3` on a machine.
 
 Developers should install with `python -m pip install -e ".[dev]"`, then run `GROND validate` and `pytest`.
 
