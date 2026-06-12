@@ -4,8 +4,8 @@ Date: 2026-06-09
 
 Input data:
 
-- `INTEGRATE.HKL`: `/Users/Mike/Desktop/MartynowyczLab/data_processing/2026.04.10/370/cbf_v7/xds20230630_1x/no_prf20260511/INTEGRATE.HKL`
-- model: `/Users/Mike/Desktop/MartynowyczLab/data_processing/2026.04.10/370/cbf_v7/xds20230630_1x/temp_a.res`
+- `INTEGRATE.HKL`: `<TYROSINE_370_XDS_NO_PRF>/INTEGRATE.HKL`
+- model: `<TYROSINE_370_XDS_NO_PRF>/temp_a.res`
 - rows: 5094
 - rocking samples: Q20
 - thickness points: 7

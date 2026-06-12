@@ -55,12 +55,12 @@
   "created_at": "2026-06-09T11:24:42-0400",
   "host": "cc02",
   "inputs": {
-    "hkl": "/data/Data1/users/mike/GROND/benchmarks/cpu_scaling_20260609/input/INTEGRATE.HKL",
+    "hkl": "<CC02_GROND_BENCHMARK>/input/INTEGRATE.HKL",
     "hkl_transform": null,
-    "res": "/data/Data1/users/mike/GROND/benchmarks/cpu_scaling_20260609/input/temp_a.res"
+    "res": "<CC02_GROND_BENCHMARK>/input/temp_a.res"
   },
   "platform": "Linux-6.8.0-117-generic-x86_64-with-glibc2.39",
-  "python": "/data/Data1/mike/miniconda3/envs/bloch_gpu/bin/python",
+  "python": "<CC02_BLOCH_GPU_PYTHON>",
   "row_selection": {
     "rows": 48,
     "top_isigma": true,

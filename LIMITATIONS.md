@@ -32,4 +32,4 @@ GROND is an independent research software project and is not endorsed by, certif
 
 ## User Responsibility
 
-Users are responsible for checking license compatibility of any external programs they call, verifying that their input data may be processed and shared, preserving enough provenance to reproduce results, and reporting limitations honestly in manuscripts. GROND is provided without warranty under the MIT License.
+Users are responsible for checking license compatibility of any external programs they call, verifying that their input data may be processed and shared, preserving enough provenance to reproduce results, and reporting limitations honestly in reports and publications. GROND is provided without warranty under the MIT License.

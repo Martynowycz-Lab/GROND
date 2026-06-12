@@ -104,9 +104,9 @@
   },
   "created_at": "2026-06-09T12:04:31-0400",
   "inputs": {
-    "hkl": "/Users/Mike/Desktop/MartynowyczLab/data_processing/2026.04.10/370/cbf_v7/xds20230630_1x/no_prf20260511/INTEGRATE.HKL",
+    "hkl": "<TYROSINE_370_XDS_NO_PRF>/INTEGRATE.HKL",
     "hkl_transform": null,
-    "res": "/Users/Mike/Desktop/MartynowyczLab/data_processing/2026.04.10/370/cbf_v7/xds20230630_1x/temp_a.res"
+    "res": "<TYROSINE_370_XDS_NO_PRF>/temp_a.res"
   },
   "jobs": {
     "matrix_count": 101880,

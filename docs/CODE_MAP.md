@@ -158,7 +158,7 @@ and returns the squared amplitude transferred from the direct beam into the targ
 
 `src/grond/refine/endpoints.py` is the interface layer for model-update backends. It declares the implemented SHELXL endpoint, the no-refiner Bloch-only path, the slow native-gradient diagnostic, and the custom command-template adapter. The registry is intentionally separate from the working numerical path: it tells users what each endpoint must accept and return without pretending every external refiner is already a fully tested `auto` replacement.
 
-`scale_compression_polish.py` is where dense frame scales are replaced by a compact, smooth scale manifold when that does not hurt all-row residuals beyond the accepted penalty. `resolution_limit_audit.py` and `forensics/resolution.py` decide whether the final endpoint should be reported at the requested resolution or a suggested shell-stable resolution. `row_mr_report.py` writes the manuscript-facing raw and merged residual tables.
+`scale_compression_polish.py` is where dense frame scales are replaced by a compact, smooth scale manifold when that does not hurt all-row residuals beyond the accepted penalty. `resolution_limit_audit.py` and `forensics/resolution.py` decide whether the final endpoint should be reported at the requested resolution or a suggested shell-stable resolution. `row_mr_report.py` writes the final-report raw and merged residual tables.
 
 ## How To Follow A Real Run
 

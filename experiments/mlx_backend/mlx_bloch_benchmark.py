@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import platform
 import sys
 import time
@@ -38,16 +39,6 @@ from grond.legacy.engine.bloch_engine import (
     promoted_bethe_effective_hamiltonian,
     sha256,
 )
-
-DEFAULT_HKL = Path(
-    "/Users/Mike/Desktop/MartynowyczLab/data_processing/2026.04.10/370/cbf_v7/"
-    "xds20230630_1x/no_prf20260511/INTEGRATE.HKL"
-)
-DEFAULT_RES = Path(
-    "/Users/Mike/Desktop/MartynowyczLab/data_processing/2026.04.10/370/cbf_v7/"
-    "xds20230630_1x/temp_a.res"
-)
-
 
 def import_mlx():
     """Import MLX lazily so the script can still report a useful error."""
@@ -339,6 +330,9 @@ def run_benchmark(args: argparse.Namespace) -> dict:
     """Run the benchmark and return a JSON-serializable summary."""
 
     mlx, mx, mlx_info = import_mlx()
+    hkl_path = Path(args.hkl)
+    res_path = Path(args.res)
+    record_paths = bool(args.record_absolute_input_paths)
     summary = {
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "python": sys.executable,
@@ -346,8 +340,10 @@ def run_benchmark(args: argparse.Namespace) -> dict:
         "mlx": mlx_info,
         "capabilities": mlx_capabilities(mx),
         "inputs": {
-            "hkl": str(Path(args.hkl)),
-            "res": str(Path(args.res)),
+            "hkl": str(hkl_path.resolve()) if record_paths else hkl_path.name,
+            "res": str(res_path.resolve()) if record_paths else res_path.name,
+            "hkl_sha256": sha256(hkl_path) if hkl_path.exists() else "",
+            "res_sha256": sha256(res_path) if res_path.exists() else "",
             "hkl_transform": args.hkl_transform,
         },
         "config": {},
@@ -530,8 +526,16 @@ def run_benchmark(args: argparse.Namespace) -> dict:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--hkl", default=str(DEFAULT_HKL))
-    ap.add_argument("--res", default=str(DEFAULT_RES))
+    ap.add_argument(
+        "--hkl",
+        default=os.environ.get("GROND_BENCH_HKL", ""),
+        help="Input INTEGRATE.HKL path. Required unless GROND_BENCH_HKL is set.",
+    )
+    ap.add_argument(
+        "--res",
+        default=os.environ.get("GROND_BENCH_RES", ""),
+        help="Input RES/CIF model path. Required unless GROND_BENCH_RES is set.",
+    )
     ap.add_argument("--hkl-transform", default=None)
     ap.add_argument("--rows", type=int, default=64)
     ap.add_argument("--top-isigma", action="store_true")
@@ -568,11 +572,18 @@ def main() -> None:
     ap.add_argument("--scipy-worker-chunksize", type=int, default=1)
     ap.add_argument("--skip-serial-reference", action="store_true", help="Skip the single-process SciPy propagation reference.")
     ap.add_argument("--reference-array", default="", help="NPZ from scipy_worker_scaling.py --save-arrays to use as the full-row reference.")
+    ap.add_argument(
+        "--record-absolute-input-paths",
+        action="store_true",
+        help="Write absolute input paths into the JSON summary. Off by default to keep committed benchmark summaries portable.",
+    )
     ap.add_argument("--accept-p95-rel", type=float, default=1e-3)
     ap.add_argument("--accept-max-rel", type=float, default=5e-2)
     ap.add_argument("--cache-dir", default="")
     ap.add_argument("--out", default="experiments/mlx_backend/mlx_bloch_benchmark_summary.json")
     args = ap.parse_args()
+    if not args.hkl or not args.res:
+        ap.error("--hkl and --res are required unless GROND_BENCH_HKL and GROND_BENCH_RES are set")
 
     summary = run_benchmark(args)
     out = Path(args.out)

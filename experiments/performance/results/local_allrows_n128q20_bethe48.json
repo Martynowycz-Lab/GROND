@@ -55,9 +55,9 @@
   "created_at": "2026-06-09T11:58:19-0400",
   "host": "Electron.dhcp.hwi.buffalo.edu",
   "inputs": {
-    "hkl": "/Users/Mike/Desktop/MartynowyczLab/data_processing/2026.04.10/370/cbf_v7/xds20230630_1x/no_prf20260511/INTEGRATE.HKL",
+    "hkl": "<TYROSINE_370_XDS_NO_PRF>/INTEGRATE.HKL",
     "hkl_transform": null,
-    "res": "/Users/Mike/Desktop/MartynowyczLab/data_processing/2026.04.10/370/cbf_v7/xds20230630_1x/temp_a.res"
+    "res": "<TYROSINE_370_XDS_NO_PRF>/temp_a.res"
   },
   "platform": "macOS-26.5.1-arm64-arm-64bit",
   "python": "/opt/anaconda3/bin/python",

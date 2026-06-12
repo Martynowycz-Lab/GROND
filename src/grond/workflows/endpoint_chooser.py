@@ -317,7 +317,7 @@ def _write_markdown(out_dir: Path, decision: Mapping) -> Path:
 
 
 def _write_tex(out_dir: Path, decision: Mapping) -> Path:
-    """Write a small LaTeX table for manuscript supplements."""
+    """Write a small LaTeX table for supplemental reports."""
 
     rows = []
     for candidate in decision.get("candidates", []):

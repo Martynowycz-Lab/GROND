@@ -33,7 +33,7 @@
 \definecolor{grondAmber}{HTML}{D88A1D}
 \definecolor{grondRed}{HTML}{B94444}
 \definecolor{grondViolet}{HTML}{7657D6}
-\definecolor{grondPaper}{HTML}{F7F8FA}
+\definecolor{grondCanvas}{HTML}{F7F8FA}
 \definecolor{grondLine}{HTML}{D7DEE8}
 
 \hypersetup{
@@ -88,7 +88,7 @@
   lane/.style={
     rounded corners=7pt,
     draw=grondLine,
-    fill=grondPaper,
+    fill=grondCanvas,
     line width=0.8pt
   },
   stage/.style={font=\sffamily\bfseries\large, text=grondInk},
@@ -124,7 +124,7 @@
 These figures describe how GROND takes a reintegrated XDS directory plus a solved
 structure and turns row-level observations into Bloch/Born predictions, corrected
 reflection files, endpoint statistics, forensic audits, and maps. The diagrams
-are written as source figures for papers, talks, and lab documentation. For a
+are written as source figures for reports, talks, and lab documentation. For a
 non-expert reader, a \emph{row} means one measured spot observation from the
 integration table. A \emph{merged reflection} means several rows have already
 been combined. GROND keeps rows alive for as long as possible because row-level

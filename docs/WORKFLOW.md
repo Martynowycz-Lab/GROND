@@ -2,7 +2,7 @@
 
 GROND is staged so that cheap checks control expensive calculations. A source-level map of the files behind this workflow is in [CODE_MAP.md](CODE_MAP.md).
 
-The publication-quality LaTeX/TikZ workflow figures live in [docs/figures](figures/README.md). The master source is [grond_workflow_figures.tex](figures/grond_workflow_figures.tex), which builds one overview figure plus detailed figures for the conventional pre-GROND path, the GROND reintegration/intake path, reflection-ledger creation, automatic decisions, physical alignment and thickness selection, Bloch/regularization, nuisance gates, endpoint/map output, multi-dataset prep, and run-mode cost. Small examples of the files shown in the diagrams are in [FILE_FORMATS.md](FILE_FORMATS.md).
+The report-quality LaTeX/TikZ workflow figures live in [docs/figures](figures/README.md). The master source is [grond_workflow_figures.tex](figures/grond_workflow_figures.tex), which builds one overview figure plus detailed figures for the conventional pre-GROND path, the GROND reintegration/intake path, reflection-ledger creation, automatic decisions, physical alignment and thickness selection, Bloch/regularization, nuisance gates, endpoint/map output, multi-dataset prep, and run-mode cost. Small examples of the files shown in the diagrams are in [FILE_FORMATS.md](FILE_FORMATS.md).
 
 ```mermaid
 flowchart TD
