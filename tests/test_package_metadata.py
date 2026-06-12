@@ -128,11 +128,20 @@ def test_public_text_avoids_disfavored_dataset_labels():
     assert offenders == []
 
 
-def test_development_lint_surface_matches_ci():
-    lint_command = "python -m ruff check src/grond tests scripts --no-cache"
+def test_development_check_surface_matches_ci():
+    development_text = (ROOT / "docs" / "DEVELOPMENT.md").read_text()
+    ci_text = (ROOT / ".github" / "workflows" / "tests.yml").read_text()
+    shared_commands = (
+        "python -m ruff check src/grond tests scripts --no-cache",
+        "python -m pytest",
+        "python -m grond doctor --probe-bloch",
+        "python -m build",
+        "check_release_artifacts.py",
+    )
 
-    assert lint_command in (ROOT / "docs" / "DEVELOPMENT.md").read_text()
-    assert lint_command in (ROOT / ".github" / "workflows" / "tests.yml").read_text()
+    for command in shared_commands:
+        assert command in development_text
+        assert command in ci_text
 
 
 def test_documented_grond_commands_still_parse():
