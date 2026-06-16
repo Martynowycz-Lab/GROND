@@ -2524,7 +2524,7 @@ def run_endpoint_calibration(prep: PrepConfig, result: dict, args: argparse.Name
         "--publication-prefer-wght-mode",
         str(getattr(args, "endpoint_calibration_prefer_wght_mode", "freeze-zero")),
         "--instability-u",
-        f"{args.instability_u:g}",
+        f"{getattr(args, 'instability_u', 0.01):g}",
     ]
     try:
         run_logged(cmd, logs, f"{safe_label(label)}_endpoint_calibration", dry_run=False)
@@ -4940,7 +4940,7 @@ def cmd_scale_replay(args: argparse.Namespace) -> int:
         "--wght-modes",
         args.wght_modes,
         "--instability-u",
-        str(args.instability_u),
+        str(getattr(args, "instability_u", 0.01)),
         "--publication-goof-min",
         str(args.publication_goof_min),
         "--publication-goof-max",
@@ -5152,6 +5152,7 @@ def add_common_run_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--endpoint-calibration-sigma-min-scale", type=float, default=0.05)
     ap.add_argument("--endpoint-calibration-sigma-max-scale", type=float, default=4.0)
     ap.add_argument("--endpoint-calibration-shelxl-iterations", type=int, default=1)
+    ap.add_argument("--instability-u", type=float, default=0.01, help="Minimum positive Ueq used by endpoint replays to flag unstable ADPs.")
     ap.add_argument("--scale-polish", choices=["auto", "on", "off"], default="auto", help="Run a post-hoc scale-window compression gate after the final Bloch row table.")
     ap.add_argument("--scale-polish-window-deg", type=float, default=5.0, help="Maximum physical frame-window width tested by the scale-polish gate.")
     ap.add_argument("--scale-polish-frame-models", default="adaptive,fixed", help="Frame-scale compression models tested by the scale-polish gate.")

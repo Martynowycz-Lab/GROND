@@ -564,6 +564,24 @@ def test_full_fast_parser_exposes_middle_profile():
     assert args.full_fast_structure_max_nfev == 0
 
 
+def test_auto_parser_exposes_endpoint_instability_guard():
+    args = build_parser().parse_args(
+        [
+            "auto",
+            "--out-dir",
+            "out",
+            "--xds-dir",
+            "xds",
+            "--structure",
+            "model.res",
+            "--instability-u",
+            "0.02",
+        ]
+    )
+    assert args.command == "auto"
+    assert args.instability_u == 0.02
+
+
 def test_full_fast_profile_pins_cheap_automatic_work():
     args = build_parser().parse_args(["auto", "--out-dir", "out", "--xds-dir", "xds", "--structure", "model.res", "--full-fast"])
     profile = apply_speed_profile(args)
