@@ -3,7 +3,9 @@ from __future__ import annotations
 import argparse
 import compileall
 import json
+import math
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -4561,6 +4563,357 @@ def cmd_validate_ls1(args: argparse.Namespace) -> int:
     return 0
 
 
+SHELX_RESTRAINT_COMMANDS = {
+    "RIGU",
+    "DFIX",
+    "DANG",
+    "SADI",
+    "FLAT",
+    "CHIV",
+    "SAME",
+    "DELU",
+    "SIMU",
+    "ISOR",
+    "EADP",
+    "EXYZ",
+}
+
+
+def is_shelx_atom_line(line: str) -> bool:
+    """Return true for ordinary SHELX atom records."""
+
+    toks = line.split()
+    if len(toks) < 7:
+        return False
+    if not re.match(r"^[A-Za-z][A-Za-z0-9_]*$", toks[0]):
+        return False
+    try:
+        int(toks[1])
+        [float(x) for x in toks[2:7]]
+    except ValueError:
+        return False
+    return True
+
+
+def shelx_label_element(label: str) -> str:
+    """Return the leading element-like character from a SHELX atom label."""
+
+    match = re.match(r"^[A-Za-z]+", label)
+    return match.group(0).upper()[0] if match else ""
+
+
+def prepare_push_endpoint_model(args: argparse.Namespace, out_dir: Path) -> tuple[Path, Path | None]:
+    """Prepare the start model for an endpoint-push run."""
+
+    source = Path(args.start_res).expanduser().resolve()
+    if args.model_prep == "as-is" and int(args.set_ls_cycles) <= 0:
+        return source, None
+
+    lines = source.read_text().splitlines()
+    active: list[str] = []
+    for line in lines:
+        active.append(line)
+        if line.strip().upper().startswith("END"):
+            break
+
+    cell = [1.0, 1.0, 1.0]
+    for line in active:
+        toks = line.split()
+        if toks and toks[0].upper() == "CELL" and len(toks) >= 8:
+            cell = [float(x) for x in toks[2:5]]
+            break
+
+    heavy: list[dict[str, object]] = []
+    i = 0
+    while i < len(active):
+        line = active[i]
+        if is_shelx_atom_line(line):
+            toks = line.split()
+            label = toks[0]
+            if shelx_label_element(label) != "H" and line.rstrip().endswith("=") and i + 1 < len(active):
+                cont = active[i + 1].split()
+                try:
+                    ueq = (float(toks[6]) + float(toks[7]) + float(cont[0])) / 3.0
+                    heavy.append(
+                        {
+                            "label": label,
+                            "xyz": tuple(float(x) % 1.0 for x in toks[2:5]),
+                            "ueq": max(0.006, min(0.08, ueq)),
+                        }
+                    )
+                except (ValueError, IndexError):
+                    pass
+        i += 1
+
+    def distance2(p: tuple[float, float, float], q: tuple[float, float, float]) -> float:
+        dx = ((p[0] - q[0] + 0.5) % 1.0) - 0.5
+        dy = ((p[1] - q[1] + 0.5) % 1.0) - 0.5
+        dz = ((p[2] - q[2] + 0.5) % 1.0) - 0.5
+        return (dx * cell[0]) ** 2 + (dy * cell[1]) ** 2 + (dz * cell[2]) ** 2
+
+    def nearest_heavy_u(xyz: tuple[float, float, float]) -> tuple[float, str | None]:
+        if not heavy:
+            return 0.03, None
+        rec = min(heavy, key=lambda item: distance2(xyz, item["xyz"]))  # type: ignore[arg-type]
+        return float(rec["ueq"]), str(rec["label"])
+
+    remove_restraints = args.model_prep in {"no-restraints", "free-h-anis-no-restraints"}
+    free_h_anis = args.model_prep == "free-h-anis-no-restraints"
+    new_lines: list[str] = []
+    removed_restraints: list[str] = []
+    removed_afix = 0
+    converted_h: list[dict[str, object]] = []
+    inserted_rem = False
+    i = 0
+    while i < len(active):
+        line = active[i]
+        toks = line.split()
+        key = toks[0].upper() if toks else ""
+
+        if not inserted_rem and key == "LATT":
+            new_lines.append(f"REM GROND endpoint-push prepared model: {args.model_prep}")
+            if int(args.set_ls_cycles) > 0:
+                new_lines.append(f"REM GROND endpoint-push set L.S. {int(args.set_ls_cycles)}")
+            inserted_rem = True
+
+        if remove_restraints and key in SHELX_RESTRAINT_COMMANDS:
+            removed_restraints.append(line)
+            i += 1
+            continue
+        if free_h_anis and key == "AFIX":
+            removed_afix += 1
+            i += 1
+            continue
+        if key == "L.S." and int(args.set_ls_cycles) > 0:
+            new_lines.append(f"L.S. {int(args.set_ls_cycles)}")
+            i += 1
+            continue
+        if key == "END":
+            if free_h_anis:
+                new_lines.append(f"REM GROND endpoint-push free anisotropic H count: {len(converted_h)}")
+            new_lines.append("END")
+            i += 1
+            continue
+        if free_h_anis and is_shelx_atom_line(line) and shelx_label_element(toks[0]) == "H":
+            label = toks[0]
+            sfac = int(toks[1])
+            x, y, z = [float(v) for v in toks[2:5]]
+            occ = float(toks[5])
+            old_u = float(toks[6]) if len(toks) > 6 else -1.2
+            parent_ueq, parent = nearest_heavy_u((x % 1.0, y % 1.0, z % 1.0))
+            multiplier = abs(old_u) if old_u < 0 else 1.2
+            if multiplier < 0.5 or multiplier > 2.0:
+                multiplier = 1.2
+            u = max(0.010, min(0.080, parent_ueq * multiplier))
+            new_lines.append(f"{label:<4} {sfac:>2d} {x:11.6f} {y:11.6f} {z:11.6f} {occ:11.5f} {u:10.5f} {u:10.5f} =")
+            new_lines.append(f" {u:10.5f} {0.0:10.5f} {0.0:10.5f} {0.0:10.5f}")
+            converted_h.append({"label": label, "parent": parent, "parent_ueq": parent_ueq, "init_u_diag": u, "old_u": old_u})
+            i += 1
+            continue
+
+        new_lines.append(line)
+        i += 1
+
+    prepared = out_dir / "start_prepared.res"
+    audit = out_dir / "start_prepared_audit.json"
+    prepared.write_text("\n".join(new_lines) + "\n")
+    audit.write_text(
+        json.dumps(
+            {
+                "source": str(source),
+                "output": str(prepared),
+                "model_prep": args.model_prep,
+                "set_ls_cycles": int(args.set_ls_cycles),
+                "discarded_post_end_lines": max(0, len(lines) - len(active)),
+                "removed_restraints": removed_restraints,
+                "removed_afix": removed_afix,
+                "converted_hydrogens": converted_h,
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+    return prepared, audit
+
+
+def write_push_endpoint_report(out_dir: Path, *, best_cycle_tolerance: float) -> Path | None:
+    """Write a compact safety report for a completed endpoint-push run."""
+
+    summary_path = out_dir / "shelxl_feedback_loop_summary.json"
+    if not summary_path.exists():
+        return None
+    summary = json.loads(summary_path.read_text())
+    rows = []
+    for run in summary.get("runs", []):
+        metrics = run.get("metrics") or {}
+        model = Path(run.get("output_model", ""))
+        lst = model.with_suffix(".lst")
+        text = lst.read_text(errors="ignore") if lst.exists() else ""
+        npd_atoms = re.findall(r"\s([A-Z][A-Z0-9]{3})\s+\*\* NON POSITIVE DEFINITE \*\*", text)
+        split_match = re.search(r"(\d+)\s+atoms may be split", text)
+        split_count = int(split_match.group(1)) if split_match else 0
+        param_match = re.search(r"Total number of l\.s\. parameters =\s+(\d+)", text)
+        restraint_match = re.search(r"Restrained GooF =\s+[0-9.]+ for\s+(\d+) restraints", text)
+        rows.append(
+            {
+                "cycle": len(rows) + 1,
+                "model": str(model),
+                "elapsed_seconds": run.get("elapsed_seconds"),
+                "parameters": int(param_match.group(1)) if param_match else None,
+                "restraints": int(restraint_match.group(1)) if restraint_match else None,
+                "npd_atoms": npd_atoms,
+                "split_count": split_count,
+                "native_wR2_all": metrics.get("native_dyn_wR2_all"),
+                "native_free_wR2_all": metrics.get("native_dyn_free_wR2_all"),
+                "endpoint_R1_all": metrics.get("endpoint_R1_all"),
+                "endpoint_wR2_all": metrics.get("endpoint_wR2_all"),
+                "endpoint_GooF": metrics.get("endpoint_GooF"),
+                "sigma_scale": metrics.get("post_bloch_sigma_scale"),
+            }
+        )
+    finite_rows = [r for r in rows if r["native_wR2_all"] is not None and math.isfinite(float(r["native_wR2_all"]))]
+    best_native = min(finite_rows, key=lambda r: float(r["native_wR2_all"])) if finite_rows else None
+    threshold = float(best_native["native_wR2_all"]) + best_cycle_tolerance if best_native else math.inf
+    safe_rows = [r for r in finite_rows if not r["npd_atoms"] and int(r["split_count"]) == 0]
+    within = [r for r in safe_rows if float(r["native_wR2_all"]) <= threshold]
+    selected = min(within or safe_rows, key=lambda r: (r["cycle"], float(r["native_wR2_all"]))) if safe_rows else None
+    decision = {
+        "summary": str(summary_path),
+        "best_cycle_tolerance": best_cycle_tolerance,
+        "best_native_cycle": best_native,
+        "selected_safe_cycle": selected,
+        "rows": rows,
+    }
+    decision_path = out_dir / "endpoint_push_decision.json"
+    decision_path.write_text(json.dumps(decision, indent=2) + "\n")
+    report_path = out_dir / "ENDPOINT_PUSH_REPORT.md"
+    with report_path.open("w") as handle:
+        handle.write("# GROND Endpoint Push Report\n\n")
+        handle.write("This report summarizes a continuation run from an existing pinned GROND row/nuisance summary. The selected model is the earliest safe cycle within the requested native-row tolerance when possible; cycles with NPD atoms or split warnings are kept as diagnostics, not promoted.\n\n")
+        handle.write("| cycle | seconds | params | restraints | NPD atoms | split warnings | native wR2all | native free wR2 | R1all | wR2all | GooF | sigma scale |\n")
+        handle.write("|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|\n")
+        for row in rows:
+            npd = ",".join(row["npd_atoms"]) if row["npd_atoms"] else "-"
+            handle.write(
+                f"| {row['cycle']} | {float(row['elapsed_seconds'] or 0):.1f} | {row['parameters']} | {row['restraints']} | "
+                f"{npd} | {row['split_count']} | {float(row['native_wR2_all'] or math.nan):.4f} | "
+                f"{float(row['native_free_wR2_all'] or math.nan):.4f} | {float(row['endpoint_R1_all'] or math.nan):.4f} | "
+                f"{float(row['endpoint_wR2_all'] or math.nan):.4f} | {float(row['endpoint_GooF'] or math.nan):.3f} | "
+                f"{float(row['sigma_scale'] or math.nan):.3f} |\n"
+            )
+        handle.write("\n")
+        if selected:
+            handle.write(f"Selected safe cycle: {selected['cycle']} at `{selected['model']}`.\n")
+        else:
+            handle.write("Selected safe cycle: none. All completed cycles had pathology warnings or missing metrics.\n")
+        if best_native:
+            handle.write(f"\nLowest native wR2all cycle: {best_native['cycle']} at `{best_native['model']}`.\n")
+    return report_path
+
+
+def cmd_push_endpoint(args: argparse.Namespace) -> int:
+    """Continue an existing GROND endpoint with pinned nuisance settings."""
+
+    python = choose_python(args.python)
+    out_dir = Path(args.out_dir).expanduser().resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    start_model, prep_audit = prepare_push_endpoint_model(args, out_dir)
+    cmd = [
+        python,
+        str(engine_script("shelxl_feedback_loop.py")),
+        "--source-summary",
+        args.source_summary,
+        "--start-res",
+        str(start_model),
+        "--out-dir",
+        str(out_dir),
+        "--python",
+        python,
+        "--cycles",
+        str(args.cycles),
+        "--n-basis",
+        str(args.n_basis),
+        "--n-points",
+        str(args.n_points),
+        "--final-n-basis",
+        str(args.final_n_basis),
+        "--final-n-points",
+        str(args.final_n_points),
+        "--workers",
+        str(args.workers),
+        "--chunksize",
+        str(args.chunksize),
+        "--shelxl",
+        args.shelxl,
+        "--shelxl-iterations",
+        str(args.shelxl_iterations),
+        "--post-bloch-sigma-policy",
+        args.post_bloch_sigma_policy,
+        "--post-bloch-sigma-holdout-fraction",
+        f"{args.post_bloch_sigma_holdout_fraction:g}",
+        "--post-bloch-sigma-min-scale",
+        f"{args.post_bloch_sigma_min_scale:g}",
+        "--post-bloch-sigma-max-scale",
+        f"{args.post_bloch_sigma_max_scale:g}",
+        "--lambda-grid",
+        args.lambda_grid,
+        "--rescale",
+        args.rescale,
+        "--cache-compression",
+        args.prediction_cache_compression,
+        "--compute-backend",
+        args.compute_backend,
+        "--row-plan-cache",
+        args.row_plan_cache,
+        "--jax-batch-size",
+        str(args.jax_batch_size),
+        "--jax-matrix-bucket-size",
+        str(args.jax_matrix_bucket_size),
+        "--bethe-strong-count",
+        str(args.bethe_strong_count),
+        "--bethe-variant",
+        args.bethe_variant,
+        "--bethe-promote-denom",
+        f"{args.bethe_promote_denom:g}",
+        "--bethe-denom-eps",
+        f"{args.bethe_denom_eps:g}",
+        "--min-d-spacing",
+        f"{args.min_d_spacing:g}",
+        "--topup-d-min",
+        f"{args.topup_d_min:g}",
+        "--min-peak",
+        f"{args.min_peak:g}",
+        "--geometry-percentile",
+        f"{args.geometry_percentile:g}",
+        "--max-rows",
+        str(args.max_rows),
+    ]
+    if args.hkl:
+        cmd += ["--hkl", args.hkl]
+    if args.baseline_hkl:
+        cmd += ["--baseline-hkl", args.baseline_hkl]
+    if args.hkl_transform:
+        cmd += [f"--hkl-transform={args.hkl_transform}"]
+    if args.make_maps_on_final:
+        cmd.append("--make-maps-on-final")
+    if args.dry_run:
+        plan = {
+            "command": cmd,
+            "prepared_start_res": str(start_model),
+            "prepared_audit": str(prep_audit) if prep_audit else "",
+            "tool_config": getattr(args, "tool_config_path", ""),
+            "external_tools": external_tool_statuses(args),
+        }
+        (out_dir / "push_endpoint_plan.json").write_text(json.dumps(plan, indent=2) + "\n")
+        print(json.dumps(plan, indent=2))
+        return 0
+    subprocess.run(cmd, check=True)
+    report = write_push_endpoint_report(out_dir, best_cycle_tolerance=float(args.best_cycle_tolerance))
+    if report:
+        print(f"Endpoint push report: {report}")
+    return 0
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     """CLI entrypoint that reports dependency and Bloch-kernel readiness."""
 
@@ -5519,6 +5872,56 @@ def build_parser() -> argparse.ArgumentParser:
     p_validate_ls1.add_argument("--native-polish-early-stop-min-improvement", type=float, default=1e-4)
     p_validate_ls1.add_argument("--native-polish-free-wR2-tolerance", type=float, default=0.02)
     p_validate_ls1.set_defaults(func=cmd_validate_ls1)
+
+    p_push = sub.add_parser("push-endpoint", help="Continue a pinned GROND endpoint from an existing summary and start model.")
+    p_push.add_argument("--source-summary", required=True, help="Existing native_row_regularize summary whose selected nuisance values should be pinned.")
+    p_push.add_argument("--start-res", required=True, help="Starting RES model to continue from.")
+    p_push.add_argument("--out-dir", required=True)
+    p_push.add_argument("--python", default="")
+    add_tool_config_args(p_push)
+    p_push.add_argument("--dry-run", action="store_true")
+    p_push.add_argument("--hkl", default="", help="Override HKL path if the source summary does not record it.")
+    p_push.add_argument("--baseline-hkl", default="", help="Optional conventional HKL for baseline/reference endpoint comparisons.")
+    p_push.add_argument("--hkl-transform", default="", help="Override signed HKL transform. Defaults to the source summary.")
+    p_push.add_argument("--cycles", type=int, default=3, help="Additional Bloch/SHELXL macrocycles.")
+    p_push.add_argument("--n-basis", type=int, default=108)
+    p_push.add_argument("--n-points", type=int, default=20)
+    p_push.add_argument("--final-n-basis", type=int, default=0)
+    p_push.add_argument("--final-n-points", type=int, default=20)
+    p_push.add_argument("--shelxl", default=default_shelxl_executable())
+    p_push.add_argument("--shelxl-iterations", type=int, default=1, help="SHELXL executable calls per macrocycle.")
+    p_push.add_argument("--workers", type=int, default=auto_worker_count(0, 0.85))
+    p_push.add_argument("--chunksize", type=int, default=0)
+    p_push.add_argument("--compute-backend", choices=["scipy", "scipy_bethe", "scipy_expm", "scipy_expm_multiply", "jax", "jax_auto", "jax_cpu", "jax_mps", "jax_cuda", "jax_padded", "jax_auto_padded", "jax_cpu_padded", "jax_mps_padded", "jax_cuda_padded", "jax_cpu_real_expm", "jax_mps_real_expm", "jax_mps_real_expm_padded"], default="scipy_bethe")
+    p_push.add_argument("--row-plan-cache", choices=["off", "readwrite", "rebuild"], default="readwrite")
+    p_push.add_argument("--jax-batch-size", type=int, default=0)
+    p_push.add_argument("--jax-matrix-bucket-size", type=int, default=0)
+    p_push.add_argument("--bethe-strong-count", type=int, default=48)
+    p_push.add_argument("--bethe-variant", choices=["truncate", "schur0", "schur_target", "schur_mean"], default="schur_target")
+    p_push.add_argument("--bethe-promote-denom", type=float, default=0.005)
+    p_push.add_argument("--bethe-denom-eps", type=float, default=1e-5)
+    p_push.add_argument("--min-d-spacing", type=float, default=0.0)
+    p_push.add_argument("--topup-d-min", type=float, default=0.0)
+    p_push.add_argument("--min-peak", type=float, default=-1.0)
+    p_push.add_argument("--geometry-percentile", type=float, default=0.0)
+    p_push.add_argument("--max-rows", type=int, default=0)
+    p_push.add_argument("--post-bloch-sigma-policy", choices=["none", "uniform_z_rms"], default="uniform_z_rms")
+    p_push.add_argument("--post-bloch-sigma-holdout-fraction", type=float, default=0.20)
+    p_push.add_argument("--post-bloch-sigma-min-scale", type=float, default=0.25)
+    p_push.add_argument("--post-bloch-sigma-max-scale", type=float, default=4.0)
+    p_push.add_argument("--lambda-grid", default="1.0")
+    p_push.add_argument("--rescale", choices=["median-iobs", "none"], default="median-iobs")
+    p_push.add_argument("--prediction-cache-compression", choices=["compressed", "none"], default="none")
+    p_push.add_argument("--make-maps-on-final", action="store_true")
+    p_push.add_argument("--best-cycle-tolerance", type=float, default=0.001, help="Safety report tolerance above the best native wR2all.")
+    p_push.add_argument(
+        "--model-prep",
+        choices=["as-is", "no-restraints", "free-h-anis-no-restraints"],
+        default="as-is",
+        help="Optional start-model preparation before the push. The free-H mode is a stress-test branch and is reported with pathology gates.",
+    )
+    p_push.add_argument("--set-ls-cycles", type=int, default=1, help="Rewrite L.S. to this value in the prepared start model. Use 0 to preserve it.")
+    p_push.set_defaults(func=cmd_push_endpoint)
 
     p_val = sub.add_parser("validate", help="Compile the vendored engine scripts with the selected Python.")
     p_val.add_argument("--python", default="")

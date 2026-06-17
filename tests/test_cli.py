@@ -33,6 +33,7 @@ EXPECTED_CLI_COMMANDS = {
     "import-dials",
     "init-config",
     "prep",
+    "push-endpoint",
     "raw-polish",
     "row-template",
     "row-validate",
@@ -218,6 +219,27 @@ def test_utility_commands_parse():
     assert ls1.wrong_polarity_control is True
     assert ls1.native_polish is True
     assert ls1.native_polish_blocks == "adp_ueq,xyz"
+    push = build_parser().parse_args(
+        [
+            "push-endpoint",
+            "--source-summary",
+            "summary.json",
+            "--start-res",
+            "model.res",
+            "--out-dir",
+            "push",
+            "--model-prep",
+            "free-h-anis-no-restraints",
+        ]
+    )
+    assert push.command == "push-endpoint"
+    assert push.cycles == 3
+    assert push.n_basis == 108
+    assert push.n_points == 20
+    assert push.compute_backend == "scipy_bethe"
+    assert push.row_plan_cache == "readwrite"
+    assert push.model_prep == "free-h-anis-no-restraints"
+    assert push.set_ls_cycles == 1
 
 
 def test_auto_parser_is_simple_run_alias():

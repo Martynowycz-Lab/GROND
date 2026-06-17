@@ -252,6 +252,22 @@ GROND validate-ls1 \
 
 For final publication adjudication, set `--n-basis` and `--n-points` to the promoted endpoint support, for example the final `max_observed_basis + 10` and Q20. The validation output reports updated-q LS1, frozen-q fixed corrected-HKL, q=1/Born, alternate-polarity, shuffled global q, shuffled resolution-shell q, shuffled shell-plus-scan q, and optional native-polish controls. The shuffled controls permute row-space `log(Idyn/Iborn)` before ordinary scale fitting, so they test whether row identity matters rather than whether another scalar scale can be fitted. The right conclusion is not that LS1 is exact native dynamical least squares through a conventional refiner. The right conclusion is whether the row-level dynamical correction beats nulls, whether the selected cycle is stable, and whether matched native polish changes the endpoint enough to matter. Details are in [docs/LS1_VALIDATION.md](docs/LS1_VALIDATION.md).
 
+## Pushing a Finished Endpoint
+
+If a run has a good pinned nuisance contract and you want to continue from a specific model rather than repeat the whole automatic search, use `push-endpoint`. It reuses the selected row-level Bloch settings from an existing `summary.json`, runs additional fixed-nuisance Bloch/SHELXL macrocycles, and writes an endpoint-push report that names the earliest safe cycle. This is meant for deliberate endpoint stress tests and short continuations, not for hiding another open-ended optimizer inside `auto`.
+
+```bash
+GROND push-endpoint \
+  --source-summary grond_out/runs/dataset/adaptive_shelxl_feedback/cycle_05_N108Q20/summary.json \
+  --start-res grond_out/runs/dataset/adaptive_shelxl_feedback/cycle_05_N108Q20/endpoint_lam_1p0_B_0p0_noexti/dyn_nuisance_corrected.res \
+  --out-dir grond_out/endpoint_push \
+  --cycles 3 \
+  --n-basis 108 \
+  --n-points 20
+```
+
+For a controlled stress test, `--model-prep no-restraints` removes common SHELX restraint instructions, while `--model-prep free-h-anis-no-restraints` also removes AFIX instructions and converts H atoms into explicit anisotropic atom records initialized from the nearest non-H atom. The report treats non-positive-definite atoms and split warnings as pathology gates; later cycles can remain useful diagnostics even when they are not the selected safe endpoint.
+
 ## What You Get
 
 The output directory contains the run configuration, the prepared inputs, per-stage logs, progress/resume state, row-level predictions, corrected reflection files, endpoint statistics, maps when available, dataset-inclusion reports, resolution-limit reports, and forensic reports. Endpoint summaries include the active SHELXL weighting history and the `post_bloch_sigma` endpoint uncertainty block so high or low `wR2all` and GooF values can be traced to the declared observation model rather than stale model-update weights. If a run is interrupted, launch the same command with the same `--out-dir`; GROND resumes completed stages recorded in `grond_progress.json`.
