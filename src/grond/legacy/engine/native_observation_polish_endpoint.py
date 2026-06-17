@@ -385,7 +385,11 @@ def main() -> None:
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--candidate-dir", action="append", required=True)
     ap.add_argument("--combine-mode", choices=["ensemble", "best_all", "best_free"], default="ensemble")
-    ap.add_argument("--lambda-grid", default="0.90,0.95,1.00")
+    ap.add_argument(
+        "--lambda-grid",
+        default="1.0",
+        help="Diagnostic q-exponent grid. Production workflows use the full Bloch/Born correction with lambda_q=1.0.",
+    )
     ap.add_argument("--rescale", choices=["median-iobs", "none"], default="median-iobs")
     ap.add_argument("--hkl-float-format", choices=["shelx_fixed", "wide"], default="shelx_fixed")
     ap.add_argument("--make-maps", action="store_true")

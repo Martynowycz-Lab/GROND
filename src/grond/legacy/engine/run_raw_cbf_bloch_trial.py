@@ -290,7 +290,11 @@ def main() -> None:
     ap.add_argument("--group-width-grid", default="1.5,3.0")
     ap.add_argument("--detector-scale-bins", type=int, default=0)
     ap.add_argument("--thickness-points", type=int, default=5)
-    ap.add_argument("--lambda-grid", default="0.95")
+    ap.add_argument(
+        "--lambda-grid",
+        default="1.0",
+        help="Diagnostic q-exponent grid. Production workflows use the full Bloch/Born correction with lambda_q=1.0.",
+    )
     ap.add_argument("--free-fraction", type=float, default=0.10)
     ap.add_argument("--split-seed", type=int, default=42)
     ap.add_argument("--workers", type=int, default=8)

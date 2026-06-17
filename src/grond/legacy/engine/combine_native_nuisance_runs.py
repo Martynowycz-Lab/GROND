@@ -443,7 +443,11 @@ def main():
     ap.add_argument("--res", required=True)
     ap.add_argument("--wght-a", type=float, default=None)
     ap.add_argument("--wght-b", type=float, default=None)
-    ap.add_argument("--endpoint-lambda", default="0.95")
+    ap.add_argument(
+        "--endpoint-lambda",
+        default="1.0",
+        help="Diagnostic endpoint q exponent. Production workflows use the full Bloch/Born correction with lambda_q=1.0.",
+    )
     ap.add_argument(
         "--endpoint-source",
         choices=("native", "hkl"),

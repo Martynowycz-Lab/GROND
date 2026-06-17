@@ -794,7 +794,11 @@ def main():
     ap.add_argument("--profile-accumulation", choices=["sum", "mean"], default="sum", help="Accumulate rocking-profile samples as summed detector sub-exposures or legacy normalized means.")
     ap.add_argument("--free-fraction", type=float, default=0.10)
     ap.add_argument("--split-seed", type=int, default=42)
-    ap.add_argument("--lambda-grid", default="0.70,0.75,0.80,0.82")
+    ap.add_argument(
+        "--lambda-grid",
+        default="1.0",
+        help="Diagnostic q-exponent grid. Production workflows use the full Bloch/Born correction with lambda_q=1.0.",
+    )
     ap.add_argument("--acceptance-metric", choices=["all_wR2", "work_wR2", "free_wR2", "all_R1"], default="all_wR2")
     ap.add_argument("--acceptance-min-delta", type=float, default=0.0, help="Required absolute improvement in the acceptance metric before exporting a moved model.")
     ap.add_argument("--free-wR2-tolerance", type=float, default=0.0, help="Maximum allowed free wR2 worsening unless --allow-free-worse is set.")

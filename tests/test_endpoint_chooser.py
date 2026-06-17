@@ -21,7 +21,7 @@ def test_endpoint_chooser_keeps_b_zero_physical_and_reports_b_diagnostic():
             "id": "physical",
             "label": "dataset",
             "source_kind": "native_corrected_hkl",
-            "lambda_q": 0.95,
+            "lambda_q": 1.0,
             "endpoint_b": 0.0,
             "keep_exti": False,
             "hkl_safe_factor": 1.0,
@@ -34,7 +34,7 @@ def test_endpoint_chooser_keeps_b_zero_physical_and_reports_b_diagnostic():
             "id": "diagnostic_b",
             "label": "dataset",
             "source_kind": "native_corrected_hkl",
-            "lambda_q": 0.95,
+            "lambda_q": 1.0,
             "endpoint_b": 18.0,
             "keep_exti": False,
             "hkl_safe_factor": 1.0,
@@ -50,6 +50,41 @@ def test_endpoint_chooser_keeps_b_zero_physical_and_reports_b_diagnostic():
     assert any("endpoint-B" in reason for reason in decision["best_diagnostic_endpoint"]["rejection_reasons"])
 
 
+def test_endpoint_chooser_rejects_nonunit_q_exponent_for_publication():
+    candidates = [
+        {
+            "id": "diagnostic_qexp",
+            "label": "dataset",
+            "source_kind": "native_corrected_hkl",
+            "lambda_q": 0.95,
+            "endpoint_b": 0.0,
+            "keep_exti": False,
+            "hkl_safe_factor": 1.0,
+            "modulation_p95": 1.2,
+            "R1_gt": 0.08,
+            "R1_all": 0.10,
+            "wR2_all": 0.18,
+        },
+        {
+            "id": "physical",
+            "label": "dataset",
+            "source_kind": "native_corrected_hkl",
+            "lambda_q": 1.0,
+            "endpoint_b": 0.0,
+            "keep_exti": False,
+            "hkl_safe_factor": 1.0,
+            "modulation_p95": 1.2,
+            "R1_gt": 0.11,
+            "R1_all": 0.13,
+            "wR2_all": 0.22,
+        },
+    ]
+    decision = choose_publication_endpoints(candidates)
+    assert decision["best_physical_endpoint"]["id"] == "physical"
+    rejected_qexp = [c for c in decision["rejected_corrections"] if c["id"] == "diagnostic_qexp"][0]
+    assert any("non-unit q exponent" in reason for reason in rejected_qexp["rejection_reasons"])
+
+
 def test_write_publication_endpoint_choice_collects_outputs(tmp_path: Path):
     run = tmp_path / "run"
     run.mkdir()
@@ -57,8 +92,8 @@ def test_write_publication_endpoint_choice_collects_outputs(tmp_path: Path):
         json.dumps(
             {
                 "endpoint_results_sorted": [
-                    endpoint(0.95, 16.0, 0.18, 0.10),
-                    endpoint(0.95, 0.0, 0.22, 0.13),
+                    endpoint(1.0, 16.0, 0.18, 0.10),
+                    endpoint(1.0, 0.0, 0.22, 0.13),
                     endpoint(1.00, 0.0, 0.23, 0.14, exti=True),
                 ]
             }
@@ -72,7 +107,10 @@ def test_write_publication_endpoint_choice_collects_outputs(tmp_path: Path):
     assert decision["best_diagnostic_endpoint"]["endpoint_b"] == 16.0
     assert (out / "publication_endpoint_choice.json").exists()
     assert (out / "PUBLICATION_ENDPOINT_CHOOSER.md").exists()
-    assert "Rejected Corrections" in (out / "PUBLICATION_ENDPOINT_CHOOSER.md").read_text()
+    report = (out / "PUBLICATION_ENDPOINT_CHOOSER.md").read_text()
+    assert "Rejected Corrections" in report
+    assert "| label | source | endpoint B | EXTI | class |" in report
+    assert "| label | source | lambda |" not in report
 
 
 def test_endpoint_chooser_prefers_combined_endpoint_when_multi_dataset():
@@ -81,7 +119,7 @@ def test_endpoint_chooser_prefers_combined_endpoint_when_multi_dataset():
             "id": "single_best",
             "label": "d07",
             "source_kind": "native_corrected_hkl",
-            "lambda_q": 0.95,
+            "lambda_q": 1.0,
             "endpoint_b": 0.0,
             "keep_exti": False,
             "hkl_safe_factor": 1.0,
@@ -94,7 +132,7 @@ def test_endpoint_chooser_prefers_combined_endpoint_when_multi_dataset():
             "id": "combined",
             "label": "combined",
             "source_kind": "combined_corrected_hkl",
-            "lambda_q": 0.95,
+            "lambda_q": 1.0,
             "endpoint_b": 0.0,
             "keep_exti": False,
             "hkl_safe_factor": 1.0,

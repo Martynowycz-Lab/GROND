@@ -51,7 +51,11 @@ def _candidate_id(label: str, endpoint: Mapping, index: int) -> str:
     lam = _float(endpoint.get("lambda_q"), float("nan"))
     endpoint_b = _float(endpoint.get("endpoint_b"), 0.0)
     exti = "exti" if bool(endpoint.get("keep_exti", False)) else "noexti"
-    return f"{label}:lambda={lam:g}:B={endpoint_b:g}:{exti}:candidate={index}"
+    parts = [str(label)]
+    if math.isfinite(lam) and abs(lam - 1.0) > 1e-9:
+        parts.append(f"qexp={lam:g}")
+    parts.extend([f"B={endpoint_b:g}", exti, f"candidate={index}"])
+    return ":".join(parts)
 
 
 def _normalize_endpoint(label: str, endpoint: Mapping, *, run_dir: Path | None, source_kind: str, index: int, accepted_polish: bool | None = None) -> dict:
@@ -167,7 +171,10 @@ def classify_publication_endpoint(
     ).to_dict()
     reasons: list[str] = list(safety.get("reasons") or [])
     endpoint_b = _float(candidate.get("endpoint_b"), 0.0)
+    lambda_q = _float(candidate.get("lambda_q"), 1.0)
     source_kind = str(candidate.get("source_kind", ""))
+    if abs(lambda_q - 1.0) > 1e-9:
+        reasons.append("non-unit q exponent is diagnostic-only; GROND publication endpoints use the full Bloch/Born correction")
     if bool(candidate.get("keep_exti", False)):
         reasons.append("EXTI endpoint correction is comparison-only; GROND publication endpoints keep EXTI off")
     if abs(endpoint_b) > 1e-12:
@@ -236,6 +243,7 @@ def choose_publication_endpoints(
         "policy": {
             "physical_endpoint_requires": [
                 "finite endpoint R factors",
+                "q exponent equal to one",
                 "EXTI off",
                 "endpoint-B equal to zero",
                 f"HKL safety factor >= {min_hkl_safe_factor:g}",
@@ -253,7 +261,7 @@ def _candidate_line(candidate: Mapping) -> str:
     reasons = "; ".join(str(r) for r in candidate.get("rejection_reasons", [])[:3])
     return (
         f"| {candidate.get('label', '')} | {candidate.get('source_kind', '')} | "
-        f"{_float(candidate.get('lambda_q'), float('nan')):.3g} | {_float(candidate.get('endpoint_b'), 0.0):.3g} | "
+        f"{_float(candidate.get('endpoint_b'), 0.0):.3g} | "
         f"{'on' if candidate.get('keep_exti') else 'off'} | {candidate.get('publication_class', '')} | "
         f"{_percent(candidate.get('R1_gt'))} | {_percent(candidate.get('R1_all'))} | {_percent(candidate.get('wR2_all'))} | "
         f"{reasons} |"
@@ -293,12 +301,12 @@ def _write_markdown(out_dir: Path, decision: Mapping) -> Path:
     lines.extend(
         [
             "",
-            "Promotion rule: finite endpoint metrics, EXTI off, endpoint-B equal to zero, safe HKL rescaling, bounded intensity modulation, and a passed observation-polish gate when a polish correction is involved.",
+            "Promotion rule: finite endpoint metrics, full q correction, EXTI off, endpoint-B equal to zero, safe HKL rescaling, bounded intensity modulation, and a passed observation-polish gate when a polish correction is involved.",
             "",
             "## Endpoint Candidates",
             "",
-            "| label | source | lambda | endpoint B | EXTI | class | R1gt | R1all | wR2all | main rejection reason |",
-            "|---|---|---:|---:|:---:|---|---:|---:|---:|---|",
+            "| label | source | endpoint B | EXTI | class | R1gt | R1all | wR2all | main rejection reason |",
+            "|---|---|---:|:---:|---|---:|---:|---:|---|",
         ]
     )
     for candidate in decision.get("candidates", []):
@@ -326,7 +334,6 @@ def _write_tex(out_dir: Path, decision: Mapping) -> Path:
                 [
                     str(candidate.get("label", "")).replace("_", r"\_"),
                     str(candidate.get("source_kind", "")).replace("_", r"\_"),
-                    f"{_float(candidate.get('lambda_q'), float('nan')):.3g}",
                     f"{_float(candidate.get('endpoint_b'), 0.0):.3g}",
                     "on" if candidate.get("keep_exti") else "off",
                     str(candidate.get("publication_class", "")).replace("_", r"\_"),
@@ -338,9 +345,9 @@ def _write_tex(out_dir: Path, decision: Mapping) -> Path:
         )
     text = "\n".join(
         [
-            r"\begin{tabular}{llrrllll}",
+            r"\begin{tabular}{llrllll}",
             r"\hline",
-            r"Label & Source & $\lambda$ & B & EXTI & Class & R1all & wR2all \\",
+            r"Label & Source & B & EXTI & Class & R1all & wR2all \\",
             r"\hline",
             *rows,
             r"\hline",

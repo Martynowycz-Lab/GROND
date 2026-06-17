@@ -627,7 +627,12 @@ def main() -> None:
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--specs", default="baseline,adaptive:293:det8,adaptive:200:det8,window:1.0:det8,window:1.5:det8,window:3.0:det8,window:5.0:det8")
     ap.add_argument("--fit-split", default="")
-    ap.add_argument("--lambda-q", type=float, default=1.0)
+    ap.add_argument(
+        "--lambda-q",
+        type=float,
+        default=1.0,
+        help="Diagnostic endpoint q exponent. Production workflows use the full Bloch/Born correction with lambda_q=1.0.",
+    )
     ap.add_argument("--rescale", choices=["median-iobs", "none"], default="median-iobs")
     ap.add_argument("--hkl-float-format", choices=["shelx_fixed", "wide"], default="shelx_fixed")
     ap.add_argument("--post-bloch-sigma-policy", choices=["none", "uniform_z_rms"], default="uniform_z_rms")

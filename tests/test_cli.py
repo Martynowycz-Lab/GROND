@@ -92,7 +92,7 @@ def test_run_parser_exposes_staged_feature_grids():
     assert args.publication_endpoint_max_modulation_p95 == 20.0
     assert args.endpoint_calibration == "auto"
     assert "adaptive:120:det8" in args.endpoint_calibration_specs
-    assert args.endpoint_calibration_lambda_q == 0.0
+    assert args.endpoint_calibration_lambda_q == 1.0
     assert args.endpoint_calibration_wght_modes == "freeze-zero,promote"
     assert args.endpoint_calibration_prefer_wght_mode == "freeze-zero"
     assert args.endpoint_calibration_goof_min == 0.85
@@ -118,6 +118,22 @@ def test_run_parser_exposes_staged_feature_grids():
     assert args.transform_metadata_prefilter == "auto"
     assert args.transform_metadata_max_candidates == 3
     assert args.transform_metadata_min_correlation == 0.70
+
+
+def test_auto_parser_hides_lambda_controls(capsys):
+    parser = build_parser()
+    with pytest.raises(SystemExit) as exc:
+        parser.parse_args(["auto", "--help"])
+    assert exc.value.code == 0
+    captured = capsys.readouterr()
+    assert "--lambda-grid" not in captured.out
+    assert "--endpoint-calibration-lambda-q" not in captured.out
+    assert "--observation-polish-lambda-grid" not in captured.out
+
+    args = parser.parse_args(["auto", "--out-dir", "out", "--hkl", "INTEGRATE.HKL", "--structure", "model.res"])
+    assert args.lambda_grid == "1.0"
+    assert args.endpoint_calibration_lambda_q == 1.0
+    assert args.observation_polish_lambda_grid == ""
     assert args.final_basis_scan_limit == 500
     assert args.final_basis_margin == 10
     assert args.final_basis_max == 500

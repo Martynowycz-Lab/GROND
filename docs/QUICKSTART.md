@@ -64,7 +64,7 @@ This is the recommended production command. It starts with cheap checks and only
 
 When a baseline HKL is available, GROND uses it to reduce transform ambiguity before running Bloch scouts. Any remaining transform candidates are tested cheaply first, then the best candidates are rerun with a stronger basis and quadrature.
 
-The automatic path checks polarity, thickness, simple geometry terms, raw-row resolution behavior, absorption-like terms, jitter, sigma behavior, detector-position scales, endpoint lambda values, maps, forensic reports, and adaptive scale compression. The final polish keeps Q=20. It chooses N from the observed rowwise support scan as `max_observed_basis + 10`, with a default cap of 500. The support top-up is at least as deep as the selected data resolution.
+The automatic path checks polarity, thickness, simple geometry terms, raw-row resolution behavior, absorption-like terms, jitter, sigma behavior, detector-position scales, full-correction endpoints, maps, forensic reports, and adaptive scale compression. The final polish keeps Q=20. It chooses N from the observed rowwise support scan as `max_observed_basis + 10`, with a default cap of 500. The support top-up is at least as deep as the selected data resolution.
 
 For multi-dataset endpoints, GROND applies one overlap-derived post-dynamical scale per crystal before merging. This removes arbitrary raw integration scale differences from the final combined HKL. The default endpoint-B grid is `0.0`. Nonzero endpoint-B scans are only used when you request them with `--endpoint-b-grid`; GROND treats them as diagnostic because they can lower endpoint R factors while making ADPs and maps worse.
 

@@ -62,6 +62,7 @@ _PROGRESS: ProgressState | None = None
 _RUN_LOG_LOCK = threading.Lock()
 _TRANSFORM_SCOUT_SEMAPHORE: threading.BoundedSemaphore | None = None
 _TRANSFORM_SCOUT_SEMAPHORE_LIMIT = 0
+FULL_Q_LAMBDA = "1.0"
 
 
 def configure_progress(log_dir: Path, *, resume: bool, total: int) -> None:
@@ -118,11 +119,13 @@ def _print_stage_metrics(cmd: list[str]) -> None:
     endpoint = summary.get("best_endpoint") or {}
     shelxl = endpoint.get("shelxl") or {}
     if shelxl:
+        lam = safe_float(endpoint.get("lambda_q"), 1.0)
         endpoint_bits = [
-            f"lambda={safe_float(endpoint.get('lambda_q'), float('nan')):.3g}",
             f"B={safe_float(endpoint.get('endpoint_b'), 0.0):.3g}",
             f"EXTI={'on' if endpoint.get('keep_exti') else 'off'}",
         ]
+        if abs(lam - 1.0) > 1e-9:
+            endpoint_bits.insert(0, f"qexp={lam:.3g}")
         print(
             "  SHELXL endpoint:",
             *endpoint_bits,
@@ -750,9 +753,10 @@ def summarize_forensic_gate(out_dir: Path, row_table: Path, hkl: str, res: str, 
                 "observation polish passed raw-row and SHELXL endpoint gates; promote polished corrected-HKL endpoint"
             )
             if sh:
+                lam = safe_float(endpoint.get("lambda_q"), 1.0)
+                q_note = f" qexp={lam:.3g}," if abs(lam - 1.0) > 1e-9 else ""
                 recommendations.append(
-                    f"best polished endpoint lambda={safe_float(endpoint.get('lambda_q'), 0.0):.3g}, "
-                    f"R1all={100.0 * safe_float(sh.get('R1_all'), float('nan')):.2f}%, "
+                    f"best polished endpoint:{q_note} R1all={100.0 * safe_float(sh.get('R1_all'), float('nan')):.2f}%, "
                     f"wR2all={100.0 * safe_float(sh.get('wR2_all'), float('nan')):.2f}%"
                 )
         else:
@@ -801,7 +805,7 @@ def should_run_observation_polish(summary: dict, args: argparse.Namespace, depth
 def observation_polish_cmd(python: str, row_table: Path, hkl: str, res: str, out_dir: Path, args: argparse.Namespace) -> list[str]:
     """Build the command that turns a passing observation correction into HKLs."""
 
-    lambda_grid = getattr(args, "observation_polish_lambda_grid", "") or getattr(args, "lambda_grid", "0.90,0.95,1.00")
+    lambda_grid = getattr(args, "observation_polish_lambda_grid", "") or getattr(args, "lambda_grid", FULL_Q_LAMBDA)
     cmd = [
         python,
         str(engine_script("native_observation_polish_endpoint.py")),
@@ -1510,9 +1514,7 @@ def native_stage_cmd(
     pinned = pinned or {}
     fast = bool(args.fast)
     endpoint_ok = bool(endpoint and is_shelx_model(structure) and not args.native_only)
-    lambda_grid = args.lambda_grid if endpoint_ok else ""
-    if fast and endpoint_ok:
-        lambda_grid = first(args.lambda_grid, "0.95")
+    lambda_grid = FULL_Q_LAMBDA if endpoint_ok else ""
     endpoint_b_grid = args.endpoint_b_grid if endpoint_ok and not fast else "0.0"
     endpoint_exti_grid = args.endpoint_exti_grid if endpoint_ok and not fast else "off"
     shelxl_iterations = args.shelxl_iterations if endpoint_ok and not fast else 1
@@ -1974,7 +1976,7 @@ def structure_cmd(python: str, ds: DatasetSpec, structure: str, baseline_hkl: st
         "--sigma-c-peak",
         grid_from_nuisance(nui, "sigma_c_peak", "0.0"),
         "--lambda-grid",
-        first(args.lambda_grid, "0.95"),
+        FULL_Q_LAMBDA,
         "--workers",
         str(args.workers),
         "--chunksize",
@@ -2042,7 +2044,7 @@ def shelxl_feedback_cmd(
         "--post-bloch-sigma-max-scale",
         f"{args.post_bloch_sigma_max_scale:g}",
         "--lambda-grid",
-        first(args.lambda_grid, "1.0"),
+        FULL_Q_LAMBDA,
         "--rescale",
         "median-iobs",
         "--cache-compression",
@@ -2090,7 +2092,7 @@ def combine_cmd(python: str, runs: dict[str, Path], structure: str, out_dir: Pat
         "--res",
         structure,
         "--endpoint-lambda",
-        first(args.lambda_grid, "0.95"),
+        FULL_Q_LAMBDA,
         "--endpoint-source",
         "native",
         "--interdataset-scale",
@@ -2437,25 +2439,11 @@ def run_publication_endpoint_chooser(prep: PrepConfig, result: dict, args: argpa
 
 
 def _endpoint_calibration_lambda(summary: Mapping[str, object], args: argparse.Namespace) -> float:
-    """Return the endpoint lambda to replay for a frozen row table."""
+    """Return the diagnostic q exponent to replay for a frozen row table."""
 
-    explicit = safe_float(getattr(args, "endpoint_calibration_lambda_q", 0.0), 0.0)
-    if explicit > 0.0:
-        return explicit
-    for block_name in ("best_endpoint", "endpoint_factor_decision"):
-        block = summary.get(block_name)
-        if not isinstance(block, Mapping):
-            continue
-        for key in ("lambda_q", "balanced_lambda_q", "final_lambda_q", "best_lambda_q"):
-            value = safe_float(block.get(key), float("nan"))
-            if value == value and value > 0.0:
-                return value
-    config = summary.get("config")
-    if isinstance(config, Mapping):
-        values = parse_numeric_grid(str(config.get("lambda_grid", "")))
-        if values:
-            return float(values[0])
-    return 1.0
+    del summary
+    value = safe_float(getattr(args, "endpoint_calibration_lambda_q", 1.0), 1.0)
+    return value if value > 0.0 else 1.0
 
 
 def run_endpoint_calibration(prep: PrepConfig, result: dict, args: argparse.Namespace, python: str, logs: Path) -> dict:
@@ -5079,7 +5067,7 @@ def cmd_raw_polish(args: argparse.Namespace) -> int:
         "--thickness-points",
         str(3 if args.fast else args.thickness_points),
         "--lambda-grid",
-        first(args.lambda_grid, "0.95") if args.fast else args.lambda_grid,
+        first(args.lambda_grid, FULL_Q_LAMBDA) if args.fast else args.lambda_grid,
         "--free-fraction",
         str(args.free_fraction),
         "--split-seed",
@@ -5150,7 +5138,7 @@ def cmd_raw_polish(args: argparse.Namespace) -> int:
     return 0
 
 
-def add_forensic_args(ap: argparse.ArgumentParser) -> None:
+def add_forensic_args(ap: argparse.ArgumentParser, *, expose_lambda_controls: bool = True) -> None:
     """Attach row-space forensic and observation-polish options to a parser."""
 
     ap.add_argument("--forensic-gate", dest="forensic_gate", action="store_true", default=True, help="Run post-final row-space forensic audits.")
@@ -5161,7 +5149,14 @@ def add_forensic_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--forensic-top-groups", type=int, default=200)
     ap.add_argument("--observation-polish", choices=["auto", "on", "off"], default="auto", help="Promote held-out observation corrections into corrected-HKL endpoints when both main gates pass.")
     ap.add_argument("--observation-polish-combine", choices=["ensemble", "best_all", "best_free"], default="ensemble")
-    ap.add_argument("--observation-polish-lambda-grid", default="", help="Lambda grid for promoted observation-polish endpoints. Empty reuses --lambda-grid when available.")
+    if expose_lambda_controls:
+        ap.add_argument(
+            "--observation-polish-lambda-grid",
+            default="",
+            help="Diagnostic q-exponent grid for promoted observation-polish endpoints. Empty uses the full Bloch/Born correction.",
+        )
+    else:
+        ap.set_defaults(observation_polish_lambda_grid="")
     ap.add_argument("--observation-polish-min-raw-wR2-gain", type=float, default=0.002)
     ap.add_argument("--observation-polish-endpoint-wR2-tolerance", type=float, default=0.0005)
     ap.add_argument("--forensic-maps", action="store_true", help="Write maps for promoted observation-polish endpoints during standalone forensics.")
@@ -5337,7 +5332,7 @@ def cmd_calibrate_endpoint(args: argparse.Namespace) -> int:
     return cmd_scale_replay(args)
 
 
-def add_common_run_args(ap: argparse.ArgumentParser) -> None:
+def add_common_run_args(ap: argparse.ArgumentParser, *, expose_lambda_controls: bool = True) -> None:
     """Attach the shared run/auto options to an argparse subcommand."""
 
     ap.add_argument("--prep", default="")
@@ -5466,7 +5461,14 @@ def add_common_run_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--free-fraction", type=float, default=0.10)
     ap.add_argument("--split-seed", type=int, default=42)
     ap.add_argument("--selection-metric", choices=["work_wR2", "free_wR2", "all_wR2", "all_R1"], default="all_wR2")
-    ap.add_argument("--lambda-grid", default="1.0")
+    if expose_lambda_controls:
+        ap.add_argument(
+            "--lambda-grid",
+            default=FULL_Q_LAMBDA,
+            help="Diagnostic q-exponent grid for lower-level runs. Production auto uses the full Bloch/Born correction and does not tune this value.",
+        )
+    else:
+        ap.set_defaults(lambda_grid=FULL_Q_LAMBDA)
     ap.add_argument(
         "--scale-smoothness",
         type=float,
@@ -5495,7 +5497,15 @@ def add_common_run_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--publication-endpoint-max-modulation-p95", type=float, default=20.0, help="Maximum 95th-percentile endpoint intensity modulation for a publication endpoint.")
     ap.add_argument("--endpoint-calibration", choices=["auto", "on", "off"], default="auto", help="Replay the final frozen row table through conservative corrected-HKL endpoint calibration after auto completes.")
     ap.add_argument("--endpoint-calibration-specs", default="baseline,adaptive:293:det8,adaptive:200:det8,adaptive:120:det8,adaptive:80:det8,window:0.5:det8,window:1.0:det8,window:1.5:det8,window:3.0:det8,window:5.0:det8,window:1.0:det4,window:3.0:det4,window:5.0:det4,window:3.0:det1")
-    ap.add_argument("--endpoint-calibration-lambda-q", type=float, default=0.0, help="Override endpoint-calibration lambda. The default 0 reuses the lambda selected in the frozen row summary.")
+    if expose_lambda_controls:
+        ap.add_argument(
+            "--endpoint-calibration-lambda-q",
+            type=float,
+            default=1.0,
+            help="Diagnostic endpoint q exponent for replay tests. Production auto pins this to 1.0.",
+        )
+    else:
+        ap.set_defaults(endpoint_calibration_lambda_q=1.0)
     ap.add_argument("--endpoint-calibration-wght-modes", default="freeze-zero,promote", help="Endpoint-calibration weight branches. The default tests fixed WGHT 0 0 before the compatibility branch.")
     ap.add_argument("--endpoint-calibration-prefer-wght-mode", default="freeze-zero")
     ap.add_argument("--endpoint-calibration-goof-min", type=float, default=0.85)
@@ -5581,7 +5591,7 @@ def add_common_run_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--dose-b-per-frame-grid", default="0.0")
     ap.add_argument("--thickness-points", type=int, default=5, help="Thickness quadrature points for screen/regularization stages.")
     ap.add_argument("--final-thickness-points", type=int, default=9, help="Thickness quadrature points for pinned final-basis polish runs.")
-    add_forensic_args(ap)
+    add_forensic_args(ap, expose_lambda_controls=expose_lambda_controls)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -5650,7 +5660,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.set_defaults(func=cmd_run)
 
     p_auto = sub.add_parser("auto", help="Simple one-command full automatic workflow.")
-    add_common_run_args(p_auto)
+    add_common_run_args(p_auto, expose_lambda_controls=False)
     p_auto.set_defaults(func=cmd_auto)
 
     p_raw = sub.add_parser("raw-polish", help="Experimental raw-CBF Beanland/Cleverley-style forward observation polish.")
@@ -5709,7 +5719,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_raw.add_argument("--group-width-grid", default="auto")
     p_raw.add_argument("--detector-scale-bins", type=int, default=8)
     p_raw.add_argument("--thickness-points", type=int, default=5)
-    p_raw.add_argument("--lambda-grid", default="1.0")
+    p_raw.add_argument(
+        "--lambda-grid",
+        default=FULL_Q_LAMBDA,
+        help="Diagnostic q-exponent grid. Production auto uses the full Bloch/Born correction with lambda_q=1.0.",
+    )
     p_raw.add_argument("--free-fraction", type=float, default=0.10)
     p_raw.add_argument("--split-seed", type=int, default=42)
     p_raw.add_argument("--limit", type=int, default=0)
@@ -5765,7 +5779,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_scale_replay.add_argument("--dry-run", action="store_true")
     p_scale_replay.add_argument("--specs", default="baseline,adaptive:293:det8,adaptive:200:det8,window:1.0:det8,window:1.5:det8,window:3.0:det8,window:5.0:det8", help="Comma list of scale contracts: baseline, adaptive:N:det8, window:DEG:det8, or stride:N:det8.")
     p_scale_replay.add_argument("--fit-split", default="all")
-    p_scale_replay.add_argument("--lambda-q", type=float, default=1.0)
+    p_scale_replay.add_argument(
+        "--lambda-q",
+        type=float,
+        default=1.0,
+        help="Diagnostic endpoint q exponent. Production auto pins this to 1.0.",
+    )
     p_scale_replay.add_argument("--rescale", choices=["median-iobs", "none"], default="median-iobs")
     p_scale_replay.add_argument("--hkl-float-format", choices=["shelx_fixed", "wide"], default="shelx_fixed")
     p_scale_replay.add_argument("--post-bloch-sigma-policy", choices=["none", "uniform_z_rms"], default="uniform_z_rms")
@@ -5799,7 +5818,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Comma list of scale contracts: baseline, adaptive:N:det8, window:DEG:det8, or stride:N:det8.",
     )
     p_cal_endpoint.add_argument("--fit-split", default="all")
-    p_cal_endpoint.add_argument("--lambda-q", type=float, default=1.0)
+    p_cal_endpoint.add_argument(
+        "--lambda-q",
+        type=float,
+        default=1.0,
+        help="Diagnostic endpoint q exponent. Production auto pins this to 1.0.",
+    )
     p_cal_endpoint.add_argument("--rescale", choices=["median-iobs", "none"], default="median-iobs")
     p_cal_endpoint.add_argument("--hkl-float-format", choices=["shelx_fixed", "wide"], default="shelx_fixed")
     p_cal_endpoint.add_argument("--post-bloch-sigma-policy", choices=["none", "uniform_z_rms"], default="uniform_z_rms")
@@ -5909,7 +5933,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_push.add_argument("--post-bloch-sigma-holdout-fraction", type=float, default=0.20)
     p_push.add_argument("--post-bloch-sigma-min-scale", type=float, default=0.25)
     p_push.add_argument("--post-bloch-sigma-max-scale", type=float, default=4.0)
-    p_push.add_argument("--lambda-grid", default="1.0")
+    p_push.add_argument(
+        "--lambda-grid",
+        default=FULL_Q_LAMBDA,
+        help="Diagnostic q-exponent grid. Production auto uses the full Bloch/Born correction with lambda_q=1.0.",
+    )
     p_push.add_argument("--rescale", choices=["median-iobs", "none"], default="median-iobs")
     p_push.add_argument("--prediction-cache-compression", choices=["compressed", "none"], default="none")
     p_push.add_argument("--make-maps-on-final", action="store_true")

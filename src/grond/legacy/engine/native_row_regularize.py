@@ -1314,7 +1314,11 @@ def main():
     ap.add_argument("--scale-fit-split", choices=["work", "all"], default="work", help="Rows used to fit nuisance group scales. Use 'all' to reproduce final all-data model-update statistics; use 'work' for validation.")
     ap.add_argument("--selection-metric", choices=["work_wR2", "free_wR2", "all_wR2", "all_R1"], default="work_wR2", help="Metric used to choose the reported best nuisance trial.")
     ap.add_argument("--fail-if-born-r1gt-above", type=float, default=0.0, help="Fail after the prediction grid if matched Born R1gt is above this value. Use as a basis/indexing sanity gate.")
-    ap.add_argument("--lambda-grid", default="1.0")
+    ap.add_argument(
+        "--lambda-grid",
+        default="1.0",
+        help="Diagnostic q-exponent grid. Production workflows use the full Bloch/Born correction with lambda_q=1.0.",
+    )
     ap.add_argument(
         "--scale-smoothness",
         type=float,
