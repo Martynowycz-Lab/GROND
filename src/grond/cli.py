@@ -5099,7 +5099,7 @@ def add_common_run_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--sg-window-max", type=float, default=0.012)
     ap.add_argument("--sg-window-scale", type=float, default=1.0)
     ap.add_argument("--sg-window-frame-floor", type=float, default=0.50)
-    ap.add_argument("--sg-window-scout", choices=["auto", "on", "off"], default="auto", help="Late held-out scout over simple fixed Sg rocking-window widths after final scale and resolution gates.")
+    ap.add_argument("--sg-window-scout", choices=["auto", "on", "off"], default="off", help="Late held-out scout over simple fixed Sg rocking-window widths after final scale and resolution gates. Off is the production default; use auto/on when auditing rocking-width sensitivity.")
     ap.add_argument("--sg-window-scout-grid", default="0.003,0.004,0.006,0.008", help="Comma-separated fixed Sg widths tested by the late rocking-window scout.")
     ap.add_argument("--sg-window-scout-n-basis", type=int, default=24, help="Basis size for the late Sg-window scout.")
     ap.add_argument("--sg-window-scout-n-points", type=int, default=10, help="Quadrature points for the late Sg-window scout.")

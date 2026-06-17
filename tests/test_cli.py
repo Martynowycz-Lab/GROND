@@ -120,7 +120,7 @@ def test_run_parser_exposes_staged_feature_grids():
     assert args.final_basis_scan_limit == 500
     assert args.final_basis_margin == 10
     assert args.final_basis_max == 500
-    assert args.sg_window_scout == "auto"
+    assert args.sg_window_scout == "off"
     assert args.sg_window_scout_grid == "0.003,0.004,0.006,0.008"
     assert args.sg_window_scout_n_basis == 24
     assert args.sg_window_scout_n_points == 10
