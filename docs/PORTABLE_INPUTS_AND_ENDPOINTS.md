@@ -113,10 +113,13 @@ The registry distinguishes production support, no-refiner fallback support, diag
 shelxl          implemented_default
 bloch_only      implemented_no_refiner
 native_gradient implemented_diagnostic
+phenix_refine   macromolecular_adapter
+refmac5         macromolecular_adapter
+servalcat       macromolecular_adapter
 custom          adapter_template
 ```
 
-`shelxl` is wired into the full automatic feedback loop. `bloch_only` is the no-refiner fallback. `native_gradient` is the slow row-space diagnostic. `custom` is the escape hatch for anything else: if a lab can turn GROND's corrected reflections and model into a one-cycle external update and back into a readable model, the command template can describe it without changing GROND's input readers.
+`shelxl` is wired into the full automatic feedback loop. `bloch_only` is the no-refiner fallback. `native_gradient` is the slow row-space diagnostic. `phenix_refine`, `refmac5`, and `servalcat` are macromolecular command-template adapters for corrected MTZ files with fixed FreeR flags. `custom` is the escape hatch for anything else: if a lab can turn GROND's corrected reflections and model into a one-cycle external update and back into a readable model, the command template can describe it without changing GROND's input readers.
 
 For a custom endpoint, add a block to `grond.config.json`:
 
@@ -135,3 +138,5 @@ For a custom endpoint, add a block to `grond.config.json`:
 ```
 
 The placeholders are `{model}`, `{reflections}`, `{out_dir}`, and `{cycles}`. GROND can probe and report this adapter now. Fully automatic replacement of the SHELXL feedback loop requires a tested adapter for the chosen file format and will be enabled endpoint by endpoint rather than assumed globally. Programs that prefer MTZ, PDB/mmCIF, or their own restraint dictionaries can still be used through `custom` if the wrapper script performs the conversion and writes a model file GROND can parse again.
+
+For macromolecular work, use the MTZ layer instead of forcing a protein through HKLF4. `GROND make-free-flags` assigns FreeR labels at unique-HKL level, `GROND export-mtz` writes corrected `IMEAN` and `SIGIMEAN` values with `FreeR_flag`, and `GROND protein-ls1` runs one configured endpoint macrocycle. The row-level work/free split remains a GROND row-contract validation split; it is not a substitute for macromolecular Rfree. The full macromolecular wrapper contract is documented in [docs/MACROMOLECULES.md](MACROMOLECULES.md).

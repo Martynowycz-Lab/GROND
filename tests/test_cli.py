@@ -29,10 +29,13 @@ EXPECTED_CLI_COMMANDS = {
     "compile",
     "doctor",
     "endpoints",
+    "export-mtz",
     "forensics",
     "import-dials",
     "init-config",
+    "make-free-flags",
     "prep",
+    "protein-ls1",
     "push-endpoint",
     "raw-polish",
     "row-template",
@@ -191,6 +194,59 @@ def test_utility_commands_parse():
     assert row_template.command == "row-template"
     row_validate = build_parser().parse_args(["row-validate", "--rows", "rows.csv", "--metadata", "rows_metadata.json"])
     assert row_validate.command == "row-validate"
+    free_flags = build_parser().parse_args(
+        [
+            "make-free-flags",
+            "--rows",
+            "rows.csv",
+            "--out",
+            "free_flags.csv",
+            "--cell",
+            "10 11 12 90 90 90",
+            "--space-group",
+            "P 1",
+        ]
+    )
+    assert free_flags.command == "make-free-flags"
+    assert free_flags.merge_anomalous is True
+    mtz = build_parser().parse_args(
+        [
+            "export-mtz",
+            "--row-table",
+            "rows.csv",
+            "--free-flags",
+            "free_flags.csv",
+            "--out-mtz",
+            "corrected.mtz",
+            "--cell",
+            "10 11 12 90 90 90",
+            "--space-group",
+            "P 1",
+            "--q-policy",
+            "low_resolution_damped",
+        ]
+    )
+    assert mtz.command == "export-mtz"
+    assert mtz.q_policy == "low_resolution_damped"
+    protein = build_parser().parse_args(
+        [
+            "protein-ls1",
+            "--model",
+            "model.pdb",
+            "--mtz",
+            "corrected.mtz",
+            "--out-dir",
+            "protein_endpoint",
+            "--command",
+            "echo {model} {mtz}",
+            "--output-model",
+            "{out_dir}/refined.pdb",
+            "--dry-run",
+        ]
+    )
+    assert protein.command == "protein-ls1"
+    assert protein.endpoint == "custom"
+    assert protein.free_label == "FreeR_flag"
     endpoints = build_parser().parse_args(["endpoints", "--json"])
     assert endpoints.command == "endpoints"
     audit = build_parser().parse_args(["forensics", "--row-table", "native_dyn_calc.csv", "--hkl", "INTEGRATE.HKL", "--res", "model.res", "--out-dir", "audit", "--forensic-depth", "full"])

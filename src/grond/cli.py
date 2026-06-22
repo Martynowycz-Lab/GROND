@@ -14,6 +14,7 @@ import threading
 import time
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import asdict
 from pathlib import Path
 
 from .accelerators import probe_accelerators, probe_bloch_ops
@@ -34,9 +35,25 @@ from .io.tool_config import (
     tool_statuses,
     write_config_template,
 )
+from .macromolecule import (
+    FREE_FLAG_LABEL,
+    export_corrected_mtz,
+    infer_cell_and_spacegroup,
+    make_free_flags,
+    propagate_free_flags,
+    read_free_flags,
+    render_protein_endpoint_command,
+    run_protein_endpoint,
+)
+from .macromolecule import (
+    read_table as read_macromolecule_table,
+)
+from .macromolecule import (
+    write_table as write_macromolecule_table,
+)
 from .paths import LEGACY_ROOT, engine_script
 from .progress import ProgressState, format_seconds
-from .refine.endpoints import endpoint_report
+from .refine.endpoints import configured_endpoint_blocks, endpoint_report
 from .runtime import apply_thread_limits, auto_chunksize, auto_worker_count
 from .workflows.dataset_policy import (
     build_dataset_policy,
@@ -4171,6 +4188,155 @@ def cmd_row_validate(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_make_free_flags(args: argparse.Namespace) -> int:
+    """Assign deterministic macromolecular FreeR flags at unique-HKL level."""
+
+    try:
+        cell, sg = infer_cell_and_spacegroup(cell_text=args.cell, space_group_text=args.space_group, model=args.model or None)
+        rows = read_macromolecule_table(args.rows)
+        flag_rows, summary = make_free_flags(
+            rows,
+            sg=sg,
+            cell=cell,
+            fraction=float(args.fraction),
+            min_free_count=int(args.min_free_count),
+            seed=int(args.seed),
+            shells=int(args.shells),
+            merge_anomalous=bool(args.merge_anomalous),
+            free_value=int(args.free_value),
+            work_value=int(args.work_value),
+        )
+        out = write_macromolecule_table(args.out, flag_rows)
+        summary_path = Path(args.summary).expanduser() if args.summary else out.with_suffix(".summary.json")
+        payload: dict[str, object] = {
+            "status": "ok",
+            "flags": str(out),
+            "summary": asdict(summary),
+        }
+        if args.write_rows:
+            flags = read_free_flags(out, sg=sg, merge_anomalous=bool(args.merge_anomalous))
+            row_out = write_macromolecule_table(
+                args.write_rows,
+                propagate_free_flags(
+                    rows,
+                    flags,
+                    sg=sg,
+                    merge_anomalous=bool(args.merge_anomalous),
+                    flag_column=FREE_FLAG_LABEL,
+                ),
+            )
+            payload["rows_with_flags"] = str(row_out)
+        summary_path.parent.mkdir(parents=True, exist_ok=True)
+        summary_path.write_text(json.dumps(payload, indent=2) + "\n")
+        payload["summary_file"] = str(summary_path.resolve())
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        print(json.dumps({"status": "error", "error": str(exc)}, indent=2))
+        return 2
+    print(json.dumps(payload, indent=2))
+    return 0
+
+
+def cmd_export_mtz(args: argparse.Namespace) -> int:
+    """Export corrected GROND rows to a macromolecular MTZ with fixed FreeR flags."""
+
+    try:
+        cell, sg = infer_cell_and_spacegroup(cell_text=args.cell, space_group_text=args.space_group, model=args.model or None)
+        summary = export_corrected_mtz(
+            row_table=args.row_table,
+            free_flags=args.free_flags,
+            out_mtz=args.out_mtz,
+            out_dir=args.out_dir or None,
+            cell=cell,
+            sg=sg,
+            dataset=args.dataset,
+            merge_anomalous=bool(args.merge_anomalous),
+            sigma_policy=args.sigma_policy,
+            q_policy=args.q_policy,
+            q_off_d_A=float(args.q_off_d_A),
+            q_full_d_A=float(args.q_full_d_A),
+        )
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        print(json.dumps({"status": "error", "error": str(exc)}, indent=2))
+        return 2
+    print(json.dumps({"status": "ok", "summary": asdict(summary)}, indent=2))
+    return 0
+
+
+def _format_protein_output_model_template(
+    template: str,
+    *,
+    model: str | Path,
+    mtz: str | Path,
+    out_dir: str | Path,
+    cycles: int,
+    free_label: str,
+) -> str:
+    values = {
+        "model": str(model),
+        "mtz": str(mtz),
+        "reflections": str(mtz),
+        "out_dir": str(out_dir),
+        "cycles": int(cycles),
+        "free_label": str(free_label),
+    }
+    try:
+        return template.format(**values)
+    except KeyError as exc:
+        raise ValueError(f"protein output_model template uses unknown placeholder {exc.args[0]!r}") from exc
+
+
+def cmd_protein_ls1(args: argparse.Namespace) -> int:
+    """Run one configured macromolecular endpoint macrocycle against a corrected MTZ."""
+
+    endpoint = str(args.endpoint).strip().lower().replace("-", "_")
+    blocks = configured_endpoint_blocks(getattr(args, "tool_config", {}) or {})
+    block = blocks.get(endpoint, {})
+    command_template = (args.endpoint_command or str(block.get("command", ""))).strip()
+    output_template = (args.output_model or str(block.get("output_model", ""))).strip()
+    if not command_template or not output_template:
+        payload = {
+            "status": "error",
+            "error": (
+                "protein-ls1 needs --command and --output-model, or matching endpoints."
+                f"{endpoint}.command/output_model entries in grond.config.json"
+            ),
+        }
+        print(json.dumps(payload, indent=2))
+        return 2
+    try:
+        out_dir = Path(args.out_dir).expanduser()
+        output_model = _format_protein_output_model_template(
+            output_template,
+            model=args.model,
+            mtz=args.mtz,
+            out_dir=out_dir,
+            cycles=int(args.cycles),
+            free_label=args.free_label,
+        )
+        command = render_protein_endpoint_command(
+            command_template,
+            model=args.model,
+            mtz=args.mtz,
+            out_dir=out_dir,
+            cycles=int(args.cycles),
+            free_label=args.free_label,
+        )
+        payload = run_protein_endpoint(
+            command=command,
+            out_dir=out_dir,
+            output_model=output_model,
+            model=args.model,
+            mtz=args.mtz,
+            cycles=int(args.cycles),
+            dry_run=bool(args.dry_run),
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        print(json.dumps({"status": "error", "error": str(exc)}, indent=2))
+        return 2
+    print(json.dumps(payload, indent=2))
+    return 0
+
+
 def cmd_endpoints(args: argparse.Namespace) -> int:
     """CLI entrypoint that reports configured model-update endpoint adapters."""
 
@@ -5631,6 +5797,52 @@ def build_parser() -> argparse.ArgumentParser:
     p_row_validate.add_argument("--write-xds-dir", default="", help="Optional output directory for an XDS-like compatibility INTEGRATE.HKL.")
     p_row_validate.add_argument("--overwrite", action="store_true")
     p_row_validate.set_defaults(func=cmd_row_validate)
+
+    p_free = sub.add_parser("make-free-flags", help="Assign fixed macromolecular FreeR flags at unique-HKL level.")
+    p_free.add_argument("--rows", required=True, help="Signed row table used to define the unique-HKL population.")
+    p_free.add_argument("--out", required=True, help="Output CSV table with h,k,l,free_flag.")
+    p_free.add_argument("--model", default="", help="Optional PDB/mmCIF/RES/CIF model used to read cell and space group.")
+    p_free.add_argument("--cell", default="", help="Six cell constants: a b c alpha beta gamma.")
+    p_free.add_argument("--space-group", default="", help="Space group symbol, for example 'P 21 21 21'.")
+    p_free.add_argument("--fraction", type=float, default=0.05, help="Target FreeR fraction on unique HKLs.")
+    p_free.add_argument("--min-free-count", type=int, default=500, help="Minimum FreeR reflections when enough unique reflections exist.")
+    p_free.add_argument("--seed", type=int, default=20260622)
+    p_free.add_argument("--shells", type=int, default=10, help="Balance FreeR flags approximately across resolution shells when d-spacings are known.")
+    p_free.add_argument("--merge-anomalous", action=argparse.BooleanOptionalAction, default=True, help="Assign FreeR flags after Friedel merging. Use --no-merge-anomalous to keep anomalous mates separate.")
+    p_free.add_argument("--free-value", type=int, default=1)
+    p_free.add_argument("--work-value", type=int, default=0)
+    p_free.add_argument("--write-rows", default="", help="Optional signed-row CSV output with FreeR_flag propagated to every row.")
+    p_free.add_argument("--summary", default="", help="Optional JSON summary path. Defaults to OUT.summary.json.")
+    p_free.set_defaults(func=cmd_make_free_flags)
+
+    p_mtz = sub.add_parser("export-mtz", help="Merge corrected GROND rows into a macromolecular MTZ with fixed FreeR flags.")
+    p_mtz.add_argument("--row-table", required=True, help="Corrected or GROND-native row CSV/TSV/JSONL table.")
+    p_mtz.add_argument("--free-flags", required=True, help="Unique-HKL FreeR flag table from make-free-flags or an equivalent wrapper.")
+    p_mtz.add_argument("--out-mtz", required=True)
+    p_mtz.add_argument("--out-dir", default="", help="Directory for merged_corrected_rows.csv and export_mtz_summary.json.")
+    p_mtz.add_argument("--model", default="", help="Optional model used to read cell and space group.")
+    p_mtz.add_argument("--cell", default="", help="Six cell constants: a b c alpha beta gamma.")
+    p_mtz.add_argument("--space-group", default="", help="Space group symbol, for example 'P 21 21 21'.")
+    p_mtz.add_argument("--dataset", default="GROND")
+    p_mtz.add_argument("--sigma-policy", choices=["formal", "chisq_overdispersion"], default="formal")
+    p_mtz.add_argument("--q-policy", choices=["full", "low_resolution_damped", "off"], default="full")
+    p_mtz.add_argument("--q-off-d-A", type=float, default=5.0, help="Low-resolution q damping is off at and below this resolution when using --q-policy low_resolution_damped.")
+    p_mtz.add_argument("--q-full-d-A", type=float, default=3.0, help="Low-resolution q damping reaches full correction at and above this resolution.")
+    p_mtz.add_argument("--merge-anomalous", action=argparse.BooleanOptionalAction, default=True)
+    p_mtz.set_defaults(func=cmd_export_mtz)
+
+    p_protein = sub.add_parser("protein-ls1", help="Run one configured macromolecular endpoint macrocycle against a corrected MTZ.")
+    add_tool_config_args(p_protein)
+    p_protein.add_argument("--model", required=True, help="Input PDB/mmCIF model for the endpoint macrocycle.")
+    p_protein.add_argument("--mtz", required=True, help="Corrected MTZ from GROND export-mtz.")
+    p_protein.add_argument("--out-dir", required=True)
+    p_protein.add_argument("--endpoint", choices=["custom", "phenix_refine", "refmac5", "servalcat"], default="custom")
+    p_protein.add_argument("--command", dest="endpoint_command", default="", help="Endpoint command template. Placeholders: {model}, {mtz}, {reflections}, {out_dir}, {cycles}, {free_label}.")
+    p_protein.add_argument("--output-model", default="", help="Output model path or template, relative to --out-dir unless absolute.")
+    p_protein.add_argument("--cycles", type=int, default=1)
+    p_protein.add_argument("--free-label", default=FREE_FLAG_LABEL)
+    p_protein.add_argument("--dry-run", action="store_true")
+    p_protein.set_defaults(func=cmd_protein_ls1)
 
     p_endpoints = sub.add_parser("endpoints", help="List GROND model-update endpoint adapters and configured tool availability.")
     add_tool_config_args(p_endpoints)

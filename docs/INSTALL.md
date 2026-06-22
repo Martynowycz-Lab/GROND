@@ -83,6 +83,9 @@ Fill in absolute paths for tools that are not already on `PATH`:
     "shelxt": "",
     "xds": "",
     "xdsconv": "",
+    "phenix_refine": "",
+    "refmac5": "",
+    "servalcat": "",
     "custom_refiner": ""
   },
   "endpoints": {
@@ -90,6 +93,21 @@ Fill in absolute paths for tools that are not already on `PATH`:
       "command": "",
       "output_model": "",
       "note": "Optional command template using {model}, {reflections}, {out_dir}, and {cycles}."
+    },
+    "phenix_refine": {
+      "command": "",
+      "output_model": "",
+      "note": "Optional macromolecular endpoint template using {model}, {mtz}, {out_dir}, {cycles}, and {free_label}."
+    },
+    "refmac5": {
+      "command": "",
+      "output_model": "",
+      "note": "Optional macromolecular endpoint template using {model}, {mtz}, {out_dir}, {cycles}, and {free_label}."
+    },
+    "servalcat": {
+      "command": "",
+      "output_model": "",
+      "note": "Optional macromolecular endpoint template using {model}, {mtz}, {out_dir}, {cycles}, and {free_label}."
     }
   }
 }
@@ -118,7 +136,7 @@ export GROND_CONFIG=/path/to/grond.config.json
 
 YAML configs are accepted when `PyYAML` is installed with `python -m pip install "grond[config]"`; JSON works with no extra dependency.
 
-The supported model-update endpoints today are SHELXL and a custom command template. SHELXL is the production default for full automatic feedback. The custom endpoint is for labs that can provide a tested one-cycle command and a declared output model path. If none of those are available, use `--native-only`: GROND will still run the Bloch-wave simulation, thickness and nuisance decisions, residual diagnostics, corrected-HKL exports, and polarity checks from the supplied model, but it will not perform the external least-squares model-update loop.
+The supported production endpoint for `GROND auto` is still SHELXL. The endpoint registry also exposes command-template adapters for custom tools and for macromolecular one-cycle endpoints such as Phenix, REFMAC, and Servalcat. The macromolecular path uses `GROND make-free-flags`, `GROND export-mtz`, and `GROND protein-ls1`; it is documented in [docs/MACROMOLECULES.md](MACROMOLECULES.md). If no model-update endpoint is available, use `--native-only`: GROND will still run the Bloch-wave simulation, thickness and nuisance decisions, residual diagnostics, corrected-HKL exports, and polarity checks from the supplied model, but it will not perform the external least-squares model-update loop.
 
 ## XDS Input Preparation
 

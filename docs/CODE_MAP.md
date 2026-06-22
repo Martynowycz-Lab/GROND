@@ -18,6 +18,7 @@ The main regularization wrapper is `src/grond/legacy/engine/native_row_regulariz
 src/grond/
   __main__.py                    console entry point for python -m grond
   cli.py                         GROND auto, run, prep, doctor, validate, and workflow orchestration
+  macromolecule.py               FreeR flags, corrected MTZ export, and protein endpoint wrappers
   runtime.py                     external executable discovery and configured tool paths
   progress.py                    progress logging, timing, and resume ledger helpers
   accelerators.py                optional backend detection and acceleration metadata
@@ -157,6 +158,8 @@ and returns the squared amplitude transferred from the direct beam into the targ
 `shelxl_feedback_loop.py` is the default fast single-dataset full-mode structure feedback loop when SHELXL is configured. It runs a high-N/Q Bloch correction, performs one least-squares update, promotes the active weighting line, and repeats. The native finite-difference alternatives are `native_structure_update.py` for one dataset and `native_multi_structure_update.py` for shared multi-dataset regularization.
 
 `src/grond/refine/endpoints.py` is the interface layer for model-update backends. It declares the implemented SHELXL endpoint, the no-refiner Bloch-only path, the slow native-gradient diagnostic, and the custom command-template adapter. The registry is intentionally separate from the working numerical path: it tells users what each endpoint must accept and return without pretending every external refiner is already a fully tested `auto` replacement.
+
+`src/grond/macromolecule.py` is the macromolecular wrapper layer. It assigns deterministic unique-HKL FreeR flags, propagates those flags back to signed rows, merges corrected rows into `IMEAN/SIGIMEAN/FreeR_flag` MTZ files, applies the optional low-resolution q damping policy for protein tests, and renders one-cycle endpoint command templates for Phenix, REFMAC, Servalcat, or a custom wrapper. It is deliberately outside the small-molecule `auto` implementation.
 
 `scale_compression_polish.py` is where dense frame scales are replaced by a compact, smooth scale manifold when that does not hurt all-row residuals beyond the accepted penalty. `resolution_limit_audit.py` and `forensics/resolution.py` decide whether the final endpoint should be reported at the requested resolution or a suggested shell-stable resolution. `row_mr_report.py` writes the final-report raw and merged residual tables.
 
