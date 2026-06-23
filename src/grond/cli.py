@@ -211,7 +211,7 @@ def estimate_run_steps(prep: PrepConfig, args: argparse.Namespace) -> int:
             if len(transform_candidates) > 1 and rerank_top > 0:
                 total += min(rerank_top, len(transform_candidates))
         total += 1
-        if getattr(args, "coordinate_polarity_control", True):
+        if getattr(args, "hand_control", True):
             total += 1
         if not getattr(args, "fast", False):
             total += 1
@@ -220,7 +220,7 @@ def estimate_run_steps(prep: PrepConfig, args: argparse.Namespace) -> int:
                 total += 1
             total += 1
         total += 1
-        if getattr(args, "coordinate_polarity_control", True):
+        if getattr(args, "hand_control", True):
             total += 2
         if getattr(args, "h_omit", "off") in {"on", "both", "only"}:
             total += 2
@@ -1034,15 +1034,16 @@ def estimate_model_nonh_atoms(structure: str) -> int | None:
         return None
 
 
-def coordinate_polarity_policy(structure: str) -> dict:
-    """Decide whether an alternate coordinate-polarity check makes sense for a model."""
+def absolute_structure_policy(structure: str) -> dict:
+    """Decide whether an alternate hand check makes sense for a model."""
 
     path = Path(structure)
     suffix = path.suffix.lower()
     policy = {
         "structure": str(path),
-        "run_coordinate_polarity_control": True,
-        "reason": "alternate coordinate-polarity check may be informative for acentric models",
+        "run_hand_control": True,
+        "run_absolute_structure_control": True,
+        "reason": "alternate hand check may be informative for acentric models",
     }
     try:
         if suffix in {".res", ".ins"}:
@@ -1052,11 +1053,19 @@ def coordinate_polarity_policy(structure: str) -> dict:
                     latt = int(float(parts[1]))
                     policy["shelx_latt"] = latt
                     if latt > 0:
-                        policy.update(run_coordinate_polarity_control=False, reason="SHELX LATT is centrosymmetric; alternate coordinate-polarity check is not meaningful")
+                        policy.update(
+                            run_hand_control=False,
+                            run_absolute_structure_control=False,
+                            reason="SHELX LATT is centrosymmetric; alternate hand check is not meaningful",
+                        )
                     else:
-                        policy.update(run_coordinate_polarity_control=True, reason="SHELX LATT is acentric; alternate coordinate-polarity check is applicable")
+                        policy.update(
+                            run_hand_control=True,
+                            run_absolute_structure_control=True,
+                            reason="SHELX LATT is acentric; alternate hand check is applicable",
+                        )
                     return policy
-            policy["reason"] = "no SHELX LATT record found; keeping polarity control enabled"
+            policy["reason"] = "no SHELX LATT record found; keeping alternate hand control enabled"
             return policy
         if suffix == ".cif":
             import gemmi
@@ -1069,9 +1078,17 @@ def coordinate_polarity_policy(structure: str) -> dict:
                     policy["space_group_number"] = number
                     policy["space_group_hm"] = str(sg.hm)
                     if sg.is_centrosymmetric():
-                        policy.update(run_coordinate_polarity_control=False, reason="CIF space group is centrosymmetric; alternate coordinate-polarity check is not meaningful")
+                        policy.update(
+                            run_hand_control=False,
+                            run_absolute_structure_control=False,
+                            reason="CIF space group is centrosymmetric; alternate hand check is not meaningful",
+                        )
                     else:
-                        policy.update(run_coordinate_polarity_control=True, reason="CIF space group is acentric; alternate coordinate-polarity check is applicable")
+                        policy.update(
+                            run_hand_control=True,
+                            run_absolute_structure_control=True,
+                            reason="CIF space group is acentric; alternate hand check is applicable",
+                        )
                     return policy
             for tag in ("_space_group_symop_operation_xyz", "_symmetry_equiv_pos_as_xyz"):
                 col = block.find_loop(tag)
@@ -1085,11 +1102,15 @@ def coordinate_polarity_policy(structure: str) -> dict:
                     den = int(op.DEN)
                     inv = [[-den, 0, 0], [0, -den, 0], [0, 0, -den]]
                     if [list(row) for row in op.rot] == inv:
-                        policy.update(run_coordinate_polarity_control=False, reason="CIF symmetry operators include inversion; alternate coordinate-polarity check is not meaningful")
+                        policy.update(
+                            run_hand_control=False,
+                            run_absolute_structure_control=False,
+                            reason="CIF symmetry operators include inversion; alternate hand check is not meaningful",
+                        )
                         return policy
             return policy
     except Exception as exc:
-        policy.update(reason=f"could not determine polarity-control symmetry policy ({exc}); keeping polarity control enabled")
+        policy.update(reason=f"could not determine hand-control symmetry policy ({exc}); keeping alternate hand control enabled")
         return policy
     return policy
 
@@ -1159,7 +1180,7 @@ def resolve_final_n_basis(
     structure: str,
     stage: str,
     *,
-    coordinate_polarity_alt: bool = False,
+    alternate_hand: bool = False,
 ) -> int:
     """Choose the final Bloch basis size from a cheap support scan."""
 
@@ -1210,8 +1231,8 @@ def resolve_final_n_basis(
     cmd.append("--include-nonpositive" if ds.include_nonpositive else "--positive-only")
     if args.max_rows:
         cmd += ["--max-rows", str(args.max_rows)]
-    if coordinate_polarity_alt:
-        cmd.append("--coordinate-polarity-alt")
+    if alternate_hand:
+        cmd.append("--alternate-hand")
     run_logged(cmd, logs, f"{ds.name}_{safe_label(stage)}_support_basis", dry_run=args.dry_run)
     payload = read_json(scan)
     n_basis = int(payload.get("recommended_n_basis") or args.final_basis_fallback)
@@ -1310,8 +1331,8 @@ def apply_speed_profile(args: argparse.Namespace, structure: str | None = None) 
     assign("screen_n_points", n_points)
     assign("transform_rerank_n_basis", min(int(args.transform_rerank_n_basis), n_basis))
     assign("transform_rerank_n_points", min(int(args.transform_rerank_n_points), n_points))
-    assign("polarity_n_basis", min(int(args.polarity_n_basis), n_basis))
-    assign("polarity_n_points", min(int(args.polarity_n_points), n_points))
+    assign("hand_n_basis", min(int(args.hand_n_basis), n_basis))
+    assign("hand_n_points", min(int(args.hand_n_points), n_points))
     assign("n_points", n_points)
     assign("structure_n_basis", min(int(args.structure_n_basis), n_basis))
     assign("structure_n_points", min(int(args.structure_n_points), max(3, n_points)))
@@ -1494,15 +1515,15 @@ def make_noh_model(python: str, structure: str, out_dir: Path, logs: Path, dry_r
     return dst
 
 
-def make_coordinate_polarity_model(python: str, structure: str, out_dir: Path, logs: Path, dry_run: bool) -> Path:
-    """Create or reuse the alternate coordinate-polarity model variant."""
+def make_alternate_hand_model(python: str, structure: str, out_dir: Path, logs: Path, dry_run: bool) -> Path:
+    """Create or reuse the alternate-hand model variant."""
 
     src = Path(structure)
-    dst = out_dir / "input" / f"{src.stem}_coordinate_polarity_alt{src.suffix or '.res'}"
+    dst = out_dir / "input" / f"{src.stem}_alternate_hand{src.suffix or '.res'}"
     if dst.exists():
         return dst
-    cmd = [python, str(engine_script("make_res_variants.py")), "--input", str(src), "--output", str(dst), "--coordinate-polarity-alt"]
-    run_logged(cmd, logs, "make_coordinate_polarity_model", dry_run=dry_run)
+    cmd = [python, str(engine_script("make_res_variants.py")), "--input", str(src), "--output", str(dst), "--alternate-hand"]
+    run_logged(cmd, logs, "make_alternate_hand_model", dry_run=dry_run)
     return dst
 
 
@@ -1518,7 +1539,7 @@ def native_stage_cmd(
     n_points: int,
     stage: str,
     pinned: dict | None = None,
-    coordinate_polarity_alt: bool = False,
+    alternate_hand: bool = False,
     make_maps: bool = True,
     endpoint: bool = True,
     max_rows_override: int | None = None,
@@ -1535,7 +1556,7 @@ def native_stage_cmd(
     endpoint_b_grid = args.endpoint_b_grid if endpoint_ok and not fast else "0.0"
     endpoint_exti_grid = args.endpoint_exti_grid if endpoint_ok and not fast else "off"
     shelxl_iterations = args.shelxl_iterations if endpoint_ok and not fast else 1
-    finalish_stage = stage in {"final", "noH", "polarity", "adaptive_final"} or stage.endswith("_final")
+    finalish_stage = stage in {"final", "noH", "hand", "adaptive_final"} or stage.endswith("_final")
     post_bloch_sigma_policy = resolved_post_bloch_sigma_policy(args, final_endpoint=bool(endpoint_ok and finalish_stage and not fast))
     thickness_grid = grid_from_nuisance(pinned, "thickness_A", "1200") if pinned else ("1000,1200,1400" if fast else args.thickness_grid)
     grad_grid = grid_from_nuisance(pinned, "thickness_grad_frac", "0.4") if pinned else ("0.0,0.4" if fast else args.thickness_grad_grid)
@@ -1701,8 +1722,8 @@ def native_stage_cmd(
     max_rows = args.max_rows if max_rows_override is None else max_rows_override
     if max_rows:
         cmd += ["--max-rows", str(max_rows)]
-    if coordinate_polarity_alt:
-        cmd.append("--coordinate-polarity-alt")
+    if alternate_hand:
+        cmd.append("--alternate-hand")
     if make_maps and endpoint_ok:
         cmd.append("--make-maps")
     return cmd
@@ -3013,7 +3034,7 @@ def choose_transform_by_scout(
     return dataset_with_transform(ds, selected["transform"]), payload
 
 
-def choose_polarity_by_scout(
+def choose_hand_by_scout(
     prep: PrepConfig,
     ds: DatasetSpec,
     args: argparse.Namespace,
@@ -3024,61 +3045,64 @@ def choose_polarity_by_scout(
     *,
     scout_max_rows: int | None = None,
 ) -> tuple[str, dict, Path]:
-    """Compare the active model against an alternate coordinate-polarity scout."""
+    """Compare the active model against an alternate-hand scout."""
 
     active_summary = read_json(active_run / "summary.json")
     active_score = score_native_summary(active_summary)
     nui = best_nuisance(active_run)
-    polarity_dir = root / "decisions" / ds.name / "polarity_scout_alt"
+    hand_dir = root / "decisions" / ds.name / "hand_scout_alt"
     try:
         run_logged(
             native_stage_cmd(
                 python,
-            ds,
-            prep.structure,
-            dataset_baseline_hkl(prep, ds),
-            polarity_dir,
+                ds,
+                prep.structure,
+                dataset_baseline_hkl(prep, ds),
+                hand_dir,
                 args,
-                n_basis=20 if args.fast else args.polarity_n_basis,
-                n_points=5 if args.fast else args.polarity_n_points,
-                stage="scout_polarity",
+                n_basis=20 if args.fast else args.hand_n_basis,
+                n_points=5 if args.fast else args.hand_n_points,
+                stage="scout_hand",
                 pinned=nui,
-                coordinate_polarity_alt=True,
+                alternate_hand=True,
                 make_maps=False,
                 endpoint=False,
                 max_rows_override=args.scout_max_rows if scout_max_rows is None else scout_max_rows,
             ),
             logs,
-            f"{ds.name}_scout_polarity_alt",
+            f"{ds.name}_scout_hand_alt",
             dry_run=args.dry_run,
         )
-        alternate_summary = read_json(polarity_dir / "summary.json")
+        alternate_summary = read_json(hand_dir / "summary.json")
         alternate_score = score_native_summary(alternate_summary)
     except Exception as exc:
         payload = {
             "selected": "original",
+            "selected_hand": "original",
             "active_score": active_score,
             "alternate_score": {},
             "score_delta_original_minus_alternate": float("-inf"),
-            "accept_delta": float(args.polarity_accept_delta),
-            "alternate_run": str(polarity_dir),
-            "warning": f"alternate coordinate-polarity scout failed: {exc}",
+            "score_delta_original_minus_alternate_hand": float("-inf"),
+            "accept_delta": float(args.hand_accept_delta),
+            "alternate_run": str(hand_dir),
+            "warning": f"alternate hand scout failed: {exc}",
         }
-        write_json(root / "decisions" / ds.name / "coordinate_polarity_decision.json", payload)
-        return "original", payload, polarity_dir
+        write_json(root / "decisions" / ds.name / "absolute_structure_decision.json", payload)
+        return "original", payload, hand_dir
     delta = active_score["score"] - alternate_score["score"]
-    selected = "alternate" if delta > float(args.polarity_accept_delta) else "original"
+    selected = "alternate" if delta > float(args.hand_accept_delta) else "original"
     payload = {
         "selected": selected,
+        "selected_hand": selected,
         "active_score": active_score,
         "alternate_score": alternate_score,
         "score_delta_original_minus_alternate": delta,
-        "accept_delta": float(args.polarity_accept_delta),
-        "alternate_run": str(polarity_dir),
+        "score_delta_original_minus_alternate_hand": delta,
+        "accept_delta": float(args.hand_accept_delta),
+        "alternate_run": str(hand_dir),
     }
-    write_json(root / "decisions" / ds.name / "coordinate_polarity_decision.json", payload)
-    return selected, payload, polarity_dir
-
+    write_json(root / "decisions" / ds.name / "absolute_structure_decision.json", payload)
+    return selected, payload, hand_dir
 
 def run_feature_gate(
     prep: PrepConfig,
@@ -3186,14 +3210,14 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
 
     active_model = prep.structure
     active_nui = best_nuisance(screen)
-    coordinate_polarity_decision = coordinate_polarity_policy(prep.structure)
-    active_polarity = "original"
-    if args.coordinate_polarity_control and coordinate_polarity_decision.get("run_coordinate_polarity_control", True) and not args.dry_run:
-        selected_polarity, coordinate_polarity_decision, alternate_probe = choose_polarity_by_scout(prep, ds, args, python, logs, root, screen, scout_max_rows=scout_rows)
-        if selected_polarity == "alternate" and is_shelx_model(prep.structure):
-            active_model = str(make_coordinate_polarity_model(python, prep.structure, root, logs, args.dry_run))
+    absolute_structure_decision = absolute_structure_policy(prep.structure)
+    active_hand = "original"
+    if args.hand_control and absolute_structure_decision.get("run_hand_control", True) and not args.dry_run:
+        selected_hand, absolute_structure_decision, alternate_probe = choose_hand_by_scout(prep, ds, args, python, logs, root, screen, scout_max_rows=scout_rows)
+        if selected_hand == "alternate" and is_shelx_model(prep.structure):
+            active_model = str(make_alternate_hand_model(python, prep.structure, root, logs, args.dry_run))
             active_nui = best_nuisance(alternate_probe) or active_nui
-            active_polarity = "alternate"
+            active_hand = "alternate"
 
     regularized_nui = active_nui
     thickness_run = screen
@@ -3358,12 +3382,12 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
             final_model = str(best_endpoint_model(endpoint_feedback_run) or endpoint_model)
         elif run_feedback:
             endpoint_feedback_decision = {**endpoint_feedback_decision, "status": "promoted_but_no_endpoint_model_found"}
-    coordinate_polarity_diagnostic = ""
-    post_feedback_polarity_promotion: dict = {}
-    if args.coordinate_polarity_control and coordinate_polarity_decision.get("run_coordinate_polarity_control", True) and not args.dry_run:
-        other = root / "runs" / ds.name / "adaptive_other_polarity_check"
-        other_model = prep.structure if active_polarity == "alternate" else final_model
-        alternate_other = active_polarity != "alternate"
+    absolute_structure_diagnostic = ""
+    post_feedback_hand_promotion: dict = {}
+    if args.hand_control and absolute_structure_decision.get("run_hand_control", True) and not args.dry_run:
+        other = root / "runs" / ds.name / "adaptive_other_hand_check"
+        other_model = prep.structure if active_hand == "alternate" else final_model
+        alternate_other = active_hand != "alternate"
         run_logged(
             native_stage_cmd(
                 python,
@@ -3374,21 +3398,21 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
                 args,
                 n_basis=20 if args.fast else final_n_basis,
                 n_points=5 if args.fast else args.n_points,
-                stage="adaptive_other_polarity",
+                stage="adaptive_other_hand",
                 pinned=best_nuisance(final) or regularized_nui,
-                coordinate_polarity_alt=alternate_other,
+                alternate_hand=alternate_other,
                 make_maps=False,
                 endpoint=False,
             ),
             logs,
-            f"{ds.name}_adaptive_other_polarity_check",
+            f"{ds.name}_adaptive_other_hand_check",
             dry_run=args.dry_run,
         )
-        stats_path = root / "runs" / ds.name / "adaptive_coordinate_polarity_diagnostic.json"
+        stats_path = root / "runs" / ds.name / "adaptive_absolute_structure_diagnostic.json"
         run_logged(
             [
                 python,
-                str(engine_script("coordinate_polarity_diagnostic.py")),
+                str(engine_script("absolute_structure_diagnostic.py")),
                 "--best",
                 str(final / "native_dyn_calc.csv"),
                 "--other",
@@ -3397,29 +3421,29 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
                 str(stats_path),
             ],
             logs,
-            f"{ds.name}_adaptive_coordinate_polarity_diagnostic",
+            f"{ds.name}_adaptive_absolute_structure_diagnostic",
             dry_run=args.dry_run,
         )
-        coordinate_polarity_diagnostic = str(stats_path)
+        absolute_structure_diagnostic = str(stats_path)
         final_summary = read_json(final / "summary.json")
         other_summary = read_json(other / "summary.json")
         final_score = score_native_summary(final_summary)
         other_score = score_native_summary(other_summary)
         post_feedback_delta = final_score.get("score", float("inf")) - other_score.get("score", float("inf"))
-        post_feedback_polarity_promotion = {
+        post_feedback_hand_promotion = {
             "status": "not_promoted",
-            "active_polarity": active_polarity,
-            "opposite_polarity": "alternate" if active_polarity == "original" else "original",
+            "active_hand": active_hand,
+            "opposite_hand": "alternate" if active_hand == "original" else "original",
             "final_score": final_score,
             "opposite_score": other_score,
             "score_delta_final_minus_opposite": post_feedback_delta,
-            "accept_delta": float(args.polarity_accept_delta),
+            "accept_delta": float(args.hand_accept_delta),
             "diagnostic": str(stats_path),
             "opposite_run": str(other),
         }
-        if post_feedback_delta > float(args.polarity_accept_delta) and is_shelx_model(final_model):
-            promoted_model = make_coordinate_polarity_model(python, final_model, root, logs, args.dry_run)
-            promoted = root / "runs" / ds.name / "adaptive_promoted_polarity_final"
+        if post_feedback_delta > float(args.hand_accept_delta) and is_shelx_model(final_model):
+            promoted_model = make_alternate_hand_model(python, final_model, root, logs, args.dry_run)
+            promoted = root / "runs" / ds.name / "adaptive_promoted_hand_final"
             run_logged(
                 native_stage_cmd(
                     python,
@@ -3430,37 +3454,38 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
                     args,
                     n_basis=20 if args.fast else final_n_basis,
                     n_points=5 if args.fast else args.n_points,
-                    stage="adaptive_promoted_polarity_final",
+                    stage="adaptive_promoted_hand_final",
                     pinned=best_nuisance(final) or regularized_nui,
-                    coordinate_polarity_alt=False,
+                    alternate_hand=False,
                     make_maps=args.make_maps,
                     endpoint=True,
                 ),
                 logs,
-                f"{ds.name}_adaptive_promoted_polarity_final",
+                f"{ds.name}_adaptive_promoted_hand_final",
                 dry_run=args.dry_run,
             )
             promoted_summary = read_json(promoted / "summary.json")
             promoted_score = score_native_summary(promoted_summary)
             final_score_after = score_native_summary(read_json(final / "summary.json"))
             promoted_delta = final_score_after.get("score", float("inf")) - promoted_score.get("score", float("inf"))
-            post_feedback_polarity_promotion.update(
+            post_feedback_hand_promotion.update(
                 {
-                    "status": "promoted" if promoted_delta > float(args.polarity_accept_delta) else "tested_not_promoted",
+                    "status": "promoted" if promoted_delta > float(args.hand_accept_delta) else "tested_not_promoted",
                     "promoted_run": str(promoted),
                     "promoted_model_input": str(promoted_model),
                     "promoted_score": promoted_score,
                     "score_delta_final_minus_promoted": promoted_delta,
                 }
             )
-            if promoted_delta > float(args.polarity_accept_delta):
+            if promoted_delta > float(args.hand_accept_delta):
                 final = promoted
                 final_model = str(best_endpoint_model(promoted) or promoted_model)
-                active_polarity = post_feedback_polarity_promotion["opposite_polarity"]
-                coordinate_polarity_decision = {
-                    **coordinate_polarity_decision,
-                    "post_feedback_selected": active_polarity,
-                    "post_feedback_promotion": post_feedback_polarity_promotion,
+                active_hand = post_feedback_hand_promotion["opposite_hand"]
+                absolute_structure_decision = {
+                    **absolute_structure_decision,
+                    "post_feedback_selected": active_hand,
+                    "post_feedback_selected_hand": active_hand,
+                    "post_feedback_promotion": post_feedback_hand_promotion,
                 }
 
     no_h_run = None
@@ -3531,15 +3556,15 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
         "status": "ok",
         "dataset": ds.name,
         "selected_transform": ds.hkl_transform,
-        "selected_polarity": active_polarity,
+        "selected_hand": active_hand,
         "structure_update_strategy": structure_strategy,
         "structure_update_run": str(structure_update_run) if structure_update_run else "",
         "transform_decision": transform_decision,
-        "coordinate_polarity_decision": coordinate_polarity_decision,
+        "absolute_structure_decision": absolute_structure_decision,
         "feature_decisions": feature_records,
         "endpoint_feedback_decision": endpoint_feedback_decision,
         "endpoint_feedback_run": str(endpoint_feedback_run) if endpoint_feedback_run else "",
-        "post_feedback_polarity_promotion": post_feedback_polarity_promotion,
+        "post_feedback_hand_promotion": post_feedback_hand_promotion,
         "scale_polish": scale_polish,
         "resolution_limit": resolution_limit,
         "sg_window_scout": sg_window_scout,
@@ -3555,8 +3580,8 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
         "primary_run": str(final),
         "no_h_run": str(no_h_run) if no_h_run else "",
         "model": final_model,
-        "coordinate_polarity_diagnostic": coordinate_polarity_diagnostic,
-        "post_feedback_polarity_promotion": post_feedback_polarity_promotion,
+        "absolute_structure_diagnostic": absolute_structure_diagnostic,
+        "post_feedback_hand_promotion": post_feedback_hand_promotion,
         "forensics": forensics,
         "scale_polish": scale_polish,
         "resolution_limits": {ds.name: resolution_limit},
@@ -3604,7 +3629,7 @@ def run_single(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pa
         if updated.exists():
             final_model = str(updated)
     final = screen
-    coordinate_polarity_diagnostic = ""
+    absolute_structure_diagnostic = ""
     if args.mode in {"regularize", "auto"} and not args.fast:
         final = root / "runs" / ds.name / "final"
         final_n_basis = resolve_final_n_basis(prep, ds, args, python, logs, root, final_model, "final")
@@ -3626,45 +3651,45 @@ def run_single(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pa
             f"{ds.name}_final",
             dry_run=args.dry_run,
         )
-    polarity_policy = coordinate_polarity_policy(final_model)
-    if args.coordinate_polarity_control and polarity_policy.get("run_coordinate_polarity_control", True) and not args.dry_run:
-        polarity = root / "runs" / ds.name / "polarity_alt"
+    hand_policy = absolute_structure_policy(final_model)
+    if args.hand_control and hand_policy.get("run_hand_control", True) and not args.dry_run:
+        hand_run = root / "runs" / ds.name / "hand_alt"
         run_logged(
             native_stage_cmd(
                 python,
                 ds,
                 final_model,
                 dataset_baseline_hkl(prep, ds),
-                polarity,
+                hand_run,
                 args,
-                n_basis=20 if args.fast else args.polarity_n_basis,
-                n_points=5 if args.fast else args.polarity_n_points,
-                stage="polarity",
+                n_basis=20 if args.fast else args.hand_n_basis,
+                n_points=5 if args.fast else args.hand_n_points,
+                stage="hand",
                 pinned=best_nuisance(final) or nui,
-                coordinate_polarity_alt=True,
+                alternate_hand=True,
                 make_maps=False,
             ),
             logs,
-            f"{ds.name}_polarity_alt",
+            f"{ds.name}_hand_alt",
             dry_run=args.dry_run,
         )
-        stats_path = root / "runs" / ds.name / "coordinate_polarity_diagnostic.json"
+        stats_path = root / "runs" / ds.name / "absolute_structure_diagnostic.json"
         run_logged(
             [
                 python,
-                str(engine_script("coordinate_polarity_diagnostic.py")),
+                str(engine_script("absolute_structure_diagnostic.py")),
                 "--best",
                 str(final / "native_dyn_calc.csv"),
                 "--other",
-                str(polarity / "native_dyn_calc.csv"),
+                str(hand_run / "native_dyn_calc.csv"),
                 "--out",
                 str(stats_path),
             ],
             logs,
-            f"{ds.name}_coordinate_polarity_diagnostic",
+            f"{ds.name}_absolute_structure_diagnostic",
             dry_run=args.dry_run,
         )
-        coordinate_polarity_diagnostic = str(stats_path)
+        absolute_structure_diagnostic = str(stats_path)
     no_h_run = None
     if args.h_omit in {"on", "both", "only"} and is_shelx_model(final_model):
         no_h = make_noh_model(python, final_model, root, logs, args.dry_run)
@@ -3732,7 +3757,7 @@ def run_single(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pa
         "primary_run": str(final),
         "no_h_run": str(no_h_run) if no_h_run else "",
         "model": final_model,
-        "coordinate_polarity_diagnostic": coordinate_polarity_diagnostic,
+        "absolute_structure_diagnostic": absolute_structure_diagnostic,
         "forensics": forensics,
         "scale_polish": scale_polish,
         "resolution_limits": {ds.name: resolution_limit},
@@ -4703,8 +4728,8 @@ def cmd_validate_ls1(args: argparse.Namespace) -> int:
         cmd += [f"--hkl-transform={args.hkl_transform}"]
     if args.skip_controls:
         cmd.append("--skip-controls")
-    if not args.wrong_polarity_control:
-        cmd.append("--no-wrong-polarity-control")
+    if not args.wrong_hand_control:
+        cmd.append("--no-wrong-hand-control")
     if args.native_polish:
         cmd.append("--native-polish")
     if args.dry_run:
@@ -5525,7 +5550,7 @@ def add_common_run_args(ap: argparse.ArgumentParser, *, expose_lambda_controls: 
     ap.add_argument("--full-fast-n-points", type=int, default=10, help="Quadrature points used by --full-fast.")
     ap.add_argument("--full-fast-structure-rows", type=int, default=0, help="Maximum objective rows for lightweight --full-fast structure update; 0 chooses an atom-count-aware budget.")
     ap.add_argument("--full-fast-structure-max-nfev", type=int, default=0, help="Maximum function evaluations per lightweight --full-fast structure block; 0 chooses an atom-count-aware budget.")
-    ap.add_argument("--auto-decide", dest="auto_decide", action="store_true", default=True, help="Run preflight, transform/polarity scouts, and adaptive thickness decisions before final work.")
+    ap.add_argument("--auto-decide", dest="auto_decide", action="store_true", default=True, help="Run preflight, transform/hand scouts, and adaptive thickness decisions before final work.")
     ap.add_argument("--no-auto-decide", dest="auto_decide", action="store_false")
     ap.add_argument("--native-only", action="store_true", help="Do not write corrected-HKL endpoints.")
     ap.add_argument("--python", default="")
@@ -5548,7 +5573,7 @@ def add_common_run_args(ap: argparse.ArgumentParser, *, expose_lambda_controls: 
     ap.add_argument("--bethe-denom-eps", type=float, default=1e-5, help="Small-denominator floor for scipy_bethe Schur corrections.")
     ap.add_argument("--matrix-convention", choices=["j_minus_i", "i_minus_j"], default="j_minus_i", help="Off-diagonal U_g indexing convention. Keep j_minus_i for production; i_minus_j is diagnostic.")
     ap.add_argument("--max-rows", type=int, default=0)
-    ap.add_argument("--scout-max-rows", type=int, default=1000, help="Representative row limit for automatic transform/polarity scouts.")
+    ap.add_argument("--scout-max-rows", type=int, default=1000, help="Representative row limit for automatic transform/hand scouts.")
     ap.add_argument("--scout-n-basis", type=int, default=8, help="Basis size for cheap decision scouts.")
     ap.add_argument("--scout-n-points", type=int, default=3, help="Quadrature points for cheap decision scouts.")
     ap.add_argument("--transform-rerank-top", type=int, default=3, help="Number of coarse transform-scout winners to rerun at better N/Q; 0 disables the second stage.")
@@ -5565,7 +5590,7 @@ def add_common_run_args(ap: argparse.ArgumentParser, *, expose_lambda_controls: 
     ap.add_argument("--transform-metadata-min-correlation-gap", type=float, default=0.05, help="Correlation gap required for auto mode to promote a single transform without Bloch-transform scouting.")
     ap.add_argument("--transform-metadata-max-rows", type=int, default=0, help="Maximum INTEGRATE/XDS rows used by metadata transform ranking; 0 uses all rows.")
     ap.add_argument("--trust-hkl-transform", action="store_true", help="Trust the supplied --hkl-transform or prep-file transform and skip Bloch transform scouting while keeping the rest of auto-decision enabled.")
-    ap.add_argument("--polarity-accept-delta", type=float, default=0.015, help="Adaptive score margin required before switching to the alternate coordinate-polarity.")
+    ap.add_argument("--hand-accept-delta", dest="hand_accept_delta", metavar="DELTA", type=float, default=0.015, help="Adaptive score margin required before switching to the alternate hand.")
     ap.add_argument("--stop-on-bad-preflight", action="store_true", default=False)
     ap.add_argument("--stop-on-bad-fit", action="store_true", default=False)
     ap.add_argument("--stop-if-wR2-above", type=float, default=0.75, help="Bad-data stop threshold for native all-row dynamic wR2 when --stop-on-bad-fit is enabled.")
@@ -5580,10 +5605,10 @@ def add_common_run_args(ap: argparse.ArgumentParser, *, expose_lambda_controls: 
     ap.add_argument("--make-maps", dest="make_maps", action="store_true", default=True)
     ap.add_argument("--no-maps", dest="make_maps", action="store_false")
     ap.add_argument("--h-omit", choices=["off", "on", "only", "both"], default="off")
-    ap.add_argument("--polarity-control", dest="coordinate_polarity_control", action="store_true", default=True, help="Run the alternate coordinate-polarity diagnostic when model symmetry makes that check meaningful.")
-    ap.add_argument("--no-polarity-control", dest="coordinate_polarity_control", action="store_false")
-    ap.add_argument("--polarity-n-basis", type=int, default=24, help="Basis size for default polarity-diagnostic runs; keep cheap unless the call is ambiguous.")
-    ap.add_argument("--polarity-n-points", type=int, default=10, help="Quadrature points for default polarity-diagnostic runs.")
+    ap.add_argument("--hand-control", dest="hand_control", action="store_true", default=True, help="Run the alternate-hand diagnostic when model symmetry makes that check meaningful.")
+    ap.add_argument("--no-hand-control", dest="hand_control", action="store_false", help="Skip the alternate-hand diagnostic.")
+    ap.add_argument("--hand-n-basis", dest="hand_n_basis", metavar="N", type=int, default=24, help="Basis size for default hand-diagnostic runs; keep cheap unless the call is ambiguous.")
+    ap.add_argument("--hand-n-points", dest="hand_n_points", metavar="Q", type=int, default=10, help="Quadrature points for default hand-diagnostic runs.")
     ap.add_argument("--production-scales", action="store_true", default=True)
     ap.add_argument("--validation-scales", dest="production_scales", action="store_false")
     ap.add_argument("--screen-n-basis", type=int, default=24, help="Basis size for initial nuisance/geometry screening.")
@@ -6095,7 +6120,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_validate_ls1.add_argument("--q-control-seed", type=int, default=12345)
     p_validate_ls1.add_argument("--q-control-shells", type=int, default=10)
     p_validate_ls1.add_argument("--skip-controls", action="store_true")
-    p_validate_ls1.add_argument("--wrong-polarity-control", action=argparse.BooleanOptionalAction, default=True)
+    p_validate_ls1.add_argument("--wrong-hand-control", dest="wrong_hand_control", action=argparse.BooleanOptionalAction, default=True, help="Run the alternate-hand null control.")
     p_validate_ls1.add_argument("--native-polish", action=argparse.BooleanOptionalAction, default=False)
     p_validate_ls1.add_argument("--native-polish-rows", type=int, default=200)
     p_validate_ls1.add_argument("--native-polish-n-basis", type=int, default=0)

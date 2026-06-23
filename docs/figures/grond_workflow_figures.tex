@@ -128,7 +128,7 @@ are written as source figures for reports, talks, and lab documentation. For a
 non-expert reader, a \emph{row} means one measured spot observation from the
 integration table. A \emph{merged reflection} means several rows have already
 been combined. GROND keeps rows alive for as long as possible because row-level
-geometry, thickness, polarity, and weak-reflection behavior are where many useful
+geometry, thickness, hand, and weak-reflection behavior are where many useful
 diagnostics live.
 
 \clearpage
@@ -152,7 +152,7 @@ diagnostics live.
   \node[enginebox, text width=38mm, right=of reint] (grond) {GROND automatic path\\
     preflight\\
     two-stage alignment scout\\
-    polarity + thickness\\
+    hand + thickness\\
     geometry + nuisance gates\\
     Bloch prediction};
   \node[outputbox, text width=42mm, right=of grond] (out) {Scientific outputs\\
@@ -200,7 +200,7 @@ diagnostics live.
   \end{scope}
 
   \node[riskbox, text width=124mm, below=12mm of conv] (limit) {What this path is good for: indexing, scaling, structure solution, atom identities, and a chemically interpretable starting model.\\
-  What it does not preserve for GROND by itself: the full row-level observation contract needed for geometry, thickness, polarity, nuisance, and dynamical prediction decisions.};
+  What it does not preserve for GROND by itself: the full row-level observation contract needed for geometry, thickness, hand, nuisance, and dynamical prediction decisions.};
   \begin{scope}[on background layer]
     \draw[softflow] (model.south) |- (limit.east);
   \end{scope}
@@ -278,10 +278,10 @@ diagnostics live.
   \node[decision, right=of pre, text width=25mm] (usable) {usable\\row set?};
   \node[enginebox, text width=31mm, right=of usable] (transform) {Two-stage transform scout\\cheap all-candidate pass\\better N/Q rerank};
   \node[decision, right=of transform, text width=24mm] (align) {clear\\alignment?};
-  \node[enginebox, text width=31mm, below=12mm of transform] (fast) {Fast Bloch scout\\small basis\\coarse thickness\\both polarity branches};
+  \node[enginebox, text width=31mm, below=12mm of transform] (fast) {Fast Bloch scout\\small basis\\coarse thickness\\both hand branches};
   \node[enginebox, text width=31mm, right=of fast] (geom) {Geometry scout\\beam center\\rotation/drift\\support basis};
   \node[decision, right=of geom, text width=25mm] (promote) {score\\improves?};
-  \node[updatebox, text width=35mm, right=of promote] (pin) {Pin current best\\transform\\polarity\\thickness band\\geometry family};
+  \node[updatebox, text width=35mm, right=of promote] (pin) {Pin current best\\transform\\hand\\thickness band\\geometry family};
   \node[stopbox, text width=31mm, below=of usable] (stop) {Stop with\\actionable error\\and diagnostics};
   \node[riskbox, text width=31mm, below=of promote] (reject) {Reject branch\\keep simpler model};
 
@@ -309,32 +309,32 @@ diagnostics live.
 
 \begin{figure}[p]
 \centering
-\grondTitle{Stage 3: Alignment, Geometry, Thickness, and Coordinate polarity}
+\grondTitle{Stage 3: Alignment, Geometry, Thickness, and Hand}
 \grondSub{These are the first physically meaningful parameters GROND must settle before full regularization.}
 \begin{tikzpicture}[node distance=8mm and 10mm]
   \node[inputbox, text width=32mm] (ledger) {Observation ledger\\one measured spot per row\\detector x/y\\frame index};
   \node[enginebox, text width=33mm, right=of ledger] (align) {Alignment scout\\cheap transform scan\\top-candidate rerank\\row residuals};
-  \node[enginebox, text width=33mm, right=of align] (polarity) {Coordinate polarity screen\\original polarity\\alternate polarity\\$\Delta\chi^2$ row diagnostic};
+  \node[enginebox, text width=33mm, right=of align] (hand) {Hand screen\\original hand\\alternate hand\\$\Delta\chi^2$ row diagnostic};
   \node[enginebox, text width=33mm, below=13mm of align] (thick) {Thickness search\\coarse band\\local regularization\\best support basis};
   \node[enginebox, text width=33mm, right=of thick] (geo) {Geometry tweak\\beam/tilt/drift terms\\only if supported};
-  \node[outputbox, text width=40mm, right=of geo] (pinned) {Pinned physical start\\best transform\\polarity\\thickness band\\geometry policy};
+  \node[outputbox, text width=40mm, right=of geo] (pinned) {Pinned physical start\\best transform\\hand\\thickness band\\geometry policy};
 
   \begin{scope}[on background layer]
     \draw[flow] (ledger) -- (align);
-    \draw[flow] (align) -- (polarity);
-    \draw[flow] (polarity) |- (thick);
+    \draw[flow] (align) -- (hand);
+    \draw[flow] (hand) |- (thick);
     \draw[flow] (thick) -- (geo);
     \draw[flow] (geo) -- (pinned);
   \end{scope}
 
   \draw[decorate, decoration={brace, amplitude=5pt}, thick, draw=grondMuted]
-    ($(align.north west)+(-1mm,5mm)$) -- ($(polarity.north east)+(1mm,5mm)$)
+    ($(align.north west)+(-1mm,5mm)$) -- ($(hand.north east)+(1mm,5mm)$)
     node[midway, yshift=8mm, note] {orientation decisions};
   \draw[decorate, decoration={brace, amplitude=5pt}, thick, draw=grondMuted]
     ($(thick.south west)+(-1mm,-5mm)$) -- ($(geo.south east)+(1mm,-5mm)$)
     node[midway, yshift=-8mm, note] {sample and instrument decisions};
 \end{tikzpicture}
-\caption{Early physical decisions. The goal is not to test every possible setting, but to find a stable transform, polarity, thickness band, and geometry family quickly enough to make the final regularization tractable.}
+\caption{Early physical decisions. The goal is not to test every possible setting, but to find a stable transform, hand, thickness band, and geometry family quickly enough to make the final regularization tractable.}
 \end{figure}
 
 \clearpage
@@ -405,7 +405,7 @@ diagnostics live.
 \grondSub{Every run ends with auditable artifacts, even when optional external map or regularization programs are absent.}
 \begin{tikzpicture}[node distance=8mm and 9mm]
   \node[outputbox, text width=32mm] (corr) {Corrected reflection files\\work/free splits\\all-row exports\\endpoint HKL};
-  \node[outputbox, text width=32mm, right=of corr] (stats) {Statistics\\raw row R factors\\merge-style R factors\\polarity $\Delta\chi^2$\\timings};
+  \node[outputbox, text width=32mm, right=of corr] (stats) {Statistics\\raw row R factors\\merge-style R factors\\hand $\Delta\chi^2$\\timings};
   \node[outputbox, text width=32mm, right=of stats] (maps) {Maps\\full map\\difference map\\H-omit\\no-H endpoint\\when tools exist};
   \node[outputbox, text width=32mm, below=13mm of stats] (ledger) {Run ledger\\\texttt{commands.jsonl}\\\texttt{grond\_progress.json}\\decision JSON\\resume state};
   \node[enginebox, text width=35mm, below=13mm of corr] (user) {Human review\\inspect trends\\compare endpoints\\choose next action};
@@ -487,7 +487,7 @@ diagnostics live.
     \addplot coordinates {(fast,1) (bloch,2) (regularize,4) (auto,6) (raw-polish,8)};
   \end{axis}
 
-  \node[smallbox, text width=29mm, anchor=north west] at (0.25,-1.9) {\textbf{fast}\\small N/Q\\Hermitian only\\triage Z, polarity, thickness};
+  \node[smallbox, text width=29mm, anchor=north west] at (0.25,-1.9) {\textbf{fast}\\small N/Q\\Hermitian only\\triage Z, hand, thickness};
   \node[smallbox, text width=31mm, anchor=north west] at (0.25,-3.05) {\textbf{full-fast}\\automatic gates\\N24/Q10\\light structure pass};
   \node[smallbox, text width=29mm, anchor=north west] at (3.1,-1.9) {\textbf{bloch}\\fixed structure\\full setup\\dynamic R factors\\maps};
   \node[smallbox, text width=29mm, anchor=north west] at (5.95,-1.9) {\textbf{regularize}\\Bloch row polish\\geometry/nuisance gates\\endpoint HKL};

@@ -50,7 +50,7 @@ try:  # Package import.
         XDSBlochPort,
         XDSData,
         frozen_kernel_contract,
-        coordinate_polarity_model,
+        alternate_hand_model,
         parse_model,
         sha256,
         split_masks,
@@ -62,7 +62,7 @@ except ImportError:  # Direct script execution from this directory.
         XDSBlochPort,
         XDSData,
         frozen_kernel_contract,
-        coordinate_polarity_model,
+        alternate_hand_model,
         parse_model,
         sha256,
         split_masks,
@@ -1348,7 +1348,7 @@ def main():
     ap.add_argument("--bethe-denom-eps", type=float, default=1e-5, help="Small-denominator floor for scipy_bethe Schur corrections.")
     ap.add_argument("--max-rows", type=int, default=0)
     ap.add_argument("--make-maps", action="store_true")
-    ap.add_argument("--coordinate-polarity-alt", action="store_true", help="Use alternate fractional xyz before building U_g for a native polarity-control run.")
+    ap.add_argument("--alternate-hand", dest="alternate_hand", action="store_true", help="Use alternate fractional xyz before building U_g for an alternate-hand control run.")
     args = ap.parse_args()
     effective_topup_d_min = min(float(args.topup_d_min), float(args.min_d_spacing)) if args.min_d_spacing > 0 else float(args.topup_d_min)
 
@@ -1372,10 +1372,10 @@ def main():
     selected_mask[indices] = True
     masks = {k: v & selected_mask for k, v in masks.items()}
     model = parse_model(Path(args.res))
-    model_tag = "alternate_fractional_xyz" if args.coordinate_polarity_alt else "original"
+    model_tag = "alternate_fractional_xyz" if args.alternate_hand else "original"
     model_tag = f"{model_tag};hkl_transform={data.hkl_transform_spec}"
-    if args.coordinate_polarity_alt:
-        model = coordinate_polarity_model(model)
+    if args.alternate_hand:
+        model = alternate_hand_model(model)
     res_hash = sha256(Path(args.res))
     wght_a, wght_b = parse_wght(Path(args.res))
     wght_a_values = parse_float_grid(args.wght_a_grid) if str(args.wght_a_grid).strip() else [wght_a]
@@ -1552,7 +1552,7 @@ def main():
     if args.fail_if_born_r1gt_above > 0.0 and best["metrics"]["all"]["born"]["R1_gt"] > float(args.fail_if_born_r1gt_above):
         failure = {
             "reason": "matched_born_gate_failed",
-            "message": "Matched Born is too poor for a meaningful Bloch/nuisance search. Check HKL transform, polarity, cell basis, and geometry before changing physics knobs.",
+            "message": "Matched Born is too poor for a meaningful Bloch/nuisance search. Check HKL transform, hand, cell basis, and geometry before changing physics knobs.",
             "threshold_R1_gt": float(args.fail_if_born_r1gt_above),
             "born_R1_gt": float(best["metrics"]["all"]["born"]["R1_gt"]),
             "born_R1_all": float(best["metrics"]["all"]["born"]["R1_all"]),

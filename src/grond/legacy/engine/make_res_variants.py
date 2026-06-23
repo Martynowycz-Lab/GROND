@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Write explicit polarity and no-H RES variants for sample Bloch endpoint tests."""
+"""Write explicit alternate-hand and no-H RES variants for sample Bloch endpoint tests."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import argparse
 from pathlib import Path
 
 from native_structure_update import update_res_coordinates
-from bloch_engine import coordinate_polarity_model, parse_model
+from bloch_engine import alternate_hand_model, parse_model
 
 
 def sfac_elements(lines: list[str]) -> dict[int, str]:
@@ -100,25 +100,25 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--input", required=True, help="Input RES path.")
     ap.add_argument("--output", required=True, help="Output RES path.")
-    ap.add_argument("--coordinate-polarity-alt", action="store_true", help="Use alternate fractional coordinates before writing.")
-    ap.add_argument("--remove-h", action="store_true", help="Remove H atoms and H-only AFIX blocks after polarity variant processing.")
+    ap.add_argument("--alternate-hand", dest="alternate_hand", action="store_true", help="Use alternate fractional coordinates before writing.")
+    ap.add_argument("--remove-h", action="store_true", help="Remove H atoms and H-only AFIX blocks after hand variant processing.")
     args = ap.parse_args()
 
     src = Path(args.input)
     dst = Path(args.output)
     dst.parent.mkdir(parents=True, exist_ok=True)
     tmp = dst
-    if args.coordinate_polarity_alt:
-        model = coordinate_polarity_model(parse_model(src))
+    if args.alternate_hand:
+        model = alternate_hand_model(parse_model(src))
         update_res_coordinates(src, dst, model)
         tmp = dst
     if args.remove_h:
-        if tmp == dst and args.coordinate_polarity_alt:
+        if tmp == dst and args.alternate_hand:
             src_for_strip = dst
         else:
             src_for_strip = src
         strip_hydrogens(src_for_strip, dst)
-    if not args.coordinate_polarity_alt and not args.remove_h:
+    if not args.alternate_hand and not args.remove_h:
         dst.write_text(src.read_text(errors="replace"))
 
 

@@ -10,7 +10,7 @@ The central numerical file is `src/grond/legacy/engine/bloch_engine.py`.
 
 That file reads XDS-like row data through `XDSData`, reads the structural model through `parse_model`, calculates electron structure factors through `fcalc_res_grid`, converts them to Fourier potential coefficients in `XDSBlochPort.build_ug_cube`, selects the direct beam, target reflection, and support beams in `XDSBlochPort.select_basis`, builds the matrix in `XDSBlochPort.hamiltonian`, and propagates the direct beam to the target beam in `XDSBlochPort.propagate_direct_to_target`. `XDSBlochPort.predict_rows` repeats that calculation over the selected rows, rocking-profile quadrature points, and thickness quadrature points.
 
-The main regularization wrapper is `src/grond/legacy/engine/native_row_regularize.py`. It calls `XDSBlochPort.predict_rows`, fits frame or compact scale terms, evaluates native and GROND row/MR residuals, writes `native_dyn_calc.csv`, and exports the corrected no-EXTI reflection endpoint. `src/grond/cli.py` then decides which stages to run, when to scout transforms and polarity, when to polish continuous thickness, when to run the SHELXL feedback loop, when to combine datasets, and when to write publication reports.
+The main regularization wrapper is `src/grond/legacy/engine/native_row_regularize.py`. It calls `XDSBlochPort.predict_rows`, fits frame or compact scale terms, evaluates native and GROND row/MR residuals, writes `native_dyn_calc.csv`, and exports the corrected no-EXTI reflection endpoint. `src/grond/cli.py` then decides which stages to run, when to scout transforms and hand, when to polish continuous thickness, when to run the SHELXL feedback loop, when to combine datasets, and when to write publication reports.
 
 ## Source Tree
 
@@ -78,7 +78,7 @@ flowchart TD
     I --> J["workflows.transform_metadata baseline-HKL prefilter"]
     J --> K["cli.choose_transform_by_scout"]
     K --> L["native_row_regularize low-N/Q scout"]
-    L --> M["cli.choose_polarity_by_scout"]
+    L --> M["cli.choose_hand_by_scout"]
     M --> N["native_row_regularize nuisance gates"]
     N --> O["continuous_thickness_polish"]
     O --> P["support_basis_scan"]

@@ -136,7 +136,7 @@ export GROND_CONFIG=/path/to/grond.config.json
 
 YAML configs are accepted when `PyYAML` is installed with `python -m pip install "grond[config]"`; JSON works with no extra dependency.
 
-The supported production endpoint for `GROND auto` is still SHELXL. The endpoint registry also exposes command-template adapters for custom tools and for macromolecular one-cycle endpoints such as Phenix, REFMAC, and Servalcat. The macromolecular path uses `GROND make-free-flags`, `GROND export-mtz`, and `GROND protein-ls1`; it is documented in [docs/MACROMOLECULES.md](MACROMOLECULES.md). If no model-update endpoint is available, use `--native-only`: GROND will still run the Bloch-wave simulation, thickness and nuisance decisions, residual diagnostics, corrected-HKL exports, and polarity checks from the supplied model, but it will not perform the external least-squares model-update loop.
+The supported production endpoint for `GROND auto` is still SHELXL. The endpoint registry also exposes command-template adapters for custom tools and for macromolecular one-cycle endpoints such as Phenix, REFMAC, and Servalcat. The macromolecular path uses `GROND make-free-flags`, `GROND export-mtz`, and `GROND protein-ls1`; it is documented in [docs/MACROMOLECULES.md](MACROMOLECULES.md). If no model-update endpoint is available, use `--native-only`: GROND will still run the Bloch-wave simulation, thickness and nuisance decisions, residual diagnostics, corrected-HKL exports, and hand checks from the supplied model, but it will not perform the external least-squares model-update loop.
 
 ## XDS Input Preparation
 

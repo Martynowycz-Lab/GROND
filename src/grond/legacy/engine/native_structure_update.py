@@ -31,7 +31,7 @@ import gemmi
 import numpy as np
 from scipy.optimize import least_squares
 
-from bloch_engine import Config, XDSBlochPort, XDSData, coordinate_polarity_model, parse_model, sha256, split_masks
+from bloch_engine import Config, XDSBlochPort, XDSData, alternate_hand_model, parse_model, sha256, split_masks
 from native_row_regularize import (
     DEFAULT_BASELINE_HKL,
     DEFAULT_HKL,
@@ -731,7 +731,7 @@ def main():
     ap.add_argument("--geometry-percentile", type=float, default=100.0, help="Keep this broad geometry percentile after PEAK/d-spacing filters.")
     ap.add_argument("--target-mode", choices=["iobs", "recorded_proxy"], default="iobs")
     ap.add_argument("--include-nonpositive", action="store_true")
-    ap.add_argument("--coordinate-polarity-alt", action="store_true", help="Use alternate fractional xyz before native row-parameter regularization.")
+    ap.add_argument("--alternate-hand", dest="alternate_hand", action="store_true", help="Use alternate fractional xyz before native row-parameter regularization as an alternate-hand control.")
     ap.add_argument("--objective-rows", type=int, default=800)
     ap.add_argument("--objective-bins", type=int, default=10)
     ap.add_argument("--objective-group-width-deg", type=float, default=3.0, help="Coarse frame-angle group width used only while fitting coordinate steps.")
@@ -818,10 +818,10 @@ def main():
     cache_root = out / "cache"
     data = XDSData(Path(args.hkl), hkl_transform=args.hkl_transform)
     base_model = parse_model(Path(args.res))
-    model_tag = "alternate_fractional_xyz" if args.coordinate_polarity_alt else "original"
+    model_tag = "alternate_fractional_xyz" if args.alternate_hand else "original"
     model_tag = f"{model_tag};hkl_transform={data.hkl_transform_spec}"
-    if args.coordinate_polarity_alt:
-        base_model = coordinate_polarity_model(base_model)
+    if args.alternate_hand:
+        base_model = alternate_hand_model(base_model)
     target, base_sig = target_arrays(data, args.target_mode)
     target_indices = row_selection(data, target, not args.include_nonpositive, args.min_d_spacing, args.min_peak, 0, args.geometry_percentile)
     masks = split_masks(data.hkl, args.free_fraction, args.split_seed)

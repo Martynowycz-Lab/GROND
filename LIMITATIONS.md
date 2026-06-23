@@ -10,7 +10,7 @@ GROND is currently aimed at small-molecule and peptide-sized electron-diffractio
 
 The DIALS bridge is newer than the XDS route. It preserves signed rows and scan-varying orientation from `integrated.refl`/`integrated.expt`, drops severe DIALS integration-quality flags by default, and applies an auditable detector-gain sigma policy for electron-diffraction rows. It should still be cross-checked on standards before replacing a known-good XDS workflow in production. In particular, inspect `dials_bridge_summary.json` for row counts, partiality behavior, sigma policy, dropped flags, and excitation-error validation.
 
-The automatic workflow includes physically motivated checks for transform alignment, polarity, thickness, nuisance terms, scale compression, resolution limits, and endpoint reporting. These checks are heuristics around explicit models, not proofs that the final result is uniquely correct. A good GROND result should still agree with chemical sense, geometry, maps, independent data quality indicators, and any appropriate control analyses.
+The automatic workflow includes physically motivated checks for transform alignment, hand, thickness, nuisance terms, scale compression, resolution limits, and endpoint reporting. These checks are heuristics around explicit models, not proofs that the final result is uniquely correct. A good GROND result should still agree with chemical sense, geometry, maps, independent data quality indicators, and any appropriate control analyses.
 
 ## Numerical And Modeling Limits
 

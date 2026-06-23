@@ -159,7 +159,7 @@ HKL.
 GROND turns the XDS rows into an observation ledger. The ledger is JSON Lines:
 one JSON object per line. A row is one measured spot, not a merged unique
 reflection. Keeping row identity is what lets GROND audit weak rows, frame
-trends, geometry, polarity, and thickness without hiding everything inside a merge.
+trends, geometry, hand, and thickness without hiding everything inside a merge.
 
 ```jsonl
 {"dataset":"crystal_a","row_index":0,"hkl":[1,0,2],"iobs":1284.5,"sigma":42.1,"frame":18.0,"detector_px":[1912.4,2105.7],"rlp":0.021,"peak":142.0,"corr":91.4,"source":{"file":"INTEGRATE.HKL","line":1042},"geometry":{"xparm":"XPARM.XDS"}}
@@ -201,7 +201,7 @@ indices plus corrected intensity or amplitude and uncertainty.
   -2   1   1     110.60     20.10
 ```
 
-GROND records how the corrected file was produced, including the selected polarity,
+GROND records how the corrected file was produced, including the selected hand,
 thickness band, transform, geometry policy, basis size, and accepted nuisance
 terms.
 
@@ -222,7 +222,7 @@ for scripts, while the values remain explicit about what population was scored.
   "stage": "adaptive_final",
   "selected": {
     "transform": "identity",
-    "polarity": "original",
+    "hand": "original",
     "thickness_nm": 0.86,
     "basis_n": 60,
     "quadrature_q": 9
@@ -259,7 +259,7 @@ uses this file to skip stages that already finished successfully.
 {
   "completed": {
     "crystal_a_preflight": {"elapsed_s": 2.41, "status": "ok"},
-    "crystal_a_scout_polarity": {"elapsed_s": 81.32, "status": "ok"}
+    "crystal_a_scout_hand_alt": {"elapsed_s": 81.32, "status": "ok"}
   },
   "running": null,
   "interrupted_stage": null

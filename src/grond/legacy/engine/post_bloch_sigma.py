@@ -11,7 +11,7 @@ The calibration is not a new claim about detector counting noise.  It says that
 the corrected endpoint is a transformed observation, and that the reported
 weighted residuals should use a declared endpoint uncertainty scale rather than
 blindly inheriting the integration sigmas.  It is not used to choose thickness,
-absorption, geometry, mirror polarity, or resolution.
+absorption, geometry, hand, or resolution.
 """
 
 from __future__ import annotations

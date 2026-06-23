@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Compare two native row tables with an alternate coordinate-polarity diagnostic.
+"""Compare two native row tables with an alternate hand diagnostic.
 
 This is intentionally row-level.  It does not pretend to be a SHELXL Flack
-parameter or a merged polarity statistic. It asks whether the
+parameter or a merged absolute-structure statistic. It asks whether the
 same signed observations have a lower scaled-residual sum for one native Bloch
-prediction than for the alternate coordinate-polarity check after each branch has had its
+prediction than for the alternate-hand check after each branch has had its
 declared nuisance scales applied.
 """
 
@@ -50,8 +50,8 @@ def block(label: str, frame: pd.DataFrame) -> dict:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--best", required=True, help="Native row CSV for the active/best polarity assignment.")
-    ap.add_argument("--other", required=True, help="Native row CSV for the alternate coordinate-polarity comparison.")
+    ap.add_argument("--best", required=True, help="Native row CSV for the active/best hand assignment.")
+    ap.add_argument("--other", required=True, help="Native row CSV for the alternate-hand comparison.")
     ap.add_argument("--out", required=True, help="Output JSON path.")
     args = ap.parse_args()
 
@@ -64,10 +64,10 @@ def main() -> None:
         "other_csv": str(Path(args.other).resolve()),
         "row_join": {"key": key, "n_best": int(len(best)), "n_other": int(len(other)), "n_joined": int(len(merged))},
         "interpretation": {
-            "diagnostic": "row-level alternate coordinate-polarity check; not a Flack parameter and not a merged polarity statistic",
+            "diagnostic": "row-level alternate-hand check; not a Flack parameter and not a merged absolute-structure statistic",
             "delta_chi2": "sum((other residual/sigma)^2 - (best residual/sigma)^2); positive favors best",
             "paired_row_t": "paired t-style contrast of per-row delta_chi2 values",
-            "sqrt_positive_delta_chi2": "square root of positive delta_chi2; a scale indicator, not a probability or polarity-assignment score",
+            "sqrt_positive_delta_chi2": "square root of positive delta_chi2; a scale indicator, not a probability or hand-assignment score",
         },
         "all": block("all", merged),
         "work": block("work", merged[merged["split_best"] == "work"]),

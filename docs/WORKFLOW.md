@@ -8,7 +8,7 @@ The report-quality LaTeX/TikZ workflow figures live in [docs/figures](figures/RE
 flowchart TD
     A[Inputs] --> B[Preflight data-quality checks]
     B --> C[Two-stage indexing-transform scout]
-    C --> D[Fast polarity and thickness screen]
+    C --> D[Fast hand and thickness screen]
     D --> E[Geometry and nuisance regularization]
     E --> F[Feature gates for row-resolution, absorption, jitter, error, dose, and detector scales]
     F --> G[Rowwise support scan and final Bloch prediction]
@@ -41,4 +41,4 @@ After each SHELXL cycle, GROND also reads the recommended `WGHT`, moves it into 
 
 The publication endpoint chooser is the final endpoint sanity check. It reports the best physical endpoint separately from the best single-dataset physical diagnostic and the lowest-residual rejected diagnostic endpoint, then lists rejected corrections with explicit reasons. For multi-dataset jobs, the combined endpoint remains the publication endpoint when it passes the physical gate, even when one crystal has a lower residual by itself. A physical endpoint must be no-EXTI, endpoint-B zero, safely scaled, and finite; nonzero endpoint-B, explicit EXTI, unsafe HKL rescaling, excessive modulation, and unaccepted observation-polish corrections remain visible but diagnostic-only.
 
-The Bloch/LS1 structure-update path has its own validation workflow because it is a lagged surrogate, not exact native dynamical least squares. `GROND validate-ls1` reruns updated-q feedback cycles from a pinned nuisance summary, compares them with frozen-q and q=1 controls, optionally runs an alternate-polarity Bloch control, and can finish with a matched-physics native finite-difference polish. The report answers whether the row-level `q` correction is doing real dynamical work and whether native polish still finds a material downhill direction. See [LS1_VALIDATION.md](LS1_VALIDATION.md).
+The Bloch/LS1 structure-update path has its own validation workflow because it is a lagged surrogate, not exact native dynamical least squares. `GROND validate-ls1` reruns updated-q feedback cycles from a pinned nuisance summary, compares them with frozen-q and q=1 controls, optionally runs an alternate-hand Bloch control, and can finish with a matched-physics native finite-difference polish. The report answers whether the row-level `q` correction is doing real dynamical work and whether native polish still finds a material downhill direction. See [LS1_VALIDATION.md](LS1_VALIDATION.md).

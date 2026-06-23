@@ -891,7 +891,7 @@ def parse_model(path: Path):
     return parse_res(path)
 
 
-def coordinate_polarity_model(model):
+def alternate_hand_model(model):
     out = copy.deepcopy(model)
     for atom in out["atoms"]:
         atom["x"] = (-float(atom["x"])) % 1.0
@@ -3020,7 +3020,7 @@ def main():
         default="j_minus_i",
         help="Off-diagonal U_g indexing convention. j_minus_i is the production signed-row default; i_minus_j is a diagnostic.",
     )
-    ap.add_argument("--coordinate-polarity-alt", action="store_true", help="Use alternate fractional coordinates as a dynamical polarity-control run.")
+    ap.add_argument("--alternate-hand", dest="alternate_hand", action="store_true", help="Use alternate fractional coordinates as an alternate-hand control run.")
     ap.add_argument("--free-fraction", type=float, default=0.10)
     ap.add_argument("--split-seed", type=int, default=42)
     ap.add_argument("--limit", type=int, default=0, help="Debug limit. 0 means all rows.")
@@ -3136,8 +3136,8 @@ def main():
         indices = indices[: int(args.limit)]
 
     model = parse_model(Path(args.res))
-    if args.coordinate_polarity_alt:
-        model = coordinate_polarity_model(model)
+    if args.alternate_hand:
+        model = alternate_hand_model(model)
     res_hash = sha256(Path(args.res))
     cache_dir = None if str(args.cache_dir).lower() == "none" else Path(args.cache_dir)
     wall0 = time.perf_counter()
@@ -3333,7 +3333,7 @@ def main():
         },
         "bloch_kernel_contract": frozen_kernel_contract(cfg),
         "config": cfg.__dict__,
-        "model_polarity": "alternate_fractional_xyz" if args.coordinate_polarity_alt else "original",
+        "model_hand": "alternate_fractional_xyz" if args.alternate_hand else "original",
         "filters": {
             "positive_only": bool(args.positive_only),
             "min_peak": args.min_peak,

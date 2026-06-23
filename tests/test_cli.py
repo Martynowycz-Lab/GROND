@@ -132,6 +132,9 @@ def test_auto_parser_hides_lambda_controls(capsys):
     assert "--lambda-grid" not in captured.out
     assert "--endpoint-calibration-lambda-q" not in captured.out
     assert "--observation-polish-lambda-grid" not in captured.out
+    assert "--hand-control" in captured.out
+    assert "--hand-n-basis" in captured.out
+    assert "--hand-accept-delta" in captured.out
 
     args = parser.parse_args(["auto", "--out-dir", "out", "--hkl", "INTEGRATE.HKL", "--structure", "model.res"])
     assert args.lambda_grid == "1.0"
@@ -149,7 +152,29 @@ def test_auto_parser_hides_lambda_controls(capsys):
     assert args.sg_window_scout_free_wR2_tolerance == 0.003
     assert args.n_points == 20
     assert args.screen_n_basis == 24
-    assert args.polarity_n_basis == 24
+    assert args.hand_n_basis == 24
+    hand_args = parser.parse_args(
+        [
+            "auto",
+            "--out-dir",
+            "out",
+            "--hkl",
+            "INTEGRATE.HKL",
+            "--structure",
+            "model.res",
+            "--no-hand-control",
+            "--hand-n-basis",
+            "30",
+            "--hand-n-points",
+            "12",
+            "--hand-accept-delta",
+            "0.02",
+        ]
+    )
+    assert hand_args.hand_control is False
+    assert hand_args.hand_n_basis == 30
+    assert hand_args.hand_n_points == 12
+    assert hand_args.hand_accept_delta == 0.02
     assert args.structure_n_basis == 24
     assert args.scale_polish_frame_models == "adaptive,fixed"
     assert args.scale_polish_adaptive_counts == "auto"
@@ -288,9 +313,22 @@ def test_utility_commands_parse():
     assert ls1.row_plan_cache == "off"
     assert ls1.q_control_seed == 12345
     assert ls1.q_control_shells == 10
-    assert ls1.wrong_polarity_control is True
+    assert ls1.wrong_hand_control is True
     assert ls1.native_polish is True
     assert ls1.native_polish_blocks == "adp_ueq,xyz"
+    ls1_no_hand = build_parser().parse_args(
+        [
+            "validate-ls1",
+            "--source-summary",
+            "summary.json",
+            "--start-res",
+            "model.res",
+            "--out-dir",
+            "validate_ls1",
+            "--no-wrong-hand-control",
+        ]
+    )
+    assert ls1_no_hand.wrong_hand_control is False
     push = build_parser().parse_args(
         [
             "push-endpoint",

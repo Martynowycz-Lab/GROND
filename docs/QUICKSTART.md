@@ -58,13 +58,13 @@ the wrong geometry.
 
 Create the config with `GROND init-config --out grond.config.json`, then fill in any external executables that are not already on `PATH`. The important ones for the default full endpoint are `shelxl` for corrected-HKL polishing/statistics and `shelx2map` for maps. The command can omit `--config` when the needed programs are already discoverable, or when `GROND_CONFIG` points to the file.
 
-Use `GROND endpoints --config grond.config.json` to see the available model-update endpoints. SHELXL is the implemented production endpoint for the normal small-molecule feedback loop. `custom` is a command-template adapter for a lab-specific one-cycle refiner. `bloch_only` is always available and means GROND will simulate Bloch intensities, optimize nuisance terms, write diagnostics, and report polarity/residual behavior without updating the model through an external refiner. Macromolecular tests should use the explicit MTZ layer described in [MACROMOLECULES.md](MACROMOLECULES.md): assign unique-HKL FreeR flags, export corrected `IMEAN/SIGIMEAN`, then run one configured `protein-ls1` endpoint macrocycle.
+Use `GROND endpoints --config grond.config.json` to see the available model-update endpoints. SHELXL is the implemented production endpoint for the normal small-molecule feedback loop. `custom` is a command-template adapter for a lab-specific one-cycle refiner. `bloch_only` is always available and means GROND will simulate Bloch intensities, optimize nuisance terms, write diagnostics, and report hand/residual behavior without updating the model through an external refiner. Macromolecular tests should use the explicit MTZ layer described in [MACROMOLECULES.md](MACROMOLECULES.md): assign unique-HKL FreeR flags, export corrected `IMEAN/SIGIMEAN`, then run one configured `protein-ls1` endpoint macrocycle.
 
 This is the recommended production command. It starts with cheap checks and only spends time on expensive Bloch calculations after the data pass those checks.
 
 When a baseline HKL is available, GROND uses it to reduce transform ambiguity before running Bloch scouts. Any remaining transform candidates are tested cheaply first, then the best candidates are rerun with a stronger basis and quadrature.
 
-The automatic path checks polarity, thickness, simple geometry terms, raw-row resolution behavior, absorption-like terms, jitter, sigma behavior, detector-position scales, full-correction endpoints, maps, forensic reports, and adaptive scale compression. The final polish keeps Q=20. It chooses N from the observed rowwise support scan as `max_observed_basis + 10`, with a default cap of 500. The support top-up is at least as deep as the selected data resolution.
+The automatic path checks hand, thickness, simple geometry terms, raw-row resolution behavior, absorption-like terms, jitter, sigma behavior, detector-position scales, full-correction endpoints, maps, forensic reports, and adaptive scale compression. The final polish keeps Q=20. It chooses N from the observed rowwise support scan as `max_observed_basis + 10`, with a default cap of 500. The support top-up is at least as deep as the selected data resolution.
 
 For multi-dataset endpoints, GROND applies one overlap-derived post-dynamical scale per crystal before merging. This removes arbitrary raw integration scale differences from the final combined HKL. The default endpoint-B grid is `0.0`. Nonzero endpoint-B scans are only used when you request them with `--endpoint-b-grid`; GROND treats them as diagnostic because they can lower endpoint R factors while making ADPs and maps worse.
 
@@ -81,7 +81,7 @@ GROND auto \
   --fast
 ```
 
-Fast mode intentionally skips the expensive final polish decisions. Use it to catch wrong paths, wrong transforms, bad integrations, or implausible thickness/polarity quickly; use the plain `GROND auto` command for the final answer.
+Fast mode intentionally skips the expensive final polish decisions. Use it to catch wrong paths, wrong transforms, bad integrations, or implausible thickness/hand quickly; use the plain `GROND auto` command for the final answer.
 
 Run the middle-speed automatic profile:
 
@@ -94,7 +94,7 @@ GROND auto \
   --full-fast
 ```
 
-`--full-fast` is different from `--fast`. It still runs the automatic transform, polarity, thickness, nuisance, lightweight structure-update, scale-compression, forensic, and endpoint-reporting steps. It pins final Bloch work to N=24/Q=10 and uses one endpoint polish pass.
+`--full-fast` is different from `--fast`. It still runs the automatic transform, hand, thickness, nuisance, lightweight structure-update, scale-compression, forensic, and endpoint-reporting steps. It pins final Bloch work to N=24/Q=10 and uses one endpoint polish pass.
 
 The lightweight structure-update budget is chosen from the number of non-hydrogen atoms in the model. Use `--full-fast-structure-rows` and `--full-fast-structure-max-nfev` only when you need to override that schedule. Structure blocks use the default data-RMS plateau gate, so a stale xyz or ADP loop should stop instead of spending days on calls that no longer improve the row objective.
 

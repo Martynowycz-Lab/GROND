@@ -16,7 +16,7 @@ for _name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "VEC
 import numpy as np
 
 from native_row_regularize import row_selection, target_arrays
-from bloch_engine import Config, XDSBlochPort, XDSData, coordinate_polarity_model, parse_model, sha256
+from bloch_engine import Config, XDSBlochPort, XDSData, alternate_hand_model, parse_model, sha256
 
 
 _WORKER_PORT = None
@@ -109,7 +109,7 @@ def main() -> int:
     ap.add_argument("--max-rows", type=int, default=0)
     ap.add_argument("--workers", type=int, default=1)
     ap.add_argument("--chunksize", type=int, default=1)
-    ap.add_argument("--coordinate-polarity-alt", action="store_true")
+    ap.add_argument("--alternate-hand", dest="alternate_hand", action="store_true")
     args = ap.parse_args()
     effective_topup_d_min = min(float(args.topup_d_min), float(args.min_d_spacing)) if args.min_d_spacing > 0 else float(args.topup_d_min)
 
@@ -118,8 +118,8 @@ def main() -> int:
     target, _base_sig = target_arrays(data, args.target_mode)
     indices = row_selection(data, target, args.positive_only, args.min_d_spacing, args.min_peak, args.max_rows, args.geometry_percentile)
     model = parse_model(Path(args.res))
-    if args.coordinate_polarity_alt:
-        model = coordinate_polarity_model(model)
+    if args.alternate_hand:
+        model = alternate_hand_model(model)
     cfg = Config(
         n_basis=int(args.n_basis_limit),
         n_points=1,

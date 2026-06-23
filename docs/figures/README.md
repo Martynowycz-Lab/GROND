@@ -15,5 +15,5 @@ endpoint outputs.
 The diagrams are written for mixed audiences. A "row" means one measured spot
 observation from the integration table; a "merged reflection" means many rows
 have already been combined. Most GROND decisions happen before merging because
-geometry, thickness, coordinate polarity, and weak-row behavior are easiest to audit while row
+geometry, thickness, hand, and weak-row behavior are easiest to audit while row
 identity is still present.

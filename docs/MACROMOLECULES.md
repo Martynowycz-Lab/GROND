@@ -6,7 +6,7 @@ This page describes the implemented wrapper layer. It is an interface layer, not
 
 ## Two Validation Layers
 
-GROND row-free and macromolecular Rfree are different validation objects. Row-free is a signed-row split used to test whether the row-level dynamical correction transfers to held-out observations. It is the right split for Born controls, frozen-q controls, shuffled-q controls, wrong-polarity controls, and row-level residual diagnostics.
+GROND row-free and macromolecular Rfree are different validation objects. Row-free is a signed-row split used to test whether the row-level dynamical correction transfers to held-out observations. It is the right split for Born controls, frozen-q controls, shuffled-q controls, wrong-hand controls, and row-level residual diagnostics.
 
 Macromolecular Rfree is assigned at the unique-HKL level and carried into a merged MTZ. Every signed observation that maps to a free unique reflection must keep that free label through correction and merging. That is what conventional macromolecular refiners expect, and it must not be regenerated after GROND has corrected the observations.
 

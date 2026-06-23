@@ -9,7 +9,7 @@ useful lagged dynamical surrogate from a cosmetic corrected-HKL loop:
 * updated-q LS1 macrocycles,
 * frozen-q fixed corrected-HKL control,
 * q=1 Born corrected-HKL control,
-* optional alternate-polarity Bloch control, and
+* optional alternate-hand Bloch control, and
 * optional native finite-difference polish with the same accepted Bloch physics.
 """
 
@@ -84,7 +84,7 @@ def run_one_native_endpoint(
     label: str,
     lambda_grid: str,
     shelxl_iterations: int,
-    coordinate_polarity_alt: bool = False,
+    alternate_hand: bool = False,
     q_control: str = "real",
 ) -> dict:
     """Run one fixed-q or q=1 native-row endpoint control."""
@@ -92,8 +92,8 @@ def run_one_native_endpoint(
     ns = as_feedback_args(args, lambda_grid=lambda_grid, shelxl_iterations=shelxl_iterations)
     run_dir.mkdir(parents=True, exist_ok=True)
     cmd = fb.native_command(ns, source_summary, model, run_dir, n_basis=args.n_basis, n_points=args.n_points)
-    if coordinate_polarity_alt:
-        cmd.append("--coordinate-polarity-alt")
+    if alternate_hand:
+        cmd.append("--alternate-hand")
     if q_control != "real":
         cmd.extend(["--q-control", q_control, "--q-control-seed", str(int(args.q_control_seed)), "--q-control-shells", str(int(args.q_control_shells))])
     (run_dir / "COMMAND.sh").write_text(shell_join(cmd) + "\n")
@@ -106,7 +106,7 @@ def run_one_native_endpoint(
         "input_model": str(model.resolve()),
         "lambda_grid": lambda_grid,
         "shelxl_iterations": int(shelxl_iterations),
-        "coordinate_polarity_alt": bool(coordinate_polarity_alt),
+        "alternate_hand": bool(alternate_hand),
         "q_control": q_control,
         "command": cmd,
         **status,
@@ -457,7 +457,7 @@ def main() -> None:
     ap.add_argument("--q-control-seed", type=int, default=12345)
     ap.add_argument("--q-control-shells", type=int, default=10)
     ap.add_argument("--skip-controls", action="store_true")
-    ap.add_argument("--wrong-polarity-control", action=argparse.BooleanOptionalAction, default=True)
+    ap.add_argument("--wrong-hand-control", dest="wrong_hand_control", action=argparse.BooleanOptionalAction, default=True, help="Run the alternate-hand null control.")
     ap.add_argument("--native-polish", action=argparse.BooleanOptionalAction, default=False)
     ap.add_argument("--native-polish-rows", type=int, default=200)
     ap.add_argument("--native-polish-n-basis", type=int, default=0)
@@ -515,17 +515,17 @@ def main() -> None:
                 shelxl_iterations=max(1, int(args.cycles)),
             )
         )
-        if args.wrong_polarity_control:
+        if args.wrong_hand_control:
             result["controls"].append(
                 run_one_native_endpoint(
                     args,
                     source_summary,
                     Path(args.start_res).expanduser().resolve(),
-                    out / "controls" / "alternate_polarity_q",
-                    label="alternate_polarity_q",
+                    out / "controls" / "alternate_hand_q",
+                    label="alternate_hand_q",
                     lambda_grid="1.0",
                     shelxl_iterations=1,
-                    coordinate_polarity_alt=True,
+                    alternate_hand=True,
                 )
             )
         for mode, label in [
