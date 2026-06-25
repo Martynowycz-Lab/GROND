@@ -131,6 +131,33 @@ def main() -> None:
 
     best_path = Path(args.best)
     other_path = Path(args.other)
+    missing_files = [str(path) for path in (best_path, other_path) if not path.exists()]
+    if missing_files:
+        out = {
+            "status": "missing_input_files",
+            "best_csv": str(best_path.resolve()),
+            "other_csv": str(other_path.resolve()),
+            "missing_files": missing_files,
+            "row_join": {
+                "key": list(KEY_COLUMNS),
+                "n_best": 0,
+                "n_other": 0,
+                "n_joined": 0,
+                "duplicate_keys_best": 0,
+                "duplicate_keys_other": 0,
+                "missing_columns": {"best": [], "other": []},
+            },
+            "interpretation": {
+                "diagnostic": "row-level alternate-hand check was skipped because one or more native row CSV files were absent",
+                "recommendation": "Treat this as an incomplete diagnostic artifact, not as evidence for either hand.",
+            },
+            "all": {"label": "all", "n": 0},
+            "work": {"label": "work", "n": 0},
+            "free": {"label": "free", "n": 0},
+        }
+        Path(args.out).write_text(json.dumps(out, indent=2, allow_nan=True) + "\n")
+        return
+
     best_rows, best_fields = read_rows(best_path)
     other_rows, other_fields = read_rows(other_path)
     missing = {"best": missing_columns(best_fields), "other": missing_columns(other_fields)}

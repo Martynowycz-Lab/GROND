@@ -44,3 +44,19 @@ def test_absolute_structure_diagnostic_runs_without_pandas(tmp_path: Path):
     assert payload["work"]["n"] == 1
     assert payload["free"]["n"] == 1
 
+
+def test_absolute_structure_diagnostic_skips_missing_inputs(tmp_path: Path):
+    best = tmp_path / "missing_best.csv"
+    other = tmp_path / "other.csv"
+    out = tmp_path / "diagnostic.json"
+    write_rows(other, [2.0, 3.0])
+
+    subprocess.run(
+        [sys.executable, str(SCRIPT), "--best", str(best), "--other", str(other), "--out", str(out)],
+        check=True,
+    )
+
+    payload = json.loads(out.read_text())
+    assert payload["status"] == "missing_input_files"
+    assert str(best) in payload["missing_files"]
+    assert payload["row_join"]["n_joined"] == 0
