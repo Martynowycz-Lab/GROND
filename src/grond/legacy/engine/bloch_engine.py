@@ -2582,7 +2582,10 @@ class XDSBlochPort:
 
             if platform.system() == "Darwin":
                 return ["forkserver", "spawn"]
-            return ["forkserver", "fork", "spawn"]
+            # Linux fork shares the initialized port/cache state copy-on-write;
+            # forkserver is a safe fallback but is much slower for high-worker
+            # repeated Bloch predictions on large servers.
+            return ["fork", "forkserver", "spawn"]
 
         results = [None] * len(indices)
         position = {int(idx): int(pos) for pos, idx in enumerate(indices)}
@@ -2831,7 +2834,10 @@ class XDSBlochPort:
 
             if platform.system() == "Darwin":
                 return ["forkserver", "spawn"]
-            return ["forkserver", "fork", "spawn"]
+            # Linux fork shares the initialized port/cache state copy-on-write;
+            # forkserver is a safe fallback but is much slower for high-worker
+            # repeated Bloch predictions on large servers.
+            return ["fork", "forkserver", "spawn"]
 
         def run_serial():
             for idx in indices:
