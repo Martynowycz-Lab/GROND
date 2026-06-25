@@ -6,7 +6,9 @@
 
 `logs/commands.jsonl` is the timing ledger. Each engine stage has a start record and a completion record with elapsed seconds and return code.
 
-`grond_progress.json` stores completed stages for resume. Re-run the same command with the same output directory to continue after an interruption.
+`QUICK_STATS.md` is the first file to open after `GROND auto`. It gives the short requested-resolution, suggested-resolution, and endpoint-calibration tables without the full audit trail.
+
+`grond_progress.json` stores completed stages for resume. Re-run the same command with the same output directory to continue after an interruption. A stage is reused only when its saved command matches the current command, so changing GROND installs, input paths, transforms, or material options forces the affected stage to recompute instead of mixing old and new outputs.
 
 `grond_continue_checkpoint.json` is written by completed single-dataset `auto` runs. It is the deliberate-continuation entry point: edit a model, then run `GROND push-endpoint --checkpoint grond_continue_checkpoint.json --start-res edited.res --out-dir endpoint_push_edited`. The checkpoint skips scouting, hand testing, thickness search, and feature gates by reusing the selected pinned row/nuisance summary. It is not crash recovery; interrupted runs use `grond_progress.json`.
 

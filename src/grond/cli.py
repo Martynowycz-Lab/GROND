@@ -273,9 +273,13 @@ def run_logged(cmd: list[str], log_dir: Path, label: str, *, dry_run: bool = Fal
         "command": cmd,
     }
     with _RUN_LOG_LOCK:
-        if progress and not dry_run and progress.should_skip(label):
-            print(progress.line_prefix(label, skipped=True), flush=True)
-            return
+        if progress and not dry_run:
+            if progress.should_skip(label, cmd):
+                print(progress.line_prefix(label, skipped=True), flush=True)
+                return
+            previous = progress.completed_record(label)
+            if previous.get("returncode") == 0 and previous.get("command") != cmd:
+                print(f"RERUN {label}: previous completed command differs from this command.", flush=True)
         with (log_dir / "commands.jsonl").open("a") as f:
             f.write(json.dumps(rec) + "\n")
         if dry_run:
@@ -4570,6 +4574,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     result["publication_endpoint_chooser"] = run_publication_endpoint_chooser(prep, result, args)
     result["publication_tables"] = run_publication_report(python, prep, result, args, logs)
     result["continue_checkpoint"] = write_continue_checkpoint(prep, result, args)
+    result["quick_stats"] = write_quick_stats(prep, result, args)
     (Path(args.out_dir) / "grond_summary.json").write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps({"out_dir": str(Path(args.out_dir).resolve()), **result}, indent=2))
     return 0
@@ -4654,6 +4659,150 @@ def write_continue_checkpoint(prep: PrepConfig, result: Mapping[str, object], ar
         checkpoint["status_reason"] = "dry-run checkpoints are plans, not usable continuation checkpoints"
     checkpoint_path.write_text(json.dumps(checkpoint, indent=2) + "\n")
     return {"path": str(checkpoint_path), **checkpoint}
+
+
+def _quick_percent(value: object) -> str:
+    """Format a fractional statistic as a percent for quick run reports."""
+
+    try:
+        return f"{100.0 * float(value):.2f}%"
+    except (TypeError, ValueError):
+        return "n/a"
+
+
+def _quick_number(value: object, digits: int = 3) -> str:
+    """Format a small numeric value without raising."""
+
+    try:
+        return f"{float(value):.{digits}f}"
+    except (TypeError, ValueError):
+        return "n/a"
+
+
+def _quick_count_pair(row: Mapping[str, object]) -> str:
+    """Return Nobs/Nall for a row-MR metrics block."""
+
+    nobs = row.get("Nobs", "n/a")
+    nall = row.get("Nall", "n/a")
+    return f"{nobs}/{nall}"
+
+
+def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argparse.Namespace) -> dict:
+    """Write a short human-first statistics summary at the run root."""
+
+    out_dir = Path(args.out_dir).expanduser().resolve()
+    quick_path = out_dir / "QUICK_STATS.md"
+    row_metrics_path = out_dir / "tables" / "row_mr_metrics.json"
+    row_metrics = try_read_json(row_metrics_path)
+    endpoint_calibration = result.get("endpoint_calibration") if isinstance(result.get("endpoint_calibration"), Mapping) else {}
+    endpoint_selection = endpoint_calibration.get("publication_selection", {}) if isinstance(endpoint_calibration, Mapping) else {}
+    metadata = row_metrics.get("metadata", {}) if isinstance(row_metrics.get("metadata"), Mapping) else {}
+    endpoints = []
+    resolution_block = row_metrics.get("resolution_scale_endpoints", {})
+    if isinstance(resolution_block, Mapping):
+        raw_endpoints = resolution_block.get("endpoints", [])
+        endpoints = raw_endpoints if isinstance(raw_endpoints, list) else []
+
+    lines = [
+        "# GROND Quick Stats",
+        "",
+        "This is the short run summary. Use the detailed reports for diagnostics and audit trails.",
+        "",
+        "## Run",
+        "",
+        f"- Output directory: `{out_dir}`",
+        f"- Datasets: `{', '.join(ds.name for ds in prep.datasets) if prep.datasets else 'n/a'}`",
+        f"- Final model: `{result.get('model', '')}`",
+        f"- Rows in final row table: `{metadata.get('row_count', 'n/a')}`",
+        f"- Final N/Q: `{metadata.get('n_basis', 'n/a')}/{metadata.get('n_points', 'n/a')}`",
+        f"- Thickness mean: `{_quick_number(metadata.get('thickness_A_mean'), 1)} A`",
+        f"- Sg window: `{metadata.get('sg_window', 'n/a')}`; absorption: `{metadata.get('absorption_mode', 'n/a')}`; Sg jitter: `{metadata.get('sg_jitter_mode', 'n/a')}`",
+        "",
+        "## Requested And Suggested Row/MR Statistics",
+        "",
+        "| endpoint | dmin A | scales | Nobs/Nall | dyn Rall | dyn wRall | dyn MRall | dyn MwRall | kin Rall | kin wRall |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    if endpoints:
+        for endpoint in endpoints:
+            if not isinstance(endpoint, Mapping):
+                continue
+            row_mr = endpoint.get("row_mr", {}) if isinstance(endpoint.get("row_mr"), Mapping) else {}
+            dyn = row_mr.get("dynamic", {}) if isinstance(row_mr.get("dynamic"), Mapping) else {}
+            kin = row_mr.get("kinematic", {}) if isinstance(row_mr.get("kinematic"), Mapping) else {}
+            lines.append(
+                "| "
+                + " | ".join(
+                    [
+                        str(endpoint.get("label", "n/a")),
+                        _quick_number(endpoint.get("dmin_A"), 3),
+                        str(endpoint.get("scale_params", "n/a")),
+                        _quick_count_pair(dyn),
+                        _quick_percent(dyn.get("Rall")),
+                        _quick_percent(dyn.get("wRall")),
+                        _quick_percent(dyn.get("MRall")),
+                        _quick_percent(dyn.get("MwRall")),
+                        _quick_percent(kin.get("Rall")),
+                        _quick_percent(kin.get("wRall")),
+                    ]
+                )
+                + " |"
+            )
+    else:
+        lines.append("| n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a |")
+
+    lines.extend(
+        [
+            "",
+            "## Endpoint Calibration",
+            "",
+            "| branch | spec | WGHT | scales | R1all | wR2all | GooF | row-free wR2all | sigma scale |",
+            "|---|---|---|---:|---:|---:|---:|---:|---:|",
+        ]
+    )
+    branch_rows = [
+        ("selected_publication", endpoint_selection.get("publication_endpoint") if isinstance(endpoint_selection, Mapping) else None),
+        ("low_R_diagnostic", endpoint_selection.get("low_r_diagnostic") if isinstance(endpoint_selection, Mapping) else None),
+        ("best_heldout_row", endpoint_selection.get("best_heldout_row") if isinstance(endpoint_selection, Mapping) else None),
+    ]
+    wrote_branch = False
+    for label, row in branch_rows:
+        if not isinstance(row, Mapping):
+            continue
+        wrote_branch = True
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    label,
+                    str(row.get("spec", "n/a")),
+                    str(row.get("wght_mode", "n/a")),
+                    str(row.get("scale_params", "n/a")),
+                    _quick_percent(row.get("shelxl_R1all")),
+                    _quick_percent(row.get("shelxl_wR2all")),
+                    _quick_number(row.get("shelxl_GooF"), 3),
+                    _quick_percent(row.get("native_free_wR2_all")),
+                    _quick_number(row.get("sigma_scale"), 3),
+                ]
+            )
+            + " |"
+        )
+    if not wrote_branch:
+        lines.append("| n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a |")
+
+    lines.extend(
+        [
+            "",
+            "## Files To Open Next",
+            "",
+            f"- Detailed row/MR table: `{row_metrics_path}`",
+            f"- Endpoint calibration report: `{endpoint_calibration.get('report', '') if isinstance(endpoint_calibration, Mapping) else ''}`",
+            f"- Publication endpoint chooser: `{out_dir / 'endpoint_chooser' / 'PUBLICATION_ENDPOINT_CHOOSER.md'}`",
+            "",
+        ]
+    )
+    quick_path.write_text("\n".join(lines))
+    return {"status": "ok", "path": str(quick_path)}
 
 
 def cmd_validate(args: argparse.Namespace) -> int:

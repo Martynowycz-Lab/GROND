@@ -529,6 +529,77 @@ def test_push_endpoint_dry_run_accepts_continue_checkpoint(tmp_path):
     assert plan["checkpoint"] == str(checkpoint.resolve())
 
 
+def test_write_quick_stats_summarizes_row_and_endpoint_tables(tmp_path):
+    out_dir = tmp_path / "grond_out"
+    tables = out_dir / "tables"
+    tables.mkdir(parents=True)
+    (tables / "row_mr_metrics.json").write_text(
+        json.dumps(
+            {
+                "metadata": {
+                    "row_count": 10,
+                    "n_basis": "24",
+                    "n_points": "20",
+                    "thickness_A_mean": 1000.0,
+                    "sg_window": "0.00400",
+                    "absorption_mode": "midgley_like",
+                    "sg_jitter_mode": "gaussian",
+                },
+                "resolution_scale_endpoints": {
+                    "endpoints": [
+                        {
+                            "label": "requested_resolution_full_scales",
+                            "dmin_A": 0.7,
+                            "scale_params": "100",
+                            "row_mr": {
+                                "dynamic": {
+                                    "Nobs": 4,
+                                    "Nall": 10,
+                                    "Rall": 0.10,
+                                    "wRall": 0.11,
+                                    "MRall": 0.08,
+                                    "MwRall": 0.09,
+                                },
+                                "kinematic": {"Rall": 0.20, "wRall": 0.21},
+                            },
+                        }
+                    ]
+                },
+            }
+        )
+        + "\n"
+    )
+    prep = PrepConfig(structure="model.res", datasets=[DatasetSpec(name="dataset", hkl="INTEGRATE.HKL")])
+    result = {
+        "model": "final.res",
+        "endpoint_calibration": {
+            "report": str(out_dir / "endpoint_calibration" / "dataset" / "REPORT.md"),
+            "publication_selection": {
+                "publication_endpoint": {
+                    "spec": "adaptive_80_det_8",
+                    "wght_mode": "freeze-zero",
+                    "scale_params": 143,
+                    "shelxl_R1all": 0.0996,
+                    "shelxl_wR2all": 0.1539,
+                    "shelxl_GooF": 1.037,
+                    "native_free_wR2_all": 0.2318,
+                    "sigma_scale": 0.584,
+                }
+            },
+        },
+    }
+    args = argparse.Namespace(out_dir=str(out_dir))
+
+    info = cli.write_quick_stats(prep, result, args)
+    text = (out_dir / "QUICK_STATS.md").read_text()
+
+    assert info["status"] == "ok"
+    assert "requested_resolution_full_scales" in text
+    assert "10.00%" in text
+    assert "selected_publication" in text
+    assert "15.39%" in text
+
+
 def test_row_validate_reports_bad_portable_rows_without_traceback(tmp_path: Path, capsys):
     from grond.io.row_contract import write_template
 

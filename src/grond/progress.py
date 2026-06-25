@@ -66,13 +66,21 @@ class ProgressState:
         tmp.write_text(json.dumps(payload, indent=2, allow_nan=True) + "\n")
         tmp.replace(self.state_path)
 
-    def should_skip(self, label: str) -> bool:
+    def should_skip(self, label: str, command: list[str] | None = None) -> bool:
         """Return true when a completed stage can be reused on a resume run."""
 
         if not self.resume:
             return False
         record = self.load().get("completed", {}).get(label, {})
-        return bool(record and record.get("returncode") == 0)
+        if not record or record.get("returncode") != 0:
+            return False
+        return command is None or record.get("command") == command
+
+    def completed_record(self, label: str) -> dict[str, Any]:
+        """Return a completed stage record if one exists."""
+
+        record = self.load().get("completed", {}).get(label, {})
+        return record if isinstance(record, dict) else {}
 
     def mark_started(self, label: str, command: list[str]) -> None:
         """Record the currently running stage so an interruption is explainable."""
@@ -143,4 +151,3 @@ class ProgressState:
         if not vals:
             return float("nan")
         return float(sum(vals) / len(vals))
-

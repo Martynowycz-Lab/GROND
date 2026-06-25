@@ -265,7 +265,7 @@ GROND push-endpoint \
   --cycles 3
 ```
 
-If you omit `--start-res`, GROND continues from the model recorded in the checkpoint. If you provide a new `--start-res`, GROND keeps the pinned row/nuisance contract but uses your edited model. This is the right route for small manual changes, H-atom tests, restraint stress tests, or “push this endpoint five more cycles” checks. It is not the same as crash recovery. For an interrupted `auto` run, rerun the original command with the same `--out-dir`; GROND resumes completed stages from `grond_progress.json`.
+If you omit `--start-res`, GROND continues from the model recorded in the checkpoint. If you provide a new `--start-res`, GROND keeps the pinned row/nuisance contract but uses your edited model. This is the right route for small manual changes, H-atom tests, restraint stress tests, or “push this endpoint five more cycles” checks. It is not the same as crash recovery. For an interrupted `auto` run, rerun the original command with the same `--out-dir`; GROND resumes completed stages from `grond_progress.json`. Resume is command-aware: if a completed stage was produced by a different GROND install path or different stage command, GROND recomputes that stage instead of silently mixing outputs.
 
 The older explicit form still works when you want to name the internal summary yourself:
 
@@ -283,7 +283,7 @@ For a controlled stress test, `--model-prep no-restraints` removes common SHELX 
 
 ## What You Get
 
-The output directory contains the run configuration, the prepared inputs, per-stage logs, progress/resume state, row-level predictions, corrected reflection files, endpoint statistics, maps when available, dataset-inclusion reports, resolution-limit reports, and forensic reports. Endpoint summaries include the active SHELXL weighting history and the `post_bloch_sigma` endpoint uncertainty block so high or low `wR2all` and GooF values can be traced to the declared observation model rather than stale model-update weights. If a run is interrupted, launch the same command with the same `--out-dir`; GROND resumes completed stages recorded in `grond_progress.json`.
+The output directory contains the run configuration, the prepared inputs, per-stage logs, progress/resume state, row-level predictions, corrected reflection files, endpoint statistics, maps when available, dataset-inclusion reports, resolution-limit reports, and forensic reports. Start with `QUICK_STATS.md`; it gives a compact requested-resolution, suggested-resolution, and endpoint-calibration table. Endpoint summaries include the active SHELXL weighting history and the `post_bloch_sigma` endpoint uncertainty block so high or low `wR2all` and GooF values can be traced to the declared observation model rather than stale model-update weights. If a run is interrupted, launch the same command with the same `--out-dir`; GROND resumes completed stages recorded in `grond_progress.json`.
 
 ## Package Layout
 
