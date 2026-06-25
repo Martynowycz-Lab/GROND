@@ -1,3 +1,4 @@
+import argparse
 import json
 import os
 from pathlib import Path
@@ -350,6 +351,19 @@ def test_utility_commands_parse():
     assert push.row_plan_cache == "readwrite"
     assert push.model_prep == "free-h-anis-no-restraints"
     assert push.set_ls_cycles == 1
+    push_checkpoint = build_parser().parse_args(
+        [
+            "push-endpoint",
+            "--checkpoint",
+            "grond_continue_checkpoint.json",
+            "--out-dir",
+            "push",
+        ]
+    )
+    assert push_checkpoint.command == "push-endpoint"
+    assert push_checkpoint.checkpoint == "grond_continue_checkpoint.json"
+    assert push_checkpoint.source_summary == ""
+    assert push_checkpoint.start_res == ""
 
 
 def test_auto_parser_is_simple_run_alias():
@@ -434,6 +448,85 @@ def test_auto_parser_accepts_dials_input_pair():
     assert args.dials_drop_dont_integrate is False
     assert args.dials_keep_dont_integrate is False
     assert args.sg_window_mode == "auto"
+
+
+def test_write_continue_checkpoint_records_single_dataset_paths(tmp_path):
+    out_dir = tmp_path / "grond_out"
+    run_dir = out_dir / "runs" / "dataset" / "final"
+    run_dir.mkdir(parents=True)
+    (run_dir / "summary.json").write_text("{}\n")
+    model = out_dir / "final_model.res"
+    model.parent.mkdir(parents=True, exist_ok=True)
+    model.write_text("TITL final\nEND\n")
+    hkl = tmp_path / "INTEGRATE.HKL"
+    hkl.write_text("! rows\n")
+    baseline = tmp_path / "baseline.hkl"
+    baseline.write_text("0 0 1 1.0 1.0\n")
+    prep = PrepConfig(
+        structure=str(model),
+        baseline_hkl=str(baseline),
+        datasets=[DatasetSpec(name="dataset", hkl=str(hkl), hkl_transform="identity")],
+    )
+    args = argparse.Namespace(out_dir=str(out_dir))
+
+    checkpoint = cli.write_continue_checkpoint(prep, {"primary_run": str(run_dir), "model": str(model)}, args)
+    saved = json.loads((out_dir / "grond_continue_checkpoint.json").read_text())
+
+    assert checkpoint["status"] == "ready"
+    assert saved["kind"] == "grond_continue_checkpoint"
+    assert saved["source_summary"] == str((run_dir / "summary.json").resolve())
+    assert saved["recommended_start_res"] == str(model.resolve())
+    assert saved["hkl"] == str(hkl.resolve())
+    assert saved["baseline_hkl"] == str(baseline.resolve())
+    assert saved["hkl_transform"] == "identity"
+
+
+def test_push_endpoint_dry_run_accepts_continue_checkpoint(tmp_path):
+    source_summary = tmp_path / "summary.json"
+    source_summary.write_text("{}\n")
+    start_res = tmp_path / "edited.res"
+    start_res.write_text("TITL edited\nLATT 1\nL.S. 4\nEND\n")
+    hkl = tmp_path / "INTEGRATE.HKL"
+    hkl.write_text("! rows\n")
+    checkpoint = tmp_path / "grond_continue_checkpoint.json"
+    checkpoint.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "grond_continue_checkpoint",
+                "status": "ready",
+                "source_summary": str(source_summary),
+                "recommended_start_res": str(start_res),
+                "hkl": str(hkl),
+                "hkl_transform": "identity",
+            }
+        )
+        + "\n"
+    )
+    out_dir = tmp_path / "push"
+    args = build_parser().parse_args(
+        [
+            "push-endpoint",
+            "--checkpoint",
+            str(checkpoint),
+            "--start-res",
+            str(start_res),
+            "--out-dir",
+            str(out_dir),
+            "--dry-run",
+        ]
+    )
+
+    assert args.func(args) == 0
+    plan = json.loads((out_dir / "push_endpoint_plan.json").read_text())
+    command = [str(item) for item in plan["command"]]
+
+    assert "--source-summary" in command
+    assert command[command.index("--source-summary") + 1] == str(source_summary.resolve())
+    assert "--hkl" in command
+    assert command[command.index("--hkl") + 1] == str(hkl.resolve())
+    assert "--hkl-transform=identity" in command
+    assert plan["checkpoint"] == str(checkpoint.resolve())
 
 
 def test_row_validate_reports_bad_portable_rows_without_traceback(tmp_path: Path, capsys):

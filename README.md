@@ -255,7 +255,19 @@ For final publication adjudication, set `--n-basis` and `--n-points` to the prom
 
 ## Pushing a Finished Endpoint
 
-If a run has a good pinned nuisance contract and you want to continue from a specific model rather than repeat the whole automatic search, use `push-endpoint`. It reuses the selected row-level Bloch settings from an existing `summary.json`, runs additional fixed-nuisance Bloch/SHELXL macrocycles, and writes an endpoint-push report that names the earliest safe cycle. This is meant for deliberate endpoint stress tests and short continuations, not for hiding another open-ended optimizer inside `auto`.
+If a run has a good pinned nuisance contract and you want to continue from a changed model rather than repeat scouting, hand testing, thickness search, and feature gates, use `push-endpoint`. A completed single-dataset `auto` run writes `grond_continue_checkpoint.json` in the run directory. That file points to the selected row-level Bloch settings and final model. Edit or replace the model, then launch a short continuation from the checkpoint:
+
+```bash
+GROND push-endpoint \
+  --checkpoint grond_out/grond_continue_checkpoint.json \
+  --start-res my_edited_model.res \
+  --out-dir grond_out/endpoint_push_my_edited_model \
+  --cycles 3
+```
+
+If you omit `--start-res`, GROND continues from the model recorded in the checkpoint. If you provide a new `--start-res`, GROND keeps the pinned row/nuisance contract but uses your edited model. This is the right route for small manual changes, H-atom tests, restraint stress tests, or “push this endpoint five more cycles” checks. It is not the same as crash recovery. For an interrupted `auto` run, rerun the original command with the same `--out-dir`; GROND resumes completed stages from `grond_progress.json`.
+
+The older explicit form still works when you want to name the internal summary yourself:
 
 ```bash
 GROND push-endpoint \

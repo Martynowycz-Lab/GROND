@@ -4569,6 +4569,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     result["endpoint_calibration"] = run_endpoint_calibration(prep, result, args, python, logs)
     result["publication_endpoint_chooser"] = run_publication_endpoint_chooser(prep, result, args)
     result["publication_tables"] = run_publication_report(python, prep, result, args, logs)
+    result["continue_checkpoint"] = write_continue_checkpoint(prep, result, args)
     (Path(args.out_dir) / "grond_summary.json").write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps({"out_dir": str(Path(args.out_dir).resolve()), **result}, indent=2))
     return 0
@@ -4579,6 +4580,80 @@ def cmd_auto(args: argparse.Namespace) -> int:
 
     args.mode = "auto"
     return cmd_run(args)
+
+
+def _checkpoint_path(raw: object, *, base: Path | None = None) -> str:
+    """Return an absolute path string for a checkpoint field."""
+
+    if raw in (None, ""):
+        return ""
+    path = Path(str(raw)).expanduser()
+    if not path.is_absolute() and base is not None:
+        path = base / path
+    return str(path.resolve())
+
+
+def write_continue_checkpoint(prep: PrepConfig, result: Mapping[str, object], args: argparse.Namespace) -> dict:
+    """Write the small JSON file used to continue a finished endpoint."""
+
+    out_dir = Path(args.out_dir).expanduser().resolve()
+    checkpoint_path = out_dir / "grond_continue_checkpoint.json"
+    dataset_count = len(prep.datasets)
+    dataset_name = prep.datasets[0].name if prep.datasets else "dataset"
+    source_run = _checkpoint_path(result.get("primary_run"))
+    source_summary = _checkpoint_path(Path(source_run) / "summary.json") if source_run else ""
+    recommended_start_res = _checkpoint_path(result.get("model"))
+    baseline_hkl = _checkpoint_path(prep.baseline_hkl) if prep.baseline_hkl else ""
+    hkl = _checkpoint_path(prep.datasets[0].hkl) if prep.datasets else ""
+    hkl_transform = prep.datasets[0].hkl_transform if prep.datasets else ""
+    source_summary_exists = bool(source_summary and Path(source_summary).exists())
+    start_model_exists = bool(recommended_start_res and Path(recommended_start_res).exists())
+    ready = bool(source_summary_exists and start_model_exists and dataset_count == 1 and not getattr(args, "dry_run", False))
+    checkpoint = {
+        "schema_version": 1,
+        "kind": "grond_continue_checkpoint",
+        "status": "ready" if ready else "not_ready",
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "run_dir": str(out_dir),
+        "dataset_count": dataset_count,
+        "dataset": dataset_name,
+        "source_run": source_run,
+        "source_summary": source_summary,
+        "recommended_start_res": recommended_start_res,
+        "hkl": hkl,
+        "baseline_hkl": baseline_hkl,
+        "hkl_transform": hkl_transform,
+        "recommended_command": [
+            "GROND",
+            "push-endpoint",
+            "--checkpoint",
+            str(checkpoint_path),
+            "--start-res",
+            "edited_model.res",
+            "--out-dir",
+            str(out_dir / "endpoint_push_from_edited_model"),
+            "--cycles",
+            "3",
+        ],
+        "notes": [
+            "Use this for deliberate continuation from a changed model while reusing the pinned GROND row/nuisance contract.",
+            "For an interrupted GROND auto run, rerun the original command with the same --out-dir instead.",
+        ],
+    }
+    if dataset_count != 1:
+        checkpoint["status_reason"] = "endpoint push currently expects one pinned row summary; multi-dataset continuation is not advertised by this checkpoint."
+    elif not source_summary:
+        checkpoint["status_reason"] = "no final source summary was recorded"
+    elif not recommended_start_res:
+        checkpoint["status_reason"] = "no recommended start model was recorded"
+    elif not source_summary_exists:
+        checkpoint["status_reason"] = "recorded final source summary does not exist yet"
+    elif not start_model_exists:
+        checkpoint["status_reason"] = "recorded start model does not exist yet"
+    elif getattr(args, "dry_run", False):
+        checkpoint["status_reason"] = "dry-run checkpoints are plans, not usable continuation checkpoints"
+    checkpoint_path.write_text(json.dumps(checkpoint, indent=2) + "\n")
+    return {"path": str(checkpoint_path), **checkpoint}
 
 
 def cmd_validate(args: argparse.Namespace) -> int:
@@ -4915,6 +4990,46 @@ def prepare_push_endpoint_model(args: argparse.Namespace, out_dir: Path) -> tupl
     return prepared, audit
 
 
+def apply_push_checkpoint(args: argparse.Namespace) -> dict:
+    """Fill push-endpoint inputs from a continue checkpoint when requested."""
+
+    checkpoint_path = str(getattr(args, "checkpoint", "") or "")
+    if not checkpoint_path:
+        if not getattr(args, "source_summary", ""):
+            raise SystemExit("Provide --source-summary, or use --checkpoint from a finished GROND auto run.")
+        if not getattr(args, "start_res", ""):
+            raise SystemExit("Provide --start-res, or use --checkpoint with a recorded start model.")
+        return {}
+
+    path = Path(checkpoint_path).expanduser().resolve()
+    if not path.exists():
+        raise SystemExit(f"Continue checkpoint not found: {path}")
+    checkpoint = read_json(path)
+    if checkpoint.get("kind") != "grond_continue_checkpoint":
+        raise SystemExit(f"{path} is not a GROND continue checkpoint.")
+    if checkpoint.get("status") != "ready":
+        reason = checkpoint.get("status_reason") or "checkpoint is not marked ready"
+        raise SystemExit(f"{path} cannot be used for endpoint continuation: {reason}")
+
+    base = path.parent
+    if not getattr(args, "source_summary", ""):
+        args.source_summary = _checkpoint_path(checkpoint.get("source_summary"), base=base)
+    if not getattr(args, "start_res", ""):
+        args.start_res = _checkpoint_path(checkpoint.get("recommended_start_res"), base=base)
+    if not getattr(args, "hkl", "") and checkpoint.get("hkl"):
+        args.hkl = _checkpoint_path(checkpoint.get("hkl"), base=base)
+    if not getattr(args, "baseline_hkl", "") and checkpoint.get("baseline_hkl"):
+        args.baseline_hkl = _checkpoint_path(checkpoint.get("baseline_hkl"), base=base)
+    if not getattr(args, "hkl_transform", "") and checkpoint.get("hkl_transform"):
+        args.hkl_transform = str(checkpoint.get("hkl_transform"))
+
+    if not getattr(args, "source_summary", ""):
+        raise SystemExit(f"{path} does not record source_summary; provide --source-summary.")
+    if not getattr(args, "start_res", ""):
+        raise SystemExit(f"{path} does not record recommended_start_res; provide --start-res.")
+    return {"checkpoint": str(path), "checkpoint_status": checkpoint.get("status")}
+
+
 def write_push_endpoint_report(out_dir: Path, *, best_cycle_tolerance: float) -> Path | None:
     """Write a compact safety report for a completed endpoint-push run."""
 
@@ -4996,6 +5111,7 @@ def cmd_push_endpoint(args: argparse.Namespace) -> int:
     python = choose_python(args.python)
     out_dir = Path(args.out_dir).expanduser().resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_info = apply_push_checkpoint(args)
     start_model, prep_audit = prepare_push_endpoint_model(args, out_dir)
     cmd = [
         python,
@@ -5080,6 +5196,7 @@ def cmd_push_endpoint(args: argparse.Namespace) -> int:
             "command": cmd,
             "prepared_start_res": str(start_model),
             "prepared_audit": str(prep_audit) if prep_audit else "",
+            **checkpoint_info,
             "tool_config": getattr(args, "tool_config_path", ""),
             "external_tools": external_tool_statuses(args),
         }
@@ -6135,8 +6252,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_validate_ls1.set_defaults(func=cmd_validate_ls1)
 
     p_push = sub.add_parser("push-endpoint", help="Continue a pinned GROND endpoint from an existing summary and start model.")
-    p_push.add_argument("--source-summary", required=True, help="Existing native_row_regularize summary whose selected nuisance values should be pinned.")
-    p_push.add_argument("--start-res", required=True, help="Starting RES model to continue from.")
+    p_push.add_argument("--checkpoint", default="", help="grond_continue_checkpoint.json from a completed auto run.")
+    p_push.add_argument("--source-summary", default="", help="Existing native_row_regularize summary whose selected nuisance values should be pinned.")
+    p_push.add_argument("--start-res", default="", help="Starting RES model to continue from. Overrides the checkpoint model when provided.")
     p_push.add_argument("--out-dir", required=True)
     p_push.add_argument("--python", default="")
     add_tool_config_args(p_push)

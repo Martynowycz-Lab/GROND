@@ -8,6 +8,8 @@
 
 `grond_progress.json` stores completed stages for resume. Re-run the same command with the same output directory to continue after an interruption.
 
+`grond_continue_checkpoint.json` is written by completed single-dataset `auto` runs. It is the deliberate-continuation entry point: edit a model, then run `GROND push-endpoint --checkpoint grond_continue_checkpoint.json --start-res edited.res --out-dir endpoint_push_edited`. The checkpoint skips scouting, hand testing, thickness search, and feature gates by reusing the selected pinned row/nuisance summary. It is not crash recovery; interrupted runs use `grond_progress.json`.
+
 `runs/<dataset>/.../native_dyn_calc.csv` is the row-level table with observed intensity, uncertainty, predicted dynamic intensity, predicted Born intensity, scale, raw-row resolution-envelope factor, and nuisance information.
 
 `summary.json` files hold machine-readable statistics. `REPORT.md` files hold the same information in a human-readable form.
