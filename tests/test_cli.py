@@ -570,6 +570,29 @@ def test_write_quick_stats_summarizes_row_and_endpoint_tables(tmp_path):
         + "\n"
     )
     prep = PrepConfig(structure="model.res", datasets=[DatasetSpec(name="dataset", hkl="INTEGRATE.HKL")])
+    (out_dir / "grond_progress.json").write_text(
+        json.dumps(
+            {
+                "completed": {
+                    "old": {
+                        "returncode": 0,
+                        "command": [
+                            "python",
+                            "/old/GROND/src/grond/legacy/engine/native_row_regularize.py",
+                        ],
+                    },
+                    "new": {
+                        "returncode": 0,
+                        "command": [
+                            "python",
+                            "/new/GROND/src/grond/legacy/engine/native_row_regularize.py",
+                        ],
+                    },
+                }
+            }
+        )
+        + "\n"
+    )
     result = {
         "model": "final.res",
         "endpoint_calibration": {
@@ -598,6 +621,8 @@ def test_write_quick_stats_summarizes_row_and_endpoint_tables(tmp_path):
     assert "10.00%" in text
     assert "selected_publication" in text
     assert "15.39%" in text
+    assert "Resume Warning" in text
+    assert "mixed-code resume" in text
 
 
 def test_row_validate_reports_bad_portable_rows_without_traceback(tmp_path: Path, capsys):

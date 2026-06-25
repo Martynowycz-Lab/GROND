@@ -4687,6 +4687,27 @@ def _quick_count_pair(row: Mapping[str, object]) -> str:
     return f"{nobs}/{nall}"
 
 
+def _quick_progress_source_roots(out_dir: Path) -> list[tuple[str, int]]:
+    """Return GROND source roots recorded in completed stage commands."""
+
+    progress = try_read_json(out_dir / "grond_progress.json")
+    completed = progress.get("completed", {}) if isinstance(progress.get("completed"), Mapping) else {}
+    counts: dict[str, int] = {}
+    marker = "/src/grond/legacy/engine/"
+    for record in completed.values():
+        if not isinstance(record, Mapping):
+            continue
+        command = record.get("command", [])
+        if not isinstance(command, list):
+            continue
+        text = " ".join(str(part) for part in command)
+        if marker not in text:
+            continue
+        root = text.split(marker, 1)[0].split()[-1]
+        counts[root] = counts.get(root, 0) + 1
+    return sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+
+
 def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argparse.Namespace) -> dict:
     """Write a short human-first statistics summary at the run root."""
 
@@ -4697,6 +4718,7 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
     endpoint_calibration = result.get("endpoint_calibration") if isinstance(result.get("endpoint_calibration"), Mapping) else {}
     endpoint_selection = endpoint_calibration.get("publication_selection", {}) if isinstance(endpoint_calibration, Mapping) else {}
     metadata = row_metrics.get("metadata", {}) if isinstance(row_metrics.get("metadata"), Mapping) else {}
+    source_roots = _quick_progress_source_roots(out_dir)
     endpoints = []
     resolution_block = row_metrics.get("resolution_scale_endpoints", {})
     if isinstance(resolution_block, Mapping):
@@ -4718,11 +4740,33 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
         f"- Thickness mean: `{_quick_number(metadata.get('thickness_A_mean'), 1)} A`",
         f"- Sg window: `{metadata.get('sg_window', 'n/a')}`; absorption: `{metadata.get('absorption_mode', 'n/a')}`; Sg jitter: `{metadata.get('sg_jitter_mode', 'n/a')}`",
         "",
-        "## Requested And Suggested Row/MR Statistics",
-        "",
-        "| endpoint | dmin A | scales | Nobs/Nall | dyn Rall | dyn wRall | dyn MRall | dyn MwRall | kin Rall | kin wRall |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
+    if len(source_roots) > 1:
+        lines.extend(
+            [
+                "## Resume Warning",
+                "",
+                "This output folder contains completed stages from more than one GROND source tree. Treat it as a mixed-code resume, not a clean benchmark. Start a new output directory for final numbers.",
+                "",
+                "| source root | completed stages |",
+                "|---|---:|",
+            ]
+        )
+        for root, count in source_roots:
+            lines.append(f"| `{root}` | {count} |")
+        lines.append("")
+    elif source_roots:
+        root, count = source_roots[0]
+        lines.extend(["## Source", "", f"- Completed stages were produced from `{root}` ({count} stages).", ""])
+
+    lines.extend(
+        [
+            "## Requested And Suggested Row/MR Statistics",
+            "",
+            "| endpoint | dmin A | scales | Nobs/Nall | dyn Rall | dyn wRall | dyn MRall | dyn MwRall | kin Rall | kin wRall |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        ]
+    )
     if endpoints:
         for endpoint in endpoints:
             if not isinstance(endpoint, Mapping):
