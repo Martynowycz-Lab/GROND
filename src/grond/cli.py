@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import compileall
+import csv
 import json
 import math
 import os
@@ -4708,6 +4709,172 @@ def _quick_progress_source_roots(out_dir: Path) -> list[tuple[str, int]]:
     return sorted(counts.items(), key=lambda item: (-item[1], item[0]))
 
 
+def _quick_final_run(result: Mapping[str, object]) -> Path | None:
+    """Return the final row-level run directory when one was recorded."""
+
+    primary = result.get("primary_run")
+    if isinstance(primary, str) and primary:
+        return Path(primary)
+    combined = result.get("combined")
+    if isinstance(combined, str) and combined:
+        return Path(combined)
+    return None
+
+
+def _quick_best_native(summary: Mapping[str, object]) -> Mapping[str, object]:
+    """Return the best native block from a native row run summary."""
+
+    value = summary.get("best_native")
+    return value if isinstance(value, Mapping) else {}
+
+
+def _quick_best_endpoint(summary: Mapping[str, object]) -> Mapping[str, object]:
+    """Return the best corrected-HKL endpoint block from a native row run summary."""
+
+    value = summary.get("best_endpoint")
+    return value if isinstance(value, Mapping) else {}
+
+
+def _quick_nuisance(summary: Mapping[str, object]) -> Mapping[str, object]:
+    """Return the final nuisance parameter block for quick reporting."""
+
+    best_native = _quick_best_native(summary)
+    nuisance = best_native.get("nuisance")
+    if isinstance(nuisance, Mapping):
+        return nuisance
+    config = summary.get("config")
+    return config if isinstance(config, Mapping) else {}
+
+
+def _quick_metric(metrics: Mapping[str, object], split: str, branch: str, key: str) -> object:
+    """Read one nested native metric without exposing KeyError to report writing."""
+
+    split_block = metrics.get(split)
+    if not isinstance(split_block, Mapping):
+        return None
+    branch_block = split_block.get(branch)
+    if not isinstance(branch_block, Mapping):
+        return None
+    return branch_block.get(key)
+
+
+def _quick_float(value: object, default: float = float("nan")) -> float:
+    """Return a finite float or a default."""
+
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return default
+    return out if math.isfinite(out) else default
+
+
+def _quick_residual_z_summary(csv_path: Path) -> dict[str, dict[str, float | int]]:
+    """Summarize row-level intensity residual z values from native_dyn_calc.csv."""
+
+    rows: dict[str, list[float]] = {"all": [], "work": [], "free": []}
+    if not csv_path.exists():
+        return {}
+    try:
+        with csv_path.open(newline="") as handle:
+            for row in csv.DictReader(handle):
+                z = _quick_float(row.get("dyn_residual_over_sigma"))
+                if not math.isfinite(z):
+                    continue
+                rows["all"].append(z)
+                split = str(row.get("split", "")).lower()
+                if split in {"work", "free"}:
+                    rows[split].append(z)
+    except OSError:
+        return {}
+
+    out: dict[str, dict[str, float | int]] = {}
+    for split, values in rows.items():
+        if not values:
+            continue
+        abs_values = sorted(abs(v) for v in values)
+        values_sorted = sorted(values)
+        n = len(values)
+        out[split] = {
+            "n": n,
+            "mean_z": float(sum(values) / n),
+            "rms_z": float(math.sqrt(sum(v * v for v in values) / n)),
+            "median_z": float(values_sorted[n // 2] if n % 2 else 0.5 * (values_sorted[n // 2 - 1] + values_sorted[n // 2])),
+            "median_abs_z": float(abs_values[n // 2] if n % 2 else 0.5 * (abs_values[n // 2 - 1] + abs_values[n // 2])),
+        }
+    return out
+
+
+def _quick_hand_block_z(block: Mapping[str, object], *, final_is_other: bool) -> dict[str, object]:
+    """Orient an absolute-structure diagnostic block so positive values favor the final selected hand."""
+
+    sign = -1.0 if final_is_other else 1.0
+    raw_delta = _quick_float(block.get("delta_chi2_other_minus_best"))
+    raw_t = _quick_float(block.get("paired_row_t_delta_chi2"))
+    oriented_delta = sign * raw_delta if math.isfinite(raw_delta) else float("nan")
+    oriented_t = sign * raw_t if math.isfinite(raw_t) else float("nan")
+    return {
+        "n": block.get("n", "n/a"),
+        "delta_chi2_rejected_minus_final": oriented_delta,
+        "paired_z_positive_favors_final": oriented_t,
+        "sqrt_positive_delta_chi2": math.sqrt(max(oriented_delta, 0.0)) if math.isfinite(oriented_delta) else float("nan"),
+    }
+
+
+def _quick_final_hand_summary(decision_tree: Mapping[str, object], diagnostic: Mapping[str, object]) -> dict[str, object]:
+    """Summarize initial and final hand decisions from the decision-tree artifacts."""
+
+    initial = decision_tree.get("absolute_structure_decision")
+    initial_decision = initial if isinstance(initial, Mapping) else {}
+    promotion = decision_tree.get("post_feedback_hand_promotion")
+    promotion_decision = promotion if isinstance(promotion, Mapping) else {}
+    final_hand = str(decision_tree.get("selected_hand") or initial_decision.get("selected_hand") or initial_decision.get("selected") or "n/a")
+    initial_hand = str(initial_decision.get("selected_hand") or initial_decision.get("selected") or "n/a")
+    final_is_other = final_hand == str(promotion_decision.get("opposite_hand"))
+    blocks: dict[str, dict[str, object]] = {}
+    for split in ("all", "work", "free"):
+        block = diagnostic.get(split)
+        if isinstance(block, Mapping):
+            blocks[split] = _quick_hand_block_z(block, final_is_other=final_is_other)
+    return {
+        "initial_hand": initial_hand,
+        "final_hand": final_hand,
+        "promotion_status": promotion_decision.get("status", "n/a") if promotion_decision else "n/a",
+        "initial_score_delta_original_minus_alternate": initial_decision.get("score_delta_original_minus_alternate"),
+        "post_feedback_score_delta_final_minus_opposite": promotion_decision.get("score_delta_final_minus_opposite"),
+        "diagnostic_blocks": blocks,
+    }
+
+
+def _quick_transform_summary(transform_decision: Mapping[str, object]) -> dict[str, object]:
+    """Return compact transform details for the quick summary."""
+
+    selected = transform_decision.get("selected")
+    selected_block = selected if isinstance(selected, Mapping) else {}
+    metadata = transform_decision.get("metadata_transform_decision")
+    metadata_block = metadata if isinstance(metadata, Mapping) else {}
+    return {
+        "selected_transform": selected_block.get("transform", "n/a"),
+        "selected_status": selected_block.get("status", "n/a"),
+        "metadata_status": metadata_block.get("status", "n/a"),
+        "metadata_log_intensity_corr": (
+            metadata_block.get("records", [{}])[0].get("log_intensity_corr")
+            if isinstance(metadata_block.get("records"), list) and metadata_block.get("records")
+            else None
+        ),
+        "metadata_correlation_gap": metadata_block.get("correlation_gap"),
+        "metadata_paired_rows": (
+            metadata_block.get("records", [{}])[0].get("paired_rows")
+            if isinstance(metadata_block.get("records"), list) and metadata_block.get("records")
+            else None
+        ),
+        "metadata_unique_overlap": (
+            metadata_block.get("records", [{}])[0].get("unique_overlap")
+            if isinstance(metadata_block.get("records"), list) and metadata_block.get("records")
+            else None
+        ),
+    }
+
+
 def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argparse.Namespace) -> dict:
     """Write a short human-first statistics summary at the run root."""
 
@@ -4719,6 +4886,40 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
     endpoint_selection = endpoint_calibration.get("publication_selection", {}) if isinstance(endpoint_calibration, Mapping) else {}
     metadata = row_metrics.get("metadata", {}) if isinstance(row_metrics.get("metadata"), Mapping) else {}
     source_roots = _quick_progress_source_roots(out_dir)
+    final_run = _quick_final_run(result)
+    final_summary = try_read_json(final_run / "summary.json") if final_run else {}
+    best_native = _quick_best_native(final_summary)
+    best_endpoint = _quick_best_endpoint(final_summary)
+    native_metrics = best_native.get("metrics") if isinstance(best_native.get("metrics"), Mapping) else {}
+    nuisance = _quick_nuisance(final_summary)
+    decision_tree_path = Path(str(result.get("decision_tree", ""))) if result.get("decision_tree") else None
+    if decision_tree_path is not None:
+        decision_tree = try_read_json(decision_tree_path)
+    elif prep.datasets:
+        decision_tree = try_read_json(out_dir / "decisions" / prep.datasets[0].name / "decision_tree.json")
+    else:
+        decision_tree = {}
+    transform_decision = decision_tree.get("transform_decision") if isinstance(decision_tree.get("transform_decision"), Mapping) else {}
+    if not transform_decision and prep.datasets:
+        transform_decision = try_read_json(out_dir / "decisions" / prep.datasets[0].name / "transform_decision.json")
+    transform_summary = _quick_transform_summary(transform_decision)
+    promotion = decision_tree.get("post_feedback_hand_promotion")
+    promotion_decision = promotion if isinstance(promotion, Mapping) else {}
+    diagnostic_path_text = (
+        promotion_decision.get("diagnostic")
+        or result.get("absolute_structure_diagnostic")
+        or decision_tree.get("absolute_structure_diagnostic")
+        or ""
+    )
+    hand_diagnostic = try_read_json(Path(str(diagnostic_path_text))) if diagnostic_path_text else {}
+    hand_summary = _quick_final_hand_summary(decision_tree, hand_diagnostic)
+    z_summary = _quick_residual_z_summary(final_run / "native_dyn_calc.csv") if final_run else {}
+    free_z = z_summary.get("free", {})
+    all_z = z_summary.get("all", {})
+    hand_blocks = hand_summary.get("diagnostic_blocks") if isinstance(hand_summary.get("diagnostic_blocks"), Mapping) else {}
+    hand_all = hand_blocks.get("all", {}) if isinstance(hand_blocks.get("all"), Mapping) else {}
+    hand_work = hand_blocks.get("work", {}) if isinstance(hand_blocks.get("work"), Mapping) else {}
+    hand_free = hand_blocks.get("free", {}) if isinstance(hand_blocks.get("free"), Mapping) else {}
     endpoints = []
     resolution_block = row_metrics.get("resolution_scale_endpoints", {})
     if isinstance(resolution_block, Mapping):
@@ -4758,6 +4959,39 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
     elif source_roots:
         root, count = source_roots[0]
         lines.extend(["## Source", "", f"- Completed stages were produced from `{root}` ({count} stages).", ""])
+
+    lines.extend(
+        [
+            "## Input Contract, Hand, And Z Diagnostics",
+            "",
+            "XDS, DIALS, and other integrators can produce different signed-row contracts from the same frames. Row filtering, partiality/Lorentz handling, scan-varying geometry, sigmas, and scale conventions can move nuisance fits such as thickness, frame offset, absorption, and scale counts. GROND therefore treats the selected HKL transform, final absolute-structure hand, and raw row-level Bloch/Born statistics as the most portable cross-pipeline checks; nuisance values are fit-contract parameters, not direct physical measurements unless the row contracts agree.",
+            "",
+            "| item | value |",
+            "|---|---|",
+            f"| selected HKL transform | `{transform_summary.get('selected_transform', 'n/a')}` |",
+            f"| transform scout status | `{transform_summary.get('selected_status', 'n/a')}` |",
+            f"| metadata transform check | `{transform_summary.get('metadata_status', 'n/a')}`; log-I corr `{_quick_number(transform_summary.get('metadata_log_intensity_corr'), 4)}`; gap `{_quick_number(transform_summary.get('metadata_correlation_gap'), 4)}`; pairs `{transform_summary.get('metadata_paired_rows', 'n/a')}`; unique overlap `{transform_summary.get('metadata_unique_overlap', 'n/a')}` |",
+            f"| initial hand scout | `{hand_summary.get('initial_hand', 'n/a')}`; delta original-minus-alternate `{_quick_number(hand_summary.get('initial_score_delta_original_minus_alternate'), 4)}` |",
+            f"| final hand | `{hand_summary.get('final_hand', 'n/a')}`; post-feedback status `{hand_summary.get('promotion_status', 'n/a')}` |",
+            f"| final hand Z, all/work/free | `{_quick_number(hand_all.get('paired_z_positive_favors_final'), 3)}` / `{_quick_number(hand_work.get('paired_z_positive_favors_final'), 3)}` / `{_quick_number(hand_free.get('paired_z_positive_favors_final'), 3)}`; positive favors final selected hand |",
+            f"| final hand sqrt(delta chi2), all/work/free | `{_quick_number(hand_all.get('sqrt_positive_delta_chi2'), 3)}` / `{_quick_number(hand_work.get('sqrt_positive_delta_chi2'), 3)}` / `{_quick_number(hand_free.get('sqrt_positive_delta_chi2'), 3)}`; oriented as rejected-minus-final |",
+            f"| free-row I residual Z | n `{free_z.get('n', 'n/a')}`; RMSZ `{_quick_number(free_z.get('rms_z'), 3)}`; meanZ `{_quick_number(free_z.get('mean_z'), 3)}`; median absZ `{_quick_number(free_z.get('median_abs_z'), 3)}` |",
+            f"| all-row I residual Z | n `{all_z.get('n', 'n/a')}`; RMSZ `{_quick_number(all_z.get('rms_z'), 3)}`; meanZ `{_quick_number(all_z.get('mean_z'), 3)}`; median absZ `{_quick_number(all_z.get('median_abs_z'), 3)}` |",
+            "",
+            "## Final Nuisance Contract",
+            "",
+            "| field | value |",
+            "|---|---|",
+            f"| thickness | `{_quick_number(nuisance.get('thickness_A', nuisance.get('thickness_grid')), 1)} A`; model `{nuisance.get('thickness_model', nuisance.get('thickness_model_grid', 'n/a'))}`; gradient `{_quick_number(nuisance.get('thickness_grad_frac', nuisance.get('thickness_grad_grid')), 3)}` |",
+            f"| frame and rocking | frame offset `{_quick_number(nuisance.get('frame_offset', nuisance.get('frame_offset_grid')), 3)}`; Sg window `{metadata.get('sg_window', 'n/a')}`; matrix `{nuisance.get('matrix_convention', 'n/a')}` |",
+            f"| absorption and jitter | absorption `{nuisance.get('absorption_mode', nuisance.get('absorption_mode_grid', 'n/a'))}`; frac `{_quick_number(nuisance.get('absorption_frac', nuisance.get('absorption_frac_grid')), 4)}`; jitter `{nuisance.get('sg_jitter_mode', nuisance.get('sg_jitter_mode_grid', 'n/a'))}` |",
+            f"| native row weights | a `{_quick_number(nuisance.get('native_wght_a', nuisance.get('wght_a_grid')), 6)}`; b `{_quick_number(nuisance.get('native_wght_b', nuisance.get('wght_b_grid')), 6)}` |",
+            f"| row dyn R1all / wR2all / free wR2all | `{_quick_percent(_quick_metric(native_metrics, 'all', 'dyn', 'R1_all'))}` / `{_quick_percent(_quick_metric(native_metrics, 'all', 'dyn', 'wR2_all'))}` / `{_quick_percent(_quick_metric(native_metrics, 'free', 'dyn', 'wR2_all'))}` |",
+            f"| row Born R1all / wR2all / free wR2all | `{_quick_percent(_quick_metric(native_metrics, 'all', 'born', 'R1_all'))}` / `{_quick_percent(_quick_metric(native_metrics, 'all', 'born', 'wR2_all'))}` / `{_quick_percent(_quick_metric(native_metrics, 'free', 'born', 'wR2_all'))}` |",
+            f"| q p05 / median / p95 | `{_quick_number(best_endpoint.get('q_p05'), 3)}` / `{_quick_number(best_endpoint.get('q_median'), 3)}` / `{_quick_number(best_endpoint.get('q_p95'), 3)}` |",
+            "",
+        ]
+    )
 
     lines.extend(
         [

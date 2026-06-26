@@ -570,6 +570,94 @@ def test_write_quick_stats_summarizes_row_and_endpoint_tables(tmp_path):
         + "\n"
     )
     prep = PrepConfig(structure="model.res", datasets=[DatasetSpec(name="dataset", hkl="INTEGRATE.HKL")])
+    final_run = out_dir / "runs" / "dataset" / "adaptive_promoted_hand_final"
+    final_run.mkdir(parents=True)
+    (final_run / "native_dyn_calc.csv").write_text(
+        "\n".join(
+            [
+                "row_index,h,k,l,split,dyn_residual_over_sigma",
+                "0,1,0,0,work,0.5",
+                "1,0,1,0,work,-1.5",
+                "2,0,0,1,free,2.0",
+                "3,1,1,0,free,-1.0",
+            ]
+        )
+        + "\n"
+    )
+    (final_run / "summary.json").write_text(
+        json.dumps(
+            {
+                "best_native": {
+                    "nuisance": {
+                        "thickness_A": 1100.0,
+                        "thickness_model": "uniform_gradient",
+                        "thickness_grad_frac": 1.2,
+                        "frame_offset": 0.2,
+                        "absorption_mode": "midgley_like",
+                        "absorption_frac": 0.0,
+                        "sg_jitter_mode": "gaussian",
+                        "matrix_convention": "j_minus_i",
+                        "native_wght_a": 0.12,
+                        "native_wght_b": 0.56,
+                    },
+                    "metrics": {
+                        "all": {
+                            "dyn": {"R1_all": 0.11, "wR2_all": 0.21},
+                            "born": {"R1_all": 0.17, "wR2_all": 0.31},
+                        },
+                        "free": {
+                            "dyn": {"wR2_all": 0.22},
+                            "born": {"wR2_all": 0.32},
+                        },
+                    },
+                },
+                "best_endpoint": {"q_p05": 0.2, "q_median": 0.4, "q_p95": 1.9},
+            }
+        )
+        + "\n"
+    )
+    decisions = out_dir / "decisions" / "dataset"
+    decisions.mkdir(parents=True)
+    diagnostic = final_run.parent / "adaptive_absolute_structure_diagnostic.json"
+    diagnostic.write_text(
+        json.dumps(
+            {
+                "all": {"n": 4, "delta_chi2_other_minus_best": -25.0, "paired_row_t_delta_chi2": -5.0},
+                "work": {"n": 2, "delta_chi2_other_minus_best": -16.0, "paired_row_t_delta_chi2": -4.0},
+                "free": {"n": 2, "delta_chi2_other_minus_best": -9.0, "paired_row_t_delta_chi2": -3.0},
+            }
+        )
+        + "\n"
+    )
+    decision_tree = decisions / "decision_tree.json"
+    decision_tree.write_text(
+        json.dumps(
+            {
+                "selected_transform": "identity",
+                "selected_hand": "alternate",
+                "transform_decision": {
+                    "selected": {"transform": "identity", "status": "ok"},
+                    "metadata_transform_decision": {
+                        "status": "promoted",
+                        "correlation_gap": 0.0876,
+                        "records": [{"log_intensity_corr": 0.9658, "paired_rows": 3931, "unique_overlap": 4039}],
+                    },
+                },
+                "absolute_structure_decision": {
+                    "selected_hand": "original",
+                    "score_delta_original_minus_alternate": -0.01,
+                },
+                "post_feedback_hand_promotion": {
+                    "status": "promoted",
+                    "active_hand": "original",
+                    "opposite_hand": "alternate",
+                    "diagnostic": str(diagnostic),
+                    "score_delta_final_minus_opposite": 0.08,
+                },
+            }
+        )
+        + "\n"
+    )
     (out_dir / "grond_progress.json").write_text(
         json.dumps(
             {
@@ -595,6 +683,8 @@ def test_write_quick_stats_summarizes_row_and_endpoint_tables(tmp_path):
     )
     result = {
         "model": "final.res",
+        "primary_run": str(final_run),
+        "decision_tree": str(decision_tree),
         "endpoint_calibration": {
             "report": str(out_dir / "endpoint_calibration" / "dataset" / "REPORT.md"),
             "publication_selection": {
@@ -623,6 +713,12 @@ def test_write_quick_stats_summarizes_row_and_endpoint_tables(tmp_path):
     assert "15.39%" in text
     assert "Resume Warning" in text
     assert "mixed-code resume" in text
+    assert "Input Contract, Hand, And Z Diagnostics" in text
+    assert "selected HKL transform | `identity`" in text
+    assert "final hand | `alternate`; post-feedback status `promoted`" in text
+    assert "final hand Z, all/work/free | `5.000` / `4.000` / `3.000`" in text
+    assert "free-row I residual Z | n `2`; RMSZ `1.581`" in text
+    assert "thickness | `1100.0 A`; model `uniform_gradient`; gradient `1.200`" in text
 
 
 def test_row_validate_reports_bad_portable_rows_without_traceback(tmp_path: Path, capsys):

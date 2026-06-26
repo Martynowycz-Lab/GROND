@@ -6,7 +6,9 @@
 
 `logs/commands.jsonl` is the timing ledger. Each engine stage has a start record and a completion record with elapsed seconds and return code.
 
-`QUICK_STATS.md` is the first file to open after `GROND auto`. It gives the short requested-resolution, suggested-resolution, and endpoint-calibration tables without the full audit trail.
+`QUICK_STATS.md` is the first file to open after `GROND auto`. It gives the selected HKL transform, initial and final absolute-structure hand, final hand Z-style row contrast, free-row intensity residual RMSZ, final nuisance contract, and the short requested-resolution, suggested-resolution, and endpoint-calibration tables without the full audit trail. Positive hand Z values in this file are oriented to favor the final selected hand, even when the underlying diagnostic JSON was written before a post-feedback hand promotion.
+
+Different integration packages can give different signed-row contracts from the same frames. XDS and DIALS may differ in row filtering, Lorentz/partiality handling, scan-varying geometry, sigma estimates, scale conventions, and the exact set of integrated observations. GROND can still find the same transform and hand and give similar raw-row R factors, while nuisance fits such as thickness, frame offset, absorption fraction, and scale counts differ. Treat those nuisance values as fitted row-contract parameters unless the row contracts agree closely.
 
 `grond_progress.json` stores completed stages for resume. Re-run the same command with the same output directory to continue after an interruption. A stage is reused only when its saved command matches the current command, so changing GROND installs, input paths, transforms, or material options forces the affected stage to recompute instead of mixing old and new outputs.
 
