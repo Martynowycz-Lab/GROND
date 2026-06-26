@@ -44,6 +44,7 @@ EXPECTED_CLI_COMMANDS = {
     "run",
     "scale-polish",
     "scale-replay",
+    "thickness-scout",
     "validate",
     "validate-ls1",
 }
@@ -78,6 +79,28 @@ def test_run_parser_exposes_staged_feature_grids():
     assert args.absorption_mu_theta2_grid == "0.0"
     assert args.absorption_tds_b_grid == "0.0"
     assert args.dose_b_mode_grid == "none"
+
+
+def test_thickness_scout_parser_exposes_contract_diagnostic_defaults():
+    args = build_parser().parse_args(
+        [
+            "thickness-scout",
+            "--out-dir",
+            "out",
+            "--xds-dir",
+            "xds",
+            "--structure",
+            "model.res",
+        ]
+    )
+    assert args.command == "thickness-scout"
+    assert args.n_basis_grid == "24,48"
+    assert args.n_points == 10
+    assert args.thickness_grid_nm == "50,75,110,150,180,220,260,300"
+    assert args.scale_modes == "production,no-detector"
+    assert args.feature_modes == "bare,final-diagnostic"
+    assert args.local_confirmation is True
+    assert args.thickness_scout_final_absorption_mode == "midgley_like"
     assert args.prediction_cache_scope == "shared"
     assert args.prediction_cache_compression == "none"
     assert args.compute_backend == "scipy"
@@ -122,6 +145,29 @@ def test_run_parser_exposes_staged_feature_grids():
     assert args.transform_metadata_prefilter == "auto"
     assert args.transform_metadata_max_candidates == 3
     assert args.transform_metadata_min_correlation == 0.70
+
+
+def test_q_field_stability_compares_shared_signed_rows(tmp_path: Path):
+    reference = tmp_path / "ref.csv"
+    candidate = tmp_path / "cand.csv"
+    reference.write_text(
+        "row_index,h,k,l,q_dyn_over_born\n"
+        "0,1,0,0,2.0\n"
+        "1,0,1,0,4.0\n"
+        "2,0,0,1,8.0\n"
+    )
+    candidate.write_text(
+        "row_index,h,k,l,q_dyn_over_born\n"
+        "0,1,0,0,2.0\n"
+        "1,0,1,0,4.0\n"
+        "2,0,0,1,16.0\n"
+    )
+
+    result = cli._q_field_stability(reference, candidate)
+
+    assert result["shared_rows"] == 3
+    assert result["logq_corr"] > 0.98
+    assert result["p95_abs_dlogq"] == pytest.approx(0.693147, rel=1e-5)
 
 
 def test_auto_parser_hides_lambda_controls(capsys):
