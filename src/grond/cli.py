@@ -18,6 +18,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
 from pathlib import Path
 
+from . import __version__
 from .accelerators import probe_accelerators, probe_bloch_ops
 from .io.config import (
     DatasetSpec,
@@ -5642,6 +5643,20 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
     python = choose_python(args.python)
     payload = probe_accelerators(python)
+    package_init = Path(__file__).resolve().parent / "__init__.py"
+    absolute_structure_script = engine_script("absolute_structure_diagnostic.py")
+    try:
+        absolute_structure_text = absolute_structure_script.read_text(errors="replace")
+    except OSError:
+        absolute_structure_text = ""
+    payload["grond"] = {
+        "version": __version__,
+        "package": str(package_init.resolve()),
+        "cli": str(Path(__file__).resolve()),
+        "engine_root": str(LEGACY_ROOT.resolve()),
+        "absolute_structure_diagnostic": str(absolute_structure_script.resolve()),
+        "absolute_structure_uses_pandas": "import pandas" in absolute_structure_text or "pd.read_csv" in absolute_structure_text,
+    }
     payload["tool_config"] = {
         "path": getattr(args, "tool_config_path", ""),
         "configured_tools": getattr(args, "configured_tools", {}),
