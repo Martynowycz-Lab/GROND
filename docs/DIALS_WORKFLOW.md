@@ -86,6 +86,19 @@ The default sigma policy is `--dials-sigma-mode auto`. DIALS stores detector gai
 
 Two diagnostic alternatives exist. `--dials-intensity-mode sum_raw` uses the raw summation intensity without LP/partiality completion. `--dials-intensity-mode scale` uses `intensity.scale.value` from `scaled.refl`, and should be treated as a conventional comparison rather than the default Bloch row target.
 
+If XDS and DIALS are being compared on the same frames, run at least one `sum_raw` DIALS bridge as a diagnostic:
+
+```bash
+GROND import-dials \
+  --refl integrated.refl \
+  --expt integrated.expt \
+  --dials-python /path/to/dials.python \
+  --intensity-mode sum_raw \
+  --out-dir dials_sum_raw_bridge
+```
+
+This is not automatically the promoted production mode. It is a scale and row-contract check. On some datasets the raw DIALS summation rows have an `I` and `I/sigma` distribution much closer to XDS no-profile rows, while the completed `lp/partiality` rows give better GROND row residuals. That means the DIALS/XDS disagreement is not only a global intensity scale question. It can also come from the refined cell, scan-varying orientation model, row filtering, partiality definitions, and which signed observations each program actually integrated.
+
 ## Geometry And Sg
 
 DIALS reflection tables may contain `zeta`, but GROND does not use it as excitation error. GROND recomputes the excitation error from the experiment geometry:
@@ -102,3 +115,5 @@ Here `A(alpha)` is obtained by linearly interpolating the DIALS scan-point A mat
 After import, inspect `dials_bridge_summary.json`. A healthy conversion should have nonzero `rows_written`, a sensible number of rows with `partiality >= 0.90`, `sigma_model` values that explain whether detector gain was applied, and `sg_validation.median_abs_sg_inv_A` close to zero for the predicted row positions. Production DIALS imports drop rows flagged `dont_integrate` and rows with severe bad-pixel, overloaded, powder-ring, bad-shoebox, failed-background, or failed-summation flags. Use `--dials-keep-dont-integrate` or `--dials-keep-bad-flags` only for diagnostics.
 
 The DIALS bridge is new compared with the XDS route and should be tested against known structures before being used as the only production path. If XDS and DIALS disagree strongly on the same raw frames, compare the row counts, partiality selection, DIALS flag policy, empirical sigma policy, resolution limit, transform scout result, hand decision, and `Sg` validation before interpreting the model-update statistics.
+
+Be especially careful when comparing fitted thickness values across integration programs. GROND thickness is a nuisance parameter fitted to a row contract, not a direct microscope thickness measurement. If XDS and DIALS use different cells, rotation axes, scan-varying orientation models, row filters, or intensity completion conventions, their fitted thickness values can differ even when both final structures are chemically reasonable. Treat a cross-pipeline thickness mismatch as a prompt to audit the row contract before treating either number as absolute.

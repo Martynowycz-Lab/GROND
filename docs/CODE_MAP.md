@@ -94,7 +94,7 @@ flowchart TD
     W --> X["models, maps, tables, logs, and resume state"]
 ```
 
-For multi-dataset jobs, `cli.run_multi` runs the same per-dataset gates, then `workflows.dataset_policy` assigns each crystal to the primary, downweight, completeness-only, or exclude role. `native_multi_structure_update.py` processes the shared native-gradient diagnostic when requested, and `combine_native_nuisance_runs.py` performs the corrected-HKL merge with one overlap scale per accepted dataset before endpoint tables are written.
+For multi-dataset jobs, `cli.run_multi` runs the same per-dataset gates, then `workflows.dataset_policy` assigns each crystal to the primary, downweight, completeness-only, or exclude role. `native_multi_structure_update.py` processes the shared native-gradient model update, and `combine_native_nuisance_runs.py` performs the corrected-HKL merge with one overlap scale per accepted dataset before endpoint tables are written. Per-dataset thickness, jitter, absorption, scale, and sigma policies remain attached to their own row tables until this final combination step.
 
 ## Single-Row Bloch Calculation
 
