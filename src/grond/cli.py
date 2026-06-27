@@ -433,6 +433,20 @@ def best_nuisance(run_dir: Path) -> dict:
     return ((summary.get("best_native") or {}).get("nuisance") or {})
 
 
+def shelx_model_is_usable(path: Path | str) -> bool:
+    """Return whether a SHELX model path can be reused as a GROND structure."""
+
+    p = Path(path)
+    if not p.exists():
+        return False
+    try:
+        if p.stat().st_size <= 0:
+            return False
+        return any(line.strip().upper().startswith("CELL ") for line in p.read_text(errors="replace").splitlines())
+    except OSError:
+        return False
+
+
 def best_endpoint_model(run_dir: Path) -> Path | None:
     """Return the polished endpoint RES path for a completed native stage."""
 
@@ -443,7 +457,7 @@ def best_endpoint_model(run_dir: Path) -> Path | None:
     if not lst:
         return None
     res = Path(lst).with_suffix(".res")
-    return res if res.exists() else None
+    return res if shelx_model_is_usable(res) else None
 
 
 def shelxl_is_available(executable: str) -> bool:
@@ -567,12 +581,29 @@ def shelxl_feedback_current_model(run_dir: Path) -> Path | None:
 
     summary = try_read_json(run_dir / "shelxl_feedback_loop_summary.json")
     current = summary.get("current_model")
-    if current and Path(current).exists():
+    if current and shelx_model_is_usable(current):
         return Path(current)
     for rec in reversed(summary.get("runs") or []):
         output = rec.get("output_model")
-        if output and Path(output).exists():
+        if output and shelx_model_is_usable(output):
             return Path(output)
+    return None
+
+
+def shelxl_feedback_current_run(run_dir: Path) -> Path | None:
+    """Return the run directory corresponding to the latest usable feedback model."""
+
+    summary = try_read_json(run_dir / "shelxl_feedback_loop_summary.json")
+    current = summary.get("current_model")
+    for rec in reversed(summary.get("runs") or []):
+        rec_run = rec.get("run_dir")
+        if not rec_run:
+            continue
+        output = rec.get("output_model")
+        if output and shelx_model_is_usable(output):
+            return Path(rec_run).expanduser()
+        if current and output and Path(output) == Path(str(current)) and shelx_model_is_usable(current):
+            return Path(rec_run).expanduser()
     return None
 
 
@@ -3374,11 +3405,17 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
                 feedback_final_run = struct_dir / f"cycle_{int(args.shelxl_feedback_cycles):02d}_N{int(final_n_basis)}Q{int(args.n_points)}"
             else:
                 feedback_summary = try_read_json(struct_dir / "shelxl_feedback_loop_summary.json")
-                runs = feedback_summary.get("runs") or []
-                if runs:
-                    last_run = runs[-1].get("run_dir")
-                    if last_run:
-                        feedback_final_run = Path(last_run)
+                feedback_final_run = shelxl_feedback_current_run(struct_dir)
+                if feedback_final_run is None:
+                    runs = feedback_summary.get("runs") or []
+                    failed = runs[-1] if runs else {}
+                    raise RuntimeError(
+                        "SHELXL feedback did not produce a usable RES model. "
+                        f"Last cycle status: returncode={failed.get('returncode', 'n/a')}; "
+                        f"endpoint={failed.get('output_model', 'n/a')}; "
+                        f"health={failed.get('endpoint_res_health', {})}. "
+                        f"See {struct_dir / 'shelxl_feedback_loop_summary.json'} and the cycle run.log."
+                    )
                 feedback_model = shelxl_feedback_current_model(struct_dir)
                 if feedback_model is not None:
                     final_model = str(feedback_model)

@@ -911,6 +911,32 @@ def parse_recommended_wght(lst_path: Path) -> tuple[float, float] | None:
     return float(a_text), float(b_text) if b_text else 0.0
 
 
+def shelx_res_health(res_path: Path) -> dict:
+    """Return whether a SHELXL RES file is usable as the next model.
+
+    SHELXL can fail in ways that still leave a path on disk.  In particular,
+    interrupted or failed app-bundle runs on macOS have produced zero-byte
+    ``.res`` files.  Those must not be fed back into the next Bloch cycle.
+    """
+
+    if not res_path.exists():
+        return {"ok": False, "reason": "missing_res", "path": str(res_path)}
+    try:
+        size = res_path.stat().st_size
+    except OSError as exc:
+        return {"ok": False, "reason": "stat_failed", "path": str(res_path), "error": str(exc)}
+    if size <= 0:
+        return {"ok": False, "reason": "empty_res", "path": str(res_path), "size": int(size)}
+    try:
+        lines = res_path.read_text(errors="replace").splitlines()
+    except OSError as exc:
+        return {"ok": False, "reason": "read_failed", "path": str(res_path), "size": int(size), "error": str(exc)}
+    has_cell = any(line.strip().upper().startswith("CELL ") for line in lines)
+    if not has_cell:
+        return {"ok": False, "reason": "missing_cell", "path": str(res_path), "size": int(size)}
+    return {"ok": True, "reason": "ok", "path": str(res_path), "size": int(size)}
+
+
 def promote_recommended_wght(ins_path: Path, recommended: tuple[float, float] | None) -> dict:
     """Move SHELXL's recommended WGHT into the active pre-END input block.
 
@@ -975,12 +1001,22 @@ def run_shelxl(work_dir: Path, stem: str, iterations: int = 1):
         history.append(stats)
         res = work_dir / f"{stem}.res"
         ins = work_dir / f"{stem}.ins"
+        health = shelx_res_health(res)
+        stats["res_health"] = health
+        if not health["ok"]:
+            stats["status"] = "invalid_res_output"
+            stats["invalid_res_reason"] = health["reason"]
+            break
         if i + 1 < n_iter and res.exists():
             shutil.copy2(res, ins)
             stats["next_wght"] = promote_recommended_wght(ins, recommended_wght)
     if last_proc is not None:
         (work_dir / "shelxl_stdout.log").write_text(last_proc.stdout)
     final = dict(history[-1]) if history else {"returncode": None, "status": "not_run"}
+    final.setdefault("res_health", shelx_res_health(work_dir / f"{stem}.res"))
+    if not final["res_health"].get("ok"):
+        final["status"] = "invalid_res_output"
+        final["invalid_res_reason"] = final["res_health"].get("reason")
     final["iterations"] = n_iter
     final["iteration_history"] = history
     return final

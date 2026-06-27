@@ -849,6 +849,51 @@ def test_structure_update_strategy_can_force_shelxl_feedback():
     assert resolve_structure_update_strategy(args, multi_dataset=True) == "shelxl_feedback"
 
 
+def test_shelxl_feedback_current_model_skips_empty_res(tmp_path: Path):
+    run_root = tmp_path / "feedback"
+    good_run = run_root / "cycle_04_N132Q20"
+    bad_run = run_root / "cycle_05_N132Q20"
+    good_res = good_run / "endpoint_lam_1p0_B_0p0_noexti" / "dyn_nuisance_corrected.res"
+    bad_res = bad_run / "endpoint_lam_1p0_B_0p0_noexti" / "dyn_nuisance_corrected.res"
+    good_res.parent.mkdir(parents=True)
+    bad_res.parent.mkdir(parents=True)
+    good_res.write_text("TITL ok\nCELL 0.02508 5.0 6.0 7.0 90 90 90\nSFAC C\nEND\n")
+    bad_res.write_text("")
+    (run_root / "shelxl_feedback_loop_summary.json").write_text(
+        json.dumps(
+            {
+                "current_model": str(bad_res),
+                "runs": [
+                    {"run_dir": str(good_run), "returncode": 0, "output_model": str(good_res)},
+                    {
+                        "run_dir": str(bad_run),
+                        "returncode": 3,
+                        "output_model": str(bad_res),
+                        "endpoint_res_health": {"ok": False, "reason": "empty_res"},
+                    },
+                ],
+            }
+        )
+        + "\n"
+    )
+
+    assert cli.shelxl_feedback_current_model(run_root) == good_res
+    assert cli.shelxl_feedback_current_run(run_root) == good_run
+
+
+def test_best_endpoint_model_rejects_empty_res(tmp_path: Path):
+    run = tmp_path / "native"
+    endpoint_dir = run / "endpoint_lam_1p0_B_0p0_noexti"
+    endpoint_dir.mkdir(parents=True)
+    lst = endpoint_dir / "dyn_nuisance_corrected.lst"
+    res = endpoint_dir / "dyn_nuisance_corrected.res"
+    lst.write_text("dummy\n")
+    res.write_text("")
+    (run / "summary.json").write_text(json.dumps({"best_endpoint": {"shelxl": {"lst": str(lst)}}}) + "\n")
+
+    assert cli.best_endpoint_model(run) is None
+
+
 def test_post_bloch_sigma_auto_is_final_endpoint_only():
     args = build_parser().parse_args(["auto", "--out-dir", "out", "--xds-dir", "xds", "--structure", "model.res"])
 

@@ -73,16 +73,41 @@ def nuisance(summary: dict) -> dict:
     return out
 
 
+def shelx_res_health(res_path: Path) -> dict:
+    """Return whether a SHELXL RES file can be used as a feedback model."""
+
+    if not res_path.exists():
+        return {"ok": False, "reason": "missing_res", "path": str(res_path)}
+    try:
+        size = res_path.stat().st_size
+    except OSError as exc:
+        return {"ok": False, "reason": "stat_failed", "path": str(res_path), "error": str(exc)}
+    if size <= 0:
+        return {"ok": False, "reason": "empty_res", "path": str(res_path), "size": int(size)}
+    try:
+        lines = res_path.read_text(errors="replace").splitlines()
+    except OSError as exc:
+        return {"ok": False, "reason": "read_failed", "path": str(res_path), "size": int(size), "error": str(exc)}
+    if not any(line.strip().upper().startswith("CELL ") for line in lines):
+        return {"ok": False, "reason": "missing_cell", "path": str(res_path), "size": int(size)}
+    return {"ok": True, "reason": "ok", "path": str(res_path), "size": int(size)}
+
+
 def endpoint_res(run_dir: Path) -> Path:
     """Return the no-EXTI B=0 lambda=1 endpoint RES file from one cycle."""
 
     direct = run_dir / "endpoint_lam_1p0_B_0p0_noexti" / "dyn_nuisance_corrected.res"
-    if direct.exists():
+    if shelx_res_health(direct)["ok"]:
         return direct
     matches = sorted(run_dir.glob("endpoint_lam_*_B_0p0_noexti/dyn_nuisance_corrected.res"))
-    if matches:
-        return matches[0]
-    raise FileNotFoundError(f"no no-EXTI B=0 endpoint RES found under {run_dir}")
+    rejected = []
+    for match in matches:
+        health = shelx_res_health(match)
+        if health["ok"]:
+            return match
+        rejected.append(health)
+    detail = f"; rejected={rejected}" if rejected else ""
+    raise FileNotFoundError(f"no usable no-EXTI B=0 endpoint RES found under {run_dir}{detail}")
 
 
 def selected_metrics(summary: dict) -> dict:
@@ -352,12 +377,22 @@ def run_cycle(
     status = run_command(cmd, run_dir / "run.log", env)
     summary_path = run_dir / "summary.json"
     summary = read_json(summary_path) if summary_path.exists() else {}
-    updated_res = endpoint_res(run_dir) if status["returncode"] == 0 else Path("")
+    updated_res = Path("")
+    endpoint_health: dict = {"ok": False, "reason": "not_run"}
+    if status["returncode"] == 0:
+        try:
+            updated_res = endpoint_res(run_dir)
+            endpoint_health = shelx_res_health(updated_res)
+        except FileNotFoundError as exc:
+            endpoint_health = {"ok": False, "reason": "missing_or_invalid_endpoint_res", "error": str(exc)}
+            status["returncode"] = 3
+            status["endpoint_error"] = str(exc)
     return {
         "label": label,
         "run_dir": str(run_dir),
         "input_model": str(model),
         "output_model": str(updated_res) if updated_res else "",
+        "endpoint_res_health": endpoint_health,
         "n_basis": int(n_basis),
         "n_points": int(n_points),
         "command": cmd,
@@ -446,6 +481,7 @@ def main() -> None:
         )
         result["runs"].append(rec)
         if rec["returncode"] != 0:
+            result["stopped_reason"] = rec.get("endpoint_error") or f"cycle returned {rec['returncode']}"
             break
         current_model = Path(rec["output_model"]).resolve()
         result["current_model"] = str(current_model)
