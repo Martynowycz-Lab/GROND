@@ -4,10 +4,12 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).resolve().parents[1] / "src" / "grond" / "legacy" / "engine"))
 
 from grond.legacy.engine.native_row_regularize import (
+    normalize_shelx_cell_wavelength,
     parse_int_grid,
     parse_lst,
     parse_recommended_wght,
     promote_recommended_wght,
+    write_endpoint_ins,
 )
 
 
@@ -95,3 +97,46 @@ def test_promote_recommended_wght_inserts_before_fvar_when_missing(tmp_path: Pat
         "HKLF 4",
         "END",
     ]
+
+
+def test_write_endpoint_ins_forces_one_shelxl_cycle_and_electron_wavelength(tmp_path: Path):
+    src = tmp_path / "model.res"
+    dst = tmp_path / "model.ins"
+    src.write_text(
+        "\n".join(
+            [
+                "TITL trial",
+                "CELL 1.0 5.0 6.0 7.0 90 90 90",
+                "SFAC C 1 0 1 0 1 0 1 0",
+                "CGLS 10",
+                'REM <HklSrc "%./old.hkl">',
+                "EXTI 0.1",
+                "HKLF 4",
+                "END",
+            ]
+        )
+        + "\n"
+    )
+
+    write_endpoint_ins(src, dst, hkl_name="dyn_nuisance_corrected.hkl")
+
+    text = dst.read_text()
+    assert "CELL 0.025079 5.0 6.0 7.0 90 90 90" in text
+    assert "CGLS 1" in text
+    assert "CGLS 10" not in text
+    assert 'REM <HklSrc "%./dyn_nuisance_corrected.hkl">' in text
+    assert "EXTI" not in text
+
+
+def test_write_endpoint_ins_inserts_one_cycle_when_missing(tmp_path: Path):
+    src = tmp_path / "model.res"
+    dst = tmp_path / "model.ins"
+    src.write_text("TITL trial\nCELL 0.02508 5 6 7 90 90 90\nSFAC C 1 0 1 0 1 0 1 0\nHKLF 4\nEND\n")
+
+    write_endpoint_ins(src, dst)
+
+    assert dst.read_text().splitlines()[3] == "L.S. 1"
+
+
+def test_normalize_shelx_cell_wavelength_preserves_electron_value():
+    assert normalize_shelx_cell_wavelength("CELL 0.02508 5 6 7 90 90 90") == "CELL 0.02508 5 6 7 90 90 90"

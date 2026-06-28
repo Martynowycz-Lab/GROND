@@ -96,6 +96,14 @@ GROND auto \
 
 `--full-fast` is different from `--fast`. It still runs the automatic transform, hand, thickness, nuisance, lightweight structure-update, scale-compression, forensic, and endpoint-reporting steps. It pins final Bloch work to N=24/Q=10 and uses one endpoint polish pass.
 
+Before a real run, check the model file:
+
+```bash
+GROND sfac-check --structure /data/my_dataset/model.res
+```
+
+GROND needs explicit electron scattering coefficient rows in SHELX models. A line such as `SFAC C H N O` is not enough, because SHELXL then uses its built-in table while the Bloch calculation has no explicit electron coefficients to read. The checker also reports whether the `CELL` wavelength looks like a placeholder. Endpoint `.ins` files are normalized to the GROND electron default `0.025079 A` when the source model says `CELL 1 ...` or another clearly non-electron wavelength.
+
 The lightweight structure-update budget is chosen from the number of non-hydrogen atoms in the model. Use `--full-fast-structure-rows` and `--full-fast-structure-max-nfev` only when you need to override that schedule. Structure blocks use the default data-RMS plateau gate, so a stale xyz or ADP loop should stop instead of spending days on calls that no longer improve the row objective.
 
 For a cheaper stress test, add `--full-fast-n-basis 10 --full-fast-n-points 5`. Treat that result as a scouting endpoint, not the preferred final answer.

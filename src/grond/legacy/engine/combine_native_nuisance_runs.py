@@ -23,9 +23,11 @@ import numpy as np
 
 try:  # Package import.
     from .bloch_engine import parse_model
+    from .native_row_regularize import write_endpoint_ins
     from .post_bloch_sigma import fit_uniform_z_rms_sigma_scale, scale_row_sigmas
 except ImportError:  # Direct script execution from this directory.
     from bloch_engine import parse_model
+    from native_row_regularize import write_endpoint_ins
     from post_bloch_sigma import fit_uniform_z_rms_sigma_scale, scale_row_sigmas
 
 
@@ -307,14 +309,7 @@ def merge_hkl_rows(rows, sigma_policy: str = "formal"):
 
 
 def write_no_exti_ins(src_res: Path, dst_ins: Path, hkl_name: str):
-    out = []
-    for line in src_res.read_text(errors="replace").splitlines():
-        if line.strip().upper().startswith("EXTI"):
-            continue
-        if "<HklSrc" in line:
-            line = f'REM <HklSrc "%./{hkl_name}">'
-        out.append(line)
-    dst_ins.write_text("\n".join(out) + "\n")
+    write_endpoint_ins(src_res, dst_ins, hkl_name=hkl_name, keep_exti=False)
 
 
 def parse_lst(path: Path):
@@ -408,7 +403,7 @@ def run_shelxl(work: Path, stem: str, shelxl: str, iterations: int = 5):
             stats["recommended_wght_b"] = recommended[1]
         history.append(stats)
         if i + 1 < n_iter and (work / f"{stem}.res").exists():
-            shutil.copy2(work / f"{stem}.res", work / f"{stem}.ins")
+            write_endpoint_ins(work / f"{stem}.res", work / f"{stem}.ins", hkl_name=f"{stem}.hkl", keep_exti=False)
             stats["next_wght"] = promote_recommended_wght(work / f"{stem}.ins", recommended)
     (work / "shelxl_stdout.log").write_text(last_stdout)
     final = dict(history[-1]) if history else {"status": "not_run"}

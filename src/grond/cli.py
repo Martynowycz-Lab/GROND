@@ -82,6 +82,7 @@ _RUN_LOG_LOCK = threading.Lock()
 _TRANSFORM_SCOUT_SEMAPHORE: threading.BoundedSemaphore | None = None
 _TRANSFORM_SCOUT_SEMAPHORE_LIMIT = 0
 FULL_Q_LAMBDA = "1.0"
+DEFAULT_ELECTRON_WAVELENGTH_A = 0.025079
 
 
 def configure_progress(log_dir: Path, *, resume: bool, total: int) -> None:
@@ -1027,6 +1028,149 @@ def _is_number(text: str) -> bool:
         return True
     except ValueError:
         return False
+
+
+def _shelx_cell_wavelength_status(value: object) -> dict[str, object]:
+    """Classify a SHELX CELL wavelength for GROND's electron endpoint contract."""
+
+    try:
+        wavelength = float(str(value).replace("D", "E").replace("d", "e"))
+    except (TypeError, ValueError):
+        return {
+            "status": "warning",
+            "wavelength_A": None,
+            "endpoint_wavelength_A": DEFAULT_ELECTRON_WAVELENGTH_A,
+            "message": "CELL wavelength is not numeric; endpoint INS files will use the GROND electron default.",
+        }
+    if not math.isfinite(wavelength) or wavelength <= 0.0 or abs(wavelength - 1.0) < 1e-6 or wavelength >= 0.1:
+        return {
+            "status": "warning",
+            "wavelength_A": wavelength,
+            "endpoint_wavelength_A": DEFAULT_ELECTRON_WAVELENGTH_A,
+            "message": "CELL wavelength is a placeholder or non-electron value; endpoint INS files will use the GROND electron default.",
+        }
+    return {
+        "status": "ok",
+        "wavelength_A": wavelength,
+        "endpoint_wavelength_A": wavelength,
+        "message": "CELL wavelength is in the expected electron range.",
+    }
+
+
+def check_sfac_contract(structure: str | Path) -> dict[str, object]:
+    """Check whether a model declares explicit numeric SFAC rows for GROND.
+
+    SHELXL accepts element-only lines such as ``SFAC C H N O`` by using its
+    built-in scattering table.  GROND's Bloch calculator needs explicit
+    electron-scattering coefficient rows, so fail this case early and clearly.
+    """
+
+    path = Path(structure).expanduser()
+    report: dict[str, object] = {
+        "schema_version": 1,
+        "structure": str(path),
+        "status": "ok",
+        "ok": True,
+        "default_electron_wavelength_A": DEFAULT_ELECTRON_WAVELENGTH_A,
+        "sfac_rows": [],
+        "messages": [],
+    }
+    messages: list[dict[str, str]] = []
+    sfac_rows: list[dict[str, object]] = []
+    suffix = path.suffix.lower()
+    if suffix == ".cif":
+        report.update(
+            status="warning",
+            ok=True,
+            messages=[
+                {
+                    "severity": "warning",
+                    "message": "CIF scattering-factor loops are not exhaustively audited by sfac-check; embedded SHELX blocks are checked after preparation.",
+                }
+            ],
+        )
+        return report
+    if suffix not in {".res", ".ins"}:
+        report.update(
+            status="warning",
+            ok=True,
+            messages=[{"severity": "warning", "message": "SFAC check only audits SHELX .res/.ins models."}],
+        )
+        return report
+    try:
+        lines = path.read_text(errors="replace").splitlines()
+    except OSError as exc:
+        return {
+            **report,
+            "status": "error",
+            "ok": False,
+            "messages": [{"severity": "error", "message": f"could not read model: {exc}"}],
+        }
+
+    cell_seen = False
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith(("!", "#")):
+            continue
+        parts = line.split()
+        head = parts[0].upper()
+        if head == "CELL":
+            cell_seen = True
+            if len(parts) >= 2:
+                status = _shelx_cell_wavelength_status(parts[1])
+                report["cell"] = status
+                if status["status"] != "ok":
+                    messages.append({"severity": "warning", "message": str(status["message"])})
+            else:
+                messages.append({"severity": "error", "message": "CELL line is missing a wavelength."})
+            continue
+        if head != "SFAC":
+            if head == "END":
+                break
+            continue
+        if len(parts) < 2:
+            sfac_rows.append({"line": raw, "status": "error", "reason": "empty_sfac"})
+            messages.append({"severity": "error", "message": "SFAC line is empty."})
+            continue
+        if len(parts) >= 3 and _is_number(parts[2]):
+            element = parts[1].capitalize()
+            coeff_count = len(parts) - 2
+            row_status = "ok" if coeff_count >= 8 else "error"
+            row = {
+                "line": raw,
+                "status": row_status,
+                "kind": "numeric_coefficients",
+                "element": element,
+                "coefficient_count": coeff_count,
+            }
+            sfac_rows.append(row)
+            if coeff_count < 8:
+                messages.append(
+                    {
+                        "severity": "error",
+                        "message": f"SFAC {element} has {coeff_count} numeric coefficients; GROND needs explicit electron rows with at least 8 numbers.",
+                    }
+                )
+            continue
+        elements = [token.capitalize() for token in parts[1:]]
+        sfac_rows.append({"line": raw, "status": "error", "kind": "element_only", "elements": elements})
+        messages.append(
+            {
+                "severity": "error",
+                "message": "Element-only SHELX SFAC lines use built-in SHELXL factors. Replace them with explicit electron scattering coefficient rows before running GROND.",
+            }
+        )
+    if not cell_seen:
+        messages.append({"severity": "error", "message": "No CELL line was found."})
+    if not sfac_rows:
+        messages.append({"severity": "error", "message": "No SFAC rows were found."})
+    report["sfac_rows"] = sfac_rows
+    report["messages"] = messages
+    has_error = any(item.get("severity") == "error" for item in messages) or any(row.get("status") == "error" for row in sfac_rows)
+    has_warning = any(item.get("severity") == "warning" for item in messages)
+    report["ok"] = not has_error
+    report["status"] = "error" if has_error else ("warning" if has_warning else "ok")
+    return report
 
 
 def estimate_model_nonh_atoms(structure: str) -> int | None:
@@ -4312,6 +4456,19 @@ def cmd_row_validate(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_sfac_check(args: argparse.Namespace) -> int:
+    """CLI entrypoint that checks model SFAC and endpoint wavelength readiness."""
+
+    payload = check_sfac_contract(args.structure)
+    if args.out:
+        out = Path(args.out).expanduser()
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(payload, indent=2) + "\n")
+        payload["out"] = str(out.resolve())
+    print(json.dumps(payload, indent=2))
+    return 0 if payload.get("ok") else 2
+
+
 def cmd_make_free_flags(args: argparse.Namespace) -> int:
     """Assign deterministic macromolecular FreeR flags at unique-HKL level."""
 
@@ -4528,6 +4685,16 @@ def cmd_run(args: argparse.Namespace) -> int:
     args.chunksize = auto_chunksize(args.chunksize, args.workers)
     original_structure = prep.structure
     prep.structure, structure_prep = prepare_structure_for_legacy(prep.structure, Path(args.out_dir))
+    sfac_check = check_sfac_contract(prep.structure)
+    sfac_check_path = Path(args.out_dir) / "sfac_check.json"
+    sfac_check_path.write_text(json.dumps(sfac_check, indent=2) + "\n")
+    if not sfac_check.get("ok", False):
+        error_text = "; ".join(str(item.get("message", "")) for item in sfac_check.get("messages", []) if item.get("severity") == "error")
+        raise SystemExit(
+            "GROND model SFAC check failed. "
+            + (error_text or "See sfac_check.json for details.")
+            + f" Report: {sfac_check_path}"
+        )
     raise_for_missing_external_tools(args, structure=prep.structure, multi_dataset=len(prep.datasets) > 1)
     configure_progress(logs, resume=bool(args.resume), total=estimate_run_steps(prep, args))
     prep.metadata = dict(prep.metadata or {})
@@ -4554,6 +4721,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         "structure": prep.structure,
         "original_structure": original_structure,
         "structure_preparation": structure_prep,
+        "structure_sfac_check": sfac_check,
         "baseline_hkl": prep.baseline_hkl,
         "workers": args.workers,
         "chunksize": args.chunksize,
@@ -4803,6 +4971,45 @@ def _quick_progress_source_roots(out_dir: Path) -> list[tuple[str, int]]:
     return sorted(counts.items(), key=lambda item: (-item[1], item[0]))
 
 
+def _quick_progress_timings(out_dir: Path) -> list[dict[str, object]]:
+    """Return completed stage timings from the resumable progress state."""
+
+    progress = try_read_json(out_dir / "grond_progress.json")
+    completed = progress.get("completed", {}) if isinstance(progress.get("completed"), Mapping) else {}
+    if not completed:
+        return []
+    event_order: list[str] = []
+    events = progress.get("events", [])
+    if isinstance(events, list):
+        for event in events:
+            if not isinstance(event, Mapping) or event.get("event") not in {"completed", "failed"}:
+                continue
+            label = str(event.get("label", ""))
+            if label and label not in event_order:
+                event_order.append(label)
+    labels = [label for label in event_order if label in completed]
+    labels.extend(label for label in completed if label not in labels)
+    rows: list[dict[str, object]] = []
+    for label in labels:
+        record = completed.get(label)
+        if not isinstance(record, Mapping):
+            continue
+        try:
+            elapsed = float(record.get("elapsed_seconds", 0.0))
+        except (TypeError, ValueError):
+            elapsed = 0.0
+        rows.append(
+            {
+                "stage": label,
+                "returncode": record.get("returncode", "n/a"),
+                "elapsed_seconds": elapsed,
+                "elapsed": format_seconds(elapsed),
+                "log": record.get("log", ""),
+            }
+        )
+    return rows
+
+
 def _quick_final_run(result: Mapping[str, object]) -> Path | None:
     """Return the final row-level run directory when one was recorded."""
 
@@ -4980,6 +5187,8 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
     endpoint_selection = endpoint_calibration.get("publication_selection", {}) if isinstance(endpoint_calibration, Mapping) else {}
     metadata = row_metrics.get("metadata", {}) if isinstance(row_metrics.get("metadata"), Mapping) else {}
     source_roots = _quick_progress_source_roots(out_dir)
+    timing_rows = _quick_progress_timings(out_dir)
+    sfac_check = try_read_json(out_dir / "sfac_check.json")
     final_run = _quick_final_run(result)
     final_summary = try_read_json(final_run / "summary.json") if final_run else {}
     best_native = _quick_best_native(final_summary)
@@ -5054,6 +5263,23 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
         root, count = source_roots[0]
         lines.extend(["## Source", "", f"- Completed stages were produced from `{root}` ({count} stages).", ""])
 
+    if timing_rows:
+        total_elapsed = sum(float(row.get("elapsed_seconds", 0.0)) for row in timing_rows)
+        lines.extend(
+            [
+                "## Stage Timings",
+                "",
+                f"- Total completed stage wall time: `{format_seconds(total_elapsed)}`",
+                "",
+                "| stage | returncode | elapsed | log |",
+                "|---|---:|---:|---|",
+            ]
+        )
+        for row in timing_rows:
+            log = str(row.get("log", ""))
+            lines.append(f"| `{row.get('stage', 'n/a')}` | {row.get('returncode', 'n/a')} | `{row.get('elapsed', 'n/a')}` | `{log}` |")
+        lines.append("")
+
     lines.extend(
         [
             "## Input Contract, Hand, And Z Diagnostics",
@@ -5062,6 +5288,7 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
             "",
             "| item | value |",
             "|---|---|",
+            f"| SFAC / endpoint wavelength check | status `{sfac_check.get('status', 'n/a') if isinstance(sfac_check, Mapping) else 'n/a'}`; endpoint wavelength `{_quick_number((sfac_check.get('cell') or {}).get('endpoint_wavelength_A') if isinstance(sfac_check.get('cell'), Mapping) else None, 6)}` A |",
             f"| selected HKL transform | `{transform_summary.get('selected_transform', 'n/a')}` |",
             f"| transform scout status | `{transform_summary.get('selected_status', 'n/a')}` |",
             f"| metadata transform check | `{transform_summary.get('metadata_status', 'n/a')}`; log-I corr `{_quick_number(transform_summary.get('metadata_log_intensity_corr'), 4)}`; gap `{_quick_number(transform_summary.get('metadata_correlation_gap'), 4)}`; pairs `{transform_summary.get('metadata_paired_rows', 'n/a')}`; unique overlap `{transform_summary.get('metadata_unique_overlap', 'n/a')}` |",
@@ -5459,8 +5686,8 @@ def prepare_push_endpoint_model(args: argparse.Namespace, out_dir: Path) -> tupl
             removed_afix += 1
             i += 1
             continue
-        if key == "L.S." and int(args.set_ls_cycles) > 0:
-            new_lines.append(f"L.S. {int(args.set_ls_cycles)}")
+        if key in {"L.S.", "LS", "CGLS"} and int(args.set_ls_cycles) > 0:
+            new_lines.append(f"{toks[0]} {int(args.set_ls_cycles)}")
             i += 1
             continue
         if key == "END":
@@ -6940,6 +7167,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_row_validate.add_argument("--write-xds-dir", default="", help="Optional output directory for an XDS-like compatibility INTEGRATE.HKL.")
     p_row_validate.add_argument("--overwrite", action="store_true")
     p_row_validate.set_defaults(func=cmd_row_validate)
+
+    p_sfac = sub.add_parser("sfac-check", help="Check a RES/INS model for explicit electron SFAC rows and endpoint wavelength readiness.")
+    p_sfac.add_argument("--structure", required=True, help="SHELX .res/.ins model to check.")
+    p_sfac.add_argument("--out", default="", help="Optional JSON report path.")
+    p_sfac.set_defaults(func=cmd_sfac_check)
 
     p_free = sub.add_parser("make-free-flags", help="Assign fixed macromolecular FreeR flags at unique-HKL level.")
     p_free.add_argument("--rows", required=True, help="Signed row table used to define the unique-HKL population.")

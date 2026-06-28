@@ -182,7 +182,7 @@ def run_shelxl_replay(work_dir: Path, stem: str, executable: str, iterations: in
         res = work_dir / f"{stem}.res"
         ins = work_dir / f"{stem}.ins"
         if i + 1 < n_iter and res.exists():
-            shutil.copy2(res, ins)
+            write_endpoint_ins(res, ins, hkl_name=f"{stem}.hkl", keep_exti=False)
             if freeze:
                 if zero:
                     write_active_wght(ins, 0.0, 0.0)

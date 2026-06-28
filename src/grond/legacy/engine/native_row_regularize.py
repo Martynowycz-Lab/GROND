@@ -76,6 +76,7 @@ DEFAULT_RES = Path("model.res")
 DEFAULT_BASELINE_HKL = Path("model.hkl")
 SHELXL = os.environ.get("SHELXL") or shutil.which("shelxl") or shutil.which("shelxl2019") or ""
 SHELX2MAP = os.environ.get("SHELX2MAP") or shutil.which("shelx2map") or ""
+DEFAULT_ELECTRON_WAVELENGTH_A = 0.025079
 
 
 @dataclass(frozen=True)
@@ -236,14 +237,74 @@ def write_hkl(path: Path, rows, float_format: str = "shelx_fixed") -> None:
         f.write(fmt.format(h=0, k=0, l=0, I=0.0, sig=0.0))
 
 
+def shelx_wavelength_needs_electron_default(value: float) -> bool:
+    """Return true when a SHELX CELL wavelength is clearly not an electron-diffraction value."""
+
+    if not math.isfinite(float(value)) or float(value) <= 0.0:
+        return True
+    if abs(float(value) - 1.0) < 1e-6:
+        return True
+    # 200-300 keV electron wavelengths are near 0.025-0.020 A.  Values above
+    # 0.1 A are almost always X-ray placeholders in small-molecule RES files.
+    return float(value) >= 0.1
+
+
+def normalize_shelx_cell_wavelength(line: str, default_wavelength: float = DEFAULT_ELECTRON_WAVELENGTH_A) -> str:
+    """Normalize obvious placeholder CELL wavelengths for electron endpoints."""
+
+    parts = line.split()
+    if len(parts) < 8 or parts[0].upper() != "CELL":
+        return line
+    try:
+        wavelength = float(parts[1])
+    except ValueError:
+        parts[1] = f"{default_wavelength:.6f}"
+        return " ".join(parts)
+    if shelx_wavelength_needs_electron_default(wavelength):
+        parts[1] = f"{default_wavelength:.6f}"
+        return " ".join(parts)
+    return line
+
+
+def force_shelxl_one_cycle(line: str) -> tuple[str, bool]:
+    """Force SHELXL LS/CGLS instruction lines to one internal cycle."""
+
+    match = re.match(r"^(\s*)(L\.S\.|LS|CGLS)\b(.*)$", line, flags=re.IGNORECASE)
+    if not match:
+        return line, False
+    indent, command, tail = match.groups()
+    rest = tail.split()
+    if rest:
+        rest[0] = "1"
+    else:
+        rest = ["1"]
+    return f"{indent}{command} {' '.join(rest)}", True
+
+
 def write_endpoint_ins(src_res: Path, dst_ins: Path, hkl_name: str = "dyn_nuisance_corrected.hkl", keep_exti: bool = False) -> None:
+    """Write the corrected-HKL endpoint INS with GROND's fixed one-cycle contract."""
+
     out = []
+    saw_cycle_instruction = False
     for line in src_res.read_text(errors="replace").splitlines():
-        if not keep_exti and line.strip().upper().startswith("EXTI"):
+        stripped = line.strip()
+        upper = stripped.upper()
+        if not keep_exti and upper.startswith("EXTI"):
             continue
+        if upper.startswith("CELL "):
+            line = normalize_shelx_cell_wavelength(line)
+        line, forced_cycle = force_shelxl_one_cycle(line)
+        saw_cycle_instruction = saw_cycle_instruction or forced_cycle
         if "<HklSrc" in line:
             line = f'REM <HklSrc "%./{hkl_name}">'
         out.append(line)
+    if not saw_cycle_instruction:
+        insert_at = len(out)
+        for i, line in enumerate(out):
+            if line.strip().upper().startswith(("HKLF", "END")):
+                insert_at = i
+                break
+        out.insert(insert_at, "L.S. 1")
     dst_ins.write_text("\n".join(out) + "\n")
 
 

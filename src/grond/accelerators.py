@@ -15,7 +15,7 @@ import sys
 os.environ.setdefault("JAX_ENABLE_X64", "True")
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 mods = {}
-for name in ["numpy", "scipy", "gemmi", "jax"]:
+for name in ["numpy", "scipy", "gemmi"]:
     try:
         mod = importlib.import_module(name)
         mods[name] = {"available": True, "version": str(getattr(mod, "__version__", "installed"))}
@@ -34,7 +34,13 @@ try:
         "x64": bool(jax.config.jax_enable_x64),
     }
 except Exception as exc:
-    jax_info = {"available": False, "error": f"{type(exc).__name__}: {str(exc)[:500]}"}
+    jax_info = {
+        "available": False,
+        "optional": True,
+        "status": "not_installed_optional",
+        "message": "JAX is not required for production GROND. The portable NumPy/SciPy Bloch solver is the reference path.",
+        "import_error": f"{type(exc).__name__}: {str(exc)[:500]}",
+    }
 
 print(json.dumps({
     "python": sys.executable,
@@ -42,6 +48,7 @@ print(json.dumps({
     "platform": platform.platform(),
     "machine": platform.machine(),
     "packages": mods,
+    "optional_packages": {"jax": jax_info},
     "jax": jax_info,
     "engine": {
         "current_core": "numpy_scipy_cpu",
@@ -99,7 +106,13 @@ try:
             rec[name] = {"ok": False, "error": f"{type(exc).__name__}: {str(exc)[:500]}"}
     out["jax"] = rec
 except Exception as exc:
-    out["jax"] = {"import_error": f"{type(exc).__name__}: {str(exc)[:500]}"}
+    out["jax"] = {
+        "available": False,
+        "optional": True,
+        "status": "not_installed_optional",
+        "message": "JAX is optional and experimental; SciPy eig/eigh is the production Bloch kernel.",
+        "import_error": f"{type(exc).__name__}: {str(exc)[:500]}",
+    }
 
 print(json.dumps(out, indent=2))
 """

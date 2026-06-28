@@ -10,6 +10,7 @@ from grond.cli import (
     apply_speed_profile,
     apply_tool_config,
     build_parser,
+    check_sfac_contract,
     combine_cmd,
     estimate_model_nonh_atoms,
     parse_numeric_grid,
@@ -44,6 +45,7 @@ EXPECTED_CLI_COMMANDS = {
     "run",
     "scale-polish",
     "scale-replay",
+    "sfac-check",
     "thickness-scout",
     "validate",
     "validate-ls1",
@@ -258,6 +260,8 @@ def test_utility_commands_parse():
     doc = build_parser().parse_args(["doctor", "--probe-bloch"])
     assert doc.command == "doctor"
     assert doc.probe_bloch is True
+    sfac = build_parser().parse_args(["sfac-check", "--structure", "model.res"])
+    assert sfac.command == "sfac-check"
     assert build_parser().parse_args(["compile", "--force"]).force is True
     cfg = build_parser().parse_args(["init-config", "--out", "grond.config.json"])
     assert cfg.command == "init-config"
@@ -410,6 +414,32 @@ def test_utility_commands_parse():
     assert push_checkpoint.checkpoint == "grond_continue_checkpoint.json"
     assert push_checkpoint.source_summary == ""
     assert push_checkpoint.start_res == ""
+
+
+def test_sfac_check_rejects_element_only_shelx_factors(tmp_path: Path, capsys):
+    model = tmp_path / "bad.res"
+    model.write_text("TITL bad\nCELL 1 5 6 7 90 90 90\nSFAC C H N O\nHKLF 4\nEND\n")
+
+    args = build_parser().parse_args(["sfac-check", "--structure", str(model)])
+    assert args.func(args) == 2
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "error"
+    assert payload["ok"] is False
+    assert payload["sfac_rows"][0]["kind"] == "element_only"
+    assert "explicit electron scattering coefficient rows" in payload["messages"][1]["message"]
+
+
+def test_sfac_check_accepts_numeric_rows_and_warns_on_placeholder_wavelength(tmp_path: Path):
+    model = tmp_path / "ok.res"
+    model.write_text("TITL ok\nCELL 1 5 6 7 90 90 90\nSFAC C 1 0 1 0 1 0 1 0\nHKLF 4\nEND\n")
+
+    payload = check_sfac_contract(model)
+
+    assert payload["status"] == "warning"
+    assert payload["ok"] is True
+    assert payload["sfac_rows"][0]["kind"] == "numeric_coefficients"
+    assert payload["cell"]["endpoint_wavelength_A"] == pytest.approx(0.025079)
 
 
 def test_auto_parser_is_simple_run_alias():
@@ -710,6 +740,8 @@ def test_write_quick_stats_summarizes_row_and_endpoint_tables(tmp_path):
                 "completed": {
                     "old": {
                         "returncode": 0,
+                        "elapsed_seconds": 1.0,
+                        "log": str(out_dir / "logs" / "old.log"),
                         "command": [
                             "python",
                             "/old/GROND/src/grond/legacy/engine/native_row_regularize.py",
@@ -717,12 +749,24 @@ def test_write_quick_stats_summarizes_row_and_endpoint_tables(tmp_path):
                     },
                     "new": {
                         "returncode": 0,
+                        "elapsed_seconds": 2.0,
+                        "log": str(out_dir / "logs" / "new.log"),
                         "command": [
                             "python",
                             "/new/GROND/src/grond/legacy/engine/native_row_regularize.py",
                         ],
                     },
                 }
+            }
+        )
+        + "\n"
+    )
+    (out_dir / "sfac_check.json").write_text(
+        json.dumps(
+            {
+                "status": "ok",
+                "cell": {"endpoint_wavelength_A": 0.025079},
+                "sfac_rows": [{"kind": "numeric_coefficients", "element": "C"}],
             }
         )
         + "\n"
@@ -759,7 +803,10 @@ def test_write_quick_stats_summarizes_row_and_endpoint_tables(tmp_path):
     assert "15.39%" in text
     assert "Resume Warning" in text
     assert "mixed-code resume" in text
+    assert "Stage Timings" in text
+    assert "Total completed stage wall time: `0m03s`" in text
     assert "Input Contract, Hand, And Z Diagnostics" in text
+    assert "SFAC / endpoint wavelength check | status `ok`; endpoint wavelength `0.025079` A" in text
     assert "selected HKL transform | `identity`" in text
     assert "final hand | `alternate`; post-feedback status `promoted`" in text
     assert "final hand Z, all/work/free | `5.000` / `4.000` / `3.000`" in text
