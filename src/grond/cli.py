@@ -1915,6 +1915,8 @@ def native_stage_cmd(
         endpoint_exti_grid,
         "--shelxl-iterations",
         str(shelxl_iterations),
+        "--endpoint-wght-mode",
+        str(getattr(args, "endpoint_wght_mode", "freeze-zero")),
         "--post-bloch-sigma-policy",
         post_bloch_sigma_policy,
         "--post-bloch-sigma-holdout-fraction",
@@ -2310,6 +2312,8 @@ def shelxl_feedback_cmd(
         args.shelxl,
         "--shelxl-iterations",
         str(args.shelxl_feedback_shelxl_iterations),
+        "--endpoint-wght-mode",
+        str(getattr(args, "endpoint_wght_mode", "freeze-zero")),
         "--post-bloch-sigma-policy",
         resolved_post_bloch_sigma_policy(args, feedback_loop=True),
         "--post-bloch-sigma-holdout-fraction",
@@ -5185,6 +5189,9 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
     row_metrics = try_read_json(row_metrics_path)
     endpoint_calibration = result.get("endpoint_calibration") if isinstance(result.get("endpoint_calibration"), Mapping) else {}
     endpoint_selection = endpoint_calibration.get("publication_selection", {}) if isinstance(endpoint_calibration, Mapping) else {}
+    publication_endpoint = endpoint_selection.get("publication_endpoint") if isinstance(endpoint_selection, Mapping) else {}
+    if not isinstance(publication_endpoint, Mapping):
+        publication_endpoint = {}
     metadata = row_metrics.get("metadata", {}) if isinstance(row_metrics.get("metadata"), Mapping) else {}
     source_roots = _quick_progress_source_roots(out_dir)
     timing_rows = _quick_progress_timings(out_dir)
@@ -5239,6 +5246,8 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
         f"- Output directory: `{out_dir}`",
         f"- Datasets: `{', '.join(ds.name for ds in prep.datasets) if prep.datasets else 'n/a'}`",
         f"- Final model: `{result.get('model', '')}`",
+        f"- Publication endpoint model: `{publication_endpoint.get('endpoint_res', '')}`",
+        f"- Publication corrected HKL: `{publication_endpoint.get('endpoint_hkl', '')}`",
         f"- Rows in final row table: `{metadata.get('row_count', 'n/a')}`",
         f"- Final N/Q: `{metadata.get('n_basis', 'n/a')}/{metadata.get('n_points', 'n/a')}`",
         f"- Thickness mean: `{_quick_number(metadata.get('thickness_A_mean'), 1)} A`",
@@ -5394,6 +5403,13 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
             "",
             "## Files To Open Next",
             "",
+            f"- Publication endpoint RES to open in SHELXLE/Olex2: `{publication_endpoint.get('endpoint_res', '')}`",
+            f"- Publication endpoint INS used for the reported run: `{publication_endpoint.get('endpoint_ins', '')}`",
+            f"- Publication corrected HKL used by that endpoint: `{publication_endpoint.get('endpoint_hkl', '')}`",
+            f"- Publication SHELXL LST with the reported R/GooF values: `{publication_endpoint.get('endpoint_lst', '')}`",
+            f"- Publication endpoint manifest: `{publication_endpoint.get('endpoint_manifest', '')}`",
+            f"- Frozen Bloch row table used to make endpoint statistics: `{final_run / 'native_dyn_calc.csv' if final_run else ''}`",
+            f"- Endpoint replay row table after compact scale selection: `{publication_endpoint.get('endpoint_row_table', '')}`",
             f"- Detailed row/MR table: `{row_metrics_path}`",
             f"- Endpoint calibration report: `{endpoint_calibration.get('report', '') if isinstance(endpoint_calibration, Mapping) else ''}`",
             f"- Publication endpoint chooser: `{out_dir / 'endpoint_chooser' / 'PUBLICATION_ENDPOINT_CHOOSER.md'}`",
@@ -7013,7 +7029,13 @@ def add_common_run_args(ap: argparse.ArgumentParser, *, expose_lambda_controls: 
     )
     ap.add_argument("--endpoint-b-grid", default="0.0", help="Corrected-HKL endpoint resolution-scale diagnostic grid. Nonzero values are opt-in only; GROND keeps B=0 as the final promotable endpoint whenever it is present.")
     ap.add_argument("--endpoint-exti-grid", default="off", help="Endpoint EXTI diagnostic grid. Final promoted outputs use off; explicit 'on' runs are comparison-only.")
-    ap.add_argument("--shelxl-iterations", type=int, default=5, help="SHELXL polish passes per corrected-HKL endpoint in full mode. Each pass promotes SHELXL's recommended WGHT into the active input before the next cycle.")
+    ap.add_argument("--shelxl-iterations", type=int, default=5, help="SHELXL executable calls per corrected-HKL endpoint in lower-level full mode. GROND normalizes each endpoint input to one internal LS/CGLS cycle.")
+    ap.add_argument(
+        "--endpoint-wght-mode",
+        choices=["freeze-zero", "inherit", "promote"],
+        default="freeze-zero",
+        help="SHELXL weight policy for corrected-HKL endpoint files. freeze-zero is the production default after GROND sigma calibration; inherit keeps the source-model WGHT; promote uses SHELXL recommendations on later external calls.",
+    )
     ap.add_argument("--shelxl", default=default_shelxl_executable(), help="SHELXL executable used for corrected-HKL endpoints and SHELXL feedback loops.")
     ap.add_argument("--shelxl-feedback-cycles", type=int, default=5, help="Number of high-N/Q Bloch -> one-SHELXL-LS feedback cycles used by the automatic SHELXL structure-update strategy.")
     ap.add_argument("--shelxl-feedback-shelxl-iterations", type=int, default=1, help="SHELXL passes per feedback cycle. Default 1 keeps each feedback update to one least-squares model update.")
@@ -7050,7 +7072,7 @@ def add_common_run_args(ap: argparse.ArgumentParser, *, expose_lambda_controls: 
     ap.add_argument("--endpoint-calibration-free-wr2-tolerance", type=float, default=0.040)
     ap.add_argument("--endpoint-calibration-sigma-min-scale", type=float, default=0.05)
     ap.add_argument("--endpoint-calibration-sigma-max-scale", type=float, default=4.0)
-    ap.add_argument("--endpoint-calibration-shelxl-iterations", type=int, default=1)
+    ap.add_argument("--endpoint-calibration-shelxl-iterations", type=int, default=3, help="External one-cycle SHELXL calls for the final fixed-weight endpoint replay. This does not change LS1 feedback; it stabilizes the openable presentation endpoint.")
     ap.add_argument("--instability-u", type=float, default=0.01, help="Minimum positive Ueq used by endpoint replays to flag unstable ADPs.")
     ap.add_argument("--scale-polish", choices=["auto", "on", "off"], default="auto", help="Run a post-hoc scale-window compression gate after the final Bloch row table.")
     ap.add_argument("--scale-polish-window-deg", type=float, default=5.0, help="Maximum physical frame-window width tested by the scale-polish gate.")
@@ -7418,7 +7440,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_cal_endpoint.add_argument("--post-bloch-sigma-min-scale", type=float, default=0.05)
     p_cal_endpoint.add_argument("--post-bloch-sigma-max-scale", type=float, default=4.0)
     p_cal_endpoint.add_argument("--shelxl", default="shelxl")
-    p_cal_endpoint.add_argument("--shelxl-iterations", type=int, default=1)
+    p_cal_endpoint.add_argument("--shelxl-iterations", type=int, default=3)
     p_cal_endpoint.add_argument("--wght-modes", default="freeze-zero,promote", help="Comma list of endpoint weight policies; freeze-zero keeps active WGHT 0 0.")
     p_cal_endpoint.add_argument("--publication-goof-min", type=float, default=0.85)
     p_cal_endpoint.add_argument("--publication-goof-max", type=float, default=1.15)

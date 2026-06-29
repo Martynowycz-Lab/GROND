@@ -157,6 +157,17 @@ def write_active_wght(ins_path: Path, a: float, b: float) -> None:
     ins_path.write_text("\n".join(lines).rstrip() + "\n")
 
 
+def active_wght_from_stats(stats: dict) -> tuple[float, float] | None:
+    try:
+        a = float(stats["active_wght_a"])
+        b = float(stats.get("active_wght_b", 0.0))
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not math.isfinite(a) or not math.isfinite(b):
+        return None
+    return a, b
+
+
 def run_shelxl_replay(work_dir: Path, stem: str, executable: str, iterations: int, wght_mode: str) -> dict:
     history = []
     n_iter = max(1, int(iterations))
@@ -194,6 +205,12 @@ def run_shelxl_replay(work_dir: Path, stem: str, executable: str, iterations: in
     if history:
         (work_dir / "shelxl_stdout.log").write_text((work_dir / f"shelxl_iter_{n_iter}.log").read_text(errors="replace"))
     final = dict(history[-1]) if history else {"returncode": None, "status": "not_run"}
+    res = work_dir / f"{stem}.res"
+    if final.get("status") in {None, "ok"} or res.exists():
+        active = (0.0, 0.0) if zero else active_wght_from_stats(final)
+        if res.exists():
+            write_endpoint_ins(res, res, hkl_name=f"{stem}.hkl", keep_exti=False, wght=active)
+            final["res_normalized_for_reopen"] = True
     final["iterations"] = n_iter
     final["iteration_history"] = history
     final["wght_mode"] = wght_mode
@@ -560,7 +577,9 @@ def write_publication_report(path: Path, selection: dict[str, object], rows_out:
             f"S_GROND_free `{_finite_float(selected.get('native_free_GooF')):.3f}`.",
             f"Endpoint sigma scale: `{_finite_float(selected.get('sigma_scale')):.4g}`; "
             f"held-out RMS(z) after calibration `{_finite_float(selected.get('heldout_rms_z_after')):.3f}`.",
-            f"Files: `{selected.get('endpoint_dir')}`.",
+            f"Files: endpoint directory `{selected.get('endpoint_dir')}`; "
+            f"RES `{selected.get('endpoint_res')}`; HKL `{selected.get('endpoint_hkl')}`; "
+            f"LST `{selected.get('endpoint_lst')}`.",
             "",
         ]
     else:
@@ -577,7 +596,9 @@ def write_publication_report(path: Path, selection: dict[str, object], rows_out:
             f"wR2all `{_percent_or_blank(low_r.get('shelxl_wR2all'))}`, "
             f"GooF `{_finite_float(low_r.get('shelxl_GooF')):.3f}`.",
             f"Publication R1all cost versus this low-R branch: `{100.0 * r_cost:.2f}%`.",
-            f"Files: `{low_r.get('endpoint_dir')}`.",
+            f"Files: endpoint directory `{low_r.get('endpoint_dir')}`; "
+            f"RES `{low_r.get('endpoint_res')}`; HKL `{low_r.get('endpoint_hkl')}`; "
+            f"LST `{low_r.get('endpoint_lst')}`.",
             "",
         ]
     if best_free:
@@ -750,6 +771,12 @@ def main() -> None:
                 "sigma_scale": sig.get("sigma_scale", ""),
                 "heldout_rms_z_after": sig.get("heldout_rms_z_after", ""),
                 "endpoint_dir": str(endpoint_dir),
+                "endpoint_res": str(endpoint_dir / "dyn_scale_replay.res"),
+                "endpoint_ins": str(endpoint_dir / "dyn_scale_replay.ins"),
+                "endpoint_hkl": str(endpoint_dir / "dyn_scale_replay.hkl"),
+                "endpoint_lst": str(endpoint_dir / "dyn_scale_replay.lst"),
+                "endpoint_manifest": str(endpoint_dir / "manifest.json"),
+                "endpoint_row_table": str(spec_dir / "native_dyn_calc.csv"),
             })
     fieldnames = list(rows_out[0].keys()) if rows_out else []
     write_rows(out / "scale_contract_endpoint_replay.csv", rows_out, fieldnames)

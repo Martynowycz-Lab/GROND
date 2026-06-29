@@ -297,6 +297,8 @@ def native_command(
         "off",
         "--shelxl-iterations",
         str(int(args.shelxl_iterations)),
+        "--endpoint-wght-mode",
+        str(getattr(args, "endpoint_wght_mode", "freeze-zero")),
         "--post-bloch-sigma-policy",
         str(args.post_bloch_sigma_policy),
         "--post-bloch-sigma-holdout-fraction",
@@ -419,6 +421,7 @@ def main() -> None:
     ap.add_argument("--chunksize", type=int, default=8)
     ap.add_argument("--shelxl", default=os.environ.get("SHELXL", "shelxl"))
     ap.add_argument("--shelxl-iterations", type=int, default=3)
+    ap.add_argument("--endpoint-wght-mode", choices=["freeze-zero", "inherit", "promote"], default="freeze-zero")
     ap.add_argument("--post-bloch-sigma-policy", choices=["none", "uniform_z_rms"], default="uniform_z_rms", help="Endpoint sigma calibration applied before each SHELXL feedback update.")
     ap.add_argument("--post-bloch-sigma-holdout-fraction", type=float, default=0.20)
     ap.add_argument("--post-bloch-sigma-min-scale", type=float, default=0.25)
@@ -454,6 +457,7 @@ def main() -> None:
         "source_summary": str(source_summary_path.resolve()),
         "start_res": str(current_model),
         "shelxl": str(args.shelxl),
+        "endpoint_wght_mode": str(args.endpoint_wght_mode),
         "post_bloch_sigma_policy": str(args.post_bloch_sigma_policy),
         "post_bloch_sigma_holdout_fraction": float(args.post_bloch_sigma_holdout_fraction),
         "post_bloch_sigma_min_scale": float(args.post_bloch_sigma_min_scale),

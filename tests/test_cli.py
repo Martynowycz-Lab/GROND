@@ -129,7 +129,7 @@ def test_thickness_scout_parser_exposes_contract_diagnostic_defaults():
     assert args.endpoint_calibration_max_r1_cost == 0.010
     assert args.endpoint_calibration_free_wr2_tolerance == 0.040
     assert args.endpoint_calibration_sigma_min_scale == 0.05
-    assert args.endpoint_calibration_shelxl_iterations == 1
+    assert args.endpoint_calibration_shelxl_iterations == 3
     assert args.fast is False
     assert args.full_fast is False
     assert args.full_fast_n_basis == 24
@@ -243,6 +243,7 @@ def test_auto_parser_hides_lambda_controls(capsys):
     assert args.allow_missing_tools is False
     assert args.shelxl_feedback_cycles == 5
     assert args.shelxl_feedback_shelxl_iterations == 1
+    assert args.endpoint_wght_mode == "freeze-zero"
     assert args.dataset_sigma_policy == "auto"
     assert args.dataset_sigma_holdout_fraction == 0.20
     assert args.dataset_sigma_min_scale == 0.25
@@ -340,7 +341,7 @@ def test_utility_commands_parse():
     )
     assert calibrate.command == "calibrate-endpoint"
     assert calibrate.wght_modes == "freeze-zero,promote"
-    assert calibrate.shelxl_iterations == 1
+    assert calibrate.shelxl_iterations == 3
     assert calibrate.post_bloch_sigma_min_scale == 0.05
     assert calibrate.publication_goof_min == 0.85
     assert calibrate.publication_free_wr2_tolerance == 0.040

@@ -269,7 +269,7 @@ def normalize_shelx_cell_wavelength(line: str, default_wavelength: float = DEFAU
 def force_shelxl_one_cycle(line: str) -> tuple[str, bool]:
     """Force SHELXL LS/CGLS instruction lines to one internal cycle."""
 
-    match = re.match(r"^(\s*)(L\.S\.|LS|CGLS)\b(.*)$", line, flags=re.IGNORECASE)
+    match = re.match(r"^(\s*)(L\.S\.|LS|CGLS)(?=\s|$)(.*)$", line, flags=re.IGNORECASE)
     if not match:
         return line, False
     indent, command, tail = match.groups()
@@ -281,8 +281,51 @@ def force_shelxl_one_cycle(line: str) -> tuple[str, bool]:
     return f"{indent}{command} {' '.join(rest)}", True
 
 
-def write_endpoint_ins(src_res: Path, dst_ins: Path, hkl_name: str = "dyn_nuisance_corrected.hkl", keep_exti: bool = False) -> None:
-    """Write the corrected-HKL endpoint INS with GROND's fixed one-cycle contract."""
+def _format_wght_line(a: float, b: float) -> str:
+    return f"WGHT      {float(a):.4f}      {float(b):.4f}"
+
+
+def set_active_wght_lines(lines: list[str], a: float, b: float) -> list[str]:
+    """Return SHELX input lines with exactly one active pre-END WGHT line.
+
+    SHELXL writes recommended WGHT records after END.  Those records are useful
+    diagnostics, but they are not active input.  Endpoint files that users open
+    in SHELXLE/Olex2 should therefore contain a single declared active WGHT in
+    the input block and no stale tail after END.
+    """
+
+    out: list[str] = []
+    inserted = False
+    wght_line = _format_wght_line(a, b)
+    for line in lines:
+        upper = line.strip().upper()
+        if upper.startswith("WGHT"):
+            if not inserted:
+                out.append(wght_line)
+                inserted = True
+            continue
+        if not inserted and upper.startswith("FVAR"):
+            out.append(wght_line)
+            inserted = True
+        out.append(line)
+    if not inserted:
+        insert_at = len(out)
+        for i, line in enumerate(out):
+            if line.strip().upper().startswith(("HKLF", "END")):
+                insert_at = i
+                break
+        out.insert(insert_at, wght_line)
+    return out
+
+
+def write_endpoint_ins(
+    src_res: Path,
+    dst_ins: Path,
+    hkl_name: str = "dyn_nuisance_corrected.hkl",
+    keep_exti: bool = False,
+    wght: tuple[float, float] | None = None,
+) -> None:
+    """Write the corrected-HKL endpoint input with GROND's fixed one-cycle contract."""
 
     out = []
     saw_cycle_instruction = False
@@ -298,6 +341,8 @@ def write_endpoint_ins(src_res: Path, dst_ins: Path, hkl_name: str = "dyn_nuisan
         if "<HklSrc" in line:
             line = f'REM <HklSrc "%./{hkl_name}">'
         out.append(line)
+        if upper.startswith("END"):
+            break
     if not saw_cycle_instruction:
         insert_at = len(out)
         for i, line in enumerate(out):
@@ -305,6 +350,8 @@ def write_endpoint_ins(src_res: Path, dst_ins: Path, hkl_name: str = "dyn_nuisan
                 insert_at = i
                 break
         out.insert(insert_at, "L.S. 1")
+    if wght is not None:
+        out = set_active_wght_lines(out, float(wght[0]), float(wght[1]))
     dst_ins.write_text("\n".join(out) + "\n")
 
 
@@ -998,6 +1045,21 @@ def shelx_res_health(res_path: Path) -> dict:
     return {"ok": True, "reason": "ok", "path": str(res_path), "size": int(size)}
 
 
+def write_active_wght(path: Path, a: float, b: float) -> dict:
+    """Force one active WGHT line in a SHELX input or output file."""
+
+    if not path.exists():
+        return {"written": False, "reason": "missing_file"}
+    lines = []
+    for line in path.read_text(errors="replace").splitlines():
+        lines.append(line)
+        if line.strip().upper().startswith("END"):
+            break
+    lines = set_active_wght_lines(lines, a, b)
+    path.write_text("\n".join(lines).rstrip() + "\n")
+    return {"written": True, "active_wght_a": float(a), "active_wght_b": float(b)}
+
+
 def promote_recommended_wght(ins_path: Path, recommended: tuple[float, float] | None) -> dict:
     """Move SHELXL's recommended WGHT into the active pre-END input block.
 
@@ -1020,27 +1082,24 @@ def promote_recommended_wght(ins_path: Path, recommended: tuple[float, float] | 
     if not active_lines:
         return {"promoted": False}
 
-    wght_line = f"WGHT      {a:.4f}      {b:.4f}"
-    replaced = False
-    for i, line in enumerate(active_lines):
-        if line.strip().upper().startswith("WGHT"):
-            active_lines[i] = wght_line
-            replaced = True
-            break
-    if not replaced:
-        insert_at = None
-        for i, line in enumerate(active_lines):
-            if line.strip().upper().startswith("FVAR"):
-                insert_at = i
-                break
-        if insert_at is None:
-            insert_at = max(0, len(active_lines) - (1 if saw_end else 0))
-        active_lines.insert(insert_at, wght_line)
+    del saw_end
+    active_lines = set_active_wght_lines(active_lines, a, b)
     ins_path.write_text("\n".join(active_lines).rstrip() + "\n")
     return {"promoted": True, "active_wght_a": float(a), "active_wght_b": float(b)}
 
 
-def run_shelxl(work_dir: Path, stem: str, iterations: int = 1):
+def _active_wght_from_stats(stats: dict) -> tuple[float, float] | None:
+    try:
+        a = float(stats["active_wght_a"])
+        b = float(stats.get("active_wght_b", 0.0))
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not math.isfinite(a) or not math.isfinite(b):
+        return None
+    return a, b
+
+
+def run_shelxl(work_dir: Path, stem: str, iterations: int = 1, wght_mode: str = "freeze-zero"):
     exe = str(SHELXL)
     if ("/" in exe and not Path(exe).exists()) or ("/" not in exe and shutil.which(exe) is None):
         msg = f"SHELXL executable not found: {SHELXL}\n"
@@ -1049,7 +1108,15 @@ def run_shelxl(work_dir: Path, stem: str, iterations: int = 1):
     history = []
     last_proc = None
     n_iter = max(1, int(iterations))
+    mode = str(wght_mode or "freeze-zero")
+    freeze_zero = mode == "freeze-zero"
+    if mode not in {"inherit", "freeze-zero", "promote"}:
+        return {"returncode": None, "status": "invalid_wght_mode", "wght_mode": mode}
+    if freeze_zero:
+        write_active_wght(work_dir / f"{stem}.ins", 0.0, 0.0)
     for i in range(n_iter):
+        if freeze_zero:
+            write_active_wght(work_dir / f"{stem}.ins", 0.0, 0.0)
         proc = subprocess.run([exe, stem], cwd=str(work_dir), text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         last_proc = proc
         (work_dir / f"shelxl_iter_{i + 1}.log").write_text(proc.stdout)
@@ -1069,8 +1136,14 @@ def run_shelxl(work_dir: Path, stem: str, iterations: int = 1):
             stats["invalid_res_reason"] = health["reason"]
             break
         if i + 1 < n_iter and res.exists():
-            shutil.copy2(res, ins)
-            stats["next_wght"] = promote_recommended_wght(ins, recommended_wght)
+            active = (0.0, 0.0) if freeze_zero else _active_wght_from_stats(stats)
+            write_endpoint_ins(res, ins, hkl_name=f"{stem}.hkl", keep_exti=False, wght=active)
+            if mode == "promote":
+                stats["next_wght"] = promote_recommended_wght(ins, recommended_wght)
+            elif freeze_zero:
+                stats["next_wght"] = {"promoted": False, "frozen": True, "active_wght_a": 0.0, "active_wght_b": 0.0}
+            else:
+                stats["next_wght"] = {"promoted": False, "inherited": True}
     if last_proc is not None:
         (work_dir / "shelxl_stdout.log").write_text(last_proc.stdout)
     final = dict(history[-1]) if history else {"returncode": None, "status": "not_run"}
@@ -1078,8 +1151,13 @@ def run_shelxl(work_dir: Path, stem: str, iterations: int = 1):
     if not final["res_health"].get("ok"):
         final["status"] = "invalid_res_output"
         final["invalid_res_reason"] = final["res_health"].get("reason")
+    else:
+        active = (0.0, 0.0) if freeze_zero else _active_wght_from_stats(final)
+        write_endpoint_ins(work_dir / f"{stem}.res", work_dir / f"{stem}.res", hkl_name=f"{stem}.hkl", keep_exti=False, wght=active)
+        final["res_normalized_for_reopen"] = True
     final["iterations"] = n_iter
     final["iteration_history"] = history
+    final["wght_mode"] = mode
     return final
 
 
@@ -1162,6 +1240,7 @@ def export_corrected_endpoint(
     post_bloch_sigma_holdout_fraction: float = 0.20,
     post_bloch_sigma_min_scale: float = 0.25,
     post_bloch_sigma_max_scale: float = 4.0,
+    endpoint_wght_mode: str = "freeze-zero",
 ):
     out_dir.mkdir(parents=True, exist_ok=True)
     arrays = best_eval["arrays"]
@@ -1228,8 +1307,15 @@ def export_corrected_endpoint(
         }
     write_hkl(hkl, rows_merged, hkl_format)
     write_hkl(out_dir / "dyn_nuisance_corrected_unmerged.hkl", rows_unmerged, hkl_format)
-    write_endpoint_ins(res_path, out_dir / "dyn_nuisance_corrected.ins", hkl_name="dyn_nuisance_corrected.hkl", keep_exti=keep_exti)
-    shelxl = run_shelxl(out_dir, "dyn_nuisance_corrected", iterations=shelxl_iterations)
+    initial_wght = (0.0, 0.0) if str(endpoint_wght_mode) == "freeze-zero" else None
+    write_endpoint_ins(
+        res_path,
+        out_dir / "dyn_nuisance_corrected.ins",
+        hkl_name="dyn_nuisance_corrected.hkl",
+        keep_exti=keep_exti,
+        wght=initial_wght,
+    )
+    shelxl = run_shelxl(out_dir, "dyn_nuisance_corrected", iterations=shelxl_iterations, wght_mode=endpoint_wght_mode)
     maps = run_maps(out_dir, "dyn_nuisance_corrected") if make_maps else {}
     manifest = {
         "lambda_q": float(lambda_q),
@@ -1241,6 +1327,7 @@ def export_corrected_endpoint(
         **modulation_meta,
         "keep_exti": bool(keep_exti),
         "shelxl_iterations": int(max(1, shelxl_iterations)),
+        "endpoint_wght_mode": str(endpoint_wght_mode),
         "post_bloch_sigma": post_bloch_sigma,
         "rows_unmerged": len(rows_unmerged),
         "rows_merged_exact_hkl": len(rows_merged),
@@ -1425,6 +1512,12 @@ def main():
     ap.add_argument("--endpoint-b-grid", default="0.0", help="Diagnostic endpoint resolution-scale grid in intensity B units: Icorr *= exp(B*(1/4d^2 - median(1/4d^2))). Nonzero values are not promoted over a neutral B=0 endpoint.")
     ap.add_argument("--endpoint-exti-grid", default="off", help="Comma grid of endpoint EXTI modes: off,on. Off removes EXTI from the corrected endpoint; on keeps/regularizes the source EXTI term.")
     ap.add_argument("--shelxl-iterations", type=int, default=1, help="Number of SHELXL polish passes per corrected endpoint. Later passes feed .res back into .ins.")
+    ap.add_argument(
+        "--endpoint-wght-mode",
+        choices=["freeze-zero", "inherit", "promote"],
+        default="freeze-zero",
+        help="SHELXL WGHT policy for corrected-HKL endpoints. freeze-zero is the production default after GROND sigma calibration; inherit keeps the source-model WGHT; promote uses SHELXL recommendations on later external passes.",
+    )
     ap.add_argument("--post-bloch-sigma-policy", choices=["none", "uniform_z_rms"], default="none", help="Endpoint uncertainty policy applied after Bloch correction and before SHELXL. uniform_z_rms fits one residual RMS(z) scalar from the current model and scales endpoint sigmas only.")
     ap.add_argument("--post-bloch-sigma-holdout-fraction", type=float, default=0.20, help="Deterministic HKL holdout fraction reported for uniform_z_rms diagnostics.")
     ap.add_argument("--post-bloch-sigma-min-scale", type=float, default=0.25, help="Lower guardrail for the uniform_z_rms sigma multiplier.")
@@ -1708,6 +1801,7 @@ def main():
                         post_bloch_sigma_holdout_fraction=args.post_bloch_sigma_holdout_fraction,
                         post_bloch_sigma_min_scale=args.post_bloch_sigma_min_scale,
                         post_bloch_sigma_max_scale=args.post_bloch_sigma_max_scale,
+                        endpoint_wght_mode=args.endpoint_wght_mode,
                     )
                 )
     endpoint_results = sorted(endpoint_results, key=lambda r: (r["shelxl"].get("wR2_all", 999), r["shelxl"].get("R1_all", 999)))
@@ -1830,7 +1924,13 @@ def main():
             "group_width_deg": group_width_values,
         },
         "selection_metric": str(args.selection_metric),
-        "shelx_weight": {"source_a": wght_a, "source_b": wght_b, "selected_native_a": best["native_weight"]["a"], "selected_native_b": best["native_weight"]["b"]},
+        "shelx_weight": {
+            "source_a": wght_a,
+            "source_b": wght_b,
+            "selected_native_a": best["native_weight"]["a"],
+            "selected_native_b": best["native_weight"]["b"],
+            "endpoint_wght_mode": args.endpoint_wght_mode,
+        },
         "bloch_kernel_contract": frozen_kernel_contract(
             Config(
                 n_basis=args.n_basis,

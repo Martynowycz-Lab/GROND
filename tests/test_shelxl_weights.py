@@ -9,6 +9,7 @@ from grond.legacy.engine.native_row_regularize import (
     parse_lst,
     parse_recommended_wght,
     promote_recommended_wght,
+    write_active_wght,
     write_endpoint_ins,
 )
 
@@ -126,6 +127,55 @@ def test_write_endpoint_ins_forces_one_shelxl_cycle_and_electron_wavelength(tmp_
     assert "CGLS 10" not in text
     assert 'REM <HklSrc "%./dyn_nuisance_corrected.hkl">' in text
     assert "EXTI" not in text
+
+
+def test_write_endpoint_ins_can_force_zero_weight_and_strip_tail(tmp_path: Path):
+    src = tmp_path / "model.res"
+    dst = tmp_path / "model.ins"
+    src.write_text(
+        "\n".join(
+            [
+                "TITL trial",
+                "CELL 1.0 5.0 6.0 7.0 90 90 90",
+                "SFAC C 1 0 1 0 1 0 1 0",
+                "WGHT    0.126534",
+                "L.S. 10",
+                "FVAR 1.0",
+                "HKLF 4",
+                "END",
+                "WGHT      0.0834      0.0000",
+                "Q1 1 0 0 0 11 0.05",
+            ]
+        )
+        + "\n"
+    )
+
+    write_endpoint_ins(src, dst, hkl_name="dyn_nuisance_corrected.hkl", wght=(0.0, 0.0))
+
+    text = dst.read_text()
+    assert "WGHT      0.0000      0.0000" in text
+    assert "WGHT    0.126534" not in text
+    assert "WGHT      0.0834" not in text
+    assert "Q1 " not in text
+    assert "L.S. 1" in text
+    assert "L.S. 10" not in text
+    assert text.rstrip().endswith("END")
+
+
+def test_write_active_wght_normalizes_res_for_reopen(tmp_path: Path):
+    res = tmp_path / "model.res"
+    res.write_text("TITL trial\nWGHT 0.2\nFVAR 1.0\nHKLF 4\nEND\nWGHT 0.1 0\n")
+
+    summary = write_active_wght(res, 0.0, 0.0)
+
+    assert summary["written"] is True
+    assert res.read_text().splitlines() == [
+        "TITL trial",
+        "WGHT      0.0000      0.0000",
+        "FVAR 1.0",
+        "HKLF 4",
+        "END",
+    ]
 
 
 def test_write_endpoint_ins_inserts_one_cycle_when_missing(tmp_path: Path):
