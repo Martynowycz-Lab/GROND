@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import tempfile
@@ -45,6 +46,28 @@ def run_checked(cmd: list[str | Path], *, cwd: Path) -> None:
     subprocess.run([str(part) for part in cmd], cwd=cwd, check=True)
 
 
+def run_json_checked(cmd: list[str | Path], *, cwd: Path) -> dict:
+    """Run one smoke command and parse a JSON object from stdout."""
+
+    printable = " ".join(str(part) for part in cmd)
+    print(f"+ {printable}")
+    proc = subprocess.run([str(part) for part in cmd], cwd=cwd, check=True, text=True, stdout=subprocess.PIPE)
+    return json.loads(proc.stdout)
+
+
+def assert_current_install(payload: dict) -> None:
+    """Fail the smoke test if the installed wheel lacks current guard rails."""
+
+    grond = payload.get("grond") or {}
+    features = grond.get("required_features") or {}
+    missing = sorted(name for name, ok in features.items() if not ok)
+    if grond.get("install_status") != "current_required_features_present" or missing:
+        raise SystemExit(
+            "installed GROND wheel is missing required current features: "
+            + ", ".join(missing or [str(grond.get("install_status"))])
+        )
+
+
 def smoke_install_wheel(dist_dir: Path) -> None:
     """Install the built wheel and verify module plus console entry points."""
 
@@ -58,7 +81,7 @@ def smoke_install_wheel(dist_dir: Path) -> None:
         run_checked([python, "-m", "pip", "install", "--disable-pip-version-check", str(wheel)], cwd=tmp_dir)
         run_checked([python, "-m", "grond", "--help"], cwd=tmp_dir)
         run_checked([python, "-m", "grond", "validate"], cwd=tmp_dir)
-        run_checked([python, "-m", "grond", "doctor", "--probe-bloch"], cwd=tmp_dir)
+        assert_current_install(run_json_checked([python, "-m", "grond", "doctor", "--probe-bloch"], cwd=tmp_dir))
         run_checked([venv_script(venv_dir, "grond"), "--help"], cwd=tmp_dir)
         run_checked([venv_script(venv_dir, "GROND"), "--help"], cwd=tmp_dir)
 

@@ -476,6 +476,23 @@ def test_sfac_check_rejects_unsupported_shelx_endpoint_contracts(tmp_path: Path)
         assert any(expected in item["message"] for item in payload["messages"])
 
 
+def test_doctor_reports_current_install_feature_flags(capsys):
+    args = build_parser().parse_args(["doctor"])
+
+    assert args.func(args) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    grond = payload["grond"]
+    assert grond["install_status"] == "current_required_features_present"
+    assert grond["required_features"] == {
+        "shelxl_feedback_res_guard": True,
+        "usable_feedback_model_selection": True,
+        "final_feedback_row_recompute": True,
+        "corrected_endpoint_hklf4_contract": True,
+        "absolute_structure_no_pandas": True,
+    }
+
+
 def test_auto_parser_is_simple_run_alias():
     args = build_parser().parse_args(["auto", "--out-dir", "out", "--xds-dir", "xds", "--structure", "model.res"])
     assert args.command == "auto"

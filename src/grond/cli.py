@@ -6045,10 +6045,31 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     payload = probe_accelerators(python)
     package_init = Path(__file__).resolve().parent / "__init__.py"
     absolute_structure_script = engine_script("absolute_structure_diagnostic.py")
+    feedback_script = engine_script("shelxl_feedback_loop.py")
+    native_regularize_script = engine_script("native_row_regularize.py")
     try:
         absolute_structure_text = absolute_structure_script.read_text(errors="replace")
     except OSError:
         absolute_structure_text = ""
+    try:
+        feedback_text = feedback_script.read_text(errors="replace")
+    except OSError:
+        feedback_text = ""
+    try:
+        native_regularize_text = native_regularize_script.read_text(errors="replace")
+    except OSError:
+        native_regularize_text = ""
+    try:
+        cli_text = Path(__file__).read_text(errors="replace")
+    except OSError:
+        cli_text = ""
+    required_features = {
+        "shelxl_feedback_res_guard": "def shelx_res_health" in feedback_text and "rejected.append(health)" in feedback_text,
+        "usable_feedback_model_selection": "shelxl_feedback_current_model" in cli_text and "shelx_model_is_usable" in cli_text,
+        "final_feedback_row_recompute": "final_row_recompute" in feedback_text and "--skip-endpoint-refinement" in feedback_text,
+        "corrected_endpoint_hklf4_contract": "HKLF 4" in native_regularize_text and "_unsupported_endpoint_reason" in native_regularize_text,
+        "absolute_structure_no_pandas": "import pandas" not in absolute_structure_text and "pd.read_csv" not in absolute_structure_text,
+    }
     payload["grond"] = {
         "version": __version__,
         "package": str(package_init.resolve()),
@@ -6056,6 +6077,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         "engine_root": str(LEGACY_ROOT.resolve()),
         "absolute_structure_diagnostic": str(absolute_structure_script.resolve()),
         "absolute_structure_uses_pandas": "import pandas" in absolute_structure_text or "pd.read_csv" in absolute_structure_text,
+        "required_features": required_features,
+        "install_status": "current_required_features_present" if all(required_features.values()) else "stale_or_incomplete_install",
     }
     payload["tool_config"] = {
         "path": getattr(args, "tool_config_path", ""),

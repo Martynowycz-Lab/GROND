@@ -36,6 +36,24 @@ The package installs both `GROND` and `grond` console commands. If a shell or ma
 python -m grond doctor --probe-bloch
 ```
 
+## Updating A Stale Mac App Bundle
+
+Some lab Macs may have an older self-contained bundle at `/Applications/GROND`. If `GROND doctor` reports `install_status: stale_or_incomplete_install`, or if the `grond` block is missing from the doctor output, remove the old bundle before reinstalling. Installing over the top can leave old `site-packages` files behind.
+
+```bash
+sudo rm -rf /Applications/GROND
+sudo mkdir -p /Applications/GROND
+sudo chown -R "$USER" /Applications/GROND
+git clone https://github.com/Martynowycz-Lab/GROND.git
+cd GROND
+python3.12 -m venv /Applications/GROND/grond
+/Applications/GROND/grond/bin/python -m pip install --upgrade pip
+/Applications/GROND/grond/bin/python -m pip install .
+/Applications/GROND/grond/bin/GROND doctor --probe-bloch
+```
+
+The final doctor output should include `version: 0.2.1` or newer, a `grond.package` path under `/Applications/GROND/grond/lib/python.../site-packages/grond`, and `install_status: current_required_features_present`.
+
 ## Developer Install
 
 Use the editable install when modifying GROND:
