@@ -297,7 +297,7 @@ To regenerate the final package without rerunning the expensive stages, use:
 GROND finish --run-dir grond_out
 ```
 
-`finish` reloads the completed run, rewrites `FINAL_SUMMARY.md` and `QUICK_STATS.md`, and makes corrected-HKL endpoint maps when `shelx2map` and the endpoint `.fcf` are available. It does not refine or change the model.
+`finish` reloads the completed run, rewrites `FINAL_SUMMARY.md` and `QUICK_STATS.md`, and writes native row-level dynamical Fourier maps plus `grond_native_dynamical.cif` from the frozen GROND row table and the selected final model. The default maps are `grond_native_dynamic_fo.map`, `grond_native_dynamic_2fofc.map`, and `grond_native_dynamic_fofc.map`. For a fast corrected-HKL endpoint-map check only, use `GROND finish --run-dir grond_out --map-mode shelx2map`. `finish` does not refine or change the model.
 
 ## Package Layout
 

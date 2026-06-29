@@ -53,6 +53,7 @@ from .macromolecule import (
 from .macromolecule import (
     write_table as write_macromolecule_table,
 )
+from .maps.native_dynamic import NativeDynamicMapOptions, write_native_dynamic_map_package
 from .paths import LEGACY_ROOT, engine_script
 from .progress import ProgressState, format_seconds
 from .refine.endpoints import configured_endpoint_blocks, endpoint_report
@@ -5618,7 +5619,7 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
         "",
         "## Notes",
         "",
-        "Endpoint maps made by `GROND finish --make-maps` are corrected-HKL endpoint maps from the frozen GROND correction. They are useful for inspection, but they are not yet native dynamical residual-potential maps.",
+        "Native maps made by `GROND finish` use the frozen row-level GROND table, the final model phase, and dynamically inferred electron amplitudes. Use `--map-mode shelx2map` only for a fast corrected-HKL endpoint-map check.",
     ]
     final_summary_path.write_text("\n".join(final_lines) + "\n")
     return {"status": "ok", "path": str(quick_path), "final_summary": str(final_summary_path), "console": console}
@@ -5709,6 +5710,77 @@ def run_finish_endpoint_maps(result: Mapping[str, object], args: argparse.Namesp
     }
 
 
+def _finish_native_row_table(result: Mapping[str, object]) -> Path:
+    """Return the best row table for native dynamical maps."""
+
+    endpoint = _publication_endpoint_from_result(result)
+    endpoint_row_table = str(endpoint.get("endpoint_row_table", "") or "").strip()
+    if endpoint_row_table:
+        return Path(endpoint_row_table).expanduser()
+    final_run = _quick_final_run(result)
+    if final_run is not None:
+        return final_run / "native_dyn_calc.csv"
+    return Path()
+
+
+def _finish_native_model(result: Mapping[str, object], args: argparse.Namespace) -> Path:
+    """Return the model whose phases should be used for native maps."""
+
+    override = str(getattr(args, "model", "") or "").strip()
+    if override:
+        return Path(override).expanduser()
+    endpoint = _publication_endpoint_from_result(result)
+    endpoint_res = str(endpoint.get("endpoint_res", "") or "").strip()
+    if endpoint_res:
+        return Path(endpoint_res).expanduser()
+    model = str(result.get("model", "") or "").strip()
+    return Path(model).expanduser() if model else Path()
+
+
+def run_finish_native_dynamic_maps(run_dir: Path, result: Mapping[str, object], args: argparse.Namespace) -> dict[str, object]:
+    """Generate native row-level dynamical Fourier maps and coefficient files."""
+
+    row_table = _finish_native_row_table(result)
+    model = _finish_native_model(result, args)
+    if not row_table:
+        return {"status": "missing_row_table", "row_table": ""}
+    if not model:
+        return {"status": "missing_model", "model": ""}
+    d_min = getattr(args, "native_map_d_min", 0.0)
+    options = NativeDynamicMapOptions(
+        grid_spacing_A=float(getattr(args, "native_map_spacing", 0.25)),
+        d_min_A=float(d_min) if float(d_min) > 0.0 else None,
+        min_i_over_sigma=float(getattr(args, "native_map_min_i_over_sigma", 0.0)),
+        max_grid_points=int(getattr(args, "native_map_max_grid_points", 8_000_000)),
+    )
+    return write_native_dynamic_map_package(
+        row_table=row_table,
+        model_path=model,
+        out_dir=run_dir / "native_dynamic_maps",
+        options=options,
+    )
+
+
+def run_finish_maps(run_dir: Path, result: Mapping[str, object], args: argparse.Namespace) -> dict[str, object]:
+    """Run the requested finish-map mode."""
+
+    if not getattr(args, "make_maps", True):
+        return {"status": "disabled"}
+    mode = str(getattr(args, "map_mode", "native") or "native").lower()
+    if mode == "off":
+        return {"status": "disabled"}
+    maps: dict[str, object] = {"mode": mode}
+    if mode in {"native", "both"}:
+        maps["native_dynamic"] = run_finish_native_dynamic_maps(run_dir, result, args)
+    if mode in {"shelx2map", "both"}:
+        maps["shelx2map"] = run_finish_endpoint_maps(result, args)
+    if mode not in {"native", "shelx2map", "both", "off"}:
+        maps["status"] = "unknown_mode"
+    else:
+        maps["status"] = "ok"
+    return maps
+
+
 def cmd_finish(args: argparse.Namespace) -> int:
     """Regenerate the compact user-facing package for a completed GROND run."""
 
@@ -5722,11 +5794,16 @@ def cmd_finish(args: argparse.Namespace) -> int:
         raise SystemExit(f"Could not read completed GROND prep file: {prep_path}")
     prep = load_prep(prep_path)
     quick = write_quick_stats(prep, result, argparse.Namespace(out_dir=str(run_dir)))
-    maps = run_finish_endpoint_maps(result, args) if getattr(args, "make_maps", True) else {"status": "disabled"}
+    maps = run_finish_maps(run_dir, result, args)
     endpoint = _publication_endpoint_from_result(result)
     endpoint_res_text = str(endpoint.get("endpoint_res", "") or "").strip()
     endpoint_res = Path(endpoint_res_text).expanduser() if endpoint_res_text else None
     cif = endpoint_res.with_suffix(".cif") if endpoint_res is not None else None
+    native_cif = ""
+    native = maps.get("native_dynamic") if isinstance(maps, Mapping) else {}
+    if isinstance(native, Mapping):
+        outputs = native.get("outputs") if isinstance(native.get("outputs"), Mapping) else {}
+        native_cif = str(outputs.get("dynamic_cif", "") or "")
     manifest = {
         "status": "ok",
         "run_dir": str(run_dir),
@@ -5736,9 +5813,10 @@ def cmd_finish(args: argparse.Namespace) -> int:
         "quick_stats": quick.get("path", ""),
         "maps": maps,
         "cif": {
-            "status": "exists" if cif is not None and cif.exists() else "missing",
-            "path": str(cif) if cif is not None else "",
-            "note": "GROND does not alter the endpoint to force CIF generation. If this is missing, export CIF from the normalized publication RES in SHELXL/Olex2.",
+            "status": "native_dynamic_written" if native_cif else ("endpoint_exists" if cif is not None and cif.exists() else "endpoint_missing"),
+            "native_dynamic_cif": native_cif,
+            "endpoint_cif": str(cif) if cif is not None else "",
+            "note": "The native GROND CIF records the row-level dynamical coefficient export. Endpoint CIF is reported only if an external endpoint already wrote one.",
         },
     }
     manifest_path = run_dir / "finish_manifest.json"
@@ -7960,18 +8038,43 @@ def build_parser() -> argparse.ArgumentParser:
     p_push.add_argument("--set-ls-cycles", type=int, default=1, help="Rewrite L.S. to this value in the prepared start model. Use 0 to preserve it.")
     p_push.set_defaults(func=cmd_push_endpoint)
 
-    p_finish = sub.add_parser("finish", help="Regenerate the compact final summary and optional corrected-endpoint maps from a completed run.")
+    p_finish = sub.add_parser("finish", help="Regenerate final summaries, native dynamical maps, and the GROND dynamic CIF from a completed run.")
     p_finish.add_argument("--run-dir", default=".", help="Completed GROND auto/run output directory. Defaults to the current directory.")
     p_finish.add_argument("--checkpoint", default="", help="Optional grond_continue_checkpoint.json; its run_dir is used.")
+    p_finish.add_argument("--model", default="", help="Optional model override for native dynamical map phases. Defaults to the selected publication endpoint RES.")
     add_tool_config_args(p_finish)
     p_finish.add_argument(
         "--make-maps",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Use shelx2map to regenerate corrected-HKL endpoint Fo, 2Fo-Fc, and Fo-Fc maps when an FCF exists.",
+        help="Generate finish maps. Native row-level dynamical maps are the default; use --no-make-maps to skip.",
     )
+    p_finish.add_argument(
+        "--map-mode",
+        choices=["native", "shelx2map", "both", "off"],
+        default="native",
+        help="native writes row-level dynamical maps; shelx2map writes quick corrected-HKL endpoint maps; both writes both.",
+    )
+    p_finish.add_argument("--native-map-spacing", type=float, default=0.25, help="Approximate CCP4 grid spacing in Angstroms for native dynamical maps.")
+    p_finish.add_argument("--native-map-d-min", type=float, default=0.0, help="Optional low-pass d_min cutoff for native dynamical maps. Zero uses all row-table coefficients.")
+    p_finish.add_argument("--native-map-min-i-over-sigma", type=float, default=0.0, help="Minimum row I/sigma used for native dynamical map amplitudes.")
+    p_finish.add_argument("--native-map-max-grid-points", type=int, default=8_000_000, help="Safety cap on native dynamical map grid points.")
     p_finish.add_argument("--json", action="store_true", help="Print the compact JSON payload used by automation.")
     p_finish.set_defaults(func=cmd_finish)
+
+    p_publish = sub.add_parser("publish", help="Alias for finish: regenerate final summaries, native dynamical maps, and the GROND dynamic CIF.")
+    p_publish.add_argument("--run-dir", default=".", help="Completed GROND auto/run output directory. Defaults to the current directory.")
+    p_publish.add_argument("--checkpoint", default="", help="Optional grond_continue_checkpoint.json; its run_dir is used.")
+    p_publish.add_argument("--model", default="", help="Optional model override for native dynamical map phases. Defaults to the selected publication endpoint RES.")
+    add_tool_config_args(p_publish)
+    p_publish.add_argument("--make-maps", action=argparse.BooleanOptionalAction, default=True)
+    p_publish.add_argument("--map-mode", choices=["native", "shelx2map", "both", "off"], default="native")
+    p_publish.add_argument("--native-map-spacing", type=float, default=0.25)
+    p_publish.add_argument("--native-map-d-min", type=float, default=0.0)
+    p_publish.add_argument("--native-map-min-i-over-sigma", type=float, default=0.0)
+    p_publish.add_argument("--native-map-max-grid-points", type=int, default=8_000_000)
+    p_publish.add_argument("--json", action="store_true")
+    p_publish.set_defaults(func=cmd_finish)
 
     p_val = sub.add_parser("validate", help="Compile the vendored engine scripts with the selected Python.")
     p_val.add_argument("--python", default="")

@@ -89,6 +89,8 @@ After a completed run, open `FINAL_SUMMARY.md` first. It names the final hand, h
 GROND finish --run-dir grond_out
 ```
 
+This writes `native_dynamic_maps/` with native row-level dynamical Fo, 2Fo-Fc, and Fo-Fc CCP4 maps, a coefficient table, and `grond_native_dynamical.cif`. The alias `GROND publish --run-dir grond_out` does the same packaging. If you only want a quick corrected-HKL endpoint-map check from SHELXL's FCF output, use `GROND finish --run-dir grond_out --map-mode shelx2map`.
+
 Run the middle-speed automatic profile:
 
 ```bash

@@ -39,6 +39,7 @@ EXPECTED_CLI_COMMANDS = {
     "make-free-flags",
     "prep",
     "protein-ls1",
+    "publish",
     "push-endpoint",
     "raw-polish",
     "row-template",
@@ -156,6 +157,7 @@ def test_finish_parser_defaults_to_existing_run_dir():
     assert args.run_dir == "grond_out"
     assert args.checkpoint == ""
     assert args.make_maps is False
+    assert args.map_mode == "native"
 
 
 def test_finish_regenerates_compact_package(tmp_path: Path, capsys):
