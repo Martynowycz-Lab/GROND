@@ -5870,18 +5870,21 @@ def write_push_endpoint_report(out_dir: Path, *, best_cycle_tolerance: float) ->
     rows = []
     for run in summary.get("runs", []):
         metrics = run.get("metrics") or {}
-        model = Path(run.get("output_model", ""))
-        lst = model.with_suffix(".lst")
-        text = lst.read_text(errors="ignore") if lst.exists() else ""
+        model_text = str(run.get("output_model") or "")
+        model = None if model_text in {"", "."} else Path(model_text)
+        lst = model.with_suffix(".lst") if model is not None else None
+        text = lst.read_text(errors="ignore") if lst is not None and lst.exists() else ""
         npd_atoms = re.findall(r"\s([A-Z][A-Z0-9]{3})\s+\*\* NON POSITIVE DEFINITE \*\*", text)
         split_match = re.search(r"(\d+)\s+atoms may be split", text)
         split_count = int(split_match.group(1)) if split_match else 0
         param_match = re.search(r"Total number of l\.s\. parameters =\s+(\d+)", text)
         restraint_match = re.search(r"Restrained GooF =\s+[0-9.]+ for\s+(\d+) restraints", text)
+        endpoint_health = run.get("endpoint_res_health") or {}
         rows.append(
             {
                 "cycle": len(rows) + 1,
-                "model": str(model),
+                "model": str(model) if model is not None else "",
+                "status": endpoint_health.get("reason") or metrics.get("endpoint_status") or "ok",
                 "elapsed_seconds": run.get("elapsed_seconds"),
                 "parameters": int(param_match.group(1)) if param_match else None,
                 "restraints": int(restraint_match.group(1)) if restraint_match else None,
@@ -5914,12 +5917,12 @@ def write_push_endpoint_report(out_dir: Path, *, best_cycle_tolerance: float) ->
     with report_path.open("w") as handle:
         handle.write("# GROND Endpoint Push Report\n\n")
         handle.write("This report summarizes a continuation run from an existing pinned GROND row/nuisance summary. The selected model is the earliest safe cycle within the requested native-row tolerance when possible; cycles with NPD atoms or split warnings are kept as diagnostics, not promoted.\n\n")
-        handle.write("| cycle | seconds | params | restraints | NPD atoms | split warnings | native wR2all | native free wR2 | R1all | wR2all | GooF | sigma scale |\n")
-        handle.write("|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|\n")
+        handle.write("| cycle | status | seconds | params | restraints | NPD atoms | split warnings | native wR2all | native free wR2 | R1all | wR2all | GooF | sigma scale |\n")
+        handle.write("|---:|---|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|\n")
         for row in rows:
             npd = ",".join(row["npd_atoms"]) if row["npd_atoms"] else "-"
             handle.write(
-                f"| {row['cycle']} | {float(row['elapsed_seconds'] or 0):.1f} | {row['parameters']} | {row['restraints']} | "
+                f"| {row['cycle']} | {row['status']} | {float(row['elapsed_seconds'] or 0):.1f} | {row['parameters']} | {row['restraints']} | "
                 f"{npd} | {row['split_count']} | {float(row['native_wR2_all'] or math.nan):.4f} | "
                 f"{float(row['native_free_wR2_all'] or math.nan):.4f} | {float(row['endpoint_R1_all'] or math.nan):.4f} | "
                 f"{float(row['endpoint_wR2_all'] or math.nan):.4f} | {float(row['endpoint_GooF'] or math.nan):.3f} | "

@@ -674,6 +674,42 @@ def test_push_endpoint_dry_run_accepts_continue_checkpoint(tmp_path):
     assert plan["checkpoint"] == str(checkpoint.resolve())
 
 
+def test_write_push_endpoint_report_handles_missing_output_model(tmp_path):
+    out_dir = tmp_path / "push"
+    out_dir.mkdir()
+    (out_dir / "shelxl_feedback_loop_summary.json").write_text(
+        json.dumps(
+            {
+                "runs": [
+                    {
+                        "label": "cycle_01",
+                        "output_model": ".",
+                        "endpoint_res_health": {
+                            "ok": False,
+                            "reason": "missing_or_invalid_endpoint_res",
+                        },
+                        "elapsed_seconds": 12.5,
+                        "metrics": {
+                            "native_dyn_wR2_all": 0.12,
+                            "native_dyn_free_wR2_all": 0.14,
+                        },
+                    }
+                ]
+            }
+        )
+        + "\n"
+    )
+
+    report = cli.write_push_endpoint_report(out_dir, best_cycle_tolerance=0.001)
+
+    assert report == out_dir / "ENDPOINT_PUSH_REPORT.md"
+    text = report.read_text()
+    assert "missing_or_invalid_endpoint_res" in text
+    decision = json.loads((out_dir / "endpoint_push_decision.json").read_text())
+    assert decision["rows"][0]["model"] == ""
+    assert decision["rows"][0]["status"] == "missing_or_invalid_endpoint_res"
+
+
 def test_write_quick_stats_summarizes_row_and_endpoint_tables(tmp_path):
     out_dir = tmp_path / "grond_out"
     tables = out_dir / "tables"
