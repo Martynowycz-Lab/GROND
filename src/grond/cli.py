@@ -5197,6 +5197,9 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
     timing_rows = _quick_progress_timings(out_dir)
     sfac_check = try_read_json(out_dir / "sfac_check.json")
     final_run = _quick_final_run(result)
+    final_model = Path(str(result.get("model"))) if result.get("model") else None
+    final_endpoint_dir = final_model.parent if final_model else None
+    final_endpoint_stem = final_model.stem if final_model else ""
     final_summary = try_read_json(final_run / "summary.json") if final_run else {}
     best_native = _quick_best_native(final_summary)
     best_endpoint = _quick_best_endpoint(final_summary)
@@ -5403,6 +5406,10 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
             "",
             "## Files To Open Next",
             "",
+            f"- Final LS1 feedback endpoint RES: `{final_model or ''}`",
+            f"- Final LS1 feedback corrected HKL: `{(final_endpoint_dir / (final_endpoint_stem + '.hkl')) if final_endpoint_dir else ''}`",
+            f"- Final LS1 feedback SHELXL LST: `{(final_endpoint_dir / (final_endpoint_stem + '.lst')) if final_endpoint_dir else ''}`",
+            f"- Final LS1 feedback manifest: `{(final_endpoint_dir / 'manifest.json') if final_endpoint_dir else ''}`",
             f"- Publication endpoint RES to open in SHELXLE/Olex2: `{publication_endpoint.get('endpoint_res', '')}`",
             f"- Publication endpoint INS used for the reported run: `{publication_endpoint.get('endpoint_ins', '')}`",
             f"- Publication corrected HKL used by that endpoint: `{publication_endpoint.get('endpoint_hkl', '')}`",
