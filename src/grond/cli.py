@@ -4902,7 +4902,10 @@ def cmd_run(args: argparse.Namespace) -> int:
     result["continue_checkpoint"] = write_continue_checkpoint(prep, result, args)
     result["quick_stats"] = write_quick_stats(prep, result, args)
     (Path(args.out_dir) / "grond_summary.json").write_text(json.dumps(result, indent=2) + "\n")
-    print(json.dumps({"out_dir": str(Path(args.out_dir).resolve()), **result}, indent=2))
+    quick = result.get("quick_stats") if isinstance(result.get("quick_stats"), Mapping) else {}
+    console = quick.get("console") if isinstance(quick.get("console"), Mapping) else {}
+    payload = {"status": result.get("status", "ok"), **console} if console else {"status": result.get("status", "ok"), "out_dir": str(Path(args.out_dir).resolve()), "quick_stats": quick}
+    print(json.dumps(payload, indent=2, allow_nan=True))
     return 0
 
 
@@ -4994,6 +4997,16 @@ def _quick_percent(value: object) -> str:
         return f"{100.0 * float(value):.2f}%"
     except (TypeError, ValueError):
         return "n/a"
+
+
+def _quick_fraction(value: object) -> float | None:
+    """Return a finite fractional statistic or None."""
+
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if math.isfinite(out) else None
 
 
 def _quick_number(value: object, digits: int = 3) -> str:
@@ -5122,6 +5135,22 @@ def _quick_metric(metrics: Mapping[str, object], split: str, branch: str, key: s
     return branch_block.get(key)
 
 
+def _quick_dyn_metric(summary: Mapping[str, object], split: str, key: str) -> object:
+    """Read one dynamical row-space metric from a native-stage summary."""
+
+    best_native = _quick_best_native(summary)
+    metrics = best_native.get("metrics") if isinstance(best_native.get("metrics"), Mapping) else {}
+    return _quick_metric(metrics, split, "dyn", key)
+
+
+def _quick_born_metric(summary: Mapping[str, object], split: str, key: str) -> object:
+    """Read one matched Born row-space metric from a native-stage summary."""
+
+    best_native = _quick_best_native(summary)
+    metrics = best_native.get("metrics") if isinstance(best_native.get("metrics"), Mapping) else {}
+    return _quick_metric(metrics, split, "born", key)
+
+
 def _quick_float(value: object, default: float = float("nan")) -> float:
     """Return a finite float or a default."""
 
@@ -5209,6 +5238,25 @@ def _quick_final_hand_summary(decision_tree: Mapping[str, object], diagnostic: M
     }
 
 
+def _quick_endpoint_file_block(publication_endpoint: Mapping[str, object], final_model: Path | None) -> dict[str, str]:
+    """Collect the endpoint paths users most often need to open."""
+
+    final_endpoint_dir = final_model.parent if final_model else None
+    final_endpoint_stem = final_model.stem if final_model else ""
+    return {
+        "final_feedback_res": str(final_model or ""),
+        "final_feedback_hkl": str((final_endpoint_dir / (final_endpoint_stem + ".hkl")) if final_endpoint_dir else ""),
+        "final_feedback_lst": str((final_endpoint_dir / (final_endpoint_stem + ".lst")) if final_endpoint_dir else ""),
+        "final_feedback_manifest": str((final_endpoint_dir / "manifest.json") if final_endpoint_dir else ""),
+        "publication_res": str(publication_endpoint.get("endpoint_res", "")),
+        "publication_ins": str(publication_endpoint.get("endpoint_ins", "")),
+        "publication_hkl": str(publication_endpoint.get("endpoint_hkl", "")),
+        "publication_lst": str(publication_endpoint.get("endpoint_lst", "")),
+        "publication_manifest": str(publication_endpoint.get("endpoint_manifest", "")),
+        "publication_row_table": str(publication_endpoint.get("endpoint_row_table", "")),
+    }
+
+
 def _quick_transform_summary(transform_decision: Mapping[str, object]) -> dict[str, object]:
     """Return compact transform details for the quick summary."""
 
@@ -5244,6 +5292,7 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
 
     out_dir = Path(args.out_dir).expanduser().resolve()
     quick_path = out_dir / "QUICK_STATS.md"
+    final_summary_path = out_dir / "FINAL_SUMMARY.md"
     row_metrics_path = out_dir / "tables" / "row_mr_metrics.json"
     row_metrics = try_read_json(row_metrics_path)
     endpoint_calibration = result.get("endpoint_calibration") if isinstance(result.get("endpoint_calibration"), Mapping) else {}
@@ -5275,6 +5324,8 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
     if not transform_decision and prep.datasets:
         transform_decision = try_read_json(out_dir / "decisions" / prep.datasets[0].name / "transform_decision.json")
     transform_summary = _quick_transform_summary(transform_decision)
+    screen_run = Path(str(decision_tree.get("screen_run", ""))) if isinstance(decision_tree.get("screen_run"), str) else None
+    screen_summary = try_read_json(screen_run / "summary.json") if screen_run else {}
     promotion = decision_tree.get("post_feedback_hand_promotion")
     promotion_decision = promotion if isinstance(promotion, Mapping) else {}
     diagnostic_path_text = (
@@ -5292,6 +5343,7 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
     hand_all = hand_blocks.get("all", {}) if isinstance(hand_blocks.get("all"), Mapping) else {}
     hand_work = hand_blocks.get("work", {}) if isinstance(hand_blocks.get("work"), Mapping) else {}
     hand_free = hand_blocks.get("free", {}) if isinstance(hand_blocks.get("free"), Mapping) else {}
+    file_block = _quick_endpoint_file_block(publication_endpoint, final_model)
     endpoints = []
     resolution_block = row_metrics.get("resolution_scale_endpoints", {})
     if isinstance(resolution_block, Mapping):
@@ -5369,6 +5421,14 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
             f"| final hand sqrt(delta chi2), all/work/free | `{_quick_number(hand_all.get('sqrt_positive_delta_chi2'), 3)}` / `{_quick_number(hand_work.get('sqrt_positive_delta_chi2'), 3)}` / `{_quick_number(hand_free.get('sqrt_positive_delta_chi2'), 3)}`; oriented as rejected-minus-final |",
             f"| free-row I residual Z | n `{free_z.get('n', 'n/a')}`; RMSZ `{_quick_number(free_z.get('rms_z'), 3)}`; meanZ `{_quick_number(free_z.get('mean_z'), 3)}`; median absZ `{_quick_number(free_z.get('median_abs_z'), 3)}` |",
             f"| all-row I residual Z | n `{all_z.get('n', 'n/a')}`; RMSZ `{_quick_number(all_z.get('rms_z'), 3)}`; meanZ `{_quick_number(all_z.get('mean_z'), 3)}`; median absZ `{_quick_number(all_z.get('median_abs_z'), 3)}` |",
+            "",
+            "## Input Model Row Statistics",
+            "",
+            "These are the first adaptive-screen row-space statistics for the supplied start model after GROND has selected the row contract used by the run. They are the practical input-model comparator, not final endpoint statistics.",
+            "",
+            "| model state | dyn R1all | dyn wR2all | dyn free wR2all | matched Born R1all | matched Born wR2all |",
+            "|---|---:|---:|---:|---:|---:|",
+            f"| input adaptive screen | `{_quick_percent(_quick_dyn_metric(screen_summary, 'all', 'R1_all'))}` | `{_quick_percent(_quick_dyn_metric(screen_summary, 'all', 'wR2_all'))}` | `{_quick_percent(_quick_dyn_metric(screen_summary, 'free', 'wR2_all'))}` | `{_quick_percent(_quick_born_metric(screen_summary, 'all', 'R1_all'))}` | `{_quick_percent(_quick_born_metric(screen_summary, 'all', 'wR2_all'))}` |",
             "",
             "## Final Nuisance Contract",
             "",
@@ -5465,17 +5525,17 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
             "",
             "## Files To Open Next",
             "",
-            f"- Final LS1 feedback endpoint RES: `{final_model or ''}`",
-            f"- Final LS1 feedback corrected HKL: `{(final_endpoint_dir / (final_endpoint_stem + '.hkl')) if final_endpoint_dir else ''}`",
-            f"- Final LS1 feedback SHELXL LST: `{(final_endpoint_dir / (final_endpoint_stem + '.lst')) if final_endpoint_dir else ''}`",
-            f"- Final LS1 feedback manifest: `{(final_endpoint_dir / 'manifest.json') if final_endpoint_dir else ''}`",
-            f"- Publication endpoint RES to open in SHELXLE/Olex2: `{publication_endpoint.get('endpoint_res', '')}`",
-            f"- Publication endpoint INS used for the reported run: `{publication_endpoint.get('endpoint_ins', '')}`",
-            f"- Publication corrected HKL used by that endpoint: `{publication_endpoint.get('endpoint_hkl', '')}`",
-            f"- Publication SHELXL LST with the reported R/GooF values: `{publication_endpoint.get('endpoint_lst', '')}`",
-            f"- Publication endpoint manifest: `{publication_endpoint.get('endpoint_manifest', '')}`",
+            f"- Final LS1 feedback endpoint RES: `{file_block['final_feedback_res']}`",
+            f"- Final LS1 feedback corrected HKL: `{file_block['final_feedback_hkl']}`",
+            f"- Final LS1 feedback SHELXL LST: `{file_block['final_feedback_lst']}`",
+            f"- Final LS1 feedback manifest: `{file_block['final_feedback_manifest']}`",
+            f"- Publication endpoint RES to open in SHELXLE/Olex2: `{file_block['publication_res']}`",
+            f"- Publication endpoint INS used for the reported run: `{file_block['publication_ins']}`",
+            f"- Publication corrected HKL used by that endpoint: `{file_block['publication_hkl']}`",
+            f"- Publication SHELXL LST with the reported R/GooF values: `{file_block['publication_lst']}`",
+            f"- Publication endpoint manifest: `{file_block['publication_manifest']}`",
             f"- Frozen Bloch row table used to make endpoint statistics: `{final_run / 'native_dyn_calc.csv' if final_run else ''}`",
-            f"- Endpoint replay row table after compact scale selection: `{publication_endpoint.get('endpoint_row_table', '')}`",
+            f"- Endpoint replay row table after compact scale selection: `{file_block['publication_row_table']}`",
             f"- Detailed row/MR table: `{row_metrics_path}`",
             f"- Endpoint calibration report: `{endpoint_calibration.get('report', '') if isinstance(endpoint_calibration, Mapping) else ''}`",
             f"- Publication endpoint chooser: `{out_dir / 'endpoint_chooser' / 'PUBLICATION_ENDPOINT_CHOOSER.md'}`",
@@ -5483,7 +5543,218 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
         ]
     )
     quick_path.write_text("\n".join(lines))
-    return {"status": "ok", "path": str(quick_path)}
+
+    selected_row = publication_endpoint if publication_endpoint else {}
+    final_row_r1 = _quick_dyn_metric(final_summary, "all", "R1_all")
+    final_row_wr2 = _quick_dyn_metric(final_summary, "all", "wR2_all")
+    final_free_wr2 = _quick_dyn_metric(final_summary, "free", "wR2_all")
+    input_row_r1 = _quick_dyn_metric(screen_summary, "all", "R1_all")
+    input_row_wr2 = _quick_dyn_metric(screen_summary, "all", "wR2_all")
+    console = {
+        "out_dir": str(out_dir),
+        "final_summary": str(final_summary_path),
+        "quick_stats": str(quick_path),
+        "full_json": str(out_dir / "grond_summary.json"),
+        "final_hand": hand_summary.get("final_hand", "n/a"),
+        "final_hand_z_all": _quick_fraction(hand_all.get("paired_z_positive_favors_final")),
+        "final_hand_z_free": _quick_fraction(hand_free.get("paired_z_positive_favors_final")),
+        "selected_transform": transform_summary.get("selected_transform", "n/a"),
+        "input_model": {
+            "row_R1all": _quick_fraction(input_row_r1),
+            "row_wR2all": _quick_fraction(input_row_wr2),
+        },
+        "final_row_model": {
+            "row_R1all": _quick_fraction(final_row_r1),
+            "row_wR2all": _quick_fraction(final_row_wr2),
+            "row_free_wR2all": _quick_fraction(final_free_wr2),
+            "row_table": str(final_run / "native_dyn_calc.csv") if final_run else "",
+        },
+        "publication_endpoint": {
+            "R1all": _quick_fraction(selected_row.get("shelxl_R1all")),
+            "wR2all": _quick_fraction(selected_row.get("shelxl_wR2all")),
+            "GooF": _quick_fraction(selected_row.get("shelxl_GooF")),
+            "scale_spec": selected_row.get("spec", ""),
+            "scale_params": selected_row.get("scale_params", ""),
+            "wght_mode": selected_row.get("wght_mode", ""),
+        },
+        "files": file_block,
+    }
+
+    final_lines = [
+        "# GROND Final Summary",
+        "",
+        "This is the compact user-facing summary. `QUICK_STATS.md` and the JSON reports keep the full audit trail.",
+        "",
+        "## Decision",
+        "",
+        "| item | value |",
+        "|---|---|",
+        f"| final hand | `{console['final_hand']}` |",
+        f"| final hand Z, all/free | `{_quick_number(console['final_hand_z_all'], 3)}` / `{_quick_number(console['final_hand_z_free'], 3)}`; positive favors the selected hand |",
+        f"| selected HKL transform | `{console['selected_transform']}` |",
+        f"| final N/Q | `{metadata.get('n_basis', 'n/a')}/{metadata.get('n_points', 'n/a')}` |",
+        f"| effective thickness model | `{_quick_number(metadata.get('thickness_A_mean'), 1)} A`; Sg window `{metadata.get('sg_window', 'n/a')}` |",
+        "",
+        "## Statistics",
+        "",
+        "| state | R1all | wR2all | free/held-out wR2all | GooF |",
+        "|---|---:|---:|---:|---:|",
+        f"| input model, row-space | `{_quick_percent(input_row_r1)}` | `{_quick_percent(input_row_wr2)}` | `{_quick_percent(_quick_dyn_metric(screen_summary, 'free', 'wR2_all'))}` | n/a |",
+        f"| final model, row-space | `{_quick_percent(final_row_r1)}` | `{_quick_percent(final_row_wr2)}` | `{_quick_percent(final_free_wr2)}` | n/a |",
+        f"| publication corrected-HKL endpoint | `{_quick_percent(selected_row.get('shelxl_R1all'))}` | `{_quick_percent(selected_row.get('shelxl_wR2all'))}` | `{_quick_percent(selected_row.get('native_free_wR2_all'))}` | `{_quick_number(selected_row.get('shelxl_GooF'), 3)}` |",
+        "",
+        "## Files",
+        "",
+        f"- Open this publication endpoint model: `{file_block['publication_res']}`",
+        f"- Use this corrected HKL with that model: `{file_block['publication_hkl']}`",
+        f"- The endpoint statistics above come from: `{file_block['publication_lst']}`",
+        f"- Frozen row-level Bloch table: `{console['final_row_model']['row_table']}`",
+        f"- Full quick report: `{quick_path}`",
+        f"- Full machine-readable run summary: `{out_dir / 'grond_summary.json'}`",
+        "",
+        "## Continue",
+        "",
+        f"- Checkpoint: `{out_dir / 'grond_continue_checkpoint.json'}`",
+        f"- To push from an edited model: `GROND push-endpoint --checkpoint {out_dir / 'grond_continue_checkpoint.json'} --start-res edited.res --out-dir {out_dir / 'endpoint_push_edited'}`",
+        f"- To regenerate this package: `GROND finish --run-dir {out_dir}`",
+        "",
+        "## Notes",
+        "",
+        "Endpoint maps made by `GROND finish --make-maps` are corrected-HKL endpoint maps from the frozen GROND correction. They are useful for inspection, but they are not yet native dynamical residual-potential maps.",
+    ]
+    final_summary_path.write_text("\n".join(final_lines) + "\n")
+    return {"status": "ok", "path": str(quick_path), "final_summary": str(final_summary_path), "console": console}
+
+
+def _finish_run_dir(args: argparse.Namespace) -> Path:
+    """Resolve the GROND run directory for `finish`."""
+
+    if getattr(args, "checkpoint", ""):
+        checkpoint = try_read_json(Path(args.checkpoint).expanduser().resolve())
+        run_dir = checkpoint.get("run_dir")
+        if not run_dir:
+            raise SystemExit(f"Checkpoint does not record run_dir: {args.checkpoint}")
+        return Path(str(run_dir)).expanduser().resolve()
+    return Path(getattr(args, "run_dir", "") or ".").expanduser().resolve()
+
+
+def _publication_endpoint_from_result(result: Mapping[str, object]) -> Mapping[str, object]:
+    """Return the selected publication endpoint block from a run result."""
+
+    endpoint_calibration = result.get("endpoint_calibration") if isinstance(result.get("endpoint_calibration"), Mapping) else {}
+    selection = endpoint_calibration.get("publication_selection", {}) if isinstance(endpoint_calibration, Mapping) else {}
+    endpoint = selection.get("publication_endpoint") if isinstance(selection, Mapping) else {}
+    return endpoint if isinstance(endpoint, Mapping) else {}
+
+
+def _shelx2map_executable(args: argparse.Namespace) -> str:
+    """Return the configured shelx2map executable, if any."""
+
+    status = external_tool_statuses(args).get("shelx2map", {})
+    resolved = str(status.get("resolved", "") or "")
+    if resolved:
+        return resolved
+    env = os.environ.get("SHELX2MAP", "")
+    if env:
+        return env
+    return shutil.which("shelx2map") or "shelx2map"
+
+
+def run_finish_endpoint_maps(result: Mapping[str, object], args: argparse.Namespace) -> dict[str, object]:
+    """Generate corrected-HKL endpoint maps from the selected publication endpoint."""
+
+    endpoint = _publication_endpoint_from_result(result)
+    endpoint_res_text = str(endpoint.get("endpoint_res", "") or "").strip()
+    if not endpoint_res_text:
+        return {"status": "missing_endpoint_res", "endpoint_res": ""}
+    endpoint_res = Path(endpoint_res_text).expanduser()
+    if not endpoint_res.exists():
+        return {"status": "missing_endpoint_res", "endpoint_res": str(endpoint_res)}
+    work_dir = endpoint_res.resolve().parent
+    stem = endpoint_res.stem
+    fcf = work_dir / f"{stem}.fcf"
+    if not fcf.exists():
+        return {"status": "missing_fcf", "fcf": str(fcf), "note": "Run the endpoint branch with SHELXL available so an FCF file is written."}
+    exe = _shelx2map_executable(args)
+    if ("/" in exe and not Path(exe).exists()) or ("/" not in exe and shutil.which(exe) is None):
+        return {"status": "missing_shelx2map", "executable": exe}
+    maps: dict[str, dict[str, object]] = {}
+    for label, mode in [("fofc", "0"), ("fo", "1"), ("2fofc", "2")]:
+        out_map = work_dir / f"grond_corrected_{label}.map"
+        proc = subprocess.run(
+            [exe, "-m", mode, "-o", out_map.name, stem],
+            cwd=str(work_dir),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+        log_path = work_dir / f"grond_finish_shelx2map_{label}.log"
+        log_path.write_text(proc.stdout)
+        actual = out_map
+        for line in proc.stdout.splitlines():
+            match = re.search(r'Map data written to "([^"]+)"', line)
+            if match:
+                actual = work_dir / match.group(1)
+        maps[label] = {
+            "map": str(actual),
+            "requested_map": str(out_map),
+            "log": str(log_path),
+            "returncode": proc.returncode,
+            "exists": actual.exists(),
+        }
+    return {
+        "status": "ok",
+        "definition": "GROND-corrected endpoint maps from the selected corrected-HKL publication endpoint; not native dynamical residual-potential maps.",
+        "endpoint_res": str(endpoint_res.resolve()),
+        "fcf": str(fcf.resolve()),
+        "maps": maps,
+    }
+
+
+def cmd_finish(args: argparse.Namespace) -> int:
+    """Regenerate the compact user-facing package for a completed GROND run."""
+
+    run_dir = _finish_run_dir(args)
+    result_path = run_dir / "grond_summary.json"
+    prep_path = run_dir / "run_prep.json"
+    result = try_read_json(result_path)
+    if not result:
+        raise SystemExit(f"Could not read completed GROND run summary: {result_path}")
+    if not prep_path.exists():
+        raise SystemExit(f"Could not read completed GROND prep file: {prep_path}")
+    prep = load_prep(prep_path)
+    quick = write_quick_stats(prep, result, argparse.Namespace(out_dir=str(run_dir)))
+    maps = run_finish_endpoint_maps(result, args) if getattr(args, "make_maps", True) else {"status": "disabled"}
+    endpoint = _publication_endpoint_from_result(result)
+    endpoint_res_text = str(endpoint.get("endpoint_res", "") or "").strip()
+    endpoint_res = Path(endpoint_res_text).expanduser() if endpoint_res_text else None
+    cif = endpoint_res.with_suffix(".cif") if endpoint_res is not None else None
+    manifest = {
+        "status": "ok",
+        "run_dir": str(run_dir),
+        "summary": str(result_path),
+        "prep": str(prep_path),
+        "final_summary": quick.get("final_summary", ""),
+        "quick_stats": quick.get("path", ""),
+        "maps": maps,
+        "cif": {
+            "status": "exists" if cif is not None and cif.exists() else "missing",
+            "path": str(cif) if cif is not None else "",
+            "note": "GROND does not alter the endpoint to force CIF generation. If this is missing, export CIF from the normalized publication RES in SHELXL/Olex2.",
+        },
+    }
+    manifest_path = run_dir / "finish_manifest.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2, allow_nan=True) + "\n")
+    console = quick.get("console") if isinstance(quick.get("console"), Mapping) else {}
+    payload = {
+        "status": "ok",
+        **console,
+        "finish_manifest": str(manifest_path),
+        "maps": maps,
+        "cif": manifest["cif"],
+    }
+    print(json.dumps(payload, indent=2, allow_nan=True))
+    return 0
 
 
 def cmd_validate(args: argparse.Namespace) -> int:
@@ -7690,6 +7961,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_push.add_argument("--set-ls-cycles", type=int, default=1, help="Rewrite L.S. to this value in the prepared start model. Use 0 to preserve it.")
     p_push.set_defaults(func=cmd_push_endpoint)
+
+    p_finish = sub.add_parser("finish", help="Regenerate the compact final summary and optional corrected-endpoint maps from a completed run.")
+    p_finish.add_argument("--run-dir", default=".", help="Completed GROND auto/run output directory. Defaults to the current directory.")
+    p_finish.add_argument("--checkpoint", default="", help="Optional grond_continue_checkpoint.json; its run_dir is used.")
+    add_tool_config_args(p_finish)
+    p_finish.add_argument(
+        "--make-maps",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use shelx2map to regenerate corrected-HKL endpoint Fo, 2Fo-Fc, and Fo-Fc maps when an FCF exists.",
+    )
+    p_finish.add_argument("--json", action="store_true", help="Print the compact JSON payload used by automation.")
+    p_finish.set_defaults(func=cmd_finish)
 
     p_val = sub.add_parser("validate", help="Compile the vendored engine scripts with the selected Python.")
     p_val.add_argument("--python", default="")

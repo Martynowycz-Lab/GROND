@@ -83,6 +83,12 @@ GROND auto \
 
 Fast mode intentionally skips the expensive final polish decisions. Use it to catch wrong paths, wrong transforms, bad integrations, or implausible thickness/hand quickly; use the plain `GROND auto` command for the final answer.
 
+After a completed run, open `FINAL_SUMMARY.md` first. It names the final hand, hand Z score, input and final row-level statistics, promoted endpoint R values, and the exact `.res`, `.hkl`, and `.lst` files to inspect. `QUICK_STATS.md` keeps the fuller audit table. To regenerate those files later without rerunning the physics stages, run:
+
+```bash
+GROND finish --run-dir grond_out
+```
+
 Run the middle-speed automatic profile:
 
 ```bash

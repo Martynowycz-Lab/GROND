@@ -23,7 +23,7 @@ from grond.cli import (
     resolved_sg_window_mode,
     transform_scout_job_count,
 )
-from grond.io.config import DatasetSpec, PrepConfig
+from grond.io.config import DatasetSpec, PrepConfig, write_prep
 
 EXPECTED_CLI_COMMANDS = {
     "auto",
@@ -32,6 +32,7 @@ EXPECTED_CLI_COMMANDS = {
     "doctor",
     "endpoints",
     "export-mtz",
+    "finish",
     "forensics",
     "import-dials",
     "init-config",
@@ -147,6 +148,105 @@ def test_thickness_scout_parser_exposes_contract_diagnostic_defaults():
     assert args.transform_metadata_prefilter == "auto"
     assert args.transform_metadata_max_candidates == 3
     assert args.transform_metadata_min_correlation == 0.70
+
+
+def test_finish_parser_defaults_to_existing_run_dir():
+    args = build_parser().parse_args(["finish", "--run-dir", "grond_out", "--no-make-maps"])
+    assert args.command == "finish"
+    assert args.run_dir == "grond_out"
+    assert args.checkpoint == ""
+    assert args.make_maps is False
+
+
+def test_finish_regenerates_compact_package(tmp_path: Path, capsys):
+    run = tmp_path / "grond"
+    final_run = run / "runs" / "dataset" / "final"
+    screen_run = run / "runs" / "dataset" / "adaptive_screen"
+    endpoint = run / "endpoint_calibration" / "dataset" / "window_1.5deg_det_8" / "endpoint_freeze-zero"
+    for path in (final_run, screen_run, endpoint, run / "decisions" / "dataset"):
+        path.mkdir(parents=True)
+    (final_run / "native_dyn_calc.csv").write_text(
+        "split,dyn_residual_over_sigma\n"
+        "work,0.5\n"
+        "free,1.5\n"
+    )
+    metrics = {
+        "all": {"dyn": {"R1_all": 0.11, "wR2_all": 0.10}, "born": {"R1_all": 0.19, "wR2_all": 0.25}},
+        "free": {"dyn": {"wR2_all": 0.15}, "born": {"wR2_all": 0.30}},
+    }
+    (final_run / "summary.json").write_text(
+        json.dumps(
+            {
+                "best_native": {
+                    "metrics": metrics,
+                    "nuisance": {"thickness_A": 1200, "thickness_model": "uniform_gradient"},
+                },
+                "best_endpoint": {"q_p05": 0.8, "q_median": 1.0, "q_p95": 1.4},
+            }
+        )
+    )
+    (screen_run / "summary.json").write_text(json.dumps({"best_native": {"metrics": metrics}}))
+    endpoint_res = endpoint / "dyn_scale_replay.res"
+    endpoint_hkl = endpoint / "dyn_scale_replay.hkl"
+    endpoint_lst = endpoint / "dyn_scale_replay.lst"
+    endpoint_res.write_text("TITL endpoint\nCELL 0.025079 5 6 7 90 90 90\nEND\n")
+    endpoint_hkl.write_text("   0   0   0    0.00    0.00\n")
+    endpoint_lst.write_text("R1 = 0.05 for 1 Fo > 4sig(Fo) and 0.11 for all 2 data\n")
+    (run / "decisions" / "dataset" / "decision_tree.json").write_text(
+        json.dumps(
+            {
+                "screen_run": str(screen_run),
+                "selected_hand": "original",
+                "transform_decision": {"selected": {"transform": "identity", "status": "ok"}},
+            }
+        )
+    )
+    write_prep(
+        run / "run_prep.json",
+        PrepConfig(
+            structure=str(tmp_path / "model.res"),
+            datasets=[DatasetSpec(name="dataset", hkl=str(tmp_path / "INTEGRATE.HKL"))],
+        ),
+    )
+    (run / "grond_summary.json").write_text(
+        json.dumps(
+            {
+                "primary_run": str(final_run),
+                "model": str(endpoint_res),
+                "decision_tree": str(run / "decisions" / "dataset" / "decision_tree.json"),
+                "endpoint_calibration": {
+                    "report": str(run / "endpoint_calibration" / "dataset" / "REPORT.md"),
+                    "publication_selection": {
+                        "publication_endpoint": {
+                            "spec": "window_1.5deg_det_8",
+                            "wght_mode": "freeze-zero",
+                            "scale_params": 137,
+                            "shelxl_R1all": 0.1105,
+                            "shelxl_wR2all": 0.1115,
+                            "shelxl_GooF": 0.906,
+                            "native_free_wR2_all": 0.1508,
+                            "endpoint_res": str(endpoint_res),
+                            "endpoint_hkl": str(endpoint_hkl),
+                            "endpoint_lst": str(endpoint_lst),
+                            "endpoint_manifest": str(endpoint / "manifest.json"),
+                            "endpoint_row_table": str(endpoint.parent / "native_dyn_calc.csv"),
+                        }
+                    },
+                },
+            }
+        )
+    )
+
+    args = build_parser().parse_args(["finish", "--run-dir", str(run), "--no-make-maps"])
+    cli.cmd_finish(args)
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "ok"
+    assert payload["publication_endpoint"]["R1all"] == pytest.approx(0.1105)
+    assert (run / "FINAL_SUMMARY.md").exists()
+    assert (run / "QUICK_STATS.md").exists()
+    assert (run / "finish_manifest.json").exists()
+    assert "GROND Final Summary" in (run / "FINAL_SUMMARY.md").read_text()
 
 
 def test_q_field_stability_compares_shared_signed_rows(tmp_path: Path):

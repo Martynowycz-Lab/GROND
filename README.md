@@ -289,7 +289,15 @@ For a controlled stress test, `--model-prep no-restraints` removes common SHELX 
 
 ## What You Get
 
-The output directory contains the run configuration, the prepared inputs, per-stage logs, progress/resume state, row-level predictions, corrected reflection files, endpoint statistics, maps when available, dataset-inclusion reports, resolution-limit reports, and forensic reports. Start with `QUICK_STATS.md`; it gives the selected HKL transform, SFAC and endpoint-wavelength check, initial and final absolute-structure hand, final hand Z-style contrast, free-row intensity residual RMSZ, final nuisance contract, stage timings, requested-resolution and suggested-resolution row statistics, and endpoint-calibration table. Endpoint summaries include the active SHELXL weighting history and the `post_bloch_sigma` endpoint uncertainty block so high or low `wR2all` and GooF values can be traced to the declared observation model rather than stale model-update weights. If a run is interrupted, launch the same command with the same `--out-dir`; GROND resumes completed stages recorded in `grond_progress.json`.
+The output directory contains the run configuration, the prepared inputs, per-stage logs, progress/resume state, row-level predictions, corrected reflection files, endpoint statistics, maps when available, dataset-inclusion reports, resolution-limit reports, and forensic reports. Start with `FINAL_SUMMARY.md`; it gives the final hand and hand Z score, selected HKL transform, input-model row statistics, final row-level statistics, promoted corrected-HKL endpoint statistics, and exact model/HKL/LST paths to open. `QUICK_STATS.md` is the compact audit table behind it, with SFAC and endpoint-wavelength checks, free-row intensity residual RMSZ, final nuisance contract, stage timings, requested-resolution and suggested-resolution row statistics, and endpoint-calibration details. Endpoint summaries include the active SHELXL weighting history and the `post_bloch_sigma` endpoint uncertainty block so high or low `wR2all` and GooF values can be traced to the declared observation model rather than stale model-update weights. If a run is interrupted, launch the same command with the same `--out-dir`; GROND resumes completed stages recorded in `grond_progress.json`.
+
+To regenerate the final package without rerunning the expensive stages, use:
+
+```bash
+GROND finish --run-dir grond_out
+```
+
+`finish` reloads the completed run, rewrites `FINAL_SUMMARY.md` and `QUICK_STATS.md`, and makes corrected-HKL endpoint maps when `shelx2map` and the endpoint `.fcf` are available. It does not refine or change the model.
 
 ## Package Layout
 
