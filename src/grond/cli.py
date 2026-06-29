@@ -5306,8 +5306,6 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
     sfac_check = try_read_json(out_dir / "sfac_check.json")
     final_run = _quick_final_run(result)
     final_model = Path(str(result.get("model"))) if result.get("model") else None
-    final_endpoint_dir = final_model.parent if final_model else None
-    final_endpoint_stem = final_model.stem if final_model else ""
     final_summary = try_read_json(final_run / "summary.json") if final_run else {}
     best_native = _quick_best_native(final_summary)
     best_endpoint = _quick_best_endpoint(final_summary)
