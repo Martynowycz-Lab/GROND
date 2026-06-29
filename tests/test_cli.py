@@ -503,6 +503,24 @@ def test_auto_parser_is_simple_run_alias():
     assert args.scale_polish_detector_bins == "exact"
 
 
+def test_push_endpoint_exposes_diagnostic_endpoint_ls_cycles():
+    args = build_parser().parse_args(
+        [
+            "push-endpoint",
+            "--source-summary",
+            "summary.json",
+            "--start-res",
+            "model.res",
+            "--out-dir",
+            "out",
+            "--endpoint-ls-cycles",
+            "20",
+        ]
+    )
+
+    assert args.endpoint_ls_cycles == 20
+
+
 def test_experimental_row_plan_cache_flags_parse():
     auto = build_parser().parse_args(
         [

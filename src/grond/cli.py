@@ -2369,6 +2369,8 @@ def shelxl_feedback_cmd(
         args.shelxl,
         "--shelxl-iterations",
         str(args.shelxl_feedback_shelxl_iterations),
+        "--endpoint-ls-cycles",
+        str(args.shelxl_feedback_endpoint_ls_cycles),
         "--endpoint-wght-mode",
         str(getattr(args, "endpoint_wght_mode", "freeze-zero")),
         "--post-bloch-sigma-policy",
@@ -5970,6 +5972,8 @@ def cmd_push_endpoint(args: argparse.Namespace) -> int:
         args.shelxl,
         "--shelxl-iterations",
         str(args.shelxl_iterations),
+        "--endpoint-ls-cycles",
+        str(args.endpoint_ls_cycles),
         "--post-bloch-sigma-policy",
         args.post_bloch_sigma_policy,
         "--post-bloch-sigma-holdout-fraction",
@@ -7116,7 +7120,8 @@ def add_common_run_args(ap: argparse.ArgumentParser, *, expose_lambda_controls: 
     )
     ap.add_argument("--endpoint-b-grid", default="0.0", help="Corrected-HKL endpoint resolution-scale diagnostic grid. Nonzero values are opt-in only; GROND keeps B=0 as the final promotable endpoint whenever it is present.")
     ap.add_argument("--endpoint-exti-grid", default="off", help="Endpoint EXTI diagnostic grid. Final promoted outputs use off; explicit 'on' runs are comparison-only.")
-    ap.add_argument("--shelxl-iterations", type=int, default=5, help="SHELXL executable calls per corrected-HKL endpoint in lower-level full mode. GROND normalizes each endpoint input to one internal LS/CGLS cycle.")
+    ap.add_argument("--shelxl-iterations", type=int, default=5, help="SHELXL executable calls per corrected-HKL endpoint in lower-level full mode. GROND normalizes each endpoint input to one internal LS/CGLS cycle unless --endpoint-ls-cycles is changed for diagnostics.")
+    ap.add_argument("--endpoint-ls-cycles", type=int, default=1, help="Diagnostic internal L.S./CGLS cycle count for generated corrected-HKL endpoint files. Production keeps this at 1.")
     ap.add_argument(
         "--endpoint-wght-mode",
         choices=["freeze-zero", "inherit", "promote"],
@@ -7126,6 +7131,7 @@ def add_common_run_args(ap: argparse.ArgumentParser, *, expose_lambda_controls: 
     ap.add_argument("--shelxl", default=default_shelxl_executable(), help="SHELXL executable used for corrected-HKL endpoints and SHELXL feedback loops.")
     ap.add_argument("--shelxl-feedback-cycles", type=int, default=5, help="Number of high-N/Q Bloch -> one-SHELXL-LS feedback cycles used by the automatic SHELXL structure-update strategy.")
     ap.add_argument("--shelxl-feedback-shelxl-iterations", type=int, default=1, help="SHELXL passes per feedback cycle. Default 1 keeps each feedback update to one least-squares model update.")
+    ap.add_argument("--shelxl-feedback-endpoint-ls-cycles", type=int, default=1, help="Diagnostic internal L.S./CGLS cycle count for each SHELXL feedback macrocycle. Production keeps this at 1.")
     ap.add_argument("--dataset-sigma-policy", choices=["auto", "none", "uniform_z_rms"], default="auto", help="Per-dataset endpoint sigma policy for multi-dataset combination. Auto calibrates each crystal independently before merging.")
     ap.add_argument("--dataset-sigma-holdout-fraction", type=float, default=0.20, help="Deterministic HKL holdout fraction reported for per-dataset endpoint sigma calibration.")
     ap.add_argument("--dataset-sigma-min-scale", type=float, default=0.25, help="Lower guardrail for per-dataset endpoint sigma scaling.")
@@ -7644,6 +7650,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_push.add_argument("--final-n-points", type=int, default=20)
     p_push.add_argument("--shelxl", default=default_shelxl_executable())
     p_push.add_argument("--shelxl-iterations", type=int, default=1, help="SHELXL executable calls per macrocycle.")
+    p_push.add_argument("--endpoint-ls-cycles", type=int, default=1, help="Diagnostic internal L.S./CGLS cycle count for each generated endpoint. Production keeps this at 1.")
     p_push.add_argument("--workers", type=int, default=auto_worker_count(0, 0.85))
     p_push.add_argument("--chunksize", type=int, default=0)
     p_push.add_argument("--compute-backend", choices=["scipy", "scipy_bethe", "scipy_expm", "scipy_expm_multiply", "jax", "jax_auto", "jax_cpu", "jax_mps", "jax_cuda", "jax_padded", "jax_auto_padded", "jax_cpu_padded", "jax_mps_padded", "jax_cuda_padded", "jax_cpu_real_expm", "jax_mps_real_expm", "jax_mps_real_expm_padded"], default="scipy_bethe")

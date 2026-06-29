@@ -129,6 +129,30 @@ def test_write_endpoint_ins_forces_one_shelxl_cycle_and_electron_wavelength(tmp_
     assert "EXTI" not in text
 
 
+def test_write_endpoint_ins_can_write_diagnostic_shelxl_cycle_count(tmp_path: Path):
+    src = tmp_path / "model.res"
+    dst = tmp_path / "model.ins"
+    src.write_text(
+        "\n".join(
+            [
+                "TITL trial",
+                "CELL 0.02508 5.0 6.0 7.0 90 90 90",
+                "SFAC C 1 0 1 0 1 0 1 0",
+                "L.S. 1",
+                "HKLF 4",
+                "END",
+            ]
+        )
+        + "\n"
+    )
+
+    write_endpoint_ins(src, dst, hkl_name="dyn_nuisance_corrected.hkl", ls_cycles=20)
+
+    text = dst.read_text()
+    assert "L.S. 20" in text
+    assert "L.S. 1" not in text
+
+
 def test_write_endpoint_ins_strips_acta_and_forces_hklf4(tmp_path: Path):
     src = tmp_path / "model.res"
     dst = tmp_path / "model.ins"

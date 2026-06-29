@@ -298,6 +298,8 @@ def native_command(
         "off",
         "--shelxl-iterations",
         str(int(args.shelxl_iterations)),
+        "--endpoint-ls-cycles",
+        str(int(args.endpoint_ls_cycles)),
         "--endpoint-wght-mode",
         str(getattr(args, "endpoint_wght_mode", "freeze-zero")),
         "--post-bloch-sigma-policy",
@@ -439,6 +441,7 @@ def main() -> None:
     ap.add_argument("--chunksize", type=int, default=8)
     ap.add_argument("--shelxl", default=os.environ.get("SHELXL", "shelxl"))
     ap.add_argument("--shelxl-iterations", type=int, default=3)
+    ap.add_argument("--endpoint-ls-cycles", type=int, default=1, help="Internal L.S./CGLS cycles used inside each generated SHELXL endpoint input.")
     ap.add_argument("--endpoint-wght-mode", choices=["freeze-zero", "inherit", "promote"], default="freeze-zero")
     ap.add_argument("--post-bloch-sigma-policy", choices=["none", "uniform_z_rms"], default="uniform_z_rms", help="Endpoint sigma calibration applied before each SHELXL feedback update.")
     ap.add_argument("--post-bloch-sigma-holdout-fraction", type=float, default=0.20)
@@ -480,6 +483,7 @@ def main() -> None:
         "post_bloch_sigma_holdout_fraction": float(args.post_bloch_sigma_holdout_fraction),
         "post_bloch_sigma_min_scale": float(args.post_bloch_sigma_min_scale),
         "post_bloch_sigma_max_scale": float(args.post_bloch_sigma_max_scale),
+        "endpoint_ls_cycles": int(args.endpoint_ls_cycles),
         "cycles_requested": int(args.cycles),
         "fast_n_basis": int(args.n_basis),
         "fast_n_points": int(args.n_points),

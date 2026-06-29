@@ -266,19 +266,26 @@ def normalize_shelx_cell_wavelength(line: str, default_wavelength: float = DEFAU
     return line
 
 
-def force_shelxl_one_cycle(line: str) -> tuple[str, bool]:
-    """Force SHELXL LS/CGLS instruction lines to one internal cycle."""
+def force_shelxl_cycle_count(line: str, cycles: int = 1) -> tuple[str, bool]:
+    """Force SHELXL LS/CGLS instruction lines to the requested internal cycle count."""
 
     match = re.match(r"^(\s*)(L\.S\.|LS|CGLS)(?=\s|$)(.*)$", line, flags=re.IGNORECASE)
     if not match:
         return line, False
     indent, command, tail = match.groups()
+    count = max(1, int(cycles))
     rest = tail.split()
     if rest:
-        rest[0] = "1"
+        rest[0] = str(count)
     else:
-        rest = ["1"]
+        rest = [str(count)]
     return f"{indent}{command} {' '.join(rest)}", True
+
+
+def force_shelxl_one_cycle(line: str) -> tuple[str, bool]:
+    """Force SHELXL LS/CGLS instruction lines to one internal cycle."""
+
+    return force_shelxl_cycle_count(line, 1)
 
 
 def _format_wght_line(a: float, b: float) -> str:
@@ -343,12 +350,14 @@ def write_endpoint_ins(
     hkl_name: str = "dyn_nuisance_corrected.hkl",
     keep_exti: bool = False,
     wght: tuple[float, float] | None = None,
+    ls_cycles: int = 1,
 ) -> None:
-    """Write the corrected-HKL endpoint input with GROND's fixed one-cycle contract."""
+    """Write the corrected-HKL endpoint input with GROND's endpoint contract."""
 
     out = []
     saw_cycle_instruction = False
     saw_hklf = False
+    cycle_count = max(1, int(ls_cycles))
     for line in src_res.read_text(errors="replace").splitlines():
         stripped = line.strip()
         upper = stripped.upper()
@@ -361,7 +370,7 @@ def write_endpoint_ins(
             continue
         if upper.startswith("CELL "):
             line = normalize_shelx_cell_wavelength(line)
-        line, forced_cycle = force_shelxl_one_cycle(line)
+        line, forced_cycle = force_shelxl_cycle_count(line, cycle_count)
         saw_cycle_instruction = saw_cycle_instruction or forced_cycle
         if "<HklSrc" in line:
             line = f'REM <HklSrc "%./{hkl_name}">'
@@ -377,7 +386,7 @@ def write_endpoint_ins(
             if line.strip().upper().startswith(("HKLF", "END")):
                 insert_at = i
                 break
-        out.insert(insert_at, "L.S. 1")
+        out.insert(insert_at, f"L.S. {cycle_count}")
     if not saw_hklf:
         insert_at = len(out)
         for i, line in enumerate(out):
@@ -1134,7 +1143,7 @@ def _active_wght_from_stats(stats: dict) -> tuple[float, float] | None:
     return a, b
 
 
-def run_shelxl(work_dir: Path, stem: str, iterations: int = 1, wght_mode: str = "freeze-zero"):
+def run_shelxl(work_dir: Path, stem: str, iterations: int = 1, wght_mode: str = "freeze-zero", endpoint_ls_cycles: int = 1):
     exe = str(SHELXL)
     if ("/" in exe and not Path(exe).exists()) or ("/" not in exe and shutil.which(exe) is None):
         msg = f"SHELXL executable not found: {SHELXL}\n"
@@ -1172,7 +1181,7 @@ def run_shelxl(work_dir: Path, stem: str, iterations: int = 1, wght_mode: str = 
             break
         if i + 1 < n_iter and res.exists():
             active = (0.0, 0.0) if freeze_zero else _active_wght_from_stats(stats)
-            write_endpoint_ins(res, ins, hkl_name=f"{stem}.hkl", keep_exti=False, wght=active)
+            write_endpoint_ins(res, ins, hkl_name=f"{stem}.hkl", keep_exti=False, wght=active, ls_cycles=endpoint_ls_cycles)
             if mode == "promote":
                 stats["next_wght"] = promote_recommended_wght(ins, recommended_wght)
             elif freeze_zero:
@@ -1188,9 +1197,17 @@ def run_shelxl(work_dir: Path, stem: str, iterations: int = 1, wght_mode: str = 
         final["invalid_res_reason"] = final["res_health"].get("reason")
     else:
         active = (0.0, 0.0) if freeze_zero else _active_wght_from_stats(final)
-        write_endpoint_ins(work_dir / f"{stem}.res", work_dir / f"{stem}.res", hkl_name=f"{stem}.hkl", keep_exti=False, wght=active)
+        write_endpoint_ins(
+            work_dir / f"{stem}.res",
+            work_dir / f"{stem}.res",
+            hkl_name=f"{stem}.hkl",
+            keep_exti=False,
+            wght=active,
+            ls_cycles=endpoint_ls_cycles,
+        )
         final["res_normalized_for_reopen"] = True
     final["iterations"] = n_iter
+    final["endpoint_ls_cycles"] = max(1, int(endpoint_ls_cycles))
     final["iteration_history"] = history
     final["wght_mode"] = mode
     return final
@@ -1271,6 +1288,7 @@ def export_corrected_endpoint(
     endpoint_b: float = 0.0,
     keep_exti: bool = False,
     shelxl_iterations: int = 1,
+    endpoint_ls_cycles: int = 1,
     post_bloch_sigma_policy: str = "none",
     post_bloch_sigma_holdout_fraction: float = 0.20,
     post_bloch_sigma_min_scale: float = 0.25,
@@ -1349,8 +1367,15 @@ def export_corrected_endpoint(
         hkl_name="dyn_nuisance_corrected.hkl",
         keep_exti=keep_exti,
         wght=initial_wght,
+        ls_cycles=endpoint_ls_cycles,
     )
-    shelxl = run_shelxl(out_dir, "dyn_nuisance_corrected", iterations=shelxl_iterations, wght_mode=endpoint_wght_mode)
+    shelxl = run_shelxl(
+        out_dir,
+        "dyn_nuisance_corrected",
+        iterations=shelxl_iterations,
+        wght_mode=endpoint_wght_mode,
+        endpoint_ls_cycles=endpoint_ls_cycles,
+    )
     maps = run_maps(out_dir, "dyn_nuisance_corrected") if make_maps else {}
     manifest = {
         "lambda_q": float(lambda_q),
@@ -1362,6 +1387,7 @@ def export_corrected_endpoint(
         **modulation_meta,
         "keep_exti": bool(keep_exti),
         "shelxl_iterations": int(max(1, shelxl_iterations)),
+        "endpoint_ls_cycles": int(max(1, endpoint_ls_cycles)),
         "endpoint_wght_mode": str(endpoint_wght_mode),
         "post_bloch_sigma": post_bloch_sigma,
         "rows_unmerged": len(rows_unmerged),
@@ -1547,6 +1573,7 @@ def main():
     ap.add_argument("--endpoint-b-grid", default="0.0", help="Diagnostic endpoint resolution-scale grid in intensity B units: Icorr *= exp(B*(1/4d^2 - median(1/4d^2))). Nonzero values are not promoted over a neutral B=0 endpoint.")
     ap.add_argument("--endpoint-exti-grid", default="off", help="Comma grid of endpoint EXTI modes: off,on. Off removes EXTI from the corrected endpoint; on keeps/regularizes the source EXTI term.")
     ap.add_argument("--shelxl-iterations", type=int, default=1, help="Number of SHELXL polish passes per corrected endpoint. Later passes feed .res back into .ins.")
+    ap.add_argument("--endpoint-ls-cycles", type=int, default=1, help="Internal L.S./CGLS cycle count written into generated endpoint .ins/.res files. Production uses 1; larger values are diagnostic stress tests.")
     ap.add_argument(
         "--endpoint-wght-mode",
         choices=["freeze-zero", "inherit", "promote"],
@@ -1834,6 +1861,7 @@ def main():
                             endpoint_b=endpoint_b,
                             keep_exti=keep_exti,
                             shelxl_iterations=args.shelxl_iterations,
+                            endpoint_ls_cycles=args.endpoint_ls_cycles,
                             post_bloch_sigma_policy=args.post_bloch_sigma_policy,
                             post_bloch_sigma_holdout_fraction=args.post_bloch_sigma_holdout_fraction,
                             post_bloch_sigma_min_scale=args.post_bloch_sigma_min_scale,
