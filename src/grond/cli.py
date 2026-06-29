@@ -1077,6 +1077,12 @@ def check_sfac_contract(structure: str | Path) -> dict[str, object]:
     }
     messages: list[dict[str, str]] = []
     sfac_rows: list[dict[str, object]] = []
+    endpoint_contract: dict[str, object] = {
+        "hklf": None,
+        "hklf_status": "missing",
+        "stripped_endpoint_commands": [],
+        "unsupported_features": [],
+    }
     suffix = path.suffix.lower()
     if suffix == ".cif":
         report.update(
@@ -1114,6 +1120,56 @@ def check_sfac_contract(structure: str | Path) -> dict[str, object]:
             continue
         parts = line.split()
         head = parts[0].upper()
+        if head == "ACTA":
+            endpoint_contract["stripped_endpoint_commands"].append({"line": raw, "command": "ACTA"})
+            messages.append(
+                {
+                    "severity": "warning",
+                    "message": "ACTA is accepted in the input model but stripped from GROND endpoint files because it can interfere with zero-cycle/check runs and is not needed for corrected-HKL refinement.",
+                }
+            )
+            continue
+        if head == "HKLF":
+            hklf = parts[1] if len(parts) > 1 else ""
+            endpoint_contract["hklf"] = hklf
+            if hklf == "4":
+                endpoint_contract["hklf_status"] = "ok"
+            elif hklf == "3":
+                endpoint_contract["hklf_status"] = "source_amplitudes_endpoint_forced_hklf4"
+                messages.append(
+                    {
+                        "severity": "warning",
+                        "message": "Input model uses HKLF 3 amplitudes. GROND can read the model, but every corrected endpoint is written as HKLF 4 intensities.",
+                    }
+                )
+            else:
+                endpoint_contract["hklf_status"] = "unsupported"
+                endpoint_contract["unsupported_features"].append({"line": raw, "feature": f"HKLF {hklf or '?'}"})
+                messages.append(
+                    {
+                        "severity": "error",
+                        "message": f"HKLF {hklf or '?'} is not supported. GROND currently writes corrected intensity endpoints as HKLF 4; HKLF 5/twin endpoints are a current limitation.",
+                    }
+                )
+            continue
+        if head in {"BASF", "TWIN"}:
+            endpoint_contract["unsupported_features"].append({"line": raw, "feature": head})
+            messages.append(
+                {
+                    "severity": "error",
+                    "message": f"{head} is not supported by GROND corrected-HKLF4 endpoints yet. Twin/BASF refinement is a current limitation.",
+                }
+            )
+            continue
+        if head == "SQUEEZE" or "SQUEEZE" in line.upper():
+            endpoint_contract["unsupported_features"].append({"line": raw, "feature": "SQUEEZE"})
+            messages.append(
+                {
+                    "severity": "error",
+                    "message": "SQUEEZE/solvent-mask corrected SHELX models are not supported by GROND corrected-HKLF4 endpoints yet.",
+                }
+            )
+            continue
         if head == "CELL":
             cell_seen = True
             if len(parts) >= 2:
@@ -1165,6 +1221,7 @@ def check_sfac_contract(structure: str | Path) -> dict[str, object]:
     if not sfac_rows:
         messages.append({"severity": "error", "message": "No SFAC rows were found."})
     report["sfac_rows"] = sfac_rows
+    report["endpoint_contract"] = endpoint_contract
     report["messages"] = messages
     has_error = any(item.get("severity") == "error" for item in messages) or any(row.get("status") == "error" for row in sfac_rows)
     has_warning = any(item.get("severity") == "warning" for item in messages)

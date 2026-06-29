@@ -174,6 +174,7 @@ def native_command(
     n_basis: int,
     n_points: int,
     make_maps: bool = False,
+    skip_endpoint_refinement: bool = False,
 ) -> list[str]:
     """Build one fixed-nuisance native Bloch/SHELXL endpoint command."""
 
@@ -345,6 +346,8 @@ def native_command(
         cmd.extend(["--max-rows", str(int(args.max_rows))])
     if make_maps:
         cmd.append("--make-maps")
+    if skip_endpoint_refinement:
+        cmd.append("--skip-endpoint-refinement")
     return cmd
 
 
@@ -370,18 +373,31 @@ def run_cycle(
     label: str,
     env: dict[str, str],
     make_maps: bool = False,
+    skip_endpoint_refinement: bool = False,
 ) -> dict:
     """Run one Bloch/SHELXL feedback cycle."""
 
     run_dir.mkdir(parents=True, exist_ok=True)
-    cmd = native_command(args, source_summary, model, run_dir, n_basis=n_basis, n_points=n_points, make_maps=make_maps)
+    cmd = native_command(
+        args,
+        source_summary,
+        model,
+        run_dir,
+        n_basis=n_basis,
+        n_points=n_points,
+        make_maps=make_maps,
+        skip_endpoint_refinement=skip_endpoint_refinement,
+    )
     (run_dir / "COMMAND.sh").write_text(" ".join(shlex.quote(str(x)) for x in cmd) + "\n")
     status = run_command(cmd, run_dir / "run.log", env)
     summary_path = run_dir / "summary.json"
     summary = read_json(summary_path) if summary_path.exists() else {}
     updated_res = Path("")
     endpoint_health: dict = {"ok": False, "reason": "not_run"}
-    if status["returncode"] == 0:
+    if status["returncode"] == 0 and skip_endpoint_refinement:
+        updated_res = model
+        endpoint_health = shelx_res_health(model)
+    elif status["returncode"] == 0:
         try:
             updated_res = endpoint_res(run_dir)
             endpoint_health = shelx_res_health(updated_res)
@@ -400,6 +416,8 @@ def run_cycle(
         "command": cmd,
         **status,
         "metrics": selected_metrics(summary) if summary else {},
+        "row_stats_model": str(model),
+        "skip_endpoint_refinement": bool(skip_endpoint_refinement),
     }
 
 
@@ -505,6 +523,30 @@ def main() -> None:
         result["runs"].append(rec)
         if rec["returncode"] == 0:
             result["current_model"] = rec["output_model"]
+            current_model = Path(rec["output_model"]).resolve()
+
+    if not result["runs"] or result["runs"][-1].get("returncode") == 0:
+        recompute_n_basis = int(args.final_n_basis) if int(args.final_n_basis) > 0 else int(args.n_basis)
+        recompute_n_points = int(args.final_n_points) if int(args.final_n_basis) > 0 else int(args.n_points)
+        rec = run_cycle(
+            args,
+            source_summary,
+            current_model,
+            out / f"final_row_recompute_N{recompute_n_basis}Q{recompute_n_points}",
+            n_basis=recompute_n_basis,
+            n_points=recompute_n_points,
+            label="final_row_recompute",
+            env=env,
+            make_maps=False,
+            skip_endpoint_refinement=True,
+        )
+        result["runs"].append(rec)
+        if rec["returncode"] == 0:
+            result["current_model"] = str(current_model)
+            result["final_row_stats_run"] = rec["run_dir"]
+            result["final_row_stats_model"] = str(current_model)
+        else:
+            result["stopped_reason"] = rec.get("endpoint_error") or f"final row recompute returned {rec['returncode']}"
 
     result["wall_seconds"] = time.perf_counter() - t0
     result["summary_path"] = str((out / "shelxl_feedback_loop_summary.json").resolve())

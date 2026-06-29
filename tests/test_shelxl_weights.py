@@ -129,6 +129,59 @@ def test_write_endpoint_ins_forces_one_shelxl_cycle_and_electron_wavelength(tmp_
     assert "EXTI" not in text
 
 
+def test_write_endpoint_ins_strips_acta_and_forces_hklf4(tmp_path: Path):
+    src = tmp_path / "model.res"
+    dst = tmp_path / "model.ins"
+    src.write_text(
+        "\n".join(
+            [
+                "TITL trial",
+                "CELL 0.02508 5.0 6.0 7.0 90 90 90",
+                "SFAC C 1 0 1 0 1 0 1 0",
+                "ACTA",
+                "L.S. 0",
+                "HKLF 3",
+                "END",
+            ]
+        )
+        + "\n"
+    )
+
+    write_endpoint_ins(src, dst, hkl_name="dyn_nuisance_corrected.hkl", wght=(0.0, 0.0))
+
+    lines = dst.read_text().splitlines()
+    assert "ACTA" not in lines
+    assert "L.S. 1" in lines
+    assert "HKLF 3" not in lines
+    assert "HKLF 4" in lines
+    assert lines.count("HKLF 4") == 1
+
+
+def test_write_endpoint_ins_rejects_unsupported_shelx_endpoint_features(tmp_path: Path):
+    for feature in ["HKLF 5", "TWIN 0 1 0 1 0 0 0 0 -1", "BASF 0.2", "REM PLATON SQUEEZE applied"]:
+        src = tmp_path / "model.res"
+        dst = tmp_path / "model.ins"
+        src.write_text(
+            "\n".join(
+                [
+                    "TITL trial",
+                    "CELL 0.02508 5.0 6.0 7.0 90 90 90",
+                    "SFAC C 1 0 1 0 1 0 1 0",
+                    feature,
+                    "END",
+                ]
+            )
+            + "\n"
+        )
+
+        try:
+            write_endpoint_ins(src, dst)
+        except ValueError as exc:
+            assert any(word in str(exc) for word in ["HKLF", "TWIN", "BASF", "SQUEEZE"])
+        else:
+            raise AssertionError(f"{feature!r} was not rejected")
+
+
 def test_write_endpoint_ins_can_force_zero_weight_and_strip_tail(tmp_path: Path):
     src = tmp_path / "model.res"
     dst = tmp_path / "model.ins"

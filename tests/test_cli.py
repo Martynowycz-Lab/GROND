@@ -443,6 +443,39 @@ def test_sfac_check_accepts_numeric_rows_and_warns_on_placeholder_wavelength(tmp
     assert payload["cell"]["endpoint_wavelength_A"] == pytest.approx(0.025079)
 
 
+def test_sfac_check_warns_acta_and_hklf3_endpoint_conversion(tmp_path: Path):
+    model = tmp_path / "hklf3.res"
+    model.write_text("TITL ok\nCELL 0.02508 5 6 7 90 90 90\nSFAC C 1 0 1 0 1 0 1 0\nACTA\nHKLF 3\nEND\n")
+
+    payload = check_sfac_contract(model)
+
+    assert payload["ok"] is True
+    assert payload["status"] == "warning"
+    assert payload["endpoint_contract"]["hklf"] == "3"
+    assert payload["endpoint_contract"]["hklf_status"] == "source_amplitudes_endpoint_forced_hklf4"
+    messages = " ".join(item["message"] for item in payload["messages"])
+    assert "ACTA" in messages
+    assert "HKLF 3" in messages
+
+
+def test_sfac_check_rejects_unsupported_shelx_endpoint_contracts(tmp_path: Path):
+    cases = [
+        ("HKLF 5", "HKLF 5"),
+        ("TWIN 0 1 0 1 0 0 0 0 -1\nHKLF 4", "TWIN"),
+        ("BASF 0.2\nHKLF 4", "BASF"),
+        ("REM PLATON SQUEEZE applied\nHKLF 4", "SQUEEZE"),
+    ]
+    for body, expected in cases:
+        model = tmp_path / f"{expected.lower()}.res"
+        model.write_text(f"TITL bad\nCELL 0.02508 5 6 7 90 90 90\nSFAC C 1 0 1 0 1 0 1 0\n{body}\nEND\n")
+
+        payload = check_sfac_contract(model)
+
+        assert payload["ok"] is False
+        assert payload["status"] == "error"
+        assert any(expected in item["message"] for item in payload["messages"])
+
+
 def test_auto_parser_is_simple_run_alias():
     args = build_parser().parse_args(["auto", "--out-dir", "out", "--xds-dir", "xds", "--structure", "model.res"])
     assert args.command == "auto"
@@ -927,6 +960,40 @@ def test_shelxl_feedback_current_model_skips_empty_res(tmp_path: Path):
 
     assert cli.shelxl_feedback_current_model(run_root) == good_res
     assert cli.shelxl_feedback_current_run(run_root) == good_run
+
+
+def test_shelxl_feedback_current_run_prefers_final_row_recompute(tmp_path: Path):
+    run_root = tmp_path / "feedback"
+    cycle_run = run_root / "cycle_05_N108Q20"
+    final_run = run_root / "final_row_recompute_N108Q20"
+    final_res = cycle_run / "endpoint_lam_1p0_B_0p0_noexti" / "dyn_nuisance_corrected.res"
+    final_res.parent.mkdir(parents=True)
+    final_run.mkdir(parents=True)
+    final_res.write_text("TITL ok\nCELL 0.02508 5.0 6.0 7.0 90 90 90\nSFAC C\nEND\n")
+    (run_root / "shelxl_feedback_loop_summary.json").write_text(
+        json.dumps(
+            {
+                "current_model": str(final_res),
+                "final_row_stats_run": str(final_run),
+                "final_row_stats_model": str(final_res),
+                "runs": [
+                    {"run_dir": str(cycle_run), "returncode": 0, "output_model": str(final_res)},
+                    {
+                        "label": "final_row_recompute",
+                        "run_dir": str(final_run),
+                        "returncode": 0,
+                        "output_model": str(final_res),
+                        "row_stats_model": str(final_res),
+                        "skip_endpoint_refinement": True,
+                    },
+                ],
+            }
+        )
+        + "\n"
+    )
+
+    assert cli.shelxl_feedback_current_model(run_root) == final_res
+    assert cli.shelxl_feedback_current_run(run_root) == final_run
 
 
 def test_best_endpoint_model_rejects_empty_res(tmp_path: Path):

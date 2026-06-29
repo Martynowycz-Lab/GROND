@@ -98,6 +98,8 @@ GROND auto \
 
 GROND separates Bloch regularization from the model-update program. The default implemented endpoint is SHELXL because it accepts the corrected HKLF-style reflection files GROND already writes, can perform a single least-squares cycle cleanly, and returns an updated `RES` model that GROND can simulate again. If no external refiner is available, `bloch_only` remains useful: GROND still runs the Bloch simulation, nuisance and thickness decisions, row/MR residuals, corrected-reflection diagnostics, and hand checks from the supplied model.
 
+For small-molecule SHELXL endpoints, the current public contract is corrected `HKLF 4` intensities. Source models that were solved or refined as `HKLF 3` amplitudes can be used as starting coordinate models, but GROND-generated endpoint files are forced to `HKLF 4`. `ACTA` is stripped from generated endpoint inputs. `HKLF 5`, `TWIN`, `BASF`, and SQUEEZE/solvent-mask corrected SHELX models are not supported yet; GROND rejects them early instead of producing misleading corrected endpoints.
+
 The general endpoint contract is deliberately simple. A refiner receives the current model, a corrected reflection target, an output directory, and a small cycle count. It must write a refined model that GROND can read again as `RES`, `CIF`, `PDB`, or mmCIF. For a one-cycle feedback loop, the endpoint should update coordinates and displacement parameters against the current corrected target without adding an empirical extinction correction unless the user explicitly requested a diagnostic comparison.
 
 GROND exposes the endpoint registry:

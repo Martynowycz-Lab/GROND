@@ -318,6 +318,25 @@ def set_active_wght_lines(lines: list[str], a: float, b: float) -> list[str]:
     return out
 
 
+def _hklf_order(line: str) -> str:
+    parts = line.split()
+    return parts[1] if len(parts) > 1 else ""
+
+
+def _unsupported_endpoint_reason(line: str) -> str:
+    upper = line.strip().upper()
+    head = upper.split()[0] if upper.split() else ""
+    if head in {"BASF", "TWIN"}:
+        return f"{head} is not supported by GROND corrected-HKLF4 endpoints yet"
+    if head == "SQUEEZE" or "SQUEEZE" in upper:
+        return "SQUEEZE/solvent-mask corrected SHELX models are not supported by GROND corrected-HKLF4 endpoints yet"
+    if head == "HKLF":
+        order = _hklf_order(line)
+        if order not in {"3", "4"}:
+            return f"HKLF {order or '?'} is not supported; GROND currently writes corrected intensity endpoints as HKLF 4"
+    return ""
+
+
 def write_endpoint_ins(
     src_res: Path,
     dst_ins: Path,
@@ -329,9 +348,15 @@ def write_endpoint_ins(
 
     out = []
     saw_cycle_instruction = False
+    saw_hklf = False
     for line in src_res.read_text(errors="replace").splitlines():
         stripped = line.strip()
         upper = stripped.upper()
+        unsupported = _unsupported_endpoint_reason(line)
+        if unsupported:
+            raise ValueError(unsupported)
+        if upper.startswith("ACTA"):
+            continue
         if not keep_exti and upper.startswith("EXTI"):
             continue
         if upper.startswith("CELL "):
@@ -340,6 +365,9 @@ def write_endpoint_ins(
         saw_cycle_instruction = saw_cycle_instruction or forced_cycle
         if "<HklSrc" in line:
             line = f'REM <HklSrc "%./{hkl_name}">'
+        if upper.startswith("HKLF"):
+            line = "HKLF 4"
+            saw_hklf = True
         out.append(line)
         if upper.startswith("END"):
             break
@@ -350,6 +378,13 @@ def write_endpoint_ins(
                 insert_at = i
                 break
         out.insert(insert_at, "L.S. 1")
+    if not saw_hklf:
+        insert_at = len(out)
+        for i, line in enumerate(out):
+            if line.strip().upper().startswith("END"):
+                insert_at = i
+                break
+        out.insert(insert_at, "HKLF 4")
     if wght is not None:
         out = set_active_wght_lines(out, float(wght[0]), float(wght[1]))
     dst_ins.write_text("\n".join(out) + "\n")
@@ -1518,6 +1553,7 @@ def main():
         default="freeze-zero",
         help="SHELXL WGHT policy for corrected-HKL endpoints. freeze-zero is the production default after GROND sigma calibration; inherit keeps the source-model WGHT; promote uses SHELXL recommendations on later external passes.",
     )
+    ap.add_argument("--skip-endpoint-refinement", action="store_true", help="Run the fixed-model Bloch row calculation and row reports only. No corrected-HKL SHELXL endpoint is written or refined.")
     ap.add_argument("--post-bloch-sigma-policy", choices=["none", "uniform_z_rms"], default="none", help="Endpoint uncertainty policy applied after Bloch correction and before SHELXL. uniform_z_rms fits one residual RMS(z) scalar from the current model and scales endpoint sigmas only.")
     ap.add_argument("--post-bloch-sigma-holdout-fraction", type=float, default=0.20, help="Deterministic HKL holdout fraction reported for uniform_z_rms diagnostics.")
     ap.add_argument("--post-bloch-sigma-min-scale", type=float, default=0.25, help="Lower guardrail for the uniform_z_rms sigma multiplier.")
@@ -1773,37 +1809,38 @@ def main():
     for mode in endpoint_exti_modes:
         if mode not in {"off", "on", "false", "true", "0", "1", "no", "yes"}:
             raise ValueError(f"unknown endpoint EXTI mode {mode!r}; use off,on")
-    for lam in parse_float_grid(args.lambda_grid):
-        for endpoint_b in parse_float_grid(args.endpoint_b_grid):
-            for exti_mode in endpoint_exti_modes:
-                keep_exti = exti_mode in {"on", "true", "1", "yes"}
-                lam_tag = str(lam).replace(".", "p")
-                b_tag = str(endpoint_b).replace("-", "m").replace(".", "p")
-                exti_tag = "exti" if keep_exti else "noexti"
-                ep_dir = out / f"endpoint_lam_{lam_tag}_B_{b_tag}_{exti_tag}"
-                endpoint_results.append(
-                    export_corrected_endpoint(
-                        ep_dir,
-                        data,
-                        target,
-                        best["arrays"]["sigma_eff"],
-                        best,
-                        masks,
-                        Path(args.res),
-                        lam,
-                        args.hkl_float_format,
-                        args.rescale,
-                        args.make_maps,
-                        endpoint_b=endpoint_b,
-                        keep_exti=keep_exti,
-                        shelxl_iterations=args.shelxl_iterations,
-                        post_bloch_sigma_policy=args.post_bloch_sigma_policy,
-                        post_bloch_sigma_holdout_fraction=args.post_bloch_sigma_holdout_fraction,
-                        post_bloch_sigma_min_scale=args.post_bloch_sigma_min_scale,
-                        post_bloch_sigma_max_scale=args.post_bloch_sigma_max_scale,
-                        endpoint_wght_mode=args.endpoint_wght_mode,
+    if not args.skip_endpoint_refinement:
+        for lam in parse_float_grid(args.lambda_grid):
+            for endpoint_b in parse_float_grid(args.endpoint_b_grid):
+                for exti_mode in endpoint_exti_modes:
+                    keep_exti = exti_mode in {"on", "true", "1", "yes"}
+                    lam_tag = str(lam).replace(".", "p")
+                    b_tag = str(endpoint_b).replace("-", "m").replace(".", "p")
+                    exti_tag = "exti" if keep_exti else "noexti"
+                    ep_dir = out / f"endpoint_lam_{lam_tag}_B_{b_tag}_{exti_tag}"
+                    endpoint_results.append(
+                        export_corrected_endpoint(
+                            ep_dir,
+                            data,
+                            target,
+                            best["arrays"]["sigma_eff"],
+                            best,
+                            masks,
+                            Path(args.res),
+                            lam,
+                            args.hkl_float_format,
+                            args.rescale,
+                            args.make_maps,
+                            endpoint_b=endpoint_b,
+                            keep_exti=keep_exti,
+                            shelxl_iterations=args.shelxl_iterations,
+                            post_bloch_sigma_policy=args.post_bloch_sigma_policy,
+                            post_bloch_sigma_holdout_fraction=args.post_bloch_sigma_holdout_fraction,
+                            post_bloch_sigma_min_scale=args.post_bloch_sigma_min_scale,
+                            post_bloch_sigma_max_scale=args.post_bloch_sigma_max_scale,
+                            endpoint_wght_mode=args.endpoint_wght_mode,
+                        )
                     )
-                )
     endpoint_results = sorted(endpoint_results, key=lambda r: (r["shelxl"].get("wR2_all", 999), r["shelxl"].get("R1_all", 999)))
     no_exti_endpoint_results = [ep for ep in endpoint_results if not bool(ep.get("keep_exti", False))]
     neutral_endpoint_results = [
@@ -1962,6 +1999,7 @@ def main():
         "best_native": {k: v for k, v in best.items() if k != "arrays"},
         "endpoint_results_sorted": endpoint_results,
         "best_endpoint": final_endpoint_results[0] if final_endpoint_results else {},
+        "skip_endpoint_refinement": bool(args.skip_endpoint_refinement),
         "endpoint_factor_decision": endpoint_factor_decision,
         "baseline_exti": baseline,
         "wall_seconds": time.perf_counter() - t0,
