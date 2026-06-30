@@ -253,6 +253,117 @@ def test_finish_regenerates_compact_package(tmp_path: Path, capsys):
     assert "GROND Final Summary" in (run / "FINAL_SUMMARY.md").read_text()
 
 
+def test_finish_prefers_endpoint_chooser_physical_endpoint(tmp_path: Path, capsys):
+    run = tmp_path / "grond"
+    final_run = run / "runs" / "dataset" / "final"
+    screen_run = run / "runs" / "dataset" / "adaptive_screen"
+    calibration = run / "endpoint_calibration" / "dataset" / "adaptive_80_det_8" / "endpoint_freeze-zero"
+    polished = run / "forensics" / "dataset" / "observation_polish" / "endpoint_lam_1p0"
+    for path in (final_run, screen_run, calibration, polished, run / "decisions" / "dataset"):
+        path.mkdir(parents=True)
+    (final_run / "native_dyn_calc.csv").write_text("split,dyn_residual_over_sigma\nwork,0.5\nfree,1.5\n")
+    metrics = {
+        "all": {"dyn": {"R1_all": 0.21, "wR2_all": 0.33}, "born": {"R1_all": 0.28, "wR2_all": 0.42}},
+        "free": {"dyn": {"wR2_all": 0.34}, "born": {"wR2_all": 0.43}},
+    }
+    (final_run / "summary.json").write_text(json.dumps({"best_native": {"metrics": metrics}, "best_endpoint": {}}))
+    (screen_run / "summary.json").write_text(json.dumps({"best_native": {"metrics": metrics}}))
+    calibration_res = calibration / "dyn_scale_replay.res"
+    calibration_hkl = calibration / "dyn_scale_replay.hkl"
+    calibration_lst = calibration / "dyn_scale_replay.lst"
+    polished_res = polished / "dyn_observation_polished.res"
+    polished_hkl = polished / "dyn_observation_polished.hkl"
+    polished_lst = polished / "dyn_observation_polished.lst"
+    for res in (calibration_res, polished_res):
+        res.write_text("TITL endpoint\nCELL 0.025079 5 6 7 90 90 90\nEND\n")
+    for hkl in (calibration_hkl, polished_hkl):
+        hkl.write_text("   0   0   0    0.00    0.00\n")
+    for lst in (calibration_lst, polished_lst):
+        lst.write_text("R1 = 0.05 for 1 Fo > 4sig(Fo) and 0.11 for all 2 data\n")
+    (run / "decisions" / "dataset" / "decision_tree.json").write_text(
+        json.dumps(
+            {
+                "screen_run": str(screen_run),
+                "selected_hand": "original",
+                "transform_decision": {"selected": {"transform": "identity", "status": "ok"}},
+            }
+        )
+    )
+    write_prep(
+        run / "run_prep.json",
+        PrepConfig(
+            structure=str(tmp_path / "model.res"),
+            datasets=[DatasetSpec(name="dataset", hkl=str(tmp_path / "INTEGRATE.HKL"))],
+        ),
+    )
+    (run / "grond_summary.json").write_text(
+        json.dumps(
+            {
+                "primary_run": str(final_run),
+                "model": str(calibration_res),
+                "decision_tree": str(run / "decisions" / "dataset" / "decision_tree.json"),
+                "endpoint_calibration": {
+                    "publication_selection": {
+                        "publication_endpoint": {
+                            "spec": "adaptive_80_det_8",
+                            "wght_mode": "freeze-zero",
+                            "scale_params": 144,
+                            "shelxl_R1all": 0.1843,
+                            "shelxl_wR2all": 0.2726,
+                            "shelxl_GooF": 1.073,
+                            "endpoint_res": str(calibration_res),
+                            "endpoint_hkl": str(calibration_hkl),
+                            "endpoint_lst": str(calibration_lst),
+                        }
+                    }
+                },
+                "publication_endpoint_chooser": {
+                    "status": "ok",
+                    "best_physical_endpoint": {
+                        "id": "dataset:observation_polish:B=0:noexti:candidate=1",
+                        "label": "dataset:observation_polish",
+                        "source_kind": "observation_polish",
+                        "run_dir": str(polished.parent),
+                        "lambda_q": 1.0,
+                        "endpoint_b": 0.0,
+                        "keep_exti": False,
+                        "hkl_safe_factor": 1.0,
+                        "modulation_p95": 1.0,
+                        "R1_gt": 0.0952,
+                        "R1_all": 0.1537,
+                        "wR2_all": 0.1922,
+                        "GooF": 0.935,
+                        "hkl": str(polished_hkl),
+                        "lst": str(polished_lst),
+                        "res": str(polished_res),
+                        "shelxl": {
+                            "active_wght_a": 0.0,
+                            "active_wght_b": 0.0,
+                            "R1_gt": 0.0952,
+                            "R1_all": 0.1537,
+                            "wR2_all": 0.1922,
+                            "GooF": 0.935,
+                            "lst": str(polished_lst),
+                        },
+                    },
+                },
+            }
+        )
+    )
+
+    args = build_parser().parse_args(["finish", "--run-dir", str(run), "--no-make-maps", "--json"])
+    cli.cmd_finish(args)
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["publication_endpoint"]["R1all"] == pytest.approx(0.1537)
+    assert payload["files"]["publication_res"] == str(polished_res)
+    final_text = (run / "FINAL_SUMMARY.md").read_text()
+    quick_text = (run / "QUICK_STATS.md").read_text()
+    assert "endpoint_chooser" in final_text
+    assert "observation_polish" in final_text
+    assert "endpoint_chooser | observation_polish" in quick_text
+
+
 def test_terminal_finish_summary_is_human_readable():
     payload = {
         "status": "ok",
@@ -1046,7 +1157,7 @@ def test_write_quick_stats_summarizes_row_and_endpoint_tables(tmp_path):
     assert info["status"] == "ok"
     assert "requested_resolution_full_scales" in text
     assert "10.00%" in text
-    assert "selected_publication" in text
+    assert "selected_scale_replay" in text
     assert "15.39%" in text
     assert "Resume Warning" in text
     assert "mixed-code resume" in text

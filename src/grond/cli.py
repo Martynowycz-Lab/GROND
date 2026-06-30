@@ -5302,6 +5302,80 @@ def _quick_final_hand_summary(decision_tree: Mapping[str, object], diagnostic: M
     }
 
 
+def _normalize_publication_endpoint_block(endpoint: Mapping[str, object], *, selection_source: str) -> dict[str, object]:
+    """Normalize endpoint-chooser and endpoint-calibration records to one shape."""
+
+    shelxl = endpoint.get("shelxl") if isinstance(endpoint.get("shelxl"), Mapping) else {}
+
+    def first_text(*keys: str) -> str:
+        for key in keys:
+            value = endpoint.get(key)
+            if value:
+                return str(value)
+        return ""
+
+    def first_number(*keys: str) -> object:
+        for key in keys:
+            if key in endpoint and endpoint.get(key) is not None:
+                return endpoint.get(key)
+            if key in shelxl and shelxl.get(key) is not None:
+                return shelxl.get(key)
+        return None
+
+    out = dict(endpoint)
+    out["selection_source"] = selection_source
+    out["source_kind"] = str(endpoint.get("source_kind") or ("endpoint_calibration" if selection_source == "endpoint_calibration" else ""))
+    out["endpoint_res"] = first_text("endpoint_res", "res")
+    out["endpoint_hkl"] = first_text("endpoint_hkl", "hkl")
+    out["endpoint_lst"] = first_text("endpoint_lst", "lst") or str(shelxl.get("lst", "") or "")
+    out["endpoint_ins"] = first_text("endpoint_ins", "ins")
+    if not out["endpoint_ins"] and out["endpoint_res"]:
+        out["endpoint_ins"] = str(Path(out["endpoint_res"]).with_suffix(".ins"))
+    out["endpoint_manifest"] = first_text("endpoint_manifest", "manifest")
+    if not out["endpoint_manifest"] and out["endpoint_res"]:
+        manifest = Path(out["endpoint_res"]).with_name("manifest.json")
+        out["endpoint_manifest"] = str(manifest)
+    out["endpoint_row_table"] = first_text("endpoint_row_table", "row_table")
+    if not out["endpoint_row_table"] and str(out.get("source_kind", "")) == "observation_polish":
+        run_dir = first_text("run_dir")
+        if run_dir:
+            out["endpoint_row_table"] = str(Path(run_dir) / "promoted_observation_rows.csv")
+    out["spec"] = str(endpoint.get("spec") or endpoint.get("scale_spec") or endpoint.get("source_kind") or endpoint.get("label") or "")
+    if not out.get("wght_mode"):
+        wght_a = first_number("active_wght_a")
+        wght_b = first_number("active_wght_b")
+        if safe_float(wght_a, float("nan")) == 0.0 and safe_float(wght_b, float("nan")) == 0.0:
+            out["wght_mode"] = "freeze-zero"
+    out["shelxl_R1gt"] = first_number("shelxl_R1gt", "R1_gt")
+    out["shelxl_R1all"] = first_number("shelxl_R1all", "R1_all")
+    out["shelxl_wR2all"] = first_number("shelxl_wR2all", "wR2_all")
+    out["shelxl_GooF"] = first_number("shelxl_GooF", "GooF")
+    out["shelxl_Ngt"] = first_number("shelxl_Ngt", "N_gt")
+    out["shelxl_Nall"] = first_number("shelxl_Nall", "N_all")
+    return out
+
+
+def _endpoint_calibration_publication_endpoint(result: Mapping[str, object]) -> Mapping[str, object]:
+    """Return the endpoint-calibration publication replay, if present."""
+
+    endpoint_calibration = result.get("endpoint_calibration") if isinstance(result.get("endpoint_calibration"), Mapping) else {}
+    selection = endpoint_calibration.get("publication_selection", {}) if isinstance(endpoint_calibration, Mapping) else {}
+    endpoint = selection.get("publication_endpoint") if isinstance(selection, Mapping) else {}
+    if not isinstance(endpoint, Mapping) or not endpoint:
+        return {}
+    return _normalize_publication_endpoint_block(endpoint, selection_source="endpoint_calibration")
+
+
+def _chooser_publication_endpoint(result: Mapping[str, object]) -> Mapping[str, object]:
+    """Return the endpoint chooser's best physical endpoint, if present."""
+
+    chooser = result.get("publication_endpoint_chooser") if isinstance(result.get("publication_endpoint_chooser"), Mapping) else {}
+    endpoint = chooser.get("best_physical_endpoint") if isinstance(chooser, Mapping) else {}
+    if not isinstance(endpoint, Mapping) or not endpoint:
+        return {}
+    return _normalize_publication_endpoint_block(endpoint, selection_source="endpoint_chooser")
+
+
 def _quick_endpoint_file_block(publication_endpoint: Mapping[str, object], final_model: Path | None) -> dict[str, str]:
     """Collect the endpoint paths users most often need to open."""
 
@@ -5446,9 +5520,7 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
     row_metrics = try_read_json(row_metrics_path)
     endpoint_calibration = result.get("endpoint_calibration") if isinstance(result.get("endpoint_calibration"), Mapping) else {}
     endpoint_selection = endpoint_calibration.get("publication_selection", {}) if isinstance(endpoint_calibration, Mapping) else {}
-    publication_endpoint = endpoint_selection.get("publication_endpoint") if isinstance(endpoint_selection, Mapping) else {}
-    if not isinstance(publication_endpoint, Mapping):
-        publication_endpoint = {}
+    publication_endpoint = _publication_endpoint_from_result(result)
     metadata = row_metrics.get("metadata", {}) if isinstance(row_metrics.get("metadata"), Mapping) else {}
     source_roots = _quick_progress_source_roots(out_dir)
     timing_rows = _quick_progress_timings(out_dir)
@@ -5509,6 +5581,7 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
         f"- Final model: `{result.get('model', '')}`",
         f"- Publication endpoint model: `{publication_endpoint.get('endpoint_res', '')}`",
         f"- Publication corrected HKL: `{publication_endpoint.get('endpoint_hkl', '')}`",
+        f"- Publication endpoint source: `{publication_endpoint.get('selection_source', 'n/a')}` / `{publication_endpoint.get('source_kind', 'n/a')}`",
         f"- Rows in final row table: `{metadata.get('row_count', 'n/a')}`",
         f"- Final N/Q: `{metadata.get('n_basis', 'n/a')}/{metadata.get('n_points', 'n/a')}`",
         f"- Thickness mean: `{_quick_number(metadata.get('thickness_A_mean'), 1)} A`",
@@ -5628,28 +5701,45 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
     else:
         lines.append("| n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a |")
 
+    selection_policy = str(endpoint_selection.get("selection_policy", "n/a")) if isinstance(endpoint_selection, Mapping) else "n/a"
+    information_criterion = str(endpoint_selection.get("information_criterion", "n/a")) if isinstance(endpoint_selection, Mapping) else "n/a"
     lines.extend(
         [
             "",
+            "## Publication Endpoint",
+            "",
+            "This is the endpoint GROND currently recommends opening for the final structure. The endpoint-calibration table below remains the conservative scale-replay audit.",
+            "",
+            "| source | kind/spec | WGHT | scales | R1gt | R1all | wR2all | GooF |",
+            "|---|---|---|---:|---:|---:|---:|---:|",
+            "| "
+            + " | ".join(
+                [
+                    str(publication_endpoint.get("selection_source", "n/a")),
+                    str(publication_endpoint.get("spec") or publication_endpoint.get("source_kind") or "n/a"),
+                    str(publication_endpoint.get("wght_mode", "n/a")),
+                    str(publication_endpoint.get("scale_params", "n/a")),
+                    _quick_percent(publication_endpoint.get("shelxl_R1gt")),
+                    _quick_percent(publication_endpoint.get("shelxl_R1all")),
+                    _quick_percent(publication_endpoint.get("shelxl_wR2all")),
+                    _quick_number(publication_endpoint.get("shelxl_GooF"), 3),
+                ]
+            )
+            + " |",
+            "",
             "## Endpoint Calibration",
+            "",
+            f"Selection policy: `{selection_policy}`; information criterion: `{information_criterion}`.",
             "",
             "| branch | spec | WGHT | scales | R1all | wR2all | GooF | row-free wR2all | sigma scale |",
             "|---|---|---|---:|---:|---:|---:|---:|---:|",
         ]
     )
     branch_rows = [
-        ("selected_publication", endpoint_selection.get("publication_endpoint") if isinstance(endpoint_selection, Mapping) else None),
+        ("selected_scale_replay", endpoint_selection.get("publication_endpoint") if isinstance(endpoint_selection, Mapping) else None),
         ("low_R_diagnostic", endpoint_selection.get("low_r_diagnostic") if isinstance(endpoint_selection, Mapping) else None),
         ("best_heldout_row", endpoint_selection.get("best_heldout_row") if isinstance(endpoint_selection, Mapping) else None),
     ]
-    selection_policy = str(endpoint_selection.get("selection_policy", "n/a")) if isinstance(endpoint_selection, Mapping) else "n/a"
-    information_criterion = str(endpoint_selection.get("information_criterion", "n/a")) if isinstance(endpoint_selection, Mapping) else "n/a"
-    lines.extend(
-        [
-            f"Selection policy: `{selection_policy}`; information criterion: `{information_criterion}`.",
-            "",
-        ]
-    )
     wrote_branch = False
     for label, row in branch_rows:
         if not isinstance(row, Mapping):
@@ -5731,12 +5821,28 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
             "scale_spec": selected_row.get("spec", ""),
             "scale_params": selected_row.get("scale_params", ""),
             "wght_mode": selected_row.get("wght_mode", ""),
+            "source": selected_row.get("selection_source", ""),
+            "source_kind": selected_row.get("source_kind", ""),
             "selection_policy": endpoint_selection.get("selection_policy", "") if isinstance(endpoint_selection, Mapping) else "",
             "information_criterion": endpoint_selection.get("information_criterion", "") if isinstance(endpoint_selection, Mapping) else "",
             "information_value": endpoint_selection.get("selected_information_criterion", "") if isinstance(endpoint_selection, Mapping) else "",
         },
         "files": file_block,
     }
+    policy = str(console["publication_endpoint"].get("selection_policy") or "").strip()
+    criterion = str(console["publication_endpoint"].get("information_criterion") or "").strip()
+    criterion_value = console["publication_endpoint"].get("information_value")
+    if policy or criterion:
+        endpoint_note = (
+            f"Endpoint calibration used `{policy or 'n/a'}` with `{criterion or 'n/a'}` = "
+            f"`{_quick_number(criterion_value, 3)}`. If the endpoint chooser selected an accepted observation-polish endpoint, "
+            "that endpoint is reported above and the calibration replay remains an audit branch."
+        )
+    else:
+        endpoint_note = (
+            "The endpoint chooser selected the publication endpoint. Endpoint-calibration replay details, when present, "
+            "are listed in `QUICK_STATS.md` as an audit branch."
+        )
 
     final_lines = [
         "# GROND Final Summary",
@@ -5752,6 +5858,7 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
         f"| selected HKL transform | `{console['selected_transform']}` |",
         f"| final N/Q | `{metadata.get('n_basis', 'n/a')}/{metadata.get('n_points', 'n/a')}` |",
         f"| effective thickness model | `{_quick_number(metadata.get('thickness_A_mean'), 1)} A`; Sg window `{metadata.get('sg_window', 'n/a')}` |",
+        f"| publication endpoint source | `{console['publication_endpoint'].get('source', 'n/a')}` / `{console['publication_endpoint'].get('source_kind', 'n/a')}` |",
         "",
         "## Statistics",
         "",
@@ -5761,7 +5868,7 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
         f"| final model, row-space | `{_quick_percent(final_row_r1)}` | `{_quick_percent(final_row_wr2)}` | `{_quick_percent(final_free_wr2)}` | n/a |",
         f"| publication corrected-HKL endpoint | `{_quick_percent(selected_row.get('shelxl_R1all'))}` | `{_quick_percent(selected_row.get('shelxl_wR2all'))}` | `{_quick_percent(selected_row.get('native_free_wR2_all'))}` | `{_quick_number(selected_row.get('shelxl_GooF'), 3)}` |",
         "",
-        f"Scale selection used `{console['publication_endpoint'].get('selection_policy', 'n/a')}` with `{console['publication_endpoint'].get('information_criterion', 'n/a')}` = `{_quick_number(console['publication_endpoint'].get('information_value'), 3)}`.",
+        endpoint_note,
         "",
         "## Files",
         "",
@@ -5801,10 +5908,10 @@ def _finish_run_dir(args: argparse.Namespace) -> Path:
 def _publication_endpoint_from_result(result: Mapping[str, object]) -> Mapping[str, object]:
     """Return the selected publication endpoint block from a run result."""
 
-    endpoint_calibration = result.get("endpoint_calibration") if isinstance(result.get("endpoint_calibration"), Mapping) else {}
-    selection = endpoint_calibration.get("publication_selection", {}) if isinstance(endpoint_calibration, Mapping) else {}
-    endpoint = selection.get("publication_endpoint") if isinstance(selection, Mapping) else {}
-    return endpoint if isinstance(endpoint, Mapping) else {}
+    chooser_endpoint = _chooser_publication_endpoint(result)
+    if chooser_endpoint:
+        return chooser_endpoint
+    return _endpoint_calibration_publication_endpoint(result)
 
 
 def _shelx2map_executable(args: argparse.Namespace) -> str:
