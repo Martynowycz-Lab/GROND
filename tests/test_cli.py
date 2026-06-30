@@ -1135,6 +1135,45 @@ def test_shelxl_feedback_current_model_skips_empty_res(tmp_path: Path):
     assert cli.shelxl_feedback_current_run(run_root) == good_run
 
 
+def test_shelxl_feedback_current_model_skips_npd_res(tmp_path: Path):
+    run_root = tmp_path / "feedback"
+    good_run = run_root / "cycle_04_N132Q20"
+    npd_run = run_root / "cycle_05_N132Q20"
+    good_res = good_run / "endpoint_lam_1p0_B_0p0_noexti" / "dyn_nuisance_corrected.res"
+    npd_res = npd_run / "endpoint_lam_1p0_B_0p0_noexti" / "dyn_nuisance_corrected.res"
+    good_res.parent.mkdir(parents=True)
+    npd_res.parent.mkdir(parents=True)
+    good_res.write_text("TITL ok\nCELL 0.02508 5.0 6.0 7.0 90 90 90\nSFAC C\nEND\n")
+    npd_res.write_text("TITL npd\nCELL 0.02508 5.0 6.0 7.0 90 90 90\nSFAC C\nEND\n")
+    (run_root / "shelxl_feedback_loop_summary.json").write_text(
+        json.dumps(
+            {
+                "current_model": str(npd_res),
+                "runs": [
+                    {"run_dir": str(good_run), "returncode": 0, "output_model": str(good_res), "endpoint_res_health": {"ok": True, "safe_for_feedback": True}},
+                    {
+                        "run_dir": str(npd_run),
+                        "returncode": 0,
+                        "output_model": str(npd_res),
+                        "endpoint_res_health": {
+                            "ok": True,
+                            "reason": "ok",
+                            "safe_for_feedback": False,
+                            "npd_count": 1,
+                            "split_count": 0,
+                            "npd_atoms": ["O001"],
+                        },
+                    },
+                ],
+            }
+        )
+        + "\n"
+    )
+
+    assert cli.shelxl_feedback_current_model(run_root) == good_res
+    assert cli.shelxl_feedback_current_run(run_root) == good_run
+
+
 def test_shelxl_feedback_current_run_prefers_final_row_recompute(tmp_path: Path):
     run_root = tmp_path / "feedback"
     cycle_run = run_root / "cycle_05_N108Q20"

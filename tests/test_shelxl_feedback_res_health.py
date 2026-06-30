@@ -59,3 +59,34 @@ def test_native_run_shelxl_marks_empty_res_invalid(tmp_path: Path, monkeypatch):
     assert result["res_health"]["ok"] is False
     assert result["iterations"] == 2
     assert len(result["iteration_history"]) == 1
+
+
+def test_native_run_shelxl_marks_npd_res_pathological(tmp_path: Path, monkeypatch):
+    fake_shelxl = tmp_path / "fake_shelxl.py"
+    fake_shelxl.write_text(
+        "import pathlib, sys\n"
+        "stem = sys.argv[1]\n"
+        "pathlib.Path(stem + '.lst').write_text('''\\n"
+        "  -0.0010  -0.0010  -0.0010   O001   ** NON POSITIVE DEFINITE **\\n"
+        " ** Warning:     0  atoms may be split and     1  atoms NPD **\\n"
+        "''')\n"
+        "pathlib.Path(stem + '.res').write_text('TITL npd\\nCELL 0.02508 5 6 7 90 90 90\\nSFAC C\\nEND\\n')\n"
+    )
+    fake_shelxl.chmod(fake_shelxl.stat().st_mode | 0o111)
+    work = tmp_path / "work"
+    work.mkdir()
+    shim = tmp_path / "shelxl_shim"
+    shim.write_text(f"#!/bin/sh\nexec {sys.executable!r} {str(fake_shelxl)!r} \"$@\"\n")
+    shim.chmod(shim.stat().st_mode | 0o111)
+    monkeypatch.setattr(nr, "SHELXL", str(shim))
+
+    result = nr.run_shelxl(work, "dyn_nuisance_corrected", iterations=3)
+
+    assert result["status"] == "adp_pathology"
+    assert result["invalid_res_reason"] == "adp_pathology"
+    assert result["npd_count"] == 1
+    assert result["npd_atoms"] == ["O001"]
+    assert result["res_health"]["ok"] is True
+    assert result["res_health"]["safe_for_feedback"] is False
+    assert result["iterations"] == 3
+    assert len(result["iteration_history"]) == 1

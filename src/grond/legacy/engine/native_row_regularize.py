@@ -56,6 +56,7 @@ try:  # Package import.
         split_masks,
     )
     from .post_bloch_sigma import fit_uniform_z_rms_sigma_scale, scale_row_sigmas
+    from .shelx_diagnostics import parse_shelx_lst_pathologies, shelx_pathology_safe_for_feedback
 except ImportError:  # Direct script execution from this directory.
     from bloch_engine import (
         Config,
@@ -68,6 +69,7 @@ except ImportError:  # Direct script execution from this directory.
         split_masks,
     )
     from post_bloch_sigma import fit_uniform_z_rms_sigma_scale, scale_row_sigmas
+    from shelx_diagnostics import parse_shelx_lst_pathologies, shelx_pathology_safe_for_feedback
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -1012,6 +1014,7 @@ def parse_lst(path: Path):
     if not path.exists():
         return out
     out["status"] = "ok"
+    out.update(parse_shelx_lst_pathologies(path))
     text = path.read_text(errors="replace")
     m = re.findall(r"^\s*WGHT[ \t]+([-+0-9.Ee]+)(?:[ \t]+([-+0-9.Ee]+))?", text, flags=re.MULTILINE)
     if m:
@@ -1063,7 +1066,7 @@ def parse_recommended_wght(lst_path: Path) -> tuple[float, float] | None:
     return float(a_text), float(b_text) if b_text else 0.0
 
 
-def shelx_res_health(res_path: Path) -> dict:
+def shelx_res_health(res_path: Path, lst_path: Path | None = None) -> dict:
     """Return whether a SHELXL RES file is usable as the next model.
 
     SHELXL can fail in ways that still leave a path on disk.  In particular,
@@ -1086,7 +1089,15 @@ def shelx_res_health(res_path: Path) -> dict:
     has_cell = any(line.strip().upper().startswith("CELL ") for line in lines)
     if not has_cell:
         return {"ok": False, "reason": "missing_cell", "path": str(res_path), "size": int(size)}
-    return {"ok": True, "reason": "ok", "path": str(res_path), "size": int(size)}
+    pathology = parse_shelx_lst_pathologies(lst_path or res_path.with_suffix(".lst"))
+    return {
+        "ok": True,
+        "reason": "ok",
+        "path": str(res_path),
+        "size": int(size),
+        **pathology,
+        "safe_for_feedback": shelx_pathology_safe_for_feedback(pathology),
+    }
 
 
 def write_active_wght(path: Path, a: float, b: float) -> dict:
@@ -1173,11 +1184,15 @@ def run_shelxl(work_dir: Path, stem: str, iterations: int = 1, wght_mode: str = 
         history.append(stats)
         res = work_dir / f"{stem}.res"
         ins = work_dir / f"{stem}.ins"
-        health = shelx_res_health(res)
+        health = shelx_res_health(res, lst)
         stats["res_health"] = health
         if not health["ok"]:
             stats["status"] = "invalid_res_output"
             stats["invalid_res_reason"] = health["reason"]
+            break
+        if health.get("safe_for_feedback") is False:
+            stats["status"] = "adp_pathology"
+            stats["invalid_res_reason"] = "adp_pathology"
             break
         if i + 1 < n_iter and res.exists():
             active = (0.0, 0.0) if freeze_zero else _active_wght_from_stats(stats)
@@ -1191,7 +1206,7 @@ def run_shelxl(work_dir: Path, stem: str, iterations: int = 1, wght_mode: str = 
     if last_proc is not None:
         (work_dir / "shelxl_stdout.log").write_text(last_proc.stdout)
     final = dict(history[-1]) if history else {"returncode": None, "status": "not_run"}
-    final.setdefault("res_health", shelx_res_health(work_dir / f"{stem}.res"))
+    final.setdefault("res_health", shelx_res_health(work_dir / f"{stem}.res", work_dir / f"{stem}.lst"))
     if not final["res_health"].get("ok"):
         final["status"] = "invalid_res_output"
         final["invalid_res_reason"] = final["res_health"].get("reason")
@@ -1407,6 +1422,18 @@ def copy_baseline(out_dir: Path, res_path: Path, hkl_path: Path):
     shutil.copy2(res_path, out_dir / "temp_a.ins")
     shutil.copy2(hkl_path, out_dir / "temp_a.hkl")
     return run_shelxl(out_dir, "temp_a")
+
+
+def endpoint_has_adp_pathology(endpoint: dict) -> bool:
+    """Return true when a SHELXL endpoint has NPD/split pathology warnings."""
+
+    shelxl = endpoint.get("shelxl") or {}
+    try:
+        npd_count = int(shelxl.get("npd_count", 0) or 0)
+        split_count = int(shelxl.get("split_count", 0) or 0)
+    except (TypeError, ValueError):
+        return bool(shelxl.get("has_npd") or shelxl.get("has_split_warnings"))
+    return npd_count > 0 or split_count > 0 or bool(shelxl.get("has_npd") or shelxl.get("has_split_warnings"))
 
 
 def write_row_table(path: Path, data: XDSData, target, best_eval, masks):
@@ -1871,11 +1898,16 @@ def main():
                     )
     endpoint_results = sorted(endpoint_results, key=lambda r: (r["shelxl"].get("wR2_all", 999), r["shelxl"].get("R1_all", 999)))
     no_exti_endpoint_results = [ep for ep in endpoint_results if not bool(ep.get("keep_exti", False))]
+    safe_no_exti_endpoint_results = [ep for ep in no_exti_endpoint_results if not endpoint_has_adp_pathology(ep)]
     neutral_endpoint_results = [
         ep for ep in no_exti_endpoint_results
         if abs(float(ep.get("endpoint_b", 0.0))) < 1e-12
     ]
-    final_endpoint_results = neutral_endpoint_results or no_exti_endpoint_results
+    safe_neutral_endpoint_results = [
+        ep for ep in safe_no_exti_endpoint_results
+        if abs(float(ep.get("endpoint_b", 0.0))) < 1e-12
+    ]
+    final_endpoint_results = safe_neutral_endpoint_results or safe_no_exti_endpoint_results or neutral_endpoint_results or no_exti_endpoint_results
 
     baseline = {}
     if Path(args.baseline_hkl).exists():
@@ -1900,7 +1932,7 @@ def main():
         minimum_hkl_safe_factor = 0.25
         best_wR2 = float(best_sh.get("wR2_all", float("nan")))
         balanced_candidates = [
-            ep for ep in neutral_endpoint_results
+            ep for ep in (safe_neutral_endpoint_results or neutral_endpoint_results)
             if (
                 float(ep.get("hkl_safe_factor", 1.0)) >= minimum_hkl_safe_factor
                 and float(ep.get("shelxl", {}).get("wR2_all", 999)) <= best_wR2 + balanced_wR2_tolerance
@@ -1936,6 +1968,9 @@ def main():
             "final_endpoint_b": final_ep.get("endpoint_b", 0.0),
             "final_R1_all": final_sh.get("R1_all"),
             "final_wR2_all": final_sh.get("wR2_all"),
+            "final_endpoint_has_adp_pathology": endpoint_has_adp_pathology(final_ep),
+            "safe_no_exti_endpoint_count": len(safe_no_exti_endpoint_results),
+            "safe_neutral_endpoint_count": len(safe_neutral_endpoint_results),
             "endpoint_b_policy": "diagnostic_only_prefer_neutral",
             "balanced_lambda_q": balanced_ep.get("lambda_q"),
             "balanced_endpoint_b": balanced_ep.get("endpoint_b", 0.0),

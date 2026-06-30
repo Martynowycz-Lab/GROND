@@ -449,6 +449,24 @@ def shelx_model_is_usable(path: Path | str) -> bool:
         return False
 
 
+def shelxl_feedback_record_safe_for_reuse(record: Mapping[str, object]) -> bool:
+    """Return whether a feedback-loop record is safe as a later starting model."""
+
+    health = record.get("endpoint_res_health")
+    if not isinstance(health, Mapping):
+        return True
+    if not bool(health.get("ok", False)):
+        return False
+    if health.get("safe_for_feedback") is False:
+        return False
+    try:
+        npd_count = int(health.get("npd_count", 0) or 0)
+        split_count = int(health.get("split_count", 0) or 0)
+    except (TypeError, ValueError):
+        return not bool(health.get("has_npd") or health.get("has_split_warnings"))
+    return npd_count <= 0 and split_count <= 0 and not bool(health.get("has_npd") or health.get("has_split_warnings"))
+
+
 def best_endpoint_model(run_dir: Path) -> Path | None:
     """Return the polished endpoint RES path for a completed native stage."""
 
@@ -582,12 +600,18 @@ def shelxl_feedback_current_model(run_dir: Path) -> Path | None:
     """Return the latest model produced by a SHELXL feedback-loop run."""
 
     summary = try_read_json(run_dir / "shelxl_feedback_loop_summary.json")
+    runs = summary.get("runs") or []
     current = summary.get("current_model")
     if current and shelx_model_is_usable(current):
-        return Path(current)
-    for rec in reversed(summary.get("runs") or []):
+        current_path = Path(str(current))
+        if current_path == Path(str(summary.get("start_res", ""))) or any(
+            rec.get("output_model") and Path(str(rec.get("output_model"))) == current_path and shelxl_feedback_record_safe_for_reuse(rec)
+            for rec in runs
+        ):
+            return current_path
+    for rec in reversed(runs):
         output = rec.get("output_model")
-        if output and shelx_model_is_usable(output):
+        if output and shelx_model_is_usable(output) and shelxl_feedback_record_safe_for_reuse(rec):
             return Path(output)
     return None
 
@@ -602,9 +626,9 @@ def shelxl_feedback_current_run(run_dir: Path) -> Path | None:
         if not rec_run:
             continue
         output = rec.get("output_model")
-        if output and shelx_model_is_usable(output):
+        if output and shelx_model_is_usable(output) and shelxl_feedback_record_safe_for_reuse(rec):
             return Path(rec_run).expanduser()
-        if current and output and Path(output) == Path(str(current)) and shelx_model_is_usable(current):
+        if current and output and Path(output) == Path(str(current)) and shelx_model_is_usable(current) and shelxl_feedback_record_safe_for_reuse(rec):
             return Path(rec_run).expanduser()
     return None
 

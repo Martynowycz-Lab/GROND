@@ -26,6 +26,11 @@ import sys
 import time
 from pathlib import Path
 
+try:
+    from .shelx_diagnostics import parse_shelx_lst_pathologies, shelx_pathology_safe_for_feedback
+except ImportError:  # Direct script execution from the legacy engine directory.
+    from shelx_diagnostics import parse_shelx_lst_pathologies, shelx_pathology_safe_for_feedback
+
 
 def read_json(path: Path) -> dict:
     """Read a JSON file, allowing GROND summaries that contain NaN tokens."""
@@ -73,7 +78,7 @@ def nuisance(summary: dict) -> dict:
     return out
 
 
-def shelx_res_health(res_path: Path) -> dict:
+def shelx_res_health(res_path: Path, lst_path: Path | None = None) -> dict:
     """Return whether a SHELXL RES file can be used as a feedback model."""
 
     if not res_path.exists():
@@ -90,19 +95,27 @@ def shelx_res_health(res_path: Path) -> dict:
         return {"ok": False, "reason": "read_failed", "path": str(res_path), "size": int(size), "error": str(exc)}
     if not any(line.strip().upper().startswith("CELL ") for line in lines):
         return {"ok": False, "reason": "missing_cell", "path": str(res_path), "size": int(size)}
-    return {"ok": True, "reason": "ok", "path": str(res_path), "size": int(size)}
+    pathology = parse_shelx_lst_pathologies(lst_path or res_path.with_suffix(".lst"))
+    return {
+        "ok": True,
+        "reason": "ok",
+        "path": str(res_path),
+        "size": int(size),
+        **pathology,
+        "safe_for_feedback": shelx_pathology_safe_for_feedback(pathology),
+    }
 
 
 def endpoint_res(run_dir: Path) -> Path:
     """Return the no-EXTI B=0 lambda=1 endpoint RES file from one cycle."""
 
     direct = run_dir / "endpoint_lam_1p0_B_0p0_noexti" / "dyn_nuisance_corrected.res"
-    if shelx_res_health(direct)["ok"]:
+    if shelx_res_health(direct, direct.with_suffix(".lst"))["ok"]:
         return direct
     matches = sorted(run_dir.glob("endpoint_lam_*_B_0p0_noexti/dyn_nuisance_corrected.res"))
     rejected = []
     for match in matches:
-        health = shelx_res_health(match)
+        health = shelx_res_health(match, match.with_suffix(".lst"))
         if health["ok"]:
             return match
         rejected.append(health)
@@ -402,7 +415,7 @@ def run_cycle(
     elif status["returncode"] == 0:
         try:
             updated_res = endpoint_res(run_dir)
-            endpoint_health = shelx_res_health(updated_res)
+            endpoint_health = shelx_res_health(updated_res, updated_res.with_suffix(".lst"))
         except FileNotFoundError as exc:
             endpoint_health = {"ok": False, "reason": "missing_or_invalid_endpoint_res", "error": str(exc)}
             status["returncode"] = 3
@@ -477,6 +490,7 @@ def main() -> None:
     result = {
         "source_summary": str(source_summary_path.resolve()),
         "start_res": str(current_model),
+        "current_model": str(current_model),
         "shelxl": str(args.shelxl),
         "endpoint_wght_mode": str(args.endpoint_wght_mode),
         "post_bloch_sigma_policy": str(args.post_bloch_sigma_policy),
@@ -508,6 +522,14 @@ def main() -> None:
         result["runs"].append(rec)
         if rec["returncode"] != 0:
             result["stopped_reason"] = rec.get("endpoint_error") or f"cycle returned {rec['returncode']}"
+            break
+        health = rec.get("endpoint_res_health") or {}
+        if health.get("safe_for_feedback") is False:
+            result["stopped_reason"] = (
+                "SHELXL feedback cycle produced ADP pathology; keeping the previous clean model. "
+                f"NPD atoms={health.get('npd_count', 0)}, split warnings={health.get('split_count', 0)}."
+            )
+            result["pathological_model"] = rec.get("output_model", "")
             break
         current_model = Path(rec["output_model"]).resolve()
         result["current_model"] = str(current_model)
