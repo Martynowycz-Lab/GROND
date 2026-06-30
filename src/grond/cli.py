@@ -4927,10 +4927,18 @@ def cmd_run(args: argparse.Namespace) -> int:
     result["continue_checkpoint"] = write_continue_checkpoint(prep, result, args)
     result["quick_stats"] = write_quick_stats(prep, result, args)
     (Path(args.out_dir) / "grond_summary.json").write_text(json.dumps(result, indent=2) + "\n")
+    finished = _PROGRESS.mark_finished(str(result.get("status", "ok"))) if _PROGRESS else _quick_progress_finish_info(Path(args.out_dir))
     quick = result.get("quick_stats") if isinstance(result.get("quick_stats"), Mapping) else {}
     console = quick.get("console") if isinstance(quick.get("console"), Mapping) else {}
-    payload = {"status": result.get("status", "ok"), **console} if console else {"status": result.get("status", "ok"), "out_dir": str(Path(args.out_dir).resolve()), "quick_stats": quick}
-    print(json.dumps(payload, indent=2, allow_nan=True))
+    payload = (
+        {"status": result.get("status", "ok"), "finished": finished, **console}
+        if console
+        else {"status": result.get("status", "ok"), "finished": finished, "out_dir": str(Path(args.out_dir).resolve()), "quick_stats": quick}
+    )
+    if getattr(args, "json", False):
+        print(json.dumps(payload, indent=2, allow_nan=True))
+    else:
+        print(_format_terminal_finish_summary(payload), flush=True)
     return 0
 
 
@@ -5109,6 +5117,31 @@ def _quick_progress_timings(out_dir: Path) -> list[dict[str, object]]:
             }
         )
     return rows
+
+
+def _quick_progress_finish_info(out_dir: Path) -> dict[str, object]:
+    """Return a compact completion/timing block from progress state."""
+
+    progress = try_read_json(out_dir / "grond_progress.json")
+    finished = progress.get("finished") if isinstance(progress.get("finished"), Mapping) else {}
+    completed = progress.get("completed", {}) if isinstance(progress.get("completed"), Mapping) else {}
+    completed_ok = len([v for v in completed.values() if isinstance(v, Mapping) and v.get("returncode") == 0])
+    failed = len([v for v in completed.values() if isinstance(v, Mapping) and v.get("returncode") not in {0, None}])
+    total_elapsed = sum(
+        _quick_float(v.get("elapsed_seconds"), 0.0)
+        for v in completed.values()
+        if isinstance(v, Mapping) and v.get("returncode") == 0
+    )
+    out = {
+        "completed_stages": completed_ok,
+        "failed_stages": failed,
+        "stage_elapsed_seconds": total_elapsed,
+        "stage_elapsed": format_seconds(total_elapsed),
+    }
+    if finished:
+        out.update(finished)
+        out["stage_elapsed"] = format_seconds(out.get("stage_elapsed_seconds", total_elapsed))
+    return out
 
 
 def _quick_final_run(result: Mapping[str, object]) -> Path | None:
@@ -5310,6 +5343,90 @@ def _quick_transform_summary(transform_decision: Mapping[str, object]) -> dict[s
             else None
         ),
     }
+
+
+def _quick_normal_equivalent_confidence(z_value: object) -> float | None:
+    """Return the one-sided normal-equivalent confidence for an oriented Z value."""
+
+    z = _quick_fraction(z_value)
+    if z is None:
+        return None
+    return 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
+
+
+def _quick_delta_percent(before: object, after: object) -> str:
+    """Format an absolute percent-point change for fractional metrics."""
+
+    b = _quick_fraction(before)
+    a = _quick_fraction(after)
+    if b is None or a is None:
+        return "n/a"
+    sign = "+" if (a - b) >= 0 else ""
+    return f"{sign}{100.0 * (a - b):.2f} pp"
+
+
+def _format_terminal_finish_summary(payload: Mapping[str, object]) -> str:
+    """Return the short human-facing completion report printed by auto/run/finish."""
+
+    status = str(payload.get("status", "ok"))
+    out_dir = str(payload.get("out_dir", ""))
+    final_hand = str(payload.get("final_hand", "n/a"))
+    transform = str(payload.get("selected_transform", "n/a"))
+    z_all = payload.get("final_hand_z_all")
+    z_free = payload.get("final_hand_z_free")
+    z_all_conf = _quick_normal_equivalent_confidence(z_all)
+    z_free_conf = _quick_normal_equivalent_confidence(z_free)
+    input_model = payload.get("input_model") if isinstance(payload.get("input_model"), Mapping) else {}
+    final_row = payload.get("final_row_model") if isinstance(payload.get("final_row_model"), Mapping) else {}
+    endpoint = payload.get("publication_endpoint") if isinstance(payload.get("publication_endpoint"), Mapping) else {}
+    files = payload.get("files") if isinstance(payload.get("files"), Mapping) else {}
+    finished = payload.get("finished") if isinstance(payload.get("finished"), Mapping) else {}
+    elapsed = str(finished.get("stage_elapsed") or format_seconds(finished.get("stage_elapsed_seconds", 0.0)))
+    completed = finished.get("completed_stages", "n/a")
+    estimated = finished.get("estimated_stages")
+    stage_note = f"{completed} stages"
+    if estimated not in {None, "", "n/a"}:
+        try:
+            if int(estimated) != int(completed):
+                stage_note += f" completed; initial estimate was {estimated}"
+            else:
+                stage_note += " completed"
+        except (TypeError, ValueError):
+            stage_note += " completed"
+    else:
+        stage_note += " completed"
+    if finished.get("failed_stages", 0):
+        stage_note += f"; {finished.get('failed_stages')} failed stage records in progress file"
+
+    headline = f"GROND finished successfully in {elapsed}." if status == "ok" else f"GROND finished with status {status} after {elapsed}."
+    lines = [
+        "",
+        headline,
+        f"Output directory: {out_dir}",
+        f"Progress: {stage_note}. Optional gates can make the final stage count smaller than the starting ETA denominator.",
+        "",
+        "Decision summary",
+        f"  Hand: {final_hand} (Z all/free = {_quick_number(z_all, 3)} / {_quick_number(z_free, 3)}; normal-equivalent confidence all/free = {_quick_percent(z_all_conf)} / {_quick_percent(z_free_conf)})",
+        f"  HKL transform: {transform}",
+        "",
+        "Row-level statistics",
+        f"  Input model: R1all {_quick_percent(input_model.get('row_R1all'))}, wR2all {_quick_percent(input_model.get('row_wR2all'))}",
+        f"  Final model: R1all {_quick_percent(final_row.get('row_R1all'))}, wR2all {_quick_percent(final_row.get('row_wR2all'))}, free wR2all {_quick_percent(final_row.get('row_free_wR2all'))}",
+        f"  Change: R1all {_quick_delta_percent(input_model.get('row_R1all'), final_row.get('row_R1all'))}, wR2all {_quick_delta_percent(input_model.get('row_wR2all'), final_row.get('row_wR2all'))}",
+        "",
+        "Publication endpoint",
+        f"  R1all {_quick_percent(endpoint.get('R1all'))}, wR2all {_quick_percent(endpoint.get('wR2all'))}, GooF {_quick_number(endpoint.get('GooF'), 3)}",
+        f"  Scales: {endpoint.get('scale_spec', 'n/a')} ({endpoint.get('scale_params', 'n/a')} parameters), WGHT {endpoint.get('wght_mode', 'n/a')}",
+        "",
+        "Open these first",
+        f"  Final summary: {payload.get('final_summary', '')}",
+        f"  Quick stats: {payload.get('quick_stats', '')}",
+        f"  Full JSON: {payload.get('full_json', '')}",
+        f"  Publication model: {files.get('publication_res', '')}",
+        f"  Publication HKL: {files.get('publication_hkl', '')}",
+        f"  Row table: {final_row.get('row_table', '')}",
+    ]
+    return "\n".join(lines)
 
 
 def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argparse.Namespace) -> dict:
@@ -5849,11 +5966,15 @@ def cmd_finish(args: argparse.Namespace) -> int:
     payload = {
         "status": "ok",
         **console,
+        "finished": _quick_progress_finish_info(run_dir),
         "finish_manifest": str(manifest_path),
         "maps": maps,
         "cif": manifest["cif"],
     }
-    print(json.dumps(payload, indent=2, allow_nan=True))
+    if getattr(args, "json", False):
+        print(json.dumps(payload, indent=2, allow_nan=True))
+    else:
+        print(_format_terminal_finish_summary(payload), flush=True)
     return 0
 
 
@@ -7382,6 +7503,7 @@ def add_common_run_args(ap: argparse.ArgumentParser, *, expose_lambda_controls: 
     ap.add_argument("--python", default="")
     add_tool_config_args(ap)
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--json", action="store_true", help="Print the compact machine-readable payload instead of the human final summary.")
     ap.add_argument("--resume", action=argparse.BooleanOptionalAction, default=True, help="Reuse completed stages recorded in OUT/grond_progress.json.")
     ap.add_argument("--workers", type=int, default=0, help="Worker processes. Default 0 uses --max-core-fraction of detected CPU cores.")
     ap.add_argument("--max-core-fraction", type=float, default=0.85, help="Fraction of detected CPU cores to use when --workers=0.")

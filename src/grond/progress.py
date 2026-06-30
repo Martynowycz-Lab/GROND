@@ -127,6 +127,32 @@ class ProgressState:
         payload.setdefault("events", []).append({"event": "interrupted", "label": label or "", "time": payload["interrupted_at"]})
         self.save(payload)
 
+    def mark_finished(self, status: str = "ok") -> dict[str, Any]:
+        """Record that the full workflow reached its final packaging step."""
+
+        payload = self.load()
+        payload.pop("current", None)
+        completed = payload.get("completed", {})
+        completed_ok = len([v for v in completed.values() if isinstance(v, dict) and v.get("returncode") == 0])
+        failed = len([v for v in completed.values() if isinstance(v, dict) and v.get("returncode") not in {0, None}])
+        total_elapsed = sum(
+            float(v.get("elapsed_seconds", 0.0))
+            for v in completed.values()
+            if isinstance(v, dict) and v.get("returncode") == 0
+        )
+        finished = {
+            "status": status,
+            "time": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "completed_stages": completed_ok,
+            "failed_stages": failed,
+            "estimated_stages": int(self.total),
+            "stage_elapsed_seconds": float(total_elapsed),
+        }
+        payload["finished"] = finished
+        payload.setdefault("events", []).append({"event": "finished", **finished})
+        self.save(payload)
+        return finished
+
     def line_prefix(self, label: str, skipped: bool = False) -> str:
         """Build the common prefix used before every stage status line."""
 
