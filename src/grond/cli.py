@@ -2810,7 +2810,7 @@ def _endpoint_calibration_lambda(summary: Mapping[str, object], args: argparse.N
 
 
 def run_endpoint_calibration(prep: PrepConfig, result: dict, args: argparse.Namespace, python: str, logs: Path) -> dict:
-    """Replay the final frozen row table through the conservative endpoint chooser."""
+    """Replay the final frozen row table through the endpoint-calibration chooser."""
 
     mode = getattr(args, "endpoint_calibration", "auto")
     if mode == "off":
@@ -2876,6 +2876,10 @@ def run_endpoint_calibration(prep: PrepConfig, result: dict, args: argparse.Name
         f"{getattr(args, 'endpoint_calibration_free_wr2_tolerance', 0.040):g}",
         "--publication-prefer-wght-mode",
         str(getattr(args, "endpoint_calibration_prefer_wght_mode", "freeze-zero")),
+        "--publication-selection-policy",
+        str(getattr(args, "endpoint_calibration_selection_policy", "bic")),
+        "--publication-information-criterion",
+        str(getattr(args, "endpoint_calibration_information_criterion", "bic_fitted_variance")),
         "--instability-u",
         f"{getattr(args, 'instability_u', 0.01):g}",
     ]
@@ -4911,6 +4915,8 @@ def cmd_run(args: argparse.Namespace) -> int:
             "lambda_q": args.endpoint_calibration_lambda_q,
             "wght_modes": args.endpoint_calibration_wght_modes,
             "preferred_wght_mode": args.endpoint_calibration_prefer_wght_mode,
+            "selection_policy": args.endpoint_calibration_selection_policy,
+            "information_criterion": args.endpoint_calibration_information_criterion,
             "goof_min": args.endpoint_calibration_goof_min,
             "goof_max": args.endpoint_calibration_goof_max,
             "max_r1_cost": args.endpoint_calibration_max_r1_cost,
@@ -5417,6 +5423,7 @@ def _format_terminal_finish_summary(payload: Mapping[str, object]) -> str:
         "Publication endpoint",
         f"  R1all {_quick_percent(endpoint.get('R1all'))}, wR2all {_quick_percent(endpoint.get('wR2all'))}, GooF {_quick_number(endpoint.get('GooF'), 3)}",
         f"  Scales: {endpoint.get('scale_spec', 'n/a')} ({endpoint.get('scale_params', 'n/a')} parameters), WGHT {endpoint.get('wght_mode', 'n/a')}",
+        f"  Scale selector: {endpoint.get('selection_policy', 'n/a')} / {endpoint.get('information_criterion', 'n/a')} = {_quick_number(endpoint.get('information_value'), 3)}",
         "",
         "Open these first",
         f"  Final summary: {payload.get('final_summary', '')}",
@@ -5635,6 +5642,14 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
         ("low_R_diagnostic", endpoint_selection.get("low_r_diagnostic") if isinstance(endpoint_selection, Mapping) else None),
         ("best_heldout_row", endpoint_selection.get("best_heldout_row") if isinstance(endpoint_selection, Mapping) else None),
     ]
+    selection_policy = str(endpoint_selection.get("selection_policy", "n/a")) if isinstance(endpoint_selection, Mapping) else "n/a"
+    information_criterion = str(endpoint_selection.get("information_criterion", "n/a")) if isinstance(endpoint_selection, Mapping) else "n/a"
+    lines.extend(
+        [
+            f"Selection policy: `{selection_policy}`; information criterion: `{information_criterion}`.",
+            "",
+        ]
+    )
     wrote_branch = False
     for label, row in branch_rows:
         if not isinstance(row, Mapping):
@@ -5716,6 +5731,9 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
             "scale_spec": selected_row.get("spec", ""),
             "scale_params": selected_row.get("scale_params", ""),
             "wght_mode": selected_row.get("wght_mode", ""),
+            "selection_policy": endpoint_selection.get("selection_policy", "") if isinstance(endpoint_selection, Mapping) else "",
+            "information_criterion": endpoint_selection.get("information_criterion", "") if isinstance(endpoint_selection, Mapping) else "",
+            "information_value": endpoint_selection.get("selected_information_criterion", "") if isinstance(endpoint_selection, Mapping) else "",
         },
         "files": file_block,
     }
@@ -5742,6 +5760,8 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
         f"| input model, row-space | `{_quick_percent(input_row_r1)}` | `{_quick_percent(input_row_wr2)}` | `{_quick_percent(_quick_dyn_metric(screen_summary, 'free', 'wR2_all'))}` | n/a |",
         f"| final model, row-space | `{_quick_percent(final_row_r1)}` | `{_quick_percent(final_row_wr2)}` | `{_quick_percent(final_free_wr2)}` | n/a |",
         f"| publication corrected-HKL endpoint | `{_quick_percent(selected_row.get('shelxl_R1all'))}` | `{_quick_percent(selected_row.get('shelxl_wR2all'))}` | `{_quick_percent(selected_row.get('native_free_wR2_all'))}` | `{_quick_number(selected_row.get('shelxl_GooF'), 3)}` |",
+        "",
+        f"Scale selection used `{console['publication_endpoint'].get('selection_policy', 'n/a')}` with `{console['publication_endpoint'].get('information_criterion', 'n/a')}` = `{_quick_number(console['publication_endpoint'].get('information_value'), 3)}`.",
         "",
         "## Files",
         "",
@@ -6971,6 +6991,10 @@ def cmd_scale_replay(args: argparse.Namespace) -> int:
         str(args.publication_free_wr2_tolerance),
         "--publication-prefer-wght-mode",
         args.publication_prefer_wght_mode,
+        "--publication-selection-policy",
+        args.publication_selection_policy,
+        "--publication-information-criterion",
+        args.publication_information_criterion,
     ]
     if args.summary:
         cmd += ["--summary", str(Path(args.summary).expanduser().resolve())]
@@ -6999,7 +7023,7 @@ def cmd_scale_replay(args: argparse.Namespace) -> int:
 
 
 def cmd_calibrate_endpoint(args: argparse.Namespace) -> int:
-    """Production-facing alias for conservative endpoint calibration."""
+    """Production-facing alias for endpoint calibration."""
 
     return cmd_scale_replay(args)
 
@@ -7642,7 +7666,7 @@ def add_common_run_args(ap: argparse.ArgumentParser, *, expose_lambda_controls: 
     ap.add_argument("--publication-endpoint-chooser", action=argparse.BooleanOptionalAction, default=True, help="Write the publication endpoint chooser that separates physical and diagnostic corrected-HKL endpoints.")
     ap.add_argument("--publication-endpoint-min-hkl-safe-factor", type=float, default=0.25, help="Minimum fixed-width HKL safety factor for a publication endpoint.")
     ap.add_argument("--publication-endpoint-max-modulation-p95", type=float, default=20.0, help="Maximum 95th-percentile endpoint intensity modulation for a publication endpoint.")
-    ap.add_argument("--endpoint-calibration", choices=["auto", "on", "off"], default="auto", help="Replay the final frozen row table through conservative corrected-HKL endpoint calibration after auto completes.")
+    ap.add_argument("--endpoint-calibration", choices=["auto", "on", "off"], default="auto", help="Replay the final frozen row table through corrected-HKL endpoint calibration after auto completes.")
     ap.add_argument("--endpoint-calibration-specs", default="baseline,adaptive:293:det8,adaptive:200:det8,adaptive:120:det8,adaptive:80:det8,window:0.5:det8,window:1.0:det8,window:1.5:det8,window:3.0:det8,window:5.0:det8,window:1.0:det4,window:3.0:det4,window:5.0:det4,window:3.0:det1")
     if expose_lambda_controls:
         ap.add_argument(
@@ -7659,6 +7683,18 @@ def add_common_run_args(ap: argparse.ArgumentParser, *, expose_lambda_controls: 
     ap.add_argument("--endpoint-calibration-goof-max", type=float, default=1.15)
     ap.add_argument("--endpoint-calibration-max-r1-cost", type=float, default=0.010)
     ap.add_argument("--endpoint-calibration-free-wr2-tolerance", type=float, default=0.040)
+    ap.add_argument(
+        "--endpoint-calibration-selection-policy",
+        choices=["bic", "gated-smallest"],
+        default="bic",
+        help="Final scale-contract selector. Default applies endpoint sanity gates, then chooses the minimum BIC fitted-variance branch.",
+    )
+    ap.add_argument(
+        "--endpoint-calibration-information-criterion",
+        choices=["bic_fitted_variance", "aic_fitted_variance", "bic_known_sigma", "aic_known_sigma"],
+        default="bic_fitted_variance",
+        help="Information criterion used by endpoint calibration when the BIC policy is active.",
+    )
     ap.add_argument("--endpoint-calibration-sigma-min-scale", type=float, default=0.05)
     ap.add_argument("--endpoint-calibration-sigma-max-scale", type=float, default=4.0)
     ap.add_argument("--endpoint-calibration-shelxl-iterations", type=int, default=3, help="External one-cycle SHELXL calls for the final fixed-weight endpoint replay. This does not change LS1 feedback; it stabilizes the openable presentation endpoint.")
@@ -7997,12 +8033,23 @@ def build_parser() -> argparse.ArgumentParser:
     p_scale_replay.add_argument("--publication-max-r1-cost", type=float, default=0.010)
     p_scale_replay.add_argument("--publication-free-wr2-tolerance", type=float, default=0.040)
     p_scale_replay.add_argument("--publication-prefer-wght-mode", default="freeze-zero")
+    p_scale_replay.add_argument(
+        "--publication-selection-policy",
+        choices=["bic", "gated-smallest"],
+        default="bic",
+        help="Endpoint scale-contract selector. Default applies endpoint sanity gates, then chooses the minimum BIC fitted-variance branch.",
+    )
+    p_scale_replay.add_argument(
+        "--publication-information-criterion",
+        choices=["bic_fitted_variance", "aic_fitted_variance", "bic_known_sigma", "aic_known_sigma"],
+        default="bic_fitted_variance",
+    )
     p_scale_replay.add_argument("--instability-u", type=float, default=0.01)
     p_scale_replay.add_argument("--native-wght-a", type=float, default=None)
     p_scale_replay.add_argument("--native-wght-b", type=float, default=None)
     p_scale_replay.set_defaults(func=cmd_scale_replay)
 
-    p_cal_endpoint = sub.add_parser("calibrate-endpoint", help="Choose a conservative corrected-HKL publication endpoint from a frozen GROND row table.")
+    p_cal_endpoint = sub.add_parser("calibrate-endpoint", help="Choose a corrected-HKL publication endpoint from a frozen GROND row table.")
     p_cal_endpoint.add_argument("--row-table", required=True)
     p_cal_endpoint.add_argument("--summary", default="")
     p_cal_endpoint.add_argument("--res", default="", help="Source RES file. Defaults to the RES path recorded in the row summary.")
@@ -8036,6 +8083,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_cal_endpoint.add_argument("--publication-max-r1-cost", type=float, default=0.010)
     p_cal_endpoint.add_argument("--publication-free-wr2-tolerance", type=float, default=0.040)
     p_cal_endpoint.add_argument("--publication-prefer-wght-mode", default="freeze-zero")
+    p_cal_endpoint.add_argument(
+        "--publication-selection-policy",
+        choices=["bic", "gated-smallest"],
+        default="bic",
+        help="Endpoint scale-contract selector. Default applies endpoint sanity gates, then chooses the minimum BIC fitted-variance branch.",
+    )
+    p_cal_endpoint.add_argument(
+        "--publication-information-criterion",
+        choices=["bic_fitted_variance", "aic_fitted_variance", "bic_known_sigma", "aic_known_sigma"],
+        default="bic_fitted_variance",
+    )
     p_cal_endpoint.add_argument("--instability-u", type=float, default=0.01)
     p_cal_endpoint.add_argument("--native-wght-a", type=float, default=None)
     p_cal_endpoint.add_argument("--native-wght-b", type=float, default=None)

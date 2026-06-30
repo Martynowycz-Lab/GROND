@@ -130,6 +130,8 @@ def test_thickness_scout_parser_exposes_contract_diagnostic_defaults():
     assert args.endpoint_calibration_goof_max == 1.15
     assert args.endpoint_calibration_max_r1_cost == 0.010
     assert args.endpoint_calibration_free_wr2_tolerance == 0.040
+    assert args.endpoint_calibration_selection_policy == "bic"
+    assert args.endpoint_calibration_information_criterion == "bic_fitted_variance"
     assert args.endpoint_calibration_sigma_min_scale == 0.05
     assert args.endpoint_calibration_shelxl_iterations == 3
     assert args.fast is False
@@ -483,6 +485,8 @@ def test_utility_commands_parse():
     assert calibrate.post_bloch_sigma_min_scale == 0.05
     assert calibrate.publication_goof_min == 0.85
     assert calibrate.publication_free_wr2_tolerance == 0.040
+    assert calibrate.publication_selection_policy == "bic"
+    assert calibrate.publication_information_criterion == "bic_fitted_variance"
     ls1 = build_parser().parse_args(
         [
             "validate-ls1",
