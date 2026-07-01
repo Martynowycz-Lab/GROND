@@ -48,6 +48,7 @@ EXPECTED_CLI_COMMANDS = {
     "scale-polish",
     "scale-replay",
     "sfac-check",
+    "target-ablation",
     "thickness-scout",
     "validate",
     "validate-ls1",
@@ -151,6 +152,31 @@ def test_thickness_scout_parser_exposes_contract_diagnostic_defaults():
     assert args.transform_metadata_prefilter == "auto"
     assert args.transform_metadata_max_candidates == 3
     assert args.transform_metadata_min_correlation == 0.70
+
+
+def test_target_ablation_parser_defaults_to_four_xds_contracts():
+    args = build_parser().parse_args(
+        [
+            "target-ablation",
+            "--xds-dir",
+            "xds",
+            "--structure",
+            "model.res",
+            "--baseline-hkl",
+            "model.hkl",
+            "--out-dir",
+            "ablation",
+        ]
+    )
+    assert args.command == "target-ablation"
+    assert args.variants == "iobs,iobs_over_rlp,iobs_times_peak,recorded_proxy"
+    assert args.shelxl_feedback_cycles == 5
+    assert args.shelxl_feedback_shelxl_iterations == 1
+    assert args.endpoint_ls_cycles == 1
+    assert args.hand_control is True
+    assert args.make_maps is False
+    assert args.resume is False
+    assert args.min_peak == 90.0
 
 
 def test_finish_parser_defaults_to_existing_run_dir():

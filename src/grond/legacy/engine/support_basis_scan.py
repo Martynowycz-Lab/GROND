@@ -15,7 +15,7 @@ for _name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "VEC
 
 import numpy as np
 
-from native_row_regularize import row_selection, target_arrays
+from native_row_regularize import TARGET_MODES, row_selection, target_arrays
 from bloch_engine import Config, XDSBlochPort, XDSData, alternate_hand_model, parse_model, sha256
 
 
@@ -103,7 +103,7 @@ def main() -> int:
     ap.add_argument("--min-d-spacing", type=float, default=0.70)
     ap.add_argument("--min-peak", type=float, default=90.0)
     ap.add_argument("--geometry-percentile", type=float, default=99.0)
-    ap.add_argument("--target-mode", choices=["iobs", "recorded_proxy"], default="iobs")
+    ap.add_argument("--target-mode", choices=list(TARGET_MODES), default="iobs")
     ap.add_argument("--positive-only", action="store_true", default=True)
     ap.add_argument("--include-nonpositive", dest="positive_only", action="store_false")
     ap.add_argument("--max-rows", type=int, default=0)

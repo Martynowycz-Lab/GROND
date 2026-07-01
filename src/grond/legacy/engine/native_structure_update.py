@@ -36,6 +36,7 @@ from native_row_regularize import (
     DEFAULT_BASELINE_HKL,
     DEFAULT_HKL,
     DEFAULT_RES,
+    TARGET_MODES,
     Nuisance,
     copy_baseline,
     evaluate_trial,
@@ -729,7 +730,7 @@ def main():
     ap.add_argument("--min-d-spacing", type=float, default=0.70)
     ap.add_argument("--min-peak", type=float, default=0.0)
     ap.add_argument("--geometry-percentile", type=float, default=100.0, help="Keep this broad geometry percentile after PEAK/d-spacing filters.")
-    ap.add_argument("--target-mode", choices=["iobs", "recorded_proxy"], default="iobs")
+    ap.add_argument("--target-mode", choices=list(TARGET_MODES), default="iobs")
     ap.add_argument("--include-nonpositive", action="store_true")
     ap.add_argument("--alternate-hand", dest="alternate_hand", action="store_true", help="Use alternate fractional xyz before native row-parameter regularization as an alternate-hand control.")
     ap.add_argument("--objective-rows", type=int, default=800)

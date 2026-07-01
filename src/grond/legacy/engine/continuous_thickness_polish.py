@@ -292,7 +292,7 @@ def main() -> int:
     ap.add_argument("--min-d-spacing", type=float, default=0.7)
     ap.add_argument("--min-peak", type=float, default=90.0)
     ap.add_argument("--geometry-percentile", type=float, default=100.0)
-    ap.add_argument("--target-mode", choices=["iobs", "recorded_proxy"], default="iobs")
+    ap.add_argument("--target-mode", choices=list(nrf.TARGET_MODES), default="iobs")
     ap.add_argument("--include-nonpositive", action="store_true")
     ap.add_argument("--start-thickness", type=float, default=1200.0)
     ap.add_argument("--start-grad", type=float, default=1.0)

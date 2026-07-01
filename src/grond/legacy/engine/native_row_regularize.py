@@ -78,6 +78,13 @@ DEFAULT_RES = Path("model.res")
 DEFAULT_BASELINE_HKL = Path("model.hkl")
 SHELXL = os.environ.get("SHELXL") or shutil.which("shelxl") or shutil.which("shelxl2019") or ""
 SHELX2MAP = os.environ.get("SHELX2MAP") or shutil.which("shelx2map") or ""
+TARGET_MODES = ("iobs", "iobs_over_rlp", "iobs_times_peak", "recorded_proxy")
+TARGET_MODE_LABELS = {
+    "iobs": "IOBS",
+    "iobs_over_rlp": "IOBS/RLP",
+    "iobs_times_peak": "IOBS*PEAK/100",
+    "recorded_proxy": "IOBS*PEAK/(100*RLP)",
+}
 DEFAULT_ELECTRON_WAVELENGTH_A = 0.025079
 
 
@@ -423,12 +430,19 @@ def exact_hkl_merge(hkls, intensities, sigmas):
 
 
 def target_arrays(data: XDSData, mode: str):
+    """Return the reduced XDS row target and matching sigma convention."""
+
     if mode == "iobs":
-        return data.iobs.copy(), data.sigma.copy()
-    if mode == "recorded_proxy":
+        factor = np.ones_like(data.iobs, dtype=float)
+    elif mode == "iobs_over_rlp":
+        factor = 1.0 / np.maximum(data.rlp, 1e-12)
+    elif mode == "iobs_times_peak":
+        factor = np.maximum(data.peak, 0.0) / 100.0
+    elif mode == "recorded_proxy":
         factor = np.maximum(data.peak, 0.0) / 100.0 / np.maximum(data.rlp, 1e-12)
-        return data.iobs * factor, data.sigma * np.abs(factor)
-    raise ValueError(f"unknown target mode {mode!r}")
+    else:
+        raise ValueError(f"unknown target mode {mode!r}")
+    return data.iobs * factor, data.sigma * np.abs(factor)
 
 
 def sigma_eff(data: XDSData, target, base_sigma, nui: Nuisance):
@@ -1535,7 +1549,7 @@ def main():
     ap.add_argument("--min-d-spacing", type=float, default=0.70)
     ap.add_argument("--min-peak", type=float, default=0.0)
     ap.add_argument("--geometry-percentile", type=float, default=100.0, help="Keep this broad geometry percentile after PEAK/d-spacing filters; 99 removes only the worst 1 percent geometry tail.")
-    ap.add_argument("--target-mode", choices=["iobs", "recorded_proxy"], default="iobs")
+    ap.add_argument("--target-mode", choices=list(TARGET_MODES), default="iobs")
     ap.add_argument("--positive-only", action="store_true", default=True)
     ap.add_argument("--include-nonpositive", dest="positive_only", action="store_false")
     ap.add_argument("--thickness-grid", default="1200,1600,1800,2200")

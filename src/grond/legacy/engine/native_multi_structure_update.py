@@ -37,6 +37,7 @@ from scipy.optimize import least_squares
 from bloch_engine import Config, XDSData, parse_model, sha256, split_masks
 from native_row_regularize import (
     Nuisance,
+    TARGET_MODES,
     native_metrics,
     parse_wght,
     row_selection,
@@ -568,7 +569,7 @@ def main():
     ap.add_argument("--min-d-spacing", type=float, default=0.70)
     ap.add_argument("--min-peak", type=float, default=90.0)
     ap.add_argument("--geometry-percentile", type=float, default=100.0, help="Keep this broad geometry percentile after PEAK/d-spacing filters.")
-    ap.add_argument("--target-mode", choices=["iobs", "recorded_proxy"], default="iobs")
+    ap.add_argument("--target-mode", choices=list(TARGET_MODES), default="iobs")
     ap.add_argument("--include-nonpositive", action="store_true")
     ap.add_argument("--objective-rows-per-dataset", type=int, default=300)
     ap.add_argument("--objective-bins", type=int, default=10)

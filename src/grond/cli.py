@@ -7,6 +7,7 @@ import json
 import math
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -84,6 +85,13 @@ _TRANSFORM_SCOUT_SEMAPHORE: threading.BoundedSemaphore | None = None
 _TRANSFORM_SCOUT_SEMAPHORE_LIMIT = 0
 FULL_Q_LAMBDA = "1.0"
 DEFAULT_ELECTRON_WAVELENGTH_A = 0.025079
+XDS_TARGET_MODES = ("iobs", "iobs_over_rlp", "iobs_times_peak", "recorded_proxy")
+XDS_TARGET_MODE_LABELS = {
+    "iobs": "IOBS",
+    "iobs_over_rlp": "IOBS/RLP",
+    "iobs_times_peak": "IOBS*PEAK/100",
+    "recorded_proxy": "IOBS*PEAK/(100*RLP)",
+}
 
 
 def configure_progress(log_dir: Path, *, resume: bool, total: int) -> None:
@@ -8021,6 +8029,336 @@ def _thickness_scout_variant_args(args: argparse.Namespace, *, scale_mode: str, 
     return variant
 
 
+def _target_ablation_variants(text: str) -> list[str]:
+    """Parse target-ablation variant names with a stable default order."""
+
+    raw = parse_name_grid(text)
+    if not raw or raw == ["all"]:
+        return list(XDS_TARGET_MODES)
+    aliases = {
+        "iobs-rlp": "iobs_over_rlp",
+        "iobs/rlp": "iobs_over_rlp",
+        "iobs_peak": "iobs_times_peak",
+        "iobs-peak": "iobs_times_peak",
+        "peak": "iobs_times_peak",
+        "proxy": "recorded_proxy",
+        "recorded": "recorded_proxy",
+        "recorded-proxy": "recorded_proxy",
+    }
+    variants: list[str] = []
+    for token in raw:
+        value = aliases.get(token, token)
+        if value not in XDS_TARGET_MODES:
+            allowed = ", ".join(XDS_TARGET_MODES)
+            raise SystemExit(f"Unknown XDS target-ablation variant {token!r}. Use one of: {allowed}.")
+        if value not in variants:
+            variants.append(value)
+    return variants
+
+
+def _target_ablation_auto_command(args: argparse.Namespace, variant: str, out_dir: Path) -> list[str]:
+    """Build one fixed-target GROND auto command for the ablation wrapper."""
+
+    cmd = [
+        sys.executable,
+        "-m",
+        "grond.cli",
+        "auto",
+        "--out-dir",
+        str(out_dir),
+        "--structure",
+        str(args.structure),
+        "--baseline-hkl",
+        str(args.baseline_hkl),
+        "--target-mode",
+        variant,
+        "--shelxl-feedback-cycles",
+        str(args.shelxl_feedback_cycles),
+        "--shelxl-feedback-shelxl-iterations",
+        str(args.shelxl_feedback_shelxl_iterations),
+        "--endpoint-ls-cycles",
+        str(args.endpoint_ls_cycles),
+        "--shelxl",
+        str(args.shelxl),
+        "--min-d-spacing",
+        f"{float(args.min_d_spacing):g}",
+        "--min-peak",
+        f"{float(args.min_peak):g}",
+        "--geometry-percentile",
+        f"{float(args.geometry_percentile):g}",
+        "--hkl-transform",
+        str(args.hkl_transform),
+        "--workers",
+        str(int(args.workers)),
+        "--max-core-fraction",
+        f"{float(args.max_core_fraction):g}",
+        "--chunksize",
+        str(int(args.chunksize)),
+        "--compute-backend",
+        str(args.compute_backend),
+        "--row-plan-cache",
+        str(args.row_plan_cache),
+        "--prediction-cache-compression",
+        str(args.prediction_cache_compression),
+    ]
+    if args.xds_dir:
+        cmd.extend(["--xds-dir", str(args.xds_dir)])
+    if args.hkl:
+        cmd.extend(["--hkl", str(args.hkl)])
+    if args.python:
+        cmd.extend(["--python", str(args.python)])
+    if getattr(args, "config", ""):
+        cmd.extend(["--config", str(args.config)])
+    if getattr(args, "allow_missing_tools", False):
+        cmd.append("--allow-missing-tools")
+    if args.trust_hkl_transform:
+        cmd.append("--trust-hkl-transform")
+    cmd.append("--hand-control" if args.hand_control else "--no-hand-control")
+    cmd.append("--resume" if args.resume else "--no-resume")
+    cmd.append("--make-maps" if args.make_maps else "--no-maps")
+    for token in shlex.split(str(getattr(args, "extra_auto_args", "") or "")):
+        cmd.append(token)
+    return cmd
+
+
+def _run_target_ablation_variant(cmd: list[str], log_path: Path, *, dry_run: bool) -> tuple[int, float]:
+    """Run one auto variant while teeing terminal output into a stable log."""
+
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    start = time.perf_counter()
+    with log_path.open("w") as handle:
+        handle.write("$ " + " ".join(shlex.quote(part) for part in cmd) + "\n\n")
+        handle.flush()
+        if dry_run:
+            print("DRY", " ".join(shlex.quote(part) for part in cmd), flush=True)
+            handle.write("[dry_run] true\n[returncode] 0\n[seconds] 0.000\n")
+            return 0, 0.0
+        env = apply_thread_limits(os.environ.copy())
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(Path.cwd()),
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            bufsize=1,
+        )
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            print(line, end="", flush=True)
+            handle.write(line)
+        returncode = proc.wait()
+        elapsed = time.perf_counter() - start
+        handle.write(f"\n[returncode] {returncode}\n[seconds] {elapsed:.3f}\n")
+    return int(returncode), elapsed
+
+
+def _target_ablation_summary_row(variant: str, run_dir: Path, log_path: Path, returncode: int, elapsed_seconds: float) -> dict[str, object]:
+    """Collect the compact fields from one completed target-ablation run."""
+
+    result = try_read_json(run_dir / "grond_summary.json")
+    quick = result.get("quick_stats") if isinstance(result.get("quick_stats"), Mapping) else {}
+    console = quick.get("console") if isinstance(quick.get("console"), Mapping) else {}
+    input_model = console.get("input_model") if isinstance(console.get("input_model"), Mapping) else {}
+    final_row = console.get("final_row_model") if isinstance(console.get("final_row_model"), Mapping) else {}
+    feedback = console.get("final_feedback_endpoint") if isinstance(console.get("final_feedback_endpoint"), Mapping) else {}
+    endpoint = console.get("publication_endpoint") if isinstance(console.get("publication_endpoint"), Mapping) else {}
+    input_shelxl = console.get("input_shelxl") if isinstance(console.get("input_shelxl"), Mapping) else {}
+    files = console.get("files") if isinstance(console.get("files"), Mapping) else {}
+    final_summary = Path(str(console.get("final_summary") or (run_dir / "FINAL_SUMMARY.md")))
+    quick_stats = Path(str(console.get("quick_stats") or (run_dir / "QUICK_STATS.md")))
+    status = "ok" if returncode == 0 and bool(result) else ("failed" if returncode != 0 else "missing_summary")
+    return {
+        "target_mode": variant,
+        "target_formula": XDS_TARGET_MODE_LABELS.get(variant, variant),
+        "status": status,
+        "returncode": returncode,
+        "elapsed_seconds": elapsed_seconds,
+        "elapsed": format_seconds(elapsed_seconds),
+        "hand": console.get("final_hand", ""),
+        "hand_z_all": console.get("final_hand_z_all"),
+        "hand_z_free": console.get("final_hand_z_free"),
+        "hkl_transform": console.get("selected_transform", ""),
+        "input_shelxl_R1gt": input_shelxl.get("R1gt"),
+        "input_shelxl_R1all": input_shelxl.get("R1all"),
+        "input_shelxl_wR2all": input_shelxl.get("wR2all"),
+        "input_shelxl_GooF": input_shelxl.get("GooF"),
+        "input_dyn_R1all": input_model.get("row_R1all"),
+        "input_dyn_wR2all": input_model.get("row_wR2all"),
+        "input_born_R1all": input_model.get("born_R1all"),
+        "input_born_wR2all": input_model.get("born_wR2all"),
+        "final_dyn_R1all": final_row.get("row_R1all"),
+        "final_dyn_wR2all": final_row.get("row_wR2all"),
+        "final_dyn_free_wR2all": final_row.get("row_free_wR2all"),
+        "final_born_R1all": final_row.get("born_R1all"),
+        "final_born_wR2all": final_row.get("born_wR2all"),
+        "final_born_free_wR2all": final_row.get("born_free_wR2all"),
+        "direct_ls1_R1gt": feedback.get("R1gt"),
+        "direct_ls1_R1all": feedback.get("R1all"),
+        "direct_ls1_wR2all": feedback.get("wR2all"),
+        "direct_ls1_GooF": feedback.get("GooF"),
+        "publication_R1gt": endpoint.get("R1gt"),
+        "publication_R1all": endpoint.get("R1all"),
+        "publication_wR2all": endpoint.get("wR2all"),
+        "publication_GooF": endpoint.get("GooF"),
+        "publication_source": endpoint.get("source"),
+        "publication_kind": endpoint.get("source_kind"),
+        "publication_scale_spec": endpoint.get("scale_spec"),
+        "publication_scale_params": endpoint.get("scale_params"),
+        "publication_wght_mode": endpoint.get("wght_mode"),
+        "publication_parameters": endpoint.get("parameters"),
+        "publication_npd_count": endpoint.get("npd_count"),
+        "publication_split_count": endpoint.get("split_count"),
+        "run_dir": str(run_dir.resolve()),
+        "terminal_log": str(log_path.resolve()),
+        "final_summary": str(final_summary.resolve()),
+        "quick_stats": str(quick_stats.resolve()),
+        "full_json": str((run_dir / "grond_summary.json").resolve()),
+        "row_table": str(final_row.get("row_table", "")),
+        "publication_res": str(files.get("publication_res", "")),
+        "publication_hkl": str(files.get("publication_hkl", "")),
+        "publication_lst": str(files.get("publication_lst", "")),
+    }
+
+
+def _write_target_ablation_report(out_dir: Path, rows: list[dict[str, object]], commands: list[dict[str, object]]) -> None:
+    """Write the human-readable XDS target-transform ablation report."""
+
+    lines = [
+        "# GROND XDS Target-Transform Ablation",
+        "",
+        "This diagnostic runs the same GROND auto path while changing only the reduced XDS row target passed into the Bloch-to-Born correction. It is meant to test Lorentz/PEAK conventions in the current scalar XDS row contract; it is not a raw-shoebox likelihood.",
+        "",
+        "## Results",
+        "",
+        "| target | formula | status | elapsed | hand Z all/free | final dyn R1/wR2 | final Born R1/wR2 | publication R1/wR2/GooF | run |",
+        "|---|---|---|---:|---:|---:|---:|---:|---|",
+    ]
+    for row in rows:
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    f"`{row.get('target_mode', '')}`",
+                    str(row.get("target_formula", "")),
+                    str(row.get("status", "")),
+                    str(row.get("elapsed", "")),
+                    f"{_quick_number(row.get('hand_z_all'), 3)} / {_quick_number(row.get('hand_z_free'), 3)}",
+                    f"{_quick_percent(row.get('final_dyn_R1all'))} / {_quick_percent(row.get('final_dyn_wR2all'))}",
+                    f"{_quick_percent(row.get('final_born_R1all'))} / {_quick_percent(row.get('final_born_wR2all'))}",
+                    f"{_quick_percent(row.get('publication_R1all'))} / {_quick_percent(row.get('publication_wR2all'))} / {_quick_number(row.get('publication_GooF'), 3)}",
+                    f"`{Path(str(row.get('run_dir', ''))).name}`",
+                ]
+            )
+            + " |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Endpoint Paths",
+            "",
+            "| target | publication RES | publication HKL | row table | terminal log |",
+            "|---|---|---|---|---|",
+        ]
+    )
+    for row in rows:
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    f"`{row.get('target_mode', '')}`",
+                    f"`{row.get('publication_res', '')}`",
+                    f"`{row.get('publication_hkl', '')}`",
+                    f"`{row.get('row_table', '')}`",
+                    f"`{row.get('terminal_log', '')}`",
+                ]
+            )
+            + " |"
+        )
+    lines.extend(["", "## Commands", ""])
+    for command in commands:
+        lines.append(f"### {command.get('target_mode', '')}")
+        lines.append("")
+        lines.append("```bash")
+        lines.append(str(command.get("command_text", "")))
+        lines.append("```")
+        lines.append("")
+    lines.extend(
+        [
+            "## Reading This",
+            "",
+            "The production interpretation is conservative. A target transform is interesting only if it improves row-level dynamical statistics, keeps or improves hand Z, and does not win solely by producing a prettier corrected-HKL endpoint. If a PEAK/RLP variant lowers endpoint R but worsens row-space Born/Bloch behavior or hand separation, keep it as a diagnostic and do not promote it.",
+            "",
+        ]
+    )
+    (out_dir / "TARGET_ABLATION_SUMMARY.md").write_text("\n".join(lines) + "\n")
+
+
+def cmd_target_ablation(args: argparse.Namespace) -> int:
+    """Run a fixed XDS target-transform ablation through ordinary auto."""
+
+    if not args.xds_dir and not args.hkl:
+        raise SystemExit("target-ablation requires --xds-dir or --hkl for the XDS row table.")
+    if not args.structure:
+        raise SystemExit("target-ablation requires --structure.")
+    if not args.baseline_hkl:
+        raise SystemExit("target-ablation requires --baseline-hkl.")
+    out_dir = Path(args.out_dir).expanduser().resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    variants = _target_ablation_variants(args.variants)
+    rows: list[dict[str, object]] = []
+    commands: list[dict[str, object]] = []
+    started = time.perf_counter()
+    for variant in variants:
+        variant_dir = out_dir / variant
+        log_path = out_dir / "logs" / f"{variant}.terminal.log"
+        cmd = _target_ablation_auto_command(args, variant, variant_dir)
+        command_text = " ".join(shlex.quote(part) for part in cmd)
+        commands.append({"target_mode": variant, "out_dir": str(variant_dir.resolve()), "terminal_log": str(log_path.resolve()), "command": cmd, "command_text": command_text})
+        print(f"\n=== XDS target ablation: {variant} ({XDS_TARGET_MODE_LABELS.get(variant, variant)}) ===", flush=True)
+        returncode, elapsed = _run_target_ablation_variant(cmd, log_path, dry_run=bool(args.dry_run))
+        row = _target_ablation_summary_row(variant, variant_dir, log_path, returncode, elapsed)
+        rows.append(row)
+        if returncode != 0 and args.fail_fast:
+            break
+    total_elapsed = time.perf_counter() - started
+    summary = {
+        "created": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "command": "target-ablation",
+        "interpretation": "Reduced XDS row-target ablation. This does not invert the data back to raw detector pixels.",
+        "inputs": {
+            "xds_dir": str(args.xds_dir),
+            "hkl": str(args.hkl),
+            "structure": str(args.structure),
+            "baseline_hkl": str(args.baseline_hkl),
+            "variants": variants,
+            "shelxl_feedback_cycles": int(args.shelxl_feedback_cycles),
+            "hand_control": bool(args.hand_control),
+        },
+        "elapsed_seconds": total_elapsed,
+        "elapsed": format_seconds(total_elapsed),
+        "runs": rows,
+        "commands": commands,
+    }
+    _write_csv(out_dir / "target_ablation_summary.csv", rows)
+    (out_dir / "target_ablation_summary.json").write_text(json.dumps(summary, indent=2, allow_nan=True) + "\n")
+    _write_target_ablation_report(out_dir, rows, commands)
+    print("")
+    print(f"GROND target ablation finished in {format_seconds(total_elapsed)}.")
+    print(f"Report: {out_dir / 'TARGET_ABLATION_SUMMARY.md'}")
+    print("")
+    print("| target | status | hand Z all/free | final dyn R1/wR2 | publication R1/wR2/GooF |")
+    print("|---|---|---:|---:|---:|")
+    for row in rows:
+        print(
+            f"| {row.get('target_mode', '')} | {row.get('status', '')} | "
+            f"{_quick_number(row.get('hand_z_all'), 3)} / {_quick_number(row.get('hand_z_free'), 3)} | "
+            f"{_quick_percent(row.get('final_dyn_R1all'))} / {_quick_percent(row.get('final_dyn_wR2all'))} | "
+            f"{_quick_percent(row.get('publication_R1all'))} / {_quick_percent(row.get('publication_wR2all'))} / {_quick_number(row.get('publication_GooF'), 3)} |"
+        )
+    return 1 if any(int(row.get("returncode", 0) or 0) != 0 for row in rows) else 0
+
+
 def cmd_thickness_scout(args: argparse.Namespace) -> int:
     """Run a diagnostic thickness contract-sensitivity scout."""
 
@@ -8269,7 +8607,7 @@ def add_common_run_args(ap: argparse.ArgumentParser, *, expose_lambda_controls: 
     ap.add_argument("--min-d-spacing", type=float, default=0.70)
     ap.add_argument("--min-peak", type=float, default=90.0)
     ap.add_argument("--geometry-percentile", type=float, default=99.0)
-    ap.add_argument("--target-mode", choices=["iobs", "recorded_proxy"], default="iobs")
+    ap.add_argument("--target-mode", choices=list(XDS_TARGET_MODES), default="iobs")
     ap.add_argument("--include-nonpositive", action="store_true")
     ap.add_argument("--make-maps", dest="make_maps", action="store_true", default=True)
     ap.add_argument("--no-maps", dest="make_maps", action="store_false")
@@ -8795,6 +9133,41 @@ def build_parser() -> argparse.ArgumentParser:
     p_cal_endpoint.add_argument("--native-wght-a", type=float, default=None)
     p_cal_endpoint.add_argument("--native-wght-b", type=float, default=None)
     p_cal_endpoint.set_defaults(func=cmd_calibrate_endpoint)
+
+    p_target_ablation = sub.add_parser(
+        "target-ablation",
+        help="Run an XDS IOBS/RLP/PEAK target-transform ablation through the same quick auto validation.",
+    )
+    p_target_ablation.add_argument("--xds-dir", default="", help="XDS directory containing INTEGRATE.HKL.")
+    p_target_ablation.add_argument("--hkl", default="", help="Explicit XDS INTEGRATE.HKL path. Use this instead of --xds-dir when needed.")
+    p_target_ablation.add_argument("--structure", required=True)
+    p_target_ablation.add_argument("--baseline-hkl", required=True)
+    p_target_ablation.add_argument("--out-dir", required=True)
+    p_target_ablation.add_argument("--variants", default=",".join(XDS_TARGET_MODES), help="Comma list of XDS target modes, or all.")
+    p_target_ablation.add_argument("--python", default="")
+    add_tool_config_args(p_target_ablation)
+    p_target_ablation.add_argument("--shelxl", default=default_shelxl_executable())
+    p_target_ablation.add_argument("--shelxl-feedback-cycles", type=int, default=5)
+    p_target_ablation.add_argument("--shelxl-feedback-shelxl-iterations", type=int, default=1)
+    p_target_ablation.add_argument("--endpoint-ls-cycles", type=int, default=1)
+    p_target_ablation.add_argument("--hkl-transform", default="identity")
+    p_target_ablation.add_argument("--trust-hkl-transform", action="store_true")
+    p_target_ablation.add_argument("--min-d-spacing", type=float, default=0.70)
+    p_target_ablation.add_argument("--min-peak", type=float, default=90.0)
+    p_target_ablation.add_argument("--geometry-percentile", type=float, default=99.0)
+    p_target_ablation.add_argument("--workers", type=int, default=0)
+    p_target_ablation.add_argument("--max-core-fraction", type=float, default=0.85)
+    p_target_ablation.add_argument("--chunksize", type=int, default=0)
+    p_target_ablation.add_argument("--compute-backend", default="scipy")
+    p_target_ablation.add_argument("--row-plan-cache", choices=["off", "readwrite", "rebuild"], default="off")
+    p_target_ablation.add_argument("--prediction-cache-compression", choices=["compressed", "none"], default="none")
+    p_target_ablation.add_argument("--hand-control", action=argparse.BooleanOptionalAction, default=True)
+    p_target_ablation.add_argument("--make-maps", action=argparse.BooleanOptionalAction, default=False, help="Ablation skips maps by default to keep the four branches fast.")
+    p_target_ablation.add_argument("--resume", action=argparse.BooleanOptionalAction, default=False)
+    p_target_ablation.add_argument("--dry-run", action="store_true")
+    p_target_ablation.add_argument("--fail-fast", action="store_true")
+    p_target_ablation.add_argument("--extra-auto-args", default="", help="Advanced: quoted argument string appended to every inner auto command.")
+    p_target_ablation.set_defaults(func=cmd_target_ablation)
 
     p_thick = sub.add_parser("thickness-scout", help="Audit effective thickness sensitivity to row contract, scale model, and accepted nuisance terms.")
     add_common_run_args(p_thick, expose_lambda_controls=False)
