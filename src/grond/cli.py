@@ -2791,14 +2791,73 @@ def run_publication_endpoint_chooser(prep: PrepConfig, result: dict, args: argpa
         return {"status": "no_endpoint_runs"}
     if not runs and not combined_run:
         return {"status": "no_endpoint_runs"}
+    extra_candidates = []
+    model_candidate = _publication_model_endpoint_candidate(result)
+    if model_candidate:
+        extra_candidates.append(model_candidate)
     return write_publication_endpoint_choice(
         runs,
         out_dir,
         combined_run=combined_run,
         forensic_summaries=forensic_summaries,
+        extra_candidates=extra_candidates,
         min_hkl_safe_factor=args.publication_endpoint_min_hkl_safe_factor,
         max_modulation_p95=args.publication_endpoint_max_modulation_p95,
+        publication_goof_min=args.endpoint_calibration_goof_min,
+        publication_goof_max=args.endpoint_calibration_goof_max,
     )
+
+
+def _publication_model_endpoint_candidate(result: Mapping[str, object]) -> dict[str, object]:
+    """Return the last LS1 corrected-HKL endpoint as a chooser candidate."""
+
+    model_text = str(result.get("model", "") or "").strip()
+    if not model_text:
+        return {}
+    res = Path(model_text).expanduser()
+    lst = res.with_suffix(".lst")
+    hkl = res.with_suffix(".hkl")
+    if not res.exists() or not lst.exists():
+        return {}
+    details = _quick_shelxl_details({}, lst)
+    if _quick_fraction(details.get("R1_all")) is None or _quick_fraction(details.get("wR2_all")) is None:
+        return {}
+    shelxl = {
+        "R1_gt": details.get("R1_gt"),
+        "R1_all": details.get("R1_all"),
+        "wR2_all": details.get("wR2_all"),
+        "GooF": details.get("GooF"),
+        "N_gt": details.get("N_gt"),
+        "N_all": details.get("N_all"),
+        "Rint": details.get("Rint"),
+        "Rsigma": details.get("Rsigma"),
+        "parameters": details.get("parameters"),
+        "restraints": details.get("restraints"),
+        "npd_count": details.get("npd_count"),
+        "split_count": details.get("split_count"),
+        "lst": str(lst),
+    }
+    return {
+        "id": "final_ls1_corrected_hkl",
+        "label": "final_ls1_corrected_hkl",
+        "source_kind": "native_corrected_hkl",
+        "run_dir": str(res.parent),
+        "lambda_q": 1.0,
+        "endpoint_b": 0.0,
+        "keep_exti": False,
+        "hkl_safe_factor": 1.0,
+        "modulation_p95": 1.0,
+        "R1_gt": details.get("R1_gt"),
+        "R1_all": details.get("R1_all"),
+        "wR2_all": details.get("wR2_all"),
+        "GooF": details.get("GooF"),
+        "N_gt": details.get("N_gt"),
+        "N_all": details.get("N_all"),
+        "hkl": str(hkl) if hkl.exists() else "",
+        "lst": str(lst),
+        "res": str(res),
+        "shelxl": shelxl,
+    }
 
 
 def _endpoint_calibration_lambda(summary: Mapping[str, object], args: argparse.Namespace) -> float:
@@ -5610,6 +5669,16 @@ def _chooser_publication_endpoint(result: Mapping[str, object]) -> Mapping[str, 
     return _normalize_publication_endpoint_block(endpoint, selection_source="endpoint_chooser")
 
 
+def _chooser_diagnostic_endpoint(result: Mapping[str, object]) -> Mapping[str, object]:
+    """Return the endpoint chooser's best rejected diagnostic endpoint, if present."""
+
+    chooser = result.get("publication_endpoint_chooser") if isinstance(result.get("publication_endpoint_chooser"), Mapping) else {}
+    endpoint = chooser.get("best_diagnostic_endpoint") if isinstance(chooser, Mapping) else {}
+    if not isinstance(endpoint, Mapping) or not endpoint:
+        return {}
+    return _normalize_publication_endpoint_block(endpoint, selection_source="endpoint_chooser_diagnostic")
+
+
 def _quick_endpoint_file_block(publication_endpoint: Mapping[str, object], final_model: Path | None) -> dict[str, str]:
     """Collect the endpoint paths users most often need to open."""
 
@@ -5695,6 +5764,7 @@ def _format_terminal_finish_summary(payload: Mapping[str, object]) -> str:
     final_row = payload.get("final_row_model") if isinstance(payload.get("final_row_model"), Mapping) else {}
     feedback = payload.get("final_feedback_endpoint") if isinstance(payload.get("final_feedback_endpoint"), Mapping) else {}
     endpoint = payload.get("publication_endpoint") if isinstance(payload.get("publication_endpoint"), Mapping) else {}
+    diagnostic = payload.get("diagnostic_endpoint") if isinstance(payload.get("diagnostic_endpoint"), Mapping) else {}
     endpoint_warning = _quick_goof_warning(endpoint.get("GooF"))
     files = payload.get("files") if isinstance(payload.get("files"), Mapping) else {}
     finished = payload.get("finished") if isinstance(payload.get("finished"), Mapping) else {}
@@ -5716,6 +5786,33 @@ def _format_terminal_finish_summary(payload: Mapping[str, object]) -> str:
         stage_note += f"; {finished.get('failed_stages')} failed stage records in progress file"
 
     headline = f"GROND finished successfully in {elapsed}." if status == "ok" else f"GROND finished with status {status} after {elapsed}."
+    publication_is_direct_ls1 = bool(files.get("publication_res") and files.get("publication_res") == files.get("final_feedback_res"))
+    endpoint_lines = ["SHELXL endpoint" if publication_is_direct_ls1 else "SHELXL endpoints"]
+    if publication_is_direct_ls1:
+        endpoint_lines.append(
+            f"  Publication endpoint (direct LS1 corrected-HKL): R1gt {_quick_percent(endpoint.get('R1gt'))}, R1all {_quick_percent(endpoint.get('R1all'))}, wR2all {_quick_percent(endpoint.get('wR2all'))}, GooF {_quick_number(endpoint.get('GooF'), 3)}; NPD {endpoint.get('npd_count', 'n/a')}; split {endpoint.get('split_count', 'n/a')}"
+        )
+    else:
+        endpoint_lines.extend(
+            [
+                f"  Direct LS1 corrected-HKL candidate: R1gt {_quick_percent(feedback.get('R1gt'))}, R1all {_quick_percent(feedback.get('R1all'))}, wR2all {_quick_percent(feedback.get('wR2all'))}, GooF {_quick_number(feedback.get('GooF'), 3)}; NPD {feedback.get('npd_count', 'n/a')}; split {feedback.get('split_count', 'n/a')}",
+                f"  Publication endpoint: R1gt {_quick_percent(endpoint.get('R1gt'))}, R1all {_quick_percent(endpoint.get('R1all'))}, wR2all {_quick_percent(endpoint.get('wR2all'))}, GooF {_quick_number(endpoint.get('GooF'), 3)}; NPD {endpoint.get('npd_count', 'n/a')}; split {endpoint.get('split_count', 'n/a')}",
+            ]
+        )
+    if diagnostic and diagnostic.get("R1all") is not None:
+        reasons = diagnostic.get("rejection_reasons")
+        first_reason = str(reasons[0]) if isinstance(reasons, list) and reasons else "diagnostic-only"
+        endpoint_lines.append(
+            f"  Diagnostic endpoint not promoted: {diagnostic.get('source_kind', 'n/a')} R1all {_quick_percent(diagnostic.get('R1all'))}, wR2all {_quick_percent(diagnostic.get('wR2all'))}, GooF {_quick_number(diagnostic.get('GooF'), 3)}; reason: {first_reason}"
+        )
+    endpoint_lines.extend(
+        [
+            f"  Endpoint source/scales: {_quick_endpoint_scale_text(endpoint)}, WGHT {endpoint.get('wght_mode', 'n/a')}",
+            f"  Scale selector: {endpoint.get('selection_policy', 'n/a')} / {endpoint.get('information_criterion', 'n/a')} = {_quick_number(endpoint.get('information_value'), 3)}",
+        ]
+    )
+    if endpoint_warning:
+        endpoint_lines.append(f"  Warning: {endpoint_warning}")
     lines = [
         "",
         headline,
@@ -5737,12 +5834,7 @@ def _format_terminal_finish_summary(payload: Mapping[str, object]) -> str:
         f"  Final matched Born rows: R1all {_quick_percent(final_row.get('born_R1all'))}, wR2all {_quick_percent(final_row.get('born_wR2all'))}, free wR2all {_quick_percent(final_row.get('born_free_wR2all'))}",
         f"  Change: R1all {_quick_delta_percent(input_model.get('row_R1all'), final_row.get('row_R1all'))}, wR2all {_quick_delta_percent(input_model.get('row_wR2all'), final_row.get('row_wR2all'))}",
         "",
-        "SHELXL endpoints",
-        f"  Final LS1 corrected-HKL endpoint: R1gt {_quick_percent(feedback.get('R1gt'))}, R1all {_quick_percent(feedback.get('R1all'))}, wR2all {_quick_percent(feedback.get('wR2all'))}, GooF {_quick_number(feedback.get('GooF'), 3)}; NPD {feedback.get('npd_count', 'n/a')}; split {feedback.get('split_count', 'n/a')}",
-        f"  Publication endpoint: R1gt {_quick_percent(endpoint.get('R1gt'))}, R1all {_quick_percent(endpoint.get('R1all'))}, wR2all {_quick_percent(endpoint.get('wR2all'))}, GooF {_quick_number(endpoint.get('GooF'), 3)}; NPD {endpoint.get('npd_count', 'n/a')}; split {endpoint.get('split_count', 'n/a')}",
-        f"  Endpoint source/scales: {_quick_endpoint_scale_text(endpoint)}, WGHT {endpoint.get('wght_mode', 'n/a')}",
-        f"  Scale selector: {endpoint.get('selection_policy', 'n/a')} / {endpoint.get('information_criterion', 'n/a')} = {_quick_number(endpoint.get('information_value'), 3)}",
-        f"  Warning: {endpoint_warning}" if endpoint_warning else "",
+        *endpoint_lines,
         "",
         "Open these first",
         f"  Final summary: {payload.get('final_summary', '')}",
@@ -5766,6 +5858,7 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
     endpoint_calibration = result.get("endpoint_calibration") if isinstance(result.get("endpoint_calibration"), Mapping) else {}
     endpoint_selection = endpoint_calibration.get("publication_selection", {}) if isinstance(endpoint_calibration, Mapping) else {}
     publication_endpoint = _publication_endpoint_from_result(result)
+    diagnostic_endpoint = _chooser_diagnostic_endpoint(result)
     metadata = row_metrics.get("metadata", {}) if isinstance(row_metrics.get("metadata"), Mapping) else {}
     source_roots = _quick_progress_source_roots(out_dir)
     timing_rows = _quick_progress_timings(out_dir)
@@ -5834,6 +5927,20 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
             "lst": publication_endpoint.get("endpoint_lst"),
         },
         Path(file_block["publication_lst"]) if file_block.get("publication_lst") else None,
+    )
+    diagnostic_shelxl = _quick_shelxl_details(
+        {
+            "R1_gt": diagnostic_endpoint.get("shelxl_R1gt"),
+            "R1_all": diagnostic_endpoint.get("shelxl_R1all"),
+            "wR2_all": diagnostic_endpoint.get("shelxl_wR2all"),
+            "GooF": diagnostic_endpoint.get("shelxl_GooF"),
+            "parameters": diagnostic_endpoint.get("shelxl_parameters"),
+            "restraints": diagnostic_endpoint.get("shelxl_restraints"),
+            "npd_count": diagnostic_endpoint.get("shelxl_npd_count"),
+            "split_count": diagnostic_endpoint.get("shelxl_split_count"),
+            "lst": diagnostic_endpoint.get("endpoint_lst"),
+        },
+        Path(str(diagnostic_endpoint.get("endpoint_lst"))) if diagnostic_endpoint.get("endpoint_lst") else None,
     )
     endpoints = []
     resolution_block = row_metrics.get("resolution_scale_endpoints", {})
@@ -6020,7 +6127,7 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
             "| "
             + " | ".join(
                 [
-                    "final LS1 corrected-HKL endpoint",
+                    "direct LS1 corrected-HKL candidate",
                     _quick_percent(final_feedback_shelxl.get("R1_gt")),
                     _quick_percent(final_feedback_shelxl.get("R1_all")),
                     _quick_percent(final_feedback_shelxl.get("wR2_all")),
@@ -6032,6 +6139,21 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
                 ]
             )
             + " |",
+            "| "
+            + " | ".join(
+                [
+                    "best diagnostic endpoint, not promoted",
+                    _quick_percent(diagnostic_shelxl.get("R1_gt")),
+                    _quick_percent(diagnostic_shelxl.get("R1_all")),
+                    _quick_percent(diagnostic_shelxl.get("wR2_all")),
+                    _quick_number(diagnostic_shelxl.get("GooF"), 3),
+                    "n/a",
+                    str(diagnostic_shelxl.get("parameters", "n/a")),
+                    _quick_shelxl_issue_text(diagnostic_shelxl),
+                    f"`{diagnostic_endpoint.get('endpoint_lst', '')}`",
+                ]
+            )
+            + " |" if diagnostic_endpoint else "",
             "| "
             + " | ".join(
                 [
@@ -6255,7 +6377,7 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
             "GooF": _quick_fraction(selected_row.get("shelxl_GooF")),
             "scale_spec": selected_row.get("spec", ""),
             "scale_params": selected_row.get("scale_params", ""),
-            "wght_mode": selected_row.get("wght_mode", ""),
+            "wght_mode": selected_row.get("wght_mode") or "n/a",
             "parameters": publication_shelxl.get("parameters"),
             "restraints": publication_shelxl.get("restraints"),
             "npd_count": publication_shelxl.get("npd_count"),
@@ -6265,6 +6387,16 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
             "selection_policy": endpoint_selection.get("selection_policy", "") if isinstance(endpoint_selection, Mapping) else "",
             "information_criterion": endpoint_selection.get("information_criterion", "") if isinstance(endpoint_selection, Mapping) else "",
             "information_value": endpoint_selection.get("selected_information_criterion", "") if isinstance(endpoint_selection, Mapping) else "",
+        },
+        "diagnostic_endpoint": {
+            "R1gt": _quick_fraction(diagnostic_endpoint.get("shelxl_R1gt")),
+            "R1all": _quick_fraction(diagnostic_endpoint.get("shelxl_R1all")),
+            "wR2all": _quick_fraction(diagnostic_endpoint.get("shelxl_wR2all")),
+            "GooF": _quick_fraction(diagnostic_endpoint.get("shelxl_GooF")),
+            "source": diagnostic_endpoint.get("selection_source", ""),
+            "source_kind": diagnostic_endpoint.get("source_kind", ""),
+            "id": diagnostic_endpoint.get("id", ""),
+            "rejection_reasons": diagnostic_endpoint.get("rejection_reasons", []),
         },
         "files": file_block,
     }
@@ -6313,7 +6445,8 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
         f"| input matched Born rows | n/a | `{_quick_percent(_quick_born_metric(screen_summary, 'all', 'R1_all'))}` | `{_quick_percent(_quick_born_metric(screen_summary, 'all', 'wR2_all'))}` | `{_quick_percent(_quick_born_metric(screen_summary, 'free', 'wR2_all'))}` | n/a | n/a | n/a |",
         f"| final dynamical rows | n/a | `{_quick_percent(final_row_r1)}` | `{_quick_percent(final_row_wr2)}` | `{_quick_percent(final_free_wr2)}` | n/a | n/a | n/a |",
         f"| final matched Born rows | n/a | `{_quick_percent(_quick_metric(native_metrics, 'all', 'born', 'R1_all'))}` | `{_quick_percent(_quick_metric(native_metrics, 'all', 'born', 'wR2_all'))}` | `{_quick_percent(_quick_metric(native_metrics, 'free', 'born', 'wR2_all'))}` | n/a | n/a | n/a |",
-        f"| final LS1 corrected-HKL endpoint | `{_quick_percent(final_feedback_shelxl.get('R1_gt'))}` | `{_quick_percent(final_feedback_shelxl.get('R1_all'))}` | `{_quick_percent(final_feedback_shelxl.get('wR2_all'))}` | n/a | `{_quick_number(final_feedback_shelxl.get('GooF'), 3)}` | `{final_feedback_shelxl.get('parameters', 'n/a')}` | `{final_feedback_shelxl.get('npd_count', 'n/a')}` / `{final_feedback_shelxl.get('split_count', 'n/a')}` |",
+        f"| direct LS1 corrected-HKL candidate | `{_quick_percent(final_feedback_shelxl.get('R1_gt'))}` | `{_quick_percent(final_feedback_shelxl.get('R1_all'))}` | `{_quick_percent(final_feedback_shelxl.get('wR2_all'))}` | n/a | `{_quick_number(final_feedback_shelxl.get('GooF'), 3)}` | `{final_feedback_shelxl.get('parameters', 'n/a')}` | `{final_feedback_shelxl.get('npd_count', 'n/a')}` / `{final_feedback_shelxl.get('split_count', 'n/a')}` |",
+        f"| best diagnostic endpoint, not promoted | `{_quick_percent(diagnostic_shelxl.get('R1_gt'))}` | `{_quick_percent(diagnostic_shelxl.get('R1_all'))}` | `{_quick_percent(diagnostic_shelxl.get('wR2_all'))}` | n/a | `{_quick_number(diagnostic_shelxl.get('GooF'), 3)}` | `{diagnostic_shelxl.get('parameters', 'n/a')}` | `{diagnostic_shelxl.get('npd_count', 'n/a')}` / `{diagnostic_shelxl.get('split_count', 'n/a')}` |" if diagnostic_endpoint else "",
         f"| publication corrected-HKL endpoint | `{_quick_percent(publication_shelxl.get('R1_gt'))}` | `{_quick_percent(publication_shelxl.get('R1_all'))}` | `{_quick_percent(publication_shelxl.get('wR2_all'))}` | `{_quick_percent(selected_row.get('native_free_wR2_all'))}` | `{_quick_number(publication_shelxl.get('GooF'), 3)}` | `{publication_shelxl.get('parameters', 'n/a')}` | `{publication_shelxl.get('npd_count', 'n/a')}` / `{publication_shelxl.get('split_count', 'n/a')}` |",
         "",
         f"**Endpoint warning:** {endpoint_warning}." if endpoint_warning else "",
@@ -6360,6 +6493,9 @@ def _publication_endpoint_from_result(result: Mapping[str, object]) -> Mapping[s
 
     chooser_endpoint = _chooser_publication_endpoint(result)
     if chooser_endpoint:
+        goof = chooser_endpoint.get("shelxl_GooF", chooser_endpoint.get("GooF"))
+        if _quick_goof_warning(goof):
+            return _endpoint_calibration_publication_endpoint(result)
         return chooser_endpoint
     chooser = result.get("publication_endpoint_chooser") if isinstance(result.get("publication_endpoint_chooser"), Mapping) else {}
     chooser_status = str(chooser.get("status", "") if isinstance(chooser, Mapping) else "")

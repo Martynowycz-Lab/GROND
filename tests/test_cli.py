@@ -502,7 +502,7 @@ def test_terminal_finish_summary_is_human_readable():
     assert "Final dynamical rows: R1all 21.30%, wR2all 33.10%, free wR2all 33.45%" in text
     assert "Final matched Born rows: R1all 27.00%, wR2all 41.00%, free wR2all 40.00%" in text
     assert "Change: R1all -0.83 pp, wR2all -10.31 pp" in text
-    assert "Final LS1 corrected-HKL endpoint: R1gt 11.00%, R1all 16.00%, wR2all 22.00%, GooF 0.950" in text
+    assert "Direct LS1 corrected-HKL candidate: R1gt 11.00%, R1all 16.00%, wR2all 22.00%, GooF 0.950" in text
     assert "Publication endpoint: R1gt 14.46%, R1all 17.85%, wR2all 25.72%, GooF 1.036" in text
 
 

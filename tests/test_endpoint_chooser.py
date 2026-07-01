@@ -29,6 +29,7 @@ def test_endpoint_chooser_keeps_b_zero_physical_and_reports_b_diagnostic():
             "R1_gt": 0.11,
             "R1_all": 0.14,
             "wR2_all": 0.24,
+            "GooF": 1.02,
         },
         {
             "id": "diagnostic_b",
@@ -42,6 +43,7 @@ def test_endpoint_chooser_keeps_b_zero_physical_and_reports_b_diagnostic():
             "R1_gt": 0.09,
             "R1_all": 0.11,
             "wR2_all": 0.19,
+            "GooF": 1.02,
         },
     ]
     decision = choose_publication_endpoints(candidates)
@@ -64,6 +66,7 @@ def test_endpoint_chooser_rejects_nonunit_q_exponent_for_publication():
             "R1_gt": 0.08,
             "R1_all": 0.10,
             "wR2_all": 0.18,
+            "GooF": 1.02,
         },
         {
             "id": "physical",
@@ -77,12 +80,54 @@ def test_endpoint_chooser_rejects_nonunit_q_exponent_for_publication():
             "R1_gt": 0.11,
             "R1_all": 0.13,
             "wR2_all": 0.22,
+            "GooF": 1.02,
         },
     ]
     decision = choose_publication_endpoints(candidates)
     assert decision["best_physical_endpoint"]["id"] == "physical"
     rejected_qexp = [c for c in decision["rejected_corrections"] if c["id"] == "diagnostic_qexp"][0]
     assert any("non-unit q exponent" in reason for reason in rejected_qexp["rejection_reasons"])
+
+
+def test_endpoint_chooser_rejects_high_goof_for_publication():
+    candidates = [
+        {
+            "id": "low_r_bad_goof",
+            "label": "dataset:observation_polish",
+            "source_kind": "observation_polish",
+            "lambda_q": 1.0,
+            "endpoint_b": 0.0,
+            "keep_exti": False,
+            "hkl_safe_factor": 1.0,
+            "modulation_p95": 1.2,
+            "observation_polish_accepted": True,
+            "R1_gt": 0.10,
+            "R1_all": 0.12,
+            "wR2_all": 0.18,
+            "GooF": 1.90,
+        },
+        {
+            "id": "boring_goof",
+            "label": "dataset",
+            "source_kind": "native_corrected_hkl",
+            "lambda_q": 1.0,
+            "endpoint_b": 0.0,
+            "keep_exti": False,
+            "hkl_safe_factor": 1.0,
+            "modulation_p95": 1.2,
+            "R1_gt": 0.12,
+            "R1_all": 0.16,
+            "wR2_all": 0.22,
+            "GooF": 0.98,
+        },
+    ]
+
+    decision = choose_publication_endpoints(candidates)
+
+    assert decision["best_physical_endpoint"]["id"] == "boring_goof"
+    assert decision["best_diagnostic_endpoint"]["id"] == "low_r_bad_goof"
+    rejected = [c for c in decision["rejected_corrections"] if c["id"] == "low_r_bad_goof"][0]
+    assert any("GooF" in reason and "outside" in reason for reason in rejected["rejection_reasons"])
 
 
 def test_write_publication_endpoint_choice_collects_outputs(tmp_path: Path):
@@ -109,7 +154,7 @@ def test_write_publication_endpoint_choice_collects_outputs(tmp_path: Path):
     assert (out / "PUBLICATION_ENDPOINT_CHOOSER.md").exists()
     report = (out / "PUBLICATION_ENDPOINT_CHOOSER.md").read_text()
     assert "Rejected Corrections" in report
-    assert "| label | source | endpoint B | EXTI | class |" in report
+    assert "| label | source | endpoint B | EXTI | class | R1gt | R1all | wR2all | GooF |" in report
     assert "| label | source | lambda |" not in report
 
 
@@ -127,6 +172,7 @@ def test_endpoint_chooser_prefers_combined_endpoint_when_multi_dataset():
             "R1_gt": 0.09,
             "R1_all": 0.10,
             "wR2_all": 0.20,
+            "GooF": 1.02,
         },
         {
             "id": "combined",
@@ -140,6 +186,7 @@ def test_endpoint_chooser_prefers_combined_endpoint_when_multi_dataset():
             "R1_gt": 0.12,
             "R1_all": 0.13,
             "wR2_all": 0.24,
+            "GooF": 1.02,
         },
     ]
     decision = choose_publication_endpoints(candidates, prefer_combined=True)

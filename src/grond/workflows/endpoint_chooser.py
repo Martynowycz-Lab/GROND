@@ -161,6 +161,8 @@ def classify_publication_endpoint(
     *,
     min_hkl_safe_factor: float = 0.25,
     max_modulation_p95: float = 20.0,
+    publication_goof_min: float = 0.85,
+    publication_goof_max: float = 1.15,
 ) -> dict:
     """Classify one endpoint as publishable physical output or diagnostic only."""
 
@@ -181,6 +183,13 @@ def classify_publication_endpoint(
         reasons.append("nonzero endpoint-B is diagnostic-only because it reshapes corrected HKL intensities and can distort ADPs or maps")
     if source_kind == "observation_polish" and not bool(candidate.get("observation_polish_accepted", False)):
         reasons.append("observation-polish correction did not pass the raw-row and endpoint holdout gates")
+    goof = _float(candidate.get("GooF"))
+    if not math.isfinite(goof):
+        reasons.append("endpoint GooF is unavailable; publication endpoints must have conventional SHELXL GooF")
+    elif goof < publication_goof_min or goof > publication_goof_max:
+        reasons.append(
+            f"endpoint GooF {goof:.3f} is outside the publication gate [{publication_goof_min:.3f}, {publication_goof_max:.3f}]"
+        )
     metrics_ok = math.isfinite(_float(candidate.get("wR2_all"))) and math.isfinite(_float(candidate.get("R1_all")))
     if not metrics_ok and "endpoint metrics are incomplete" not in reasons:
         reasons.append("endpoint metrics are incomplete")
@@ -198,6 +207,8 @@ def choose_publication_endpoints(
     *,
     min_hkl_safe_factor: float = 0.25,
     max_modulation_p95: float = 20.0,
+    publication_goof_min: float = 0.85,
+    publication_goof_max: float = 1.15,
     prefer_combined: bool = False,
 ) -> dict:
     """Choose best physical and diagnostic endpoints from normalized candidates."""
@@ -208,6 +219,8 @@ def choose_publication_endpoints(
             candidate,
             min_hkl_safe_factor=min_hkl_safe_factor,
             max_modulation_p95=max_modulation_p95,
+            publication_goof_min=publication_goof_min,
+            publication_goof_max=publication_goof_max,
         )
         classified.append({**candidate, **decision})
 
@@ -248,6 +261,7 @@ def choose_publication_endpoints(
                 "endpoint-B equal to zero",
                 f"HKL safety factor >= {min_hkl_safe_factor:g}",
                 f"95th percentile modulation <= {max_modulation_p95:g}",
+                f"SHELXL GooF between {publication_goof_min:g} and {publication_goof_max:g}",
                 "observation-polish endpoints must pass raw-row and endpoint holdout gates",
             ],
             "ranking": "multi-dataset combined endpoint first when present, then wR2all, R1all, and R1gt",
@@ -259,11 +273,14 @@ def _candidate_line(candidate: Mapping) -> str:
     """Render one endpoint candidate row for Markdown."""
 
     reasons = "; ".join(str(r) for r in candidate.get("rejection_reasons", [])[:3])
+    goof = _float(candidate.get("GooF"))
+    goof_text = "n/a" if not math.isfinite(goof) else f"{goof:.3f}"
     return (
         f"| {candidate.get('label', '')} | {candidate.get('source_kind', '')} | "
         f"{_float(candidate.get('endpoint_b'), 0.0):.3g} | "
         f"{'on' if candidate.get('keep_exti') else 'off'} | {candidate.get('publication_class', '')} | "
         f"{_percent(candidate.get('R1_gt'))} | {_percent(candidate.get('R1_all'))} | {_percent(candidate.get('wR2_all'))} | "
+        f"{goof_text} | "
         f"{reasons} |"
     )
 
@@ -301,12 +318,12 @@ def _write_markdown(out_dir: Path, decision: Mapping) -> Path:
     lines.extend(
         [
             "",
-            "Promotion rule: finite endpoint metrics, full q correction, EXTI off, endpoint-B equal to zero, safe HKL rescaling, bounded intensity modulation, and a passed observation-polish gate when a polish correction is involved.",
+            "Promotion rule: finite endpoint metrics, conventional SHELXL GooF inside the configured gate, full q correction, EXTI off, endpoint-B equal to zero, safe HKL rescaling, bounded intensity modulation, and a passed observation-polish gate when a polish correction is involved.",
             "",
             "## Endpoint Candidates",
             "",
-            "| label | source | endpoint B | EXTI | class | R1gt | R1all | wR2all | main rejection reason |",
-            "|---|---|---:|:---:|---|---:|---:|---:|---|",
+            "| label | source | endpoint B | EXTI | class | R1gt | R1all | wR2all | GooF | main rejection reason |",
+            "|---|---|---:|:---:|---|---:|---:|---:|---:|---|",
         ]
     )
     for candidate in decision.get("candidates", []):
@@ -366,8 +383,11 @@ def write_publication_endpoint_choice(
     *,
     combined_run: Path | None = None,
     forensic_summaries: Mapping[str, Mapping] | None = None,
+    extra_candidates: list[dict] | None = None,
     min_hkl_safe_factor: float = 0.25,
     max_modulation_p95: float = 20.0,
+    publication_goof_min: float = 0.85,
+    publication_goof_max: float = 1.15,
 ) -> dict:
     """Collect endpoint candidates, choose publication endpoints, and write reports."""
 
@@ -376,10 +396,13 @@ def write_publication_endpoint_choice(
     candidates.extend(_collect_native_candidates(runs))
     candidates.extend(_collect_combined_candidate(combined_run))
     candidates.extend(_collect_observation_polish_candidates(forensic_summaries))
+    candidates.extend(extra_candidates or [])
     decision = choose_publication_endpoints(
         candidates,
         min_hkl_safe_factor=min_hkl_safe_factor,
         max_modulation_p95=max_modulation_p95,
+        publication_goof_min=publication_goof_min,
+        publication_goof_max=publication_goof_max,
         prefer_combined=combined_run is not None,
     )
     json_path = out_dir / "publication_endpoint_choice.json"
