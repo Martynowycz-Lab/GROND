@@ -5832,7 +5832,11 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
     policy = str(console["publication_endpoint"].get("selection_policy") or "").strip()
     criterion = str(console["publication_endpoint"].get("information_criterion") or "").strip()
     criterion_value = console["publication_endpoint"].get("information_value")
-    if policy or criterion:
+    if not selected_row:
+        endpoint_note = (
+            "No endpoint chooser-approved physical endpoint was selected. Endpoint-calibration scale replays are diagnostic only for this run."
+        )
+    elif policy or criterion:
         endpoint_note = (
             f"Endpoint calibration used `{policy or 'n/a'}` with `{criterion or 'n/a'}` = "
             f"`{_quick_number(criterion_value, 3)}`. If the endpoint chooser selected an accepted observation-polish endpoint, "
@@ -5858,7 +5862,7 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
         f"| selected HKL transform | `{console['selected_transform']}` |",
         f"| final N/Q | `{metadata.get('n_basis', 'n/a')}/{metadata.get('n_points', 'n/a')}` |",
         f"| effective thickness model | `{_quick_number(metadata.get('thickness_A_mean'), 1)} A`; Sg window `{metadata.get('sg_window', 'n/a')}` |",
-        f"| publication endpoint source | `{console['publication_endpoint'].get('source', 'n/a')}` / `{console['publication_endpoint'].get('source_kind', 'n/a')}` |",
+        f"| publication endpoint source | `{console['publication_endpoint'].get('source') or 'none'}` / `{console['publication_endpoint'].get('source_kind') or 'no_physical_endpoint'}` |",
         "",
         "## Statistics",
         "",
@@ -5911,6 +5915,10 @@ def _publication_endpoint_from_result(result: Mapping[str, object]) -> Mapping[s
     chooser_endpoint = _chooser_publication_endpoint(result)
     if chooser_endpoint:
         return chooser_endpoint
+    chooser = result.get("publication_endpoint_chooser") if isinstance(result.get("publication_endpoint_chooser"), Mapping) else {}
+    chooser_status = str(chooser.get("status", "") if isinstance(chooser, Mapping) else "")
+    if chooser and chooser_status not in {"", "disabled", "dry_run", "no_endpoint_runs"}:
+        return {}
     return _endpoint_calibration_publication_endpoint(result)
 
 

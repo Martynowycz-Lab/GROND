@@ -364,6 +364,78 @@ def test_finish_prefers_endpoint_chooser_physical_endpoint(tmp_path: Path, capsy
     assert "endpoint_chooser | observation_polish" in quick_text
 
 
+def test_finish_does_not_promote_calibration_when_chooser_rejects_all(tmp_path: Path, capsys):
+    run = tmp_path / "grond"
+    final_run = run / "runs" / "dataset" / "final"
+    screen_run = run / "runs" / "dataset" / "adaptive_screen"
+    calibration = run / "endpoint_calibration" / "dataset" / "adaptive_80_det_8" / "endpoint_freeze-zero"
+    for path in (final_run, screen_run, calibration, run / "decisions" / "dataset"):
+        path.mkdir(parents=True)
+    (final_run / "native_dyn_calc.csv").write_text("split,dyn_residual_over_sigma\nwork,0.5\nfree,1.5\n")
+    metrics = {
+        "all": {"dyn": {"R1_all": 0.18, "wR2_all": 0.45}, "born": {"R1_all": 0.19, "wR2_all": 0.48}},
+        "free": {"dyn": {"wR2_all": 0.44}, "born": {"wR2_all": 0.48}},
+    }
+    (final_run / "summary.json").write_text(json.dumps({"best_native": {"metrics": metrics}, "best_endpoint": {}}))
+    (screen_run / "summary.json").write_text(json.dumps({"best_native": {"metrics": metrics}}))
+    calibration_res = calibration / "dyn_scale_replay.res"
+    calibration_hkl = calibration / "dyn_scale_replay.hkl"
+    calibration_lst = calibration / "dyn_scale_replay.lst"
+    calibration_res.write_text("TITL endpoint\nCELL 0.025079 5 6 7 90 90 90\nEND\n")
+    calibration_hkl.write_text("   0   0   0    0.00    0.00\n")
+    calibration_lst.write_text("R1 = 0.05 for 1 Fo > 4sig(Fo) and 0.11 for all 2 data\n")
+    (run / "decisions" / "dataset" / "decision_tree.json").write_text(
+        json.dumps(
+            {
+                "screen_run": str(screen_run),
+                "selected_hand": "alternate",
+                "transform_decision": {"selected": {"transform": "identity", "status": "ok"}},
+            }
+        )
+    )
+    write_prep(
+        run / "run_prep.json",
+        PrepConfig(
+            structure=str(tmp_path / "model.res"),
+            datasets=[DatasetSpec(name="dataset", hkl=str(tmp_path / "INTEGRATE.HKL"))],
+        ),
+    )
+    (run / "grond_summary.json").write_text(
+        json.dumps(
+            {
+                "primary_run": str(final_run),
+                "model": str(calibration_res),
+                "decision_tree": str(run / "decisions" / "dataset" / "decision_tree.json"),
+                "endpoint_calibration": {
+                    "publication_selection": {
+                        "publication_endpoint": {
+                            "spec": "adaptive_80_det_8",
+                            "wght_mode": "freeze-zero",
+                            "scale_params": 143,
+                            "shelxl_R1all": 0.183,
+                            "shelxl_wR2all": 0.2716,
+                            "shelxl_GooF": 1.118,
+                            "endpoint_res": str(calibration_res),
+                            "endpoint_hkl": str(calibration_hkl),
+                            "endpoint_lst": str(calibration_lst),
+                        }
+                    }
+                },
+                "publication_endpoint_chooser": {"status": "no_endpoint_candidates", "best_physical_endpoint": {}},
+            }
+        )
+    )
+
+    args = build_parser().parse_args(["finish", "--run-dir", str(run), "--no-make-maps", "--json"])
+    cli.cmd_finish(args)
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["publication_endpoint"]["R1all"] is None
+    assert payload["files"]["publication_res"] == ""
+    text = (run / "FINAL_SUMMARY.md").read_text()
+    assert "publication corrected-HKL endpoint | `n/a`" in text
+
+
 def test_terminal_finish_summary_is_human_readable():
     payload = {
         "status": "ok",
