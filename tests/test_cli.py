@@ -448,15 +448,44 @@ def test_terminal_finish_summary_is_human_readable():
         "final_hand_z_all": 1.505,
         "final_hand_z_free": 0.876,
         "selected_transform": "identity",
-        "input_model": {"row_R1all": 0.22128, "row_wR2all": 0.43413},
-        "final_row_model": {"row_R1all": 0.21300, "row_wR2all": 0.33100, "row_free_wR2all": 0.33448, "row_table": "/tmp/rows.csv"},
+        "input_shelxl": {
+            "R1gt": 0.1382,
+            "R1all": 0.1714,
+            "wR2all": 0.3845,
+            "GooF": 1.406,
+            "parameters": 123,
+            "restraints": 75,
+            "npd_count": 0,
+            "split_count": 1,
+        },
+        "input_model": {"row_R1all": 0.22128, "row_wR2all": 0.43413, "born_R1all": 0.28, "born_wR2all": 0.42},
+        "final_row_model": {
+            "row_R1all": 0.21300,
+            "row_wR2all": 0.33100,
+            "row_free_wR2all": 0.33448,
+            "born_R1all": 0.27,
+            "born_wR2all": 0.41,
+            "born_free_wR2all": 0.40,
+            "row_table": "/tmp/rows.csv",
+        },
+        "final_feedback_endpoint": {
+            "R1gt": 0.1100,
+            "R1all": 0.1600,
+            "wR2all": 0.2200,
+            "GooF": 0.950,
+            "npd_count": 0,
+            "split_count": 0,
+        },
         "publication_endpoint": {
+            "R1gt": 0.1446,
             "R1all": 0.1785,
             "wR2all": 0.2572,
             "GooF": 1.036,
             "scale_spec": "adaptive_120_det_8",
             "scale_params": 184,
             "wght_mode": "freeze-zero",
+            "npd_count": 0,
+            "split_count": 0,
         },
         "files": {"publication_res": "/tmp/endpoint.res", "publication_hkl": "/tmp/endpoint.hkl"},
     }
@@ -466,10 +495,15 @@ def test_terminal_finish_summary_is_human_readable():
     assert "GROND finished successfully in 13m42s." in text
     assert "Progress: 25 stages completed; initial estimate was 30." in text
     assert "Hand: alternate (Z all/free = 1.505 / 0.876" in text
-    assert "Input model: R1all 22.13%, wR2all 43.41%" in text
-    assert "Final model: R1all 21.30%, wR2all 33.10%, free wR2all 33.45%" in text
+    assert "Starting SHELXL reference" in text
+    assert "R1gt 13.82%, R1all 17.14%, wR2all 38.45%, GooF 1.406" in text
+    assert "Input dynamical rows: R1all 22.13%, wR2all 43.41%" in text
+    assert "Input matched Born rows: R1all 28.00%, wR2all 42.00%" in text
+    assert "Final dynamical rows: R1all 21.30%, wR2all 33.10%, free wR2all 33.45%" in text
+    assert "Final matched Born rows: R1all 27.00%, wR2all 41.00%, free wR2all 40.00%" in text
     assert "Change: R1all -0.83 pp, wR2all -10.31 pp" in text
-    assert "R1all 17.85%, wR2all 25.72%, GooF 1.036" in text
+    assert "Final LS1 corrected-HKL endpoint: R1gt 11.00%, R1all 16.00%, wR2all 22.00%, GooF 0.950" in text
+    assert "Publication endpoint: R1gt 14.46%, R1all 17.85%, wR2all 25.72%, GooF 1.036" in text
 
 
 def test_q_field_stability_compares_shared_signed_rows(tmp_path: Path):

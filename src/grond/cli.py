@@ -5225,6 +5225,201 @@ def _quick_float(value: object, default: float = float("nan")) -> float:
     return out if math.isfinite(out) else default
 
 
+def _quick_int(value: object) -> int | None:
+    """Return an int when a report value is integer-like."""
+
+    try:
+        out = int(value)
+    except (TypeError, ValueError):
+        return None
+    return out
+
+
+def _quick_lst_diagnostics(lst_path: Path | None) -> dict[str, object]:
+    """Parse the SHELXL LST fields users need for endpoint sanity checks."""
+
+    if lst_path is None:
+        return {"lst": "", "exists": False}
+    out: dict[str, object] = {"lst": str(lst_path), "exists": lst_path.exists()}
+    if not lst_path.exists():
+        return out
+    try:
+        text = lst_path.read_text(errors="replace")
+    except OSError as exc:
+        out.update({"exists": False, "error": str(exc)})
+        return out
+
+    matches = re.findall(r"wR2 =\s*([0-9.]+), GooF = S =\s*([0-9.]+).* for all data", text)
+    if matches:
+        wr2, goof = matches[-1]
+        out["wR2_all"] = float(wr2)
+        out["GooF"] = float(goof)
+    matches = re.findall(r"\+\s+wR2:\s*([0-9.]+),\s*GooF:\s*([0-9.]+)", text)
+    if matches:
+        wr2, goof = matches[-1]
+        out["wR2_all"] = float(wr2)
+        out["GooF"] = float(goof)
+    matches = re.findall(r"R1 =\s*([0-9.]+) for\s+(\d+) Fo > 4sig\(Fo\) and\s+([0-9.]+) for all\s+(\d+) data", text)
+    if matches:
+        r1_gt, n_gt, r1_all, n_all = matches[-1]
+        out["R1_gt"] = float(r1_gt)
+        out["N_gt"] = int(n_gt)
+        out["R1_all"] = float(r1_all)
+        out["N_all"] = int(n_all)
+    matches_gt = re.findall(r"\+\s+R1:\s*([0-9.]+) for\s+(\d+) reflections", text)
+    matches_all = re.findall(r"\+\s+R1 \(all\):\s*([0-9.]+) for\s+(\d+) reflections", text)
+    if matches_gt and matches_all:
+        r1_gt, n_gt = matches_gt[-1]
+        r1_all, n_all = matches_all[-1]
+        out["R1_gt"] = float(r1_gt)
+        out["N_gt"] = int(n_gt)
+        out["R1_all"] = float(r1_all)
+        out["N_all"] = int(n_all)
+    matches = re.findall(r"R\(int\) =\s*([0-9.]+)\s+R\(sigma\) =\s*([0-9.]+)", text)
+    if matches:
+        rint, rsigma = matches[-1]
+        out["Rint"] = float(rint)
+        out["Rsigma"] = float(rsigma)
+    matches = re.findall(r"Recommended weighting scheme:\s+WGHT\s+([-+0-9.Ee]+)(?:\s+([-+0-9.Ee]+))?", text)
+    if matches:
+        a_text, b_text = matches[-1]
+        out["recommended_wght_a"] = float(a_text)
+        out["recommended_wght_b"] = float(b_text) if b_text else 0.0
+    matches = re.findall(r"WGHT\s+([-+0-9.Ee]+)(?:\s+([-+0-9.Ee]+))?", text)
+    if matches:
+        a_text, b_text = matches[0]
+        out["active_wght_a"] = float(a_text)
+        out["active_wght_b"] = float(b_text) if b_text else 0.0
+    matches = re.findall(r"Total number of l\.s\. parameters =\s+(\d+)", text)
+    if matches:
+        out["parameters"] = int(matches[-1])
+    matches = re.findall(r"Restrained GooF =\s+[0-9.]+ for\s+(\d+) restraints", text)
+    if matches:
+        out["restraints"] = int(matches[-1])
+    matches = re.findall(r"\+\++\s*(\d+)\s+Constraints\s+\|\s+(\d+)\s+Restraints\s+\|\s+(\d+)\s+Parameters", text)
+    if matches:
+        _constraints, restraints, parameters = matches[-1]
+        out["parameters"] = int(parameters)
+        out["restraints"] = int(restraints)
+    npd_atoms = sorted(set(re.findall(r"\s([A-Z][A-Z0-9]{1,7})\s+\*\* NON POSITIVE DEFINITE \*\*", text)))
+    out["npd_atoms"] = npd_atoms
+    matches = re.findall(r"(\d+)\s+atoms NPD", text)
+    out["npd_count"] = int(matches[-1]) if matches else len(npd_atoms)
+    matches = re.findall(r"(\d+)\s+atoms may be split", text)
+    out["split_count"] = int(matches[-1]) if matches else 0
+    out["has_npd"] = int(out.get("npd_count", 0) or 0) > 0
+    out["has_split_warnings"] = int(out.get("split_count", 0) or 0) > 0
+    return out
+
+
+def _quick_shelxl_details(source: Mapping[str, object] | None = None, lst_path: Path | None = None) -> dict[str, object]:
+    """Merge recorded SHELXL stats with LST-derived health diagnostics."""
+
+    out: dict[str, object] = dict(source or {})
+    if lst_path is None:
+        text = str(out.get("lst") or out.get("endpoint_lst") or "")
+        lst_path = Path(text) if text else None
+    diagnostics = _quick_lst_diagnostics(lst_path)
+    out.setdefault("lst", diagnostics.get("lst", ""))
+    out["lst_exists"] = bool(diagnostics.get("exists"))
+    for key in (
+        "R1_gt",
+        "R1_all",
+        "wR2_all",
+        "GooF",
+        "N_gt",
+        "N_all",
+        "Rint",
+        "Rsigma",
+        "parameters",
+        "restraints",
+        "npd_count",
+        "npd_atoms",
+        "split_count",
+        "has_npd",
+        "has_split_warnings",
+        "active_wght_a",
+        "active_wght_b",
+        "recommended_wght_a",
+        "recommended_wght_b",
+    ):
+        old_value = out.get(key)
+        if key in diagnostics and (old_value is None or old_value == ""):
+            out[key] = diagnostics[key]
+        elif key in diagnostics and key in {"parameters", "restraints", "npd_count", "npd_atoms", "split_count", "has_npd", "has_split_warnings", "recommended_wght_a", "recommended_wght_b"}:
+            out[key] = diagnostics[key]
+    return out
+
+
+def _quick_baseline_shelxl(prep: PrepConfig) -> dict[str, object]:
+    """Return the conventional starting SHELXL stats next to the supplied RES/HKL."""
+
+    structure = Path(prep.structure).expanduser() if prep.structure else None
+    hkl = ""
+    if prep.datasets:
+        try:
+            hkl = dataset_baseline_hkl(prep, prep.datasets[0])
+        except Exception:
+            hkl = prep.baseline_hkl
+    elif prep.baseline_hkl:
+        hkl = prep.baseline_hkl
+    lst = structure.with_suffix(".lst") if structure is not None else None
+    if lst is not None and not lst.exists():
+        log = structure.with_suffix(".log") if structure is not None else None
+        if log is not None and log.exists():
+            lst = log
+    details = _quick_shelxl_details({}, lst)
+    details["res"] = str(structure or "")
+    details["hkl"] = str(hkl or "")
+    return details
+
+
+def _quick_shelxl_issue_text(details: Mapping[str, object]) -> str:
+    """Format NPD/split problems in one compact cell."""
+
+    npd = _quick_int(details.get("npd_count"))
+    split = _quick_int(details.get("split_count"))
+    atoms = details.get("npd_atoms")
+    atom_text = ""
+    if isinstance(atoms, list) and atoms:
+        shown = ", ".join(str(v) for v in atoms[:5])
+        atom_text = f" ({shown}{', ...' if len(atoms) > 5 else ''})"
+    return f"NPD `{npd if npd is not None else 'n/a'}`{atom_text}; split `{split if split is not None else 'n/a'}`"
+
+
+def _quick_shelxl_weight_text(details: Mapping[str, object]) -> str:
+    """Format active and recommended SHELXL weights."""
+
+    active_a = details.get("active_wght_a")
+    active_b = details.get("active_wght_b")
+    rec_a = details.get("recommended_wght_a")
+    rec_b = details.get("recommended_wght_b")
+    active = f"{_quick_number(active_a, 4)} {_quick_number(active_b, 4)}" if active_a is not None else "n/a"
+    recommended = f"{_quick_number(rec_a, 4)} {_quick_number(rec_b, 4)}" if rec_a is not None else "n/a"
+    return f"active `{active}`; recommended `{recommended}`"
+
+
+def _quick_endpoint_scale_text(endpoint: Mapping[str, object]) -> str:
+    """Return a readable endpoint scale/source line without blank parameter text."""
+
+    spec = str(endpoint.get("scale_spec") or endpoint.get("spec") or endpoint.get("source_kind") or "n/a")
+    params = endpoint.get("scale_params")
+    if params in {None, "", "n/a"}:
+        return f"{spec}; source {endpoint.get('source', endpoint.get('selection_source', 'n/a'))}/{endpoint.get('source_kind', 'n/a')}"
+    return f"{spec} ({params} parameters)"
+
+
+def _quick_goof_warning(goof_value: object) -> str:
+    """Return a short endpoint-calibration warning for non-boring GooF values."""
+
+    goof = _quick_float(goof_value)
+    if not math.isfinite(goof):
+        return ""
+    if 0.85 <= goof <= 1.15:
+        return ""
+    return "endpoint GooF is outside 0.85-1.15; treat this endpoint as diagnostic unless the row-level and weighting audits justify it"
+
+
 def _quick_residual_z_summary(csv_path: Path) -> dict[str, dict[str, float | int]]:
     """Summarize row-level intensity residual z values from native_dyn_calc.csv."""
 
@@ -5352,6 +5547,45 @@ def _normalize_publication_endpoint_block(endpoint: Mapping[str, object], *, sel
     out["shelxl_GooF"] = first_number("shelxl_GooF", "GooF")
     out["shelxl_Ngt"] = first_number("shelxl_Ngt", "N_gt")
     out["shelxl_Nall"] = first_number("shelxl_Nall", "N_all")
+    shelxl_details = _quick_shelxl_details(shelxl, Path(out["endpoint_lst"]) if out["endpoint_lst"] else None)
+    fallback_pairs = {
+        "shelxl_R1gt": "R1_gt",
+        "shelxl_R1all": "R1_all",
+        "shelxl_wR2all": "wR2_all",
+        "shelxl_GooF": "GooF",
+        "shelxl_Ngt": "N_gt",
+        "shelxl_Nall": "N_all",
+        "shelxl_Rint": "Rint",
+        "shelxl_Rsigma": "Rsigma",
+        "shelxl_parameters": "parameters",
+        "shelxl_restraints": "restraints",
+        "shelxl_npd_count": "npd_count",
+        "shelxl_npd_atoms": "npd_atoms",
+        "shelxl_split_count": "split_count",
+        "shelxl_has_npd": "has_npd",
+        "shelxl_has_split_warnings": "has_split_warnings",
+        "shelxl_active_wght_a": "active_wght_a",
+        "shelxl_active_wght_b": "active_wght_b",
+        "shelxl_recommended_wght_a": "recommended_wght_a",
+        "shelxl_recommended_wght_b": "recommended_wght_b",
+    }
+    for out_key, detail_key in fallback_pairs.items():
+        old_value = out.get(out_key)
+        if (old_value is None or old_value == "") and detail_key in shelxl_details:
+            out[out_key] = shelxl_details[detail_key]
+        elif out_key in {
+            "shelxl_parameters",
+            "shelxl_restraints",
+            "shelxl_npd_count",
+            "shelxl_npd_atoms",
+            "shelxl_split_count",
+            "shelxl_has_npd",
+            "shelxl_has_split_warnings",
+            "shelxl_recommended_wght_a",
+            "shelxl_recommended_wght_b",
+        } and detail_key in shelxl_details:
+            out[out_key] = shelxl_details[detail_key]
+    out["shelxl_lst_exists"] = shelxl_details.get("lst_exists", shelxl_details.get("exists", False))
     return out
 
 
@@ -5457,8 +5691,11 @@ def _format_terminal_finish_summary(payload: Mapping[str, object]) -> str:
     z_all_conf = _quick_normal_equivalent_confidence(z_all)
     z_free_conf = _quick_normal_equivalent_confidence(z_free)
     input_model = payload.get("input_model") if isinstance(payload.get("input_model"), Mapping) else {}
+    input_shelxl = payload.get("input_shelxl") if isinstance(payload.get("input_shelxl"), Mapping) else {}
     final_row = payload.get("final_row_model") if isinstance(payload.get("final_row_model"), Mapping) else {}
+    feedback = payload.get("final_feedback_endpoint") if isinstance(payload.get("final_feedback_endpoint"), Mapping) else {}
     endpoint = payload.get("publication_endpoint") if isinstance(payload.get("publication_endpoint"), Mapping) else {}
+    endpoint_warning = _quick_goof_warning(endpoint.get("GooF"))
     files = payload.get("files") if isinstance(payload.get("files"), Mapping) else {}
     finished = payload.get("finished") if isinstance(payload.get("finished"), Mapping) else {}
     elapsed = str(finished.get("stage_elapsed") or format_seconds(finished.get("stage_elapsed_seconds", 0.0)))
@@ -5489,15 +5726,23 @@ def _format_terminal_finish_summary(payload: Mapping[str, object]) -> str:
         f"  Hand: {final_hand} (Z all/free = {_quick_number(z_all, 3)} / {_quick_number(z_free, 3)}; normal-equivalent confidence all/free = {_quick_percent(z_all_conf)} / {_quick_percent(z_free_conf)})",
         f"  HKL transform: {transform}",
         "",
+        "Starting SHELXL reference",
+        f"  R1gt {_quick_percent(input_shelxl.get('R1gt'))}, R1all {_quick_percent(input_shelxl.get('R1all'))}, wR2all {_quick_percent(input_shelxl.get('wR2all'))}, GooF {_quick_number(input_shelxl.get('GooF'), 3)}",
+        f"  Parameters/restraints {input_shelxl.get('parameters', 'n/a')} / {input_shelxl.get('restraints', 'n/a')}; NPD {input_shelxl.get('npd_count', 'n/a')}; split {input_shelxl.get('split_count', 'n/a')}",
+        "",
         "Row-level statistics",
-        f"  Input model: R1all {_quick_percent(input_model.get('row_R1all'))}, wR2all {_quick_percent(input_model.get('row_wR2all'))}",
-        f"  Final model: R1all {_quick_percent(final_row.get('row_R1all'))}, wR2all {_quick_percent(final_row.get('row_wR2all'))}, free wR2all {_quick_percent(final_row.get('row_free_wR2all'))}",
+        f"  Input dynamical rows: R1all {_quick_percent(input_model.get('row_R1all'))}, wR2all {_quick_percent(input_model.get('row_wR2all'))}",
+        f"  Input matched Born rows: R1all {_quick_percent(input_model.get('born_R1all'))}, wR2all {_quick_percent(input_model.get('born_wR2all'))}",
+        f"  Final dynamical rows: R1all {_quick_percent(final_row.get('row_R1all'))}, wR2all {_quick_percent(final_row.get('row_wR2all'))}, free wR2all {_quick_percent(final_row.get('row_free_wR2all'))}",
+        f"  Final matched Born rows: R1all {_quick_percent(final_row.get('born_R1all'))}, wR2all {_quick_percent(final_row.get('born_wR2all'))}, free wR2all {_quick_percent(final_row.get('born_free_wR2all'))}",
         f"  Change: R1all {_quick_delta_percent(input_model.get('row_R1all'), final_row.get('row_R1all'))}, wR2all {_quick_delta_percent(input_model.get('row_wR2all'), final_row.get('row_wR2all'))}",
         "",
-        "Publication endpoint",
-        f"  R1all {_quick_percent(endpoint.get('R1all'))}, wR2all {_quick_percent(endpoint.get('wR2all'))}, GooF {_quick_number(endpoint.get('GooF'), 3)}",
-        f"  Scales: {endpoint.get('scale_spec', 'n/a')} ({endpoint.get('scale_params', 'n/a')} parameters), WGHT {endpoint.get('wght_mode', 'n/a')}",
+        "SHELXL endpoints",
+        f"  Final LS1 corrected-HKL endpoint: R1gt {_quick_percent(feedback.get('R1gt'))}, R1all {_quick_percent(feedback.get('R1all'))}, wR2all {_quick_percent(feedback.get('wR2all'))}, GooF {_quick_number(feedback.get('GooF'), 3)}; NPD {feedback.get('npd_count', 'n/a')}; split {feedback.get('split_count', 'n/a')}",
+        f"  Publication endpoint: R1gt {_quick_percent(endpoint.get('R1gt'))}, R1all {_quick_percent(endpoint.get('R1all'))}, wR2all {_quick_percent(endpoint.get('wR2all'))}, GooF {_quick_number(endpoint.get('GooF'), 3)}; NPD {endpoint.get('npd_count', 'n/a')}; split {endpoint.get('split_count', 'n/a')}",
+        f"  Endpoint source/scales: {_quick_endpoint_scale_text(endpoint)}, WGHT {endpoint.get('wght_mode', 'n/a')}",
         f"  Scale selector: {endpoint.get('selection_policy', 'n/a')} / {endpoint.get('information_criterion', 'n/a')} = {_quick_number(endpoint.get('information_value'), 3)}",
+        f"  Warning: {endpoint_warning}" if endpoint_warning else "",
         "",
         "Open these first",
         f"  Final summary: {payload.get('final_summary', '')}",
@@ -5563,6 +5808,33 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
     hand_work = hand_blocks.get("work", {}) if isinstance(hand_blocks.get("work"), Mapping) else {}
     hand_free = hand_blocks.get("free", {}) if isinstance(hand_blocks.get("free"), Mapping) else {}
     file_block = _quick_endpoint_file_block(publication_endpoint, final_model)
+    input_shelxl = _quick_baseline_shelxl(prep)
+    best_endpoint_shelxl = best_endpoint.get("shelxl") if isinstance(best_endpoint.get("shelxl"), Mapping) else {}
+    final_feedback_shelxl = _quick_shelxl_details(
+        best_endpoint_shelxl,
+        Path(file_block["final_feedback_lst"]) if file_block.get("final_feedback_lst") else None,
+    )
+    publication_shelxl = _quick_shelxl_details(
+        {
+            "R1_gt": publication_endpoint.get("shelxl_R1gt"),
+            "R1_all": publication_endpoint.get("shelxl_R1all"),
+            "wR2_all": publication_endpoint.get("shelxl_wR2all"),
+            "GooF": publication_endpoint.get("shelxl_GooF"),
+            "N_gt": publication_endpoint.get("shelxl_Ngt"),
+            "N_all": publication_endpoint.get("shelxl_Nall"),
+            "parameters": publication_endpoint.get("shelxl_parameters"),
+            "restraints": publication_endpoint.get("shelxl_restraints"),
+            "npd_count": publication_endpoint.get("shelxl_npd_count"),
+            "npd_atoms": publication_endpoint.get("shelxl_npd_atoms"),
+            "split_count": publication_endpoint.get("shelxl_split_count"),
+            "active_wght_a": publication_endpoint.get("shelxl_active_wght_a"),
+            "active_wght_b": publication_endpoint.get("shelxl_active_wght_b"),
+            "recommended_wght_a": publication_endpoint.get("shelxl_recommended_wght_a"),
+            "recommended_wght_b": publication_endpoint.get("shelxl_recommended_wght_b"),
+            "lst": publication_endpoint.get("endpoint_lst"),
+        },
+        Path(file_block["publication_lst"]) if file_block.get("publication_lst") else None,
+    )
     endpoints = []
     resolution_block = row_metrics.get("resolution_scale_endpoints", {})
     if isinstance(resolution_block, Mapping):
@@ -5625,6 +5897,35 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
 
     lines.extend(
         [
+            "## Starting SHELXL Reference",
+            "",
+            "These are the conventional SHELXL values parsed from the supplied starting model's sibling `.lst` file, with `.log` accepted as a front-end fallback. GROND does not rerun this baseline here; if neither file is present, the conventional starting endpoint is reported as unavailable.",
+            "",
+            "| RES | HKL | stats file found | R1gt | R1all | wR2all | GooF | parameters | restraints | pathology | WGHT |",
+            "|---|---|---:|---:|---:|---:|---:|---:|---:|---|---|",
+            "| "
+            + " | ".join(
+                [
+                    f"`{input_shelxl.get('res', '')}`",
+                    f"`{input_shelxl.get('hkl', '')}`",
+                    "`yes`" if input_shelxl.get("lst_exists") else "`no`",
+                    _quick_percent(input_shelxl.get("R1_gt")),
+                    _quick_percent(input_shelxl.get("R1_all")),
+                    _quick_percent(input_shelxl.get("wR2_all")),
+                    _quick_number(input_shelxl.get("GooF"), 3),
+                    str(input_shelxl.get("parameters", "n/a")),
+                    str(input_shelxl.get("restraints", "n/a")),
+                    _quick_shelxl_issue_text(input_shelxl),
+                    _quick_shelxl_weight_text(input_shelxl),
+                ]
+            )
+            + " |",
+            "",
+        ]
+    )
+
+    lines.extend(
+        [
             "## Input Contract, Hand, And Z Diagnostics",
             "",
             "XDS, DIALS, and other integrators can produce different signed-row contracts from the same frames. Row filtering, partiality/Lorentz handling, scan-varying geometry, sigmas, and scale conventions can move nuisance fits such as thickness, frame offset, absorption, and scale counts. GROND therefore treats the selected HKL transform, final absolute-structure hand, and raw row-level Bloch/Born statistics as the most portable cross-pipeline checks; nuisance values are fit-contract parameters, not direct physical measurements unless the row contracts agree.",
@@ -5649,6 +5950,103 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
             "| model state | dyn R1all | dyn wR2all | dyn free wR2all | matched Born R1all | matched Born wR2all |",
             "|---|---:|---:|---:|---:|---:|",
             f"| input adaptive screen | `{_quick_percent(_quick_dyn_metric(screen_summary, 'all', 'R1_all'))}` | `{_quick_percent(_quick_dyn_metric(screen_summary, 'all', 'wR2_all'))}` | `{_quick_percent(_quick_dyn_metric(screen_summary, 'free', 'wR2_all'))}` | `{_quick_percent(_quick_born_metric(screen_summary, 'all', 'R1_all'))}` | `{_quick_percent(_quick_born_metric(screen_summary, 'all', 'wR2_all'))}` |",
+            "",
+            "## Kinematic, Born, And Dynamical Top-Line Comparison",
+            "",
+            "This table separates three different objects that should not be collapsed into one R factor: the user's conventional kinematic SHELXL endpoint, the matched Born row calculation under the GROND row contract, and the GROND dynamical row/endpoint results.",
+            "",
+            "| object | R1gt | R1all | wR2all | GooF | row free wR2all | parameters | pathology | source |",
+            "|---|---:|---:|---:|---:|---:|---:|---|---|",
+            "| "
+            + " | ".join(
+                [
+                    "input conventional SHELXL",
+                    _quick_percent(input_shelxl.get("R1_gt")),
+                    _quick_percent(input_shelxl.get("R1_all")),
+                    _quick_percent(input_shelxl.get("wR2_all")),
+                    _quick_number(input_shelxl.get("GooF"), 3),
+                    "n/a",
+                    str(input_shelxl.get("parameters", "n/a")),
+                    _quick_shelxl_issue_text(input_shelxl),
+                    f"`{input_shelxl.get('lst', '')}`",
+                ]
+            )
+            + " |",
+            "| "
+            + " | ".join(
+                [
+                    "input matched Born rows",
+                    "n/a",
+                    _quick_percent(_quick_born_metric(screen_summary, "all", "R1_all")),
+                    _quick_percent(_quick_born_metric(screen_summary, "all", "wR2_all")),
+                    "n/a",
+                    _quick_percent(_quick_born_metric(screen_summary, "free", "wR2_all")),
+                    "n/a",
+                    "n/a",
+                    "`adaptive_screen summary.json`",
+                ]
+            )
+            + " |",
+            "| "
+            + " | ".join(
+                [
+                    "final matched Born rows",
+                    "n/a",
+                    _quick_percent(_quick_metric(native_metrics, "all", "born", "R1_all")),
+                    _quick_percent(_quick_metric(native_metrics, "all", "born", "wR2_all")),
+                    "n/a",
+                    _quick_percent(_quick_metric(native_metrics, "free", "born", "wR2_all")),
+                    "n/a",
+                    "n/a",
+                    f"`{final_run / 'summary.json' if final_run else ''}`",
+                ]
+            )
+            + " |",
+            "| "
+            + " | ".join(
+                [
+                    "final dynamical rows",
+                    "n/a",
+                    _quick_percent(_quick_metric(native_metrics, "all", "dyn", "R1_all")),
+                    _quick_percent(_quick_metric(native_metrics, "all", "dyn", "wR2_all")),
+                    "n/a",
+                    _quick_percent(_quick_metric(native_metrics, "free", "dyn", "wR2_all")),
+                    "n/a",
+                    "n/a",
+                    f"`{final_run / 'native_dyn_calc.csv' if final_run else ''}`",
+                ]
+            )
+            + " |",
+            "| "
+            + " | ".join(
+                [
+                    "final LS1 corrected-HKL endpoint",
+                    _quick_percent(final_feedback_shelxl.get("R1_gt")),
+                    _quick_percent(final_feedback_shelxl.get("R1_all")),
+                    _quick_percent(final_feedback_shelxl.get("wR2_all")),
+                    _quick_number(final_feedback_shelxl.get("GooF"), 3),
+                    "n/a",
+                    str(final_feedback_shelxl.get("parameters", "n/a")),
+                    _quick_shelxl_issue_text(final_feedback_shelxl),
+                    f"`{file_block['final_feedback_lst']}`",
+                ]
+            )
+            + " |",
+            "| "
+            + " | ".join(
+                [
+                    "publication corrected-HKL endpoint",
+                    _quick_percent(publication_shelxl.get("R1_gt")),
+                    _quick_percent(publication_shelxl.get("R1_all")),
+                    _quick_percent(publication_shelxl.get("wR2_all")),
+                    _quick_number(publication_shelxl.get("GooF"), 3),
+                    _quick_percent(publication_endpoint.get("native_free_wR2_all")),
+                    str(publication_shelxl.get("parameters", "n/a")),
+                    _quick_shelxl_issue_text(publication_shelxl),
+                    f"`{file_block['publication_lst']}`",
+                ]
+            )
+            + " |",
             "",
             "## Final Nuisance Contract",
             "",
@@ -5710,8 +6108,8 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
             "",
             "This is the endpoint GROND currently recommends opening for the final structure. The endpoint-calibration table below remains the conservative scale-replay audit.",
             "",
-            "| source | kind/spec | WGHT | scales | R1gt | R1all | wR2all | GooF |",
-            "|---|---|---|---:|---:|---:|---:|---:|",
+            "| source | kind/spec | WGHT | scales | R1gt | R1all | wR2all | GooF | params/restraints | pathology |",
+            "|---|---|---|---:|---:|---:|---:|---:|---:|---|",
             "| "
             + " | ".join(
                 [
@@ -5719,14 +6117,23 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
                     str(publication_endpoint.get("spec") or publication_endpoint.get("source_kind") or "n/a"),
                     str(publication_endpoint.get("wght_mode", "n/a")),
                     str(publication_endpoint.get("scale_params", "n/a")),
-                    _quick_percent(publication_endpoint.get("shelxl_R1gt")),
-                    _quick_percent(publication_endpoint.get("shelxl_R1all")),
-                    _quick_percent(publication_endpoint.get("shelxl_wR2all")),
-                    _quick_number(publication_endpoint.get("shelxl_GooF"), 3),
+                    _quick_percent(publication_shelxl.get("R1_gt")),
+                    _quick_percent(publication_shelxl.get("R1_all")),
+                    _quick_percent(publication_shelxl.get("wR2_all")),
+                    _quick_number(publication_shelxl.get("GooF"), 3),
+                    f"{publication_shelxl.get('parameters', 'n/a')} / {publication_shelxl.get('restraints', 'n/a')}",
+                    _quick_shelxl_issue_text(publication_shelxl),
                 ]
             )
             + " |",
             "",
+            (
+                "**Endpoint warning:** "
+                + _quick_goof_warning(publication_shelxl.get("GooF"))
+                + "."
+                if _quick_goof_warning(publication_shelxl.get("GooF"))
+                else ""
+            ),
             "## Endpoint Calibration",
             "",
             f"Selection policy: `{selection_policy}`; information criterion: `{information_criterion}`.",
@@ -5804,23 +6211,55 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
         "final_hand_z_all": _quick_fraction(hand_all.get("paired_z_positive_favors_final")),
         "final_hand_z_free": _quick_fraction(hand_free.get("paired_z_positive_favors_final")),
         "selected_transform": transform_summary.get("selected_transform", "n/a"),
+        "input_shelxl": {
+            "R1gt": _quick_fraction(input_shelxl.get("R1_gt")),
+            "R1all": _quick_fraction(input_shelxl.get("R1_all")),
+            "wR2all": _quick_fraction(input_shelxl.get("wR2_all")),
+            "GooF": _quick_fraction(input_shelxl.get("GooF")),
+            "parameters": input_shelxl.get("parameters"),
+            "restraints": input_shelxl.get("restraints"),
+            "npd_count": input_shelxl.get("npd_count"),
+            "split_count": input_shelxl.get("split_count"),
+            "lst": input_shelxl.get("lst", ""),
+        },
         "input_model": {
             "row_R1all": _quick_fraction(input_row_r1),
             "row_wR2all": _quick_fraction(input_row_wr2),
+            "born_R1all": _quick_fraction(_quick_born_metric(screen_summary, "all", "R1_all")),
+            "born_wR2all": _quick_fraction(_quick_born_metric(screen_summary, "all", "wR2_all")),
         },
         "final_row_model": {
             "row_R1all": _quick_fraction(final_row_r1),
             "row_wR2all": _quick_fraction(final_row_wr2),
             "row_free_wR2all": _quick_fraction(final_free_wr2),
+            "born_R1all": _quick_fraction(_quick_metric(native_metrics, "all", "born", "R1_all")),
+            "born_wR2all": _quick_fraction(_quick_metric(native_metrics, "all", "born", "wR2_all")),
+            "born_free_wR2all": _quick_fraction(_quick_metric(native_metrics, "free", "born", "wR2_all")),
             "row_table": str(final_run / "native_dyn_calc.csv") if final_run else "",
         },
+        "final_feedback_endpoint": {
+            "R1gt": _quick_fraction(final_feedback_shelxl.get("R1_gt")),
+            "R1all": _quick_fraction(final_feedback_shelxl.get("R1_all")),
+            "wR2all": _quick_fraction(final_feedback_shelxl.get("wR2_all")),
+            "GooF": _quick_fraction(final_feedback_shelxl.get("GooF")),
+            "parameters": final_feedback_shelxl.get("parameters"),
+            "restraints": final_feedback_shelxl.get("restraints"),
+            "npd_count": final_feedback_shelxl.get("npd_count"),
+            "split_count": final_feedback_shelxl.get("split_count"),
+            "lst": final_feedback_shelxl.get("lst", file_block["final_feedback_lst"]),
+        },
         "publication_endpoint": {
+            "R1gt": _quick_fraction(selected_row.get("shelxl_R1gt")),
             "R1all": _quick_fraction(selected_row.get("shelxl_R1all")),
             "wR2all": _quick_fraction(selected_row.get("shelxl_wR2all")),
             "GooF": _quick_fraction(selected_row.get("shelxl_GooF")),
             "scale_spec": selected_row.get("spec", ""),
             "scale_params": selected_row.get("scale_params", ""),
             "wght_mode": selected_row.get("wght_mode", ""),
+            "parameters": publication_shelxl.get("parameters"),
+            "restraints": publication_shelxl.get("restraints"),
+            "npd_count": publication_shelxl.get("npd_count"),
+            "split_count": publication_shelxl.get("split_count"),
             "source": selected_row.get("selection_source", ""),
             "source_kind": selected_row.get("source_kind", ""),
             "selection_policy": endpoint_selection.get("selection_policy", "") if isinstance(endpoint_selection, Mapping) else "",
@@ -5847,6 +6286,7 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
             "The endpoint chooser selected the publication endpoint. Endpoint-calibration replay details, when present, "
             "are listed in `QUICK_STATS.md` as an audit branch."
         )
+    endpoint_warning = _quick_goof_warning(publication_shelxl.get("GooF"))
 
     final_lines = [
         "# GROND Final Summary",
@@ -5866,11 +6306,17 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
         "",
         "## Statistics",
         "",
-        "| state | R1all | wR2all | free/held-out wR2all | GooF |",
-        "|---|---:|---:|---:|---:|",
-        f"| input model, row-space | `{_quick_percent(input_row_r1)}` | `{_quick_percent(input_row_wr2)}` | `{_quick_percent(_quick_dyn_metric(screen_summary, 'free', 'wR2_all'))}` | n/a |",
-        f"| final model, row-space | `{_quick_percent(final_row_r1)}` | `{_quick_percent(final_row_wr2)}` | `{_quick_percent(final_free_wr2)}` | n/a |",
-        f"| publication corrected-HKL endpoint | `{_quick_percent(selected_row.get('shelxl_R1all'))}` | `{_quick_percent(selected_row.get('shelxl_wR2all'))}` | `{_quick_percent(selected_row.get('native_free_wR2_all'))}` | `{_quick_number(selected_row.get('shelxl_GooF'), 3)}` |",
+        "| state | R1gt | R1all | wR2all | free/held-out wR2all | GooF | parameters | NPD/split |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|",
+        f"| input conventional SHELXL | `{_quick_percent(input_shelxl.get('R1_gt'))}` | `{_quick_percent(input_shelxl.get('R1_all'))}` | `{_quick_percent(input_shelxl.get('wR2_all'))}` | n/a | `{_quick_number(input_shelxl.get('GooF'), 3)}` | `{input_shelxl.get('parameters', 'n/a')}` | `{input_shelxl.get('npd_count', 'n/a')}` / `{input_shelxl.get('split_count', 'n/a')}` |",
+        f"| input dynamical rows | n/a | `{_quick_percent(input_row_r1)}` | `{_quick_percent(input_row_wr2)}` | `{_quick_percent(_quick_dyn_metric(screen_summary, 'free', 'wR2_all'))}` | n/a | n/a | n/a |",
+        f"| input matched Born rows | n/a | `{_quick_percent(_quick_born_metric(screen_summary, 'all', 'R1_all'))}` | `{_quick_percent(_quick_born_metric(screen_summary, 'all', 'wR2_all'))}` | `{_quick_percent(_quick_born_metric(screen_summary, 'free', 'wR2_all'))}` | n/a | n/a | n/a |",
+        f"| final dynamical rows | n/a | `{_quick_percent(final_row_r1)}` | `{_quick_percent(final_row_wr2)}` | `{_quick_percent(final_free_wr2)}` | n/a | n/a | n/a |",
+        f"| final matched Born rows | n/a | `{_quick_percent(_quick_metric(native_metrics, 'all', 'born', 'R1_all'))}` | `{_quick_percent(_quick_metric(native_metrics, 'all', 'born', 'wR2_all'))}` | `{_quick_percent(_quick_metric(native_metrics, 'free', 'born', 'wR2_all'))}` | n/a | n/a | n/a |",
+        f"| final LS1 corrected-HKL endpoint | `{_quick_percent(final_feedback_shelxl.get('R1_gt'))}` | `{_quick_percent(final_feedback_shelxl.get('R1_all'))}` | `{_quick_percent(final_feedback_shelxl.get('wR2_all'))}` | n/a | `{_quick_number(final_feedback_shelxl.get('GooF'), 3)}` | `{final_feedback_shelxl.get('parameters', 'n/a')}` | `{final_feedback_shelxl.get('npd_count', 'n/a')}` / `{final_feedback_shelxl.get('split_count', 'n/a')}` |",
+        f"| publication corrected-HKL endpoint | `{_quick_percent(publication_shelxl.get('R1_gt'))}` | `{_quick_percent(publication_shelxl.get('R1_all'))}` | `{_quick_percent(publication_shelxl.get('wR2_all'))}` | `{_quick_percent(selected_row.get('native_free_wR2_all'))}` | `{_quick_number(publication_shelxl.get('GooF'), 3)}` | `{publication_shelxl.get('parameters', 'n/a')}` | `{publication_shelxl.get('npd_count', 'n/a')}` / `{publication_shelxl.get('split_count', 'n/a')}` |",
+        "",
+        f"**Endpoint warning:** {endpoint_warning}." if endpoint_warning else "",
         "",
         endpoint_note,
         "",
