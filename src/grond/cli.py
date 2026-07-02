@@ -5795,6 +5795,62 @@ def _quick_delta_percent(before: object, after: object) -> str:
     return f"{sign}{100.0 * (a - b):.2f} pp"
 
 
+def _quick_source_shelx_controls(path: Path | None) -> dict[str, object]:
+    """Read the source RES/INS control records that affect baseline interpretation."""
+
+    out: dict[str, object] = {"hklf": "", "exti": "", "wght": "", "acta": False}
+    if path is None or not path.exists():
+        return out
+    try:
+        text = path.read_text(errors="replace")
+    except OSError:
+        return out
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        head = line.split()[0].upper()
+        if head == "END":
+            break
+        if head == "HKLF":
+            out["hklf"] = " ".join(line.split()[:2])
+        elif head == "EXTI":
+            out["exti"] = " ".join(line.split()[:2])
+        elif head == "WGHT":
+            terms = _quick_parse_wght_terms(line)
+            out["wght"] = "WGHT " + " ".join(_quick_number(value, 6) for value in terms) if terms else line
+        elif head == "ACTA":
+            out["acta"] = True
+    return out
+
+
+def _quick_source_shelx_control_text(controls: Mapping[str, object]) -> str:
+    """Format source SHELX controls in one compact report cell."""
+
+    hklf = str(controls.get("hklf") or "HKLF n/a")
+    exti = str(controls.get("exti") or "EXTI none")
+    wght = str(controls.get("wght") or "WGHT n/a")
+    acta = "ACTA present" if controls.get("acta") else "ACTA absent"
+    return f"{hklf}; {exti}; {wght}; {acta}"
+
+
+def _quick_row_weight_definition(nuisance: Mapping[str, object]) -> str:
+    """Return the exact row wR2 weighting convention used by the final native report."""
+
+    a = nuisance.get("native_wght_a", nuisance.get("wght_a_grid"))
+    b = nuisance.get("native_wght_b", nuisance.get("wght_b_grid"))
+    return (
+        "Raw-row `wR2all` is `sqrt(sum_r w_r (Iobs_r - Icalc_r)^2 / sum_r w_r Iobs_r^2)` "
+        "over signed observation rows. For dynamical rows `Icalc_r = Idyn_r`; for matched Born rows "
+        "`Icalc_r = Iborn_r` under the same row contract, thickness, geometry, scales, and sigma model. "
+        "`w_r = 1 / [sigma_eff_r^2 + (a P_r)^2 + b P_r]`, with "
+        "`P_r = (max(Iobs_r, 0) + 2 max(Icalc_r, 0)) / 3`. "
+        f"This run reports final native row weights `a={_quick_number(a, 6)}` and `b={_quick_number(b, 6)}`. "
+        "This is the raw signed-row observation-space statistic to compare with native dynamical-refinement row "
+        "targets; it is not SHELXL's merged-reflection `wR2all`."
+    )
+
+
 def _format_terminal_finish_summary(payload: Mapping[str, object]) -> str:
     """Return the short human-facing completion report printed by auto/run/finish."""
 
@@ -5949,6 +6005,8 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
     hand_free = hand_blocks.get("free", {}) if isinstance(hand_blocks.get("free"), Mapping) else {}
     file_block = _quick_endpoint_file_block(publication_endpoint, final_model)
     input_shelxl = _quick_baseline_shelxl(prep)
+    source_structure = Path(prep.structure).expanduser() if prep.structure else None
+    source_controls = _quick_source_shelx_controls(source_structure)
     best_endpoint_shelxl = best_endpoint.get("shelxl") if isinstance(best_endpoint.get("shelxl"), Mapping) else {}
     final_feedback_shelxl = _quick_shelxl_details(
         best_endpoint_shelxl,
@@ -5994,6 +6052,8 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
     if isinstance(resolution_block, Mapping):
         raw_endpoints = resolution_block.get("endpoints", [])
         endpoints = raw_endpoints if isinstance(raw_endpoints, list) else []
+    row_count_text = str(metadata.get("row_count", "n/a"))
+    source_control_text = _quick_source_shelx_control_text(source_controls)
 
     lines = [
         "# GROND Quick Stats",
@@ -6105,24 +6165,25 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
             "|---|---:|---:|---:|---:|---:|",
             f"| input adaptive screen | `{_quick_percent(_quick_dyn_metric(screen_summary, 'all', 'R1_all'))}` | `{_quick_percent(_quick_dyn_metric(screen_summary, 'all', 'wR2_all'))}` | `{_quick_percent(_quick_dyn_metric(screen_summary, 'free', 'wR2_all'))}` | `{_quick_percent(_quick_born_metric(screen_summary, 'all', 'R1_all'))}` | `{_quick_percent(_quick_born_metric(screen_summary, 'all', 'wR2_all'))}` |",
             "",
-            "## Kinematic, Born, And Dynamical Top-Line Comparison",
+            "## Master Comparison Matrix",
             "",
-            "This table separates three different objects that should not be collapsed into one R factor: the user's conventional kinematic SHELXL endpoint, the matched Born row calculation under the GROND row contract, and the GROND dynamical row/endpoint results.",
+            "This table separates the objects users need to compare. Rows labeled `raw signed rows` are observation-space intensity residuals on the GROND row contract. Rows labeled `merged SHELXL endpoint` are conventional corrected-HKL refinement endpoints. The two `wR2all` columns have the same name because the communities use that name, but they are different targets and should not be compared as if they had one denominator.",
             "",
-            "| object | R1gt | R1all | wR2all | GooF | row free wR2all | parameters | pathology | source |",
-            "|---|---:|---:|---:|---:|---:|---:|---|---|",
+            "| object | target class | R1gt | R1all | wR2all | free/held-out wR2all | GooF | N/reflections | parameters/scales | source and notes |",
+            "|---|---|---:|---:|---:|---:|---:|---:|---|---|",
             "| "
             + " | ".join(
                 [
                     "input conventional SHELXL",
+                    "merged SHELXL endpoint",
                     _quick_percent(input_shelxl.get("R1_gt")),
                     _quick_percent(input_shelxl.get("R1_all")),
                     _quick_percent(input_shelxl.get("wR2_all")),
-                    _quick_number(input_shelxl.get("GooF"), 3),
                     "n/a",
-                    str(input_shelxl.get("parameters", "n/a")),
-                    _quick_shelxl_issue_text(input_shelxl),
-                    f"`{input_shelxl.get('lst', '')}`",
+                    _quick_number(input_shelxl.get("GooF"), 3),
+                    str(input_shelxl.get("N_all", "n/a")),
+                    f"{input_shelxl.get('parameters', 'n/a')} params; {input_shelxl.get('restraints', 'n/a')} restraints",
+                    f"{source_control_text}; {_quick_shelxl_issue_text(input_shelxl)}; `{input_shelxl.get('lst', '')}`",
                 ]
             )
             + " |",
@@ -6130,14 +6191,31 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
             + " | ".join(
                 [
                     "input matched Born rows",
+                    "raw signed rows, matched Born",
                     "n/a",
                     _quick_percent(_quick_born_metric(screen_summary, "all", "R1_all")),
                     _quick_percent(_quick_born_metric(screen_summary, "all", "wR2_all")),
-                    "n/a",
                     _quick_percent(_quick_born_metric(screen_summary, "free", "wR2_all")),
                     "n/a",
+                    row_count_text,
+                    "screen nuisance/scales",
+                    "`adaptive_screen summary.json`; same signed rows as input dynamical comparator",
+                ]
+            )
+            + " |",
+            "| "
+            + " | ".join(
+                [
+                    "input dynamical rows",
+                    "raw signed rows, Bloch dynamical",
                     "n/a",
-                    "`adaptive_screen summary.json`",
+                    _quick_percent(_quick_dyn_metric(screen_summary, "all", "R1_all")),
+                    _quick_percent(_quick_dyn_metric(screen_summary, "all", "wR2_all")),
+                    _quick_percent(_quick_dyn_metric(screen_summary, "free", "wR2_all")),
+                    "n/a",
+                    row_count_text,
+                    "screen nuisance/scales",
+                    "`adaptive_screen summary.json`; supplied model under first accepted GROND row contract",
                 ]
             )
             + " |",
@@ -6145,14 +6223,15 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
             + " | ".join(
                 [
                     "final matched Born rows",
+                    "raw signed rows, matched Born",
                     "n/a",
                     _quick_percent(_quick_metric(native_metrics, "all", "born", "R1_all")),
                     _quick_percent(_quick_metric(native_metrics, "all", "born", "wR2_all")),
-                    "n/a",
                     _quick_percent(_quick_metric(native_metrics, "free", "born", "wR2_all")),
                     "n/a",
-                    "n/a",
-                    f"`{final_run / 'summary.json' if final_run else ''}`",
+                    row_count_text,
+                    "final nuisance/scales",
+                    f"`{final_run / 'summary.json' if final_run else ''}`; Born comparator at final model",
                 ]
             )
             + " |",
@@ -6160,14 +6239,15 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
             + " | ".join(
                 [
                     "final dynamical rows",
+                    "raw signed rows, Bloch dynamical",
                     "n/a",
                     _quick_percent(_quick_metric(native_metrics, "all", "dyn", "R1_all")),
                     _quick_percent(_quick_metric(native_metrics, "all", "dyn", "wR2_all")),
-                    "n/a",
                     _quick_percent(_quick_metric(native_metrics, "free", "dyn", "wR2_all")),
                     "n/a",
-                    "n/a",
-                    f"`{final_run / 'native_dyn_calc.csv' if final_run else ''}`",
+                    row_count_text,
+                    "final nuisance/scales",
+                    f"`{final_run / 'native_dyn_calc.csv' if final_run else ''}`; final raw-row statistic",
                 ]
             )
             + " |",
@@ -6175,14 +6255,15 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
             + " | ".join(
                 [
                     "direct LS1 corrected-HKL candidate",
+                    "merged SHELXL endpoint",
                     _quick_percent(final_feedback_shelxl.get("R1_gt")),
                     _quick_percent(final_feedback_shelxl.get("R1_all")),
                     _quick_percent(final_feedback_shelxl.get("wR2_all")),
-                    _quick_number(final_feedback_shelxl.get("GooF"), 3),
                     "n/a",
-                    str(final_feedback_shelxl.get("parameters", "n/a")),
-                    _quick_shelxl_issue_text(final_feedback_shelxl),
-                    f"`{file_block['final_feedback_lst']}`",
+                    _quick_number(final_feedback_shelxl.get("GooF"), 3),
+                    str(final_feedback_shelxl.get("N_all", "n/a")),
+                    f"{final_feedback_shelxl.get('parameters', 'n/a')} params; {final_feedback_shelxl.get('restraints', 'n/a')} restraints",
+                    f"{_quick_shelxl_issue_text(final_feedback_shelxl)}; `{file_block['final_feedback_lst']}`",
                 ]
             )
             + " |",
@@ -6190,14 +6271,15 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
             + " | ".join(
                 [
                     "best diagnostic endpoint, not promoted",
+                    "merged SHELXL endpoint",
                     _quick_percent(diagnostic_shelxl.get("R1_gt")),
                     _quick_percent(diagnostic_shelxl.get("R1_all")),
                     _quick_percent(diagnostic_shelxl.get("wR2_all")),
-                    _quick_number(diagnostic_shelxl.get("GooF"), 3),
                     "n/a",
-                    str(diagnostic_shelxl.get("parameters", "n/a")),
-                    _quick_shelxl_issue_text(diagnostic_shelxl),
-                    f"`{diagnostic_endpoint.get('endpoint_lst', '')}`",
+                    _quick_number(diagnostic_shelxl.get("GooF"), 3),
+                    str(diagnostic_shelxl.get("N_all", "n/a")),
+                    f"{diagnostic_shelxl.get('parameters', 'n/a')} params; {diagnostic_shelxl.get('restraints', 'n/a')} restraints",
+                    f"{_quick_shelxl_issue_text(diagnostic_shelxl)}; `{diagnostic_endpoint.get('endpoint_lst', '')}`",
                 ]
             )
             + " |" if diagnostic_endpoint else "",
@@ -6205,17 +6287,128 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
             + " | ".join(
                 [
                     "publication corrected-HKL endpoint",
+                    "merged SHELXL endpoint",
                     _quick_percent(publication_shelxl.get("R1_gt")),
                     _quick_percent(publication_shelxl.get("R1_all")),
                     _quick_percent(publication_shelxl.get("wR2_all")),
-                    _quick_number(publication_shelxl.get("GooF"), 3),
                     _quick_percent(publication_endpoint.get("native_free_wR2_all")),
-                    str(publication_shelxl.get("parameters", "n/a")),
-                    _quick_shelxl_issue_text(publication_shelxl),
-                    f"`{file_block['publication_lst']}`",
+                    _quick_number(publication_shelxl.get("GooF"), 3),
+                    str(publication_shelxl.get("N_all", "n/a")),
+                    f"{publication_endpoint.get('spec') or publication_endpoint.get('source_kind') or 'n/a'}; {publication_endpoint.get('scale_params', 'n/a')} scales; {publication_shelxl.get('parameters', 'n/a')} params",
+                    f"{_quick_shelxl_issue_text(publication_shelxl)}; `{file_block['publication_lst']}`",
                 ]
             )
             + " |",
+            "",
+            "## Master Delta Matrix",
+            "",
+            "Negative values are improvements for R factors. Deltas are only meaningful within the same target class.",
+            "",
+            "| comparison | target class | dR1all | dwR2all | d free/held-out wR2all | interpretation |",
+            "|---|---|---:|---:|---:|---|",
+            "| "
+            + " | ".join(
+                [
+                    "input dynamical rows minus input matched Born rows",
+                    "raw signed rows",
+                    _quick_delta_percent(
+                        _quick_born_metric(screen_summary, "all", "R1_all"),
+                        _quick_dyn_metric(screen_summary, "all", "R1_all"),
+                    ),
+                    _quick_delta_percent(
+                        _quick_born_metric(screen_summary, "all", "wR2_all"),
+                        _quick_dyn_metric(screen_summary, "all", "wR2_all"),
+                    ),
+                    _quick_delta_percent(
+                        _quick_born_metric(screen_summary, "free", "wR2_all"),
+                        _quick_dyn_metric(screen_summary, "free", "wR2_all"),
+                    ),
+                    "starting-model dynamical correction benefit over the matched Born control",
+                ]
+            )
+            + " |",
+            "| "
+            + " | ".join(
+                [
+                    "final dynamical rows minus final matched Born rows",
+                    "raw signed rows",
+                    _quick_delta_percent(
+                        _quick_metric(native_metrics, "all", "born", "R1_all"),
+                        _quick_metric(native_metrics, "all", "dyn", "R1_all"),
+                    ),
+                    _quick_delta_percent(
+                        _quick_metric(native_metrics, "all", "born", "wR2_all"),
+                        _quick_metric(native_metrics, "all", "dyn", "wR2_all"),
+                    ),
+                    _quick_delta_percent(
+                        _quick_metric(native_metrics, "free", "born", "wR2_all"),
+                        _quick_metric(native_metrics, "free", "dyn", "wR2_all"),
+                    ),
+                    "final model dynamical correction benefit over the final Born control",
+                ]
+            )
+            + " |",
+            "| "
+            + " | ".join(
+                [
+                    "final dynamical rows minus input dynamical rows",
+                    "raw signed rows",
+                    _quick_delta_percent(
+                        _quick_dyn_metric(screen_summary, "all", "R1_all"),
+                        _quick_metric(native_metrics, "all", "dyn", "R1_all"),
+                    ),
+                    _quick_delta_percent(
+                        _quick_dyn_metric(screen_summary, "all", "wR2_all"),
+                        _quick_metric(native_metrics, "all", "dyn", "wR2_all"),
+                    ),
+                    _quick_delta_percent(
+                        _quick_dyn_metric(screen_summary, "free", "wR2_all"),
+                        _quick_metric(native_metrics, "free", "dyn", "wR2_all"),
+                    ),
+                    "net row-level movement from the supplied model to the final model",
+                ]
+            )
+            + " |",
+            "| "
+            + " | ".join(
+                [
+                    "publication endpoint minus input conventional SHELXL",
+                    "merged SHELXL endpoint",
+                    _quick_delta_percent(input_shelxl.get("R1_all"), publication_shelxl.get("R1_all")),
+                    _quick_delta_percent(input_shelxl.get("wR2_all"), publication_shelxl.get("wR2_all")),
+                    "n/a",
+                    "headline conventional endpoint change; compare only with matching reflection coverage caveats",
+                ]
+            )
+            + " |",
+            "| "
+            + " | ".join(
+                [
+                    "direct LS1 endpoint minus input conventional SHELXL",
+                    "merged SHELXL endpoint",
+                    _quick_delta_percent(input_shelxl.get("R1_all"), final_feedback_shelxl.get("R1_all")),
+                    _quick_delta_percent(input_shelxl.get("wR2_all"), final_feedback_shelxl.get("wR2_all")),
+                    "n/a",
+                    "unreplayed corrected-HKL endpoint change before publication scale selection",
+                ]
+            )
+            + " |",
+            "| "
+            + " | ".join(
+                [
+                    "publication endpoint minus direct LS1 endpoint",
+                    "merged SHELXL endpoint",
+                    _quick_delta_percent(final_feedback_shelxl.get("R1_all"), publication_shelxl.get("R1_all")),
+                    _quick_delta_percent(final_feedback_shelxl.get("wR2_all"), publication_shelxl.get("wR2_all")),
+                    "n/a",
+                    "cost or gain of the publication endpoint replay relative to the direct LS1 candidate",
+                ]
+            )
+            + " |",
+            "",
+            "## Row-Level wR2all Definition",
+            "",
+            _quick_row_weight_definition(nuisance),
             "",
             "## Final Nuisance Contract",
             "",
@@ -6234,7 +6427,9 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
 
     lines.extend(
         [
-            "## Requested And Suggested Row/MR Statistics",
+            "## Completeness, Integration, And Row/MR Statistics",
+            "",
+            "These rows keep integration/completeness-style quantities separate from endpoint refinement. `Nobs/Nall` is the accepted observed-row coverage at that resolution gate; the MR columns are merged-row diagnostics from the frozen row table, not SHELXL least-squares statistics.",
             "",
             "| endpoint | dmin A | scales | Nobs/Nall | dyn Rall | dyn wRall | dyn MRall | dyn MwRall | kin Rall | kin wRall |",
             "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
@@ -6485,16 +6680,26 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
         "",
         "## Statistics",
         "",
-        "| state | R1gt | R1all | wR2all | free/held-out wR2all | GooF | parameters | NPD/split |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|",
-        f"| input conventional SHELXL | `{_quick_percent(input_shelxl.get('R1_gt'))}` | `{_quick_percent(input_shelxl.get('R1_all'))}` | `{_quick_percent(input_shelxl.get('wR2_all'))}` | n/a | `{_quick_number(input_shelxl.get('GooF'), 3)}` | `{input_shelxl.get('parameters', 'n/a')}` | `{input_shelxl.get('npd_count', 'n/a')}` / `{input_shelxl.get('split_count', 'n/a')}` |",
-        f"| input dynamical rows | n/a | `{_quick_percent(input_row_r1)}` | `{_quick_percent(input_row_wr2)}` | `{_quick_percent(_quick_dyn_metric(screen_summary, 'free', 'wR2_all'))}` | n/a | n/a | n/a |",
-        f"| input matched Born rows | n/a | `{_quick_percent(_quick_born_metric(screen_summary, 'all', 'R1_all'))}` | `{_quick_percent(_quick_born_metric(screen_summary, 'all', 'wR2_all'))}` | `{_quick_percent(_quick_born_metric(screen_summary, 'free', 'wR2_all'))}` | n/a | n/a | n/a |",
-        f"| final dynamical rows | n/a | `{_quick_percent(final_row_r1)}` | `{_quick_percent(final_row_wr2)}` | `{_quick_percent(final_free_wr2)}` | n/a | n/a | n/a |",
-        f"| final matched Born rows | n/a | `{_quick_percent(_quick_metric(native_metrics, 'all', 'born', 'R1_all'))}` | `{_quick_percent(_quick_metric(native_metrics, 'all', 'born', 'wR2_all'))}` | `{_quick_percent(_quick_metric(native_metrics, 'free', 'born', 'wR2_all'))}` | n/a | n/a | n/a |",
-        f"| direct LS1 corrected-HKL candidate | `{_quick_percent(final_feedback_shelxl.get('R1_gt'))}` | `{_quick_percent(final_feedback_shelxl.get('R1_all'))}` | `{_quick_percent(final_feedback_shelxl.get('wR2_all'))}` | n/a | `{_quick_number(final_feedback_shelxl.get('GooF'), 3)}` | `{final_feedback_shelxl.get('parameters', 'n/a')}` | `{final_feedback_shelxl.get('npd_count', 'n/a')}` / `{final_feedback_shelxl.get('split_count', 'n/a')}` |",
-        f"| best diagnostic endpoint, not promoted | `{_quick_percent(diagnostic_shelxl.get('R1_gt'))}` | `{_quick_percent(diagnostic_shelxl.get('R1_all'))}` | `{_quick_percent(diagnostic_shelxl.get('wR2_all'))}` | n/a | `{_quick_number(diagnostic_shelxl.get('GooF'), 3)}` | `{diagnostic_shelxl.get('parameters', 'n/a')}` | `{diagnostic_shelxl.get('npd_count', 'n/a')}` / `{diagnostic_shelxl.get('split_count', 'n/a')}` |" if diagnostic_endpoint else "",
-        f"| publication corrected-HKL endpoint | `{_quick_percent(publication_shelxl.get('R1_gt'))}` | `{_quick_percent(publication_shelxl.get('R1_all'))}` | `{_quick_percent(publication_shelxl.get('wR2_all'))}` | `{_quick_percent(selected_row.get('native_free_wR2_all'))}` | `{_quick_number(publication_shelxl.get('GooF'), 3)}` | `{publication_shelxl.get('parameters', 'n/a')}` | `{publication_shelxl.get('npd_count', 'n/a')}` / `{publication_shelxl.get('split_count', 'n/a')}` |",
+        "Rows labeled `raw signed rows` report signed-row intensity residuals. Endpoint rows report merged corrected-HKL SHELXL refinement statistics. Read `QUICK_STATS.md` for the full definition, denominator, and delta matrix.",
+        "",
+        "| state | target class | R1gt | R1all | wR2all | free/held-out wR2all | GooF | parameters | NPD/split |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|",
+        f"| input conventional SHELXL | merged SHELXL endpoint | `{_quick_percent(input_shelxl.get('R1_gt'))}` | `{_quick_percent(input_shelxl.get('R1_all'))}` | `{_quick_percent(input_shelxl.get('wR2_all'))}` | n/a | `{_quick_number(input_shelxl.get('GooF'), 3)}` | `{input_shelxl.get('parameters', 'n/a')}` | `{input_shelxl.get('npd_count', 'n/a')}` / `{input_shelxl.get('split_count', 'n/a')}` |",
+        f"| input dynamical rows | raw signed rows | n/a | `{_quick_percent(input_row_r1)}` | `{_quick_percent(input_row_wr2)}` | `{_quick_percent(_quick_dyn_metric(screen_summary, 'free', 'wR2_all'))}` | n/a | n/a | n/a |",
+        f"| input matched Born rows | raw signed rows | n/a | `{_quick_percent(_quick_born_metric(screen_summary, 'all', 'R1_all'))}` | `{_quick_percent(_quick_born_metric(screen_summary, 'all', 'wR2_all'))}` | `{_quick_percent(_quick_born_metric(screen_summary, 'free', 'wR2_all'))}` | n/a | n/a | n/a |",
+        f"| final dynamical rows | raw signed rows | n/a | `{_quick_percent(final_row_r1)}` | `{_quick_percent(final_row_wr2)}` | `{_quick_percent(final_free_wr2)}` | n/a | n/a | n/a |",
+        f"| final matched Born rows | raw signed rows | n/a | `{_quick_percent(_quick_metric(native_metrics, 'all', 'born', 'R1_all'))}` | `{_quick_percent(_quick_metric(native_metrics, 'all', 'born', 'wR2_all'))}` | `{_quick_percent(_quick_metric(native_metrics, 'free', 'born', 'wR2_all'))}` | n/a | n/a | n/a |",
+        f"| direct LS1 corrected-HKL candidate | merged SHELXL endpoint | `{_quick_percent(final_feedback_shelxl.get('R1_gt'))}` | `{_quick_percent(final_feedback_shelxl.get('R1_all'))}` | `{_quick_percent(final_feedback_shelxl.get('wR2_all'))}` | n/a | `{_quick_number(final_feedback_shelxl.get('GooF'), 3)}` | `{final_feedback_shelxl.get('parameters', 'n/a')}` | `{final_feedback_shelxl.get('npd_count', 'n/a')}` / `{final_feedback_shelxl.get('split_count', 'n/a')}` |",
+        f"| best diagnostic endpoint, not promoted | merged SHELXL endpoint | `{_quick_percent(diagnostic_shelxl.get('R1_gt'))}` | `{_quick_percent(diagnostic_shelxl.get('R1_all'))}` | `{_quick_percent(diagnostic_shelxl.get('wR2_all'))}` | n/a | `{_quick_number(diagnostic_shelxl.get('GooF'), 3)}` | `{diagnostic_shelxl.get('parameters', 'n/a')}` | `{diagnostic_shelxl.get('npd_count', 'n/a')}` / `{diagnostic_shelxl.get('split_count', 'n/a')}` |" if diagnostic_endpoint else "",
+        f"| publication corrected-HKL endpoint | merged SHELXL endpoint | `{_quick_percent(publication_shelxl.get('R1_gt'))}` | `{_quick_percent(publication_shelxl.get('R1_all'))}` | `{_quick_percent(publication_shelxl.get('wR2_all'))}` | `{_quick_percent(selected_row.get('native_free_wR2_all'))}` | `{_quick_number(publication_shelxl.get('GooF'), 3)}` | `{publication_shelxl.get('parameters', 'n/a')}` | `{publication_shelxl.get('npd_count', 'n/a')}` / `{publication_shelxl.get('split_count', 'n/a')}` |",
+        "",
+        "## Deltas",
+        "",
+        "| comparison | target class | dR1all | dwR2all | d free/held-out wR2all |",
+        "|---|---|---:|---:|---:|",
+        f"| final dynamical rows minus final matched Born rows | raw signed rows | `{_quick_delta_percent(_quick_metric(native_metrics, 'all', 'born', 'R1_all'), _quick_metric(native_metrics, 'all', 'dyn', 'R1_all'))}` | `{_quick_delta_percent(_quick_metric(native_metrics, 'all', 'born', 'wR2_all'), _quick_metric(native_metrics, 'all', 'dyn', 'wR2_all'))}` | `{_quick_delta_percent(_quick_metric(native_metrics, 'free', 'born', 'wR2_all'), _quick_metric(native_metrics, 'free', 'dyn', 'wR2_all'))}` |",
+        f"| final dynamical rows minus input dynamical rows | raw signed rows | `{_quick_delta_percent(input_row_r1, final_row_r1)}` | `{_quick_delta_percent(input_row_wr2, final_row_wr2)}` | `{_quick_delta_percent(_quick_dyn_metric(screen_summary, 'free', 'wR2_all'), final_free_wr2)}` |",
+        f"| publication endpoint minus input conventional SHELXL | merged SHELXL endpoint | `{_quick_delta_percent(input_shelxl.get('R1_all'), publication_shelxl.get('R1_all'))}` | `{_quick_delta_percent(input_shelxl.get('wR2_all'), publication_shelxl.get('wR2_all'))}` | n/a |",
         "",
         f"**Endpoint warning:** {endpoint_warning}." if endpoint_warning else "",
         "",

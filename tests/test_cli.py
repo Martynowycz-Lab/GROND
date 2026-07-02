@@ -463,7 +463,7 @@ def test_finish_does_not_promote_calibration_when_chooser_rejects_all(tmp_path: 
     assert payload["publication_endpoint"]["R1all"] is None
     assert payload["files"]["publication_res"] == ""
     text = (run / "FINAL_SUMMARY.md").read_text()
-    assert "publication corrected-HKL endpoint | `n/a`" in text
+    assert "publication corrected-HKL endpoint | merged SHELXL endpoint | `n/a`" in text
 
 
 def test_terminal_finish_summary_is_human_readable():
@@ -1318,6 +1318,14 @@ def test_write_quick_stats_summarizes_row_and_endpoint_tables(tmp_path):
     assert "final hand Z, all/work/free | `5.000` / `4.000` / `3.000`" in text
     assert "free-row I residual Z | n `2`; RMSZ `1.581`" in text
     assert "thickness | `1100.0 A`; model `uniform_gradient`; gradient `1.200`" in text
+    assert "Master Comparison Matrix" in text
+    assert "raw signed rows, Bloch dynamical" in text
+    assert "merged SHELXL endpoint" in text
+    assert "Master Delta Matrix" in text
+    assert "final dynamical rows minus final matched Born rows" in text
+    assert "Row-Level wR2all Definition" in text
+    assert "Raw-row `wR2all` is `sqrt(sum_r w_r (Iobs_r - Icalc_r)^2 / sum_r w_r Iobs_r^2)`" in text
+    assert "Completeness, Integration, And Row/MR Statistics" in text
 
 
 def test_row_validate_reports_bad_portable_rows_without_traceback(tmp_path: Path, capsys):
