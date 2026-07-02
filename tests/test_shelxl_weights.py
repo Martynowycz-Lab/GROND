@@ -163,6 +163,37 @@ def test_write_endpoint_ins_forces_one_shelxl_cycle_and_electron_wavelength(tmp_
     assert "EXTI" not in text
 
 
+def test_write_endpoint_ins_can_keep_baseline_exti_wght_and_force_one_cycle(tmp_path: Path):
+    src = tmp_path / "model.res"
+    dst = tmp_path / "baseline.ins"
+    src.write_text(
+        "\n".join(
+            [
+                "TITL trial",
+                "CELL 0.02508 5.0 6.0 7.0 90 90 90",
+                "SFAC C 1 0 1 0 1 0 1 0",
+                "L.S. 100",
+                "EXTI 0.123",
+                "WGHT 0.200000",
+                "FVAR 1.0",
+                "HKLF 4",
+                "END",
+                "WGHT 0.1000 0.0000",
+            ]
+        )
+        + "\n"
+    )
+
+    write_endpoint_ins(src, dst, hkl_name="temp_a.hkl", keep_exti=True, wght=None, ls_cycles=1)
+
+    text = dst.read_text()
+    assert "L.S. 1" in text
+    assert "L.S. 100" not in text
+    assert "EXTI 0.123" in text
+    assert "WGHT 0.200000" in text
+    assert "WGHT 0.1000" not in text
+
+
 def test_write_endpoint_ins_can_write_diagnostic_shelxl_cycle_count(tmp_path: Path):
     src = tmp_path / "model.res"
     dst = tmp_path / "model.ins"

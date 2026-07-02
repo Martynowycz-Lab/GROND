@@ -611,6 +611,32 @@ def test_auto_parser_hides_lambda_controls(capsys):
     assert hand_args.hand_n_basis == 30
     assert hand_args.hand_n_points == 12
     assert hand_args.hand_accept_delta == 0.02
+    gated_hand_args = parser.parse_args(
+        [
+            "auto",
+            "--out-dir",
+            "out",
+            "--hkl",
+            "INTEGRATE.HKL",
+            "--structure",
+            "model.res",
+            "--hand-max-wR2-all",
+            "0.4",
+            "--hand-max-free-wR2-all",
+            "0.45",
+            "--hand-min-free-wR2-gain",
+            "0.01",
+            "--hand-min-z-all",
+            "2.5",
+            "--hand-min-z-free",
+            "1.0",
+        ]
+    )
+    assert gated_hand_args.hand_max_wR2_all == 0.4
+    assert gated_hand_args.hand_max_free_wR2_all == 0.45
+    assert gated_hand_args.hand_min_free_wR2_gain == 0.01
+    assert gated_hand_args.hand_min_z_all == 2.5
+    assert gated_hand_args.hand_min_z_free == 1.0
     assert args.structure_n_basis == 24
     assert args.scale_polish_frame_models == "adaptive,fixed"
     assert args.scale_polish_adaptive_counts == "auto"
@@ -642,6 +668,29 @@ def test_auto_parser_hides_lambda_controls(capsys):
     assert args.post_bloch_sigma_holdout_fraction == 0.20
     assert args.post_bloch_sigma_min_scale == 0.25
     assert args.post_bloch_sigma_max_scale == 4.0
+
+
+def test_post_feedback_hand_diagnostic_gate_requires_signed_support():
+    args = argparse.Namespace(hand_min_z_all=2.0, hand_min_z_free=0.5)
+    ok, reasons = cli.hand_diagnostic_supports_other(
+        {
+            "all": {"paired_row_t_delta_chi2": -2.4},
+            "free": {"paired_row_t_delta_chi2": -0.8},
+        },
+        args,
+    )
+    assert ok is True
+    assert reasons == []
+
+    weak, weak_reasons = cli.hand_diagnostic_supports_other(
+        {
+            "all": {"paired_row_t_delta_chi2": -0.1},
+            "free": {"paired_row_t_delta_chi2": 0.2},
+        },
+        args,
+    )
+    assert weak is False
+    assert "all-row hand Z/t" in weak_reasons[0]
 
 
 def test_utility_commands_parse():

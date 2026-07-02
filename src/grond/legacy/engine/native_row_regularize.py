@@ -1496,9 +1496,21 @@ def export_corrected_endpoint(
 
 def copy_baseline(out_dir: Path, res_path: Path, hkl_path: Path):
     out_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(res_path, out_dir / "temp_a.ins")
     shutil.copy2(hkl_path, out_dir / "temp_a.hkl")
-    return run_shelxl(out_dir, "temp_a")
+    # This is a diagnostic replay of the user's conventional endpoint, not a
+    # GROND corrected-HKL endpoint.  Keep the user's active WGHT and EXTI policy,
+    # but normalize the copied input to a single LS/CGLS cycle so stale Olex2 or
+    # SHELXLE directives such as ``L.S. 100`` cannot turn the baseline check into
+    # a long re-refinement under different conditions.
+    write_endpoint_ins(
+        res_path,
+        out_dir / "temp_a.ins",
+        hkl_name="temp_a.hkl",
+        keep_exti=True,
+        wght=None,
+        ls_cycles=1,
+    )
+    return run_shelxl(out_dir, "temp_a", iterations=1, wght_mode="inherit", endpoint_ls_cycles=1)
 
 
 def endpoint_has_adp_pathology(endpoint: dict) -> bool:

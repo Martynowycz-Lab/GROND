@@ -3487,19 +3487,68 @@ def choose_hand_by_scout(
         write_json(root / "decisions" / ds.name / "absolute_structure_decision.json", payload)
         return "original", payload, hand_dir
     delta = active_score["score"] - alternate_score["score"]
-    selected = "alternate" if delta > float(args.hand_accept_delta) else "original"
+    scout_selected = "alternate" if delta > float(args.hand_accept_delta) else "original"
+    selected = scout_selected
+    gate_reasons: list[str] = []
+    if scout_selected == "alternate":
+        max_all = float(getattr(args, "hand_max_wR2_all", 0.45))
+        max_free = float(getattr(args, "hand_max_free_wR2_all", 0.50))
+        min_free_gain = float(getattr(args, "hand_min_free_wR2_gain", 0.0))
+        alt_all = safe_float(alternate_score.get("dyn_wR2_all"))
+        alt_free = safe_float(alternate_score.get("free_dyn_wR2_all"))
+        active_free = safe_float(active_score.get("free_dyn_wR2_all"))
+        if not math.isfinite(alt_all) or alt_all > max_all:
+            gate_reasons.append(f"alternate all-row wR2 {alt_all:.4g} exceeds hand gate {max_all:.4g}")
+        if not math.isfinite(alt_free) or alt_free > max_free:
+            gate_reasons.append(f"alternate free-row wR2 {alt_free:.4g} exceeds hand gate {max_free:.4g}")
+        if math.isfinite(active_free) and math.isfinite(alt_free):
+            free_gain = active_free - alt_free
+            if free_gain < min_free_gain:
+                gate_reasons.append(f"free-row wR2 gain {free_gain:.4g} is below hand gate {min_free_gain:.4g}")
+        else:
+            gate_reasons.append("free-row wR2 values were not finite")
+        if gate_reasons:
+            selected = "original"
     payload = {
         "selected": selected,
         "selected_hand": selected,
+        "scout_selected_before_quality_gate": scout_selected,
+        "quality_gate_status": "rejected_switch" if gate_reasons else "passed",
+        "quality_gate_reasons": gate_reasons,
         "active_score": active_score,
         "alternate_score": alternate_score,
         "score_delta_original_minus_alternate": delta,
         "score_delta_original_minus_alternate_hand": delta,
         "accept_delta": float(args.hand_accept_delta),
+        "hand_max_wR2_all": float(getattr(args, "hand_max_wR2_all", 0.45)),
+        "hand_max_free_wR2_all": float(getattr(args, "hand_max_free_wR2_all", 0.50)),
+        "hand_min_free_wR2_gain": float(getattr(args, "hand_min_free_wR2_gain", 0.0)),
         "alternate_run": str(hand_dir),
     }
     write_json(root / "decisions" / ds.name / "absolute_structure_decision.json", payload)
     return selected, payload, hand_dir
+
+
+def hand_diagnostic_supports_other(stats: Mapping[str, object], args: argparse.Namespace) -> tuple[bool, list[str]]:
+    """Return whether row-level paired diagnostics support switching to ``other``.
+
+    ``absolute_structure_diagnostic.py`` defines positive paired-row t values as
+    support for the current best/final row table.  A post-feedback promotion
+    switches to the opposite-hand row table, so the required sign is negative.
+    """
+
+    min_all = float(getattr(args, "hand_min_z_all", 2.0))
+    min_free = float(getattr(args, "hand_min_z_free", 0.5))
+    reasons: list[str] = []
+    all_block = stats.get("all") if isinstance(stats, Mapping) else {}
+    free_block = stats.get("free") if isinstance(stats, Mapping) else {}
+    all_t = safe_float((all_block or {}).get("paired_row_t_delta_chi2") if isinstance(all_block, Mapping) else float("nan"))
+    free_t = safe_float((free_block or {}).get("paired_row_t_delta_chi2") if isinstance(free_block, Mapping) else float("nan"))
+    if not math.isfinite(all_t) or all_t > -min_all:
+        reasons.append(f"all-row hand Z/t {all_t:.4g} does not support switching to other at threshold {min_all:.4g}")
+    if min_free > 0.0 and (not math.isfinite(free_t) or free_t > -min_free):
+        reasons.append(f"free-row hand Z/t {free_t:.4g} does not support switching to other at threshold {min_free:.4g}")
+    return not reasons, reasons
 
 def run_feature_gate(
     prep: PrepConfig,
@@ -3844,7 +3893,13 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
             "diagnostic": str(stats_path),
             "opposite_run": str(other),
         }
-        if post_feedback_delta > float(args.hand_accept_delta) and is_shelx_model(final_model):
+        diagnostic_gate_ok, diagnostic_gate_reasons = hand_diagnostic_supports_other(
+            try_read_json(stats_path) or {},
+            args,
+        )
+        post_feedback_hand_promotion["diagnostic_quality_gate_status"] = "passed" if diagnostic_gate_ok else "rejected_switch"
+        post_feedback_hand_promotion["diagnostic_quality_gate_reasons"] = diagnostic_gate_reasons
+        if post_feedback_delta > float(args.hand_accept_delta) and diagnostic_gate_ok and is_shelx_model(final_model):
             promoted_model = make_alternate_hand_model(python, final_model, root, logs, args.dry_run)
             promoted = root / "runs" / ds.name / "adaptive_promoted_hand_final"
             run_logged(
@@ -3890,6 +3945,8 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
                     "post_feedback_selected_hand": active_hand,
                     "post_feedback_promotion": post_feedback_hand_promotion,
                 }
+        elif post_feedback_delta > float(args.hand_accept_delta) and not diagnostic_gate_ok:
+            post_feedback_hand_promotion["status"] = "rejected_by_diagnostic_quality_gate"
 
     no_h_run = None
     if args.h_omit in {"on", "both", "only"} and is_shelx_model(final_model):
@@ -9109,6 +9166,11 @@ def add_common_run_args(ap: argparse.ArgumentParser, *, expose_lambda_controls: 
     ap.add_argument("--transform-metadata-max-rows", type=int, default=0, help="Maximum INTEGRATE/XDS rows used by metadata transform ranking; 0 uses all rows.")
     ap.add_argument("--trust-hkl-transform", action="store_true", help="Trust the supplied --hkl-transform or prep-file transform and skip Bloch transform scouting while keeping the rest of auto-decision enabled.")
     ap.add_argument("--hand-accept-delta", dest="hand_accept_delta", metavar="DELTA", type=float, default=0.015, help="Adaptive score margin required before switching to the alternate hand.")
+    ap.add_argument("--hand-max-wR2-all", type=float, default=0.45, help="Maximum alternate-hand all-row wR2 allowed before automatic hand switching. Poor row contracts still report the hand diagnostic but keep the input hand.")
+    ap.add_argument("--hand-max-free-wR2-all", type=float, default=0.50, help="Maximum alternate-hand free-row wR2 allowed before automatic hand switching.")
+    ap.add_argument("--hand-min-free-wR2-gain", type=float, default=0.0, help="Minimum free-row wR2 improvement required before automatic scout-stage hand switching.")
+    ap.add_argument("--hand-min-z-all", type=float, default=2.0, help="Minimum paired all-row hand diagnostic magnitude required before post-feedback hand promotion.")
+    ap.add_argument("--hand-min-z-free", type=float, default=0.5, help="Minimum paired free-row hand diagnostic magnitude required before post-feedback hand promotion. Set to 0 to disable the free-row sign gate.")
     ap.add_argument("--stop-on-bad-preflight", action="store_true", default=False)
     ap.add_argument("--stop-on-bad-fit", action="store_true", default=False)
     ap.add_argument("--stop-if-wR2-above", type=float, default=0.75, help="Bad-data stop threshold for native all-row dynamic wR2 when --stop-on-bad-fit is enabled.")
