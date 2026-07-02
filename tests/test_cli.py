@@ -1157,11 +1157,35 @@ def test_write_quick_stats_summarizes_row_and_endpoint_tables(tmp_path):
     (final_run / "native_dyn_calc.csv").write_text(
         "\n".join(
             [
-                "row_index,h,k,l,split,dyn_residual_over_sigma",
-                "0,1,0,0,work,0.5",
-                "1,0,1,0,work,-1.5",
-                "2,0,0,1,free,2.0",
-                "3,1,1,0,free,-1.0",
+                ",".join(
+                    [
+                        "row_index",
+                        "h",
+                        "k",
+                        "l",
+                        "d_A",
+                        "group",
+                        "detector_bin",
+                        "basis_size",
+                        "split",
+                        "q_dyn_over_born",
+                        "center_sg_inv_A",
+                        "sg_window_inv_A",
+                        "sg_window_raw_inv_A",
+                        "sg_window_half_frames",
+                        "sg_window_clipped",
+                        "sg_dSg_domega_inv_A_per_deg",
+                        "sg_profile_points_total",
+                        "sg_profile_weight_sum",
+                        "max_sg_solve_residual",
+                        "dyn_residual_over_sigma",
+                        "born_residual_over_sigma",
+                    ]
+                ),
+                "0,1,0,0,0.80,0,0,32,work,0.90,0.001,0.004,0.005,0.5,0,0.002,60,1.0,0.00001,0.5,1.5",
+                "1,0,1,0,0.90,0,1,36,work,1.10,-0.002,0.004,0.005,0.5,0,0.002,60,1.0,0.00002,-1.5,-2.0",
+                "2,0,0,1,1.00,1,0,40,free,1.25,0.003,0.004,0.006,0.5,1,0.002,60,1.0,0.00003,2.0,2.5",
+                "3,1,1,0,1.10,1,1,44,free,0.75,-0.004,0.004,0.006,0.5,0,0.002,60,1.0,0.00004,-1.0,-1.2",
             ]
         )
         + "\n"
@@ -1326,6 +1350,17 @@ def test_write_quick_stats_summarizes_row_and_endpoint_tables(tmp_path):
     assert "Row-Level wR2all Definition" in text
     assert "Raw-row `wR2all` is `sqrt(sum_r w_r (Iobs_r - Icalc_r)^2 / sum_r w_r Iobs_r^2)`" in text
     assert "Completeness, Integration, And Row/MR Statistics" in text
+    assert "Bloch matrix and row-contract diagnostics" in text
+    bloch_diagnostics = out_dir / "BLOCH_DIAGNOSTICS.md"
+    assert bloch_diagnostics.exists()
+    bloch_text = bloch_diagnostics.read_text()
+    assert "GROND Bloch Diagnostics" in bloch_text
+    assert "Bethe Approximation" in bloch_text
+    assert "Sg, Rocking, And Quadrature" in bloch_text
+    assert "center excitation error Sg" in bloch_text
+    assert "q = Idyn/Iborn" in bloch_text
+    assert "Bloch matrix and row-contract diagnostics" in (out_dir / "FINAL_SUMMARY.md").read_text()
+    assert info["console"]["files"]["bloch_diagnostics"] == str(bloch_diagnostics)
 
 
 def test_row_validate_reports_bad_portable_rows_without_traceback(tmp_path: Path, capsys):

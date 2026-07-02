@@ -915,6 +915,32 @@ def evaluate_trial(data, target, base_sig, pred, indices, masks, nui: Nuisance, 
     dyn_unmodulated = dyn.copy()
     if "basis_size" in pred:
         basis_size[pred["indices"]] = np.asarray(pred["basis_size"], dtype=int)
+    pred_indices = np.asarray(pred["indices"], dtype=int)
+
+    def expand_pred_array(name: str, *, dtype=float, default=np.nan):
+        values = np.full(len(target), default, dtype=dtype)
+        if name in pred:
+            values[pred_indices] = np.asarray(pred[name], dtype=dtype)
+        return values
+
+    sg_arrays = {
+        "center_sg": expand_pred_array("center_sg"),
+        "omega_bragg": expand_pred_array("omega_bragg"),
+        "omega_delta": expand_pred_array("omega_delta"),
+        "sg_window": expand_pred_array("sg_window"),
+        "sg_window_raw": expand_pred_array("sg_window_raw"),
+        "sg_window_half_frames": expand_pred_array("sg_window_half_frames"),
+        "sg_window_clipped": expand_pred_array("sg_window_clipped", dtype=bool, default=False),
+        "sg_dSg_domega": expand_pred_array("sg_dSg_domega"),
+        "sg_dSg_dframe": expand_pred_array("sg_dSg_dframe"),
+        "sg_jitter_sigma": expand_pred_array("sg_jitter_sigma"),
+        "sg_jitter_d_inv": expand_pred_array("sg_jitter_d_inv"),
+        "sg_jitter_frame_fraction": expand_pred_array("sg_jitter_frame_fraction"),
+        "sg_jitter_kernel_points": expand_pred_array("sg_jitter_kernel_points", dtype=int, default=1),
+        "sg_profile_points_total": expand_pred_array("sg_profile_points_total", dtype=int, default=0),
+        "sg_profile_weight_sum": expand_pred_array("sg_profile_weight_sum"),
+        "sg_residual": expand_pred_array("sg_residual"),
+    }
     groups = group_indices(data, nui.group_width_deg, nui.frame_offset)
     det_bins = detector_bin_indices(data, nui.detector_scale_bins)
     sig = sigma_eff(data, target, base_sig, nui)
@@ -993,6 +1019,7 @@ def evaluate_trial(data, target, base_sig, pred, indices, masks, nui: Nuisance, 
             "groups": groups,
             "detector_bins": det_bins,
             "basis_size": basis_size,
+            **sg_arrays,
             "valid": valid,
         },
     }
@@ -1493,11 +1520,19 @@ def write_row_table(path: Path, data: XDSData, target, best_eval, masks):
     with path.open("w", newline="") as f:
         fields = [
             "row_index", "h", "k", "l", "d_A", "target_I", "sigma_eff", "xds_sigma", "peak", "corr", "rlp",
-            "group", "detector_bin", "basis_size", "split", "row_resolution_factor", "dyn_raw_unmodulated", "dyn_raw", "born_raw", "q_dyn_over_born", "dyn_scaled", "born_scaled",
+            "group", "detector_bin", "basis_size", "center_sg_inv_A", "omega_bragg_deg", "omega_bragg_minus_center_deg",
+            "sg_window_inv_A", "sg_window_raw_inv_A", "sg_window_half_frames", "sg_window_clipped",
+            "sg_dSg_domega_inv_A_per_deg", "sg_dSg_dframe_inv_A", "sg_jitter_sigma_inv_A",
+            "sg_jitter_d_inv_A", "sg_jitter_frame_fraction", "sg_jitter_kernel_points",
+            "sg_profile_points_total", "sg_profile_weight_sum", "max_sg_solve_residual",
+            "split", "row_resolution_factor", "dyn_raw_unmodulated", "dyn_raw", "born_raw", "q_dyn_over_born", "dyn_scaled", "born_scaled",
             "dyn_residual_over_sigma", "born_residual_over_sigma",
         ]
         w = csv.DictWriter(f, fieldnames=fields)
         w.writeheader()
+        default_float = np.full(len(target), np.nan, dtype=float)
+        default_int = np.zeros(len(target), dtype=int)
+        default_bool = np.zeros(len(target), dtype=bool)
         for i in np.where(arrays["valid"])[0]:
             split = "free" if masks["free"][i] else "work"
             q = arrays["dyn_raw"][i] / max(arrays["born_raw"][i], 1e-30)
@@ -1514,6 +1549,22 @@ def write_row_table(path: Path, data: XDSData, target, best_eval, masks):
                 "group": int(arrays["groups"][i]),
                 "detector_bin": int(arrays.get("detector_bins", np.zeros(len(target), dtype=int))[i]),
                 "basis_size": int(arrays.get("basis_size", np.zeros(len(target), dtype=int))[i]),
+                "center_sg_inv_A": float(arrays.get("center_sg", default_float)[i]),
+                "omega_bragg_deg": float(arrays.get("omega_bragg", default_float)[i]),
+                "omega_bragg_minus_center_deg": float(arrays.get("omega_delta", default_float)[i]),
+                "sg_window_inv_A": float(arrays.get("sg_window", default_float)[i]),
+                "sg_window_raw_inv_A": float(arrays.get("sg_window_raw", default_float)[i]),
+                "sg_window_half_frames": float(arrays.get("sg_window_half_frames", default_float)[i]),
+                "sg_window_clipped": int(bool(arrays.get("sg_window_clipped", default_bool)[i])),
+                "sg_dSg_domega_inv_A_per_deg": float(arrays.get("sg_dSg_domega", default_float)[i]),
+                "sg_dSg_dframe_inv_A": float(arrays.get("sg_dSg_dframe", default_float)[i]),
+                "sg_jitter_sigma_inv_A": float(arrays.get("sg_jitter_sigma", default_float)[i]),
+                "sg_jitter_d_inv_A": float(arrays.get("sg_jitter_d_inv", default_float)[i]),
+                "sg_jitter_frame_fraction": float(arrays.get("sg_jitter_frame_fraction", default_float)[i]),
+                "sg_jitter_kernel_points": int(arrays.get("sg_jitter_kernel_points", default_int)[i]),
+                "sg_profile_points_total": int(arrays.get("sg_profile_points_total", default_int)[i]),
+                "sg_profile_weight_sum": float(arrays.get("sg_profile_weight_sum", default_float)[i]),
+                "max_sg_solve_residual": float(arrays.get("sg_residual", default_float)[i]),
                 "split": split,
                 "row_resolution_factor": float(arrays.get("row_resolution_factor", np.ones(len(target), dtype=float))[i]),
                 "dyn_raw_unmodulated": float(arrays.get("dyn_raw_unmodulated", arrays["dyn_raw"])[i]),

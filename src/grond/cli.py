@@ -5563,6 +5563,269 @@ def _quick_residual_z_summary(csv_path: Path) -> dict[str, dict[str, float | int
     return out
 
 
+def _quick_quantile(sorted_values: list[float], q: float) -> float:
+    """Return a linear-interpolated quantile from sorted finite values."""
+
+    if not sorted_values:
+        return float("nan")
+    if len(sorted_values) == 1:
+        return float(sorted_values[0])
+    q = min(max(float(q), 0.0), 1.0)
+    pos = q * (len(sorted_values) - 1)
+    lo = int(math.floor(pos))
+    hi = int(math.ceil(pos))
+    if lo == hi:
+        return float(sorted_values[lo])
+    frac = pos - lo
+    return float((1.0 - frac) * sorted_values[lo] + frac * sorted_values[hi])
+
+
+def _quick_numeric_distribution(values: list[float]) -> dict[str, float | int]:
+    """Return compact finite-value distribution statistics."""
+
+    finite = sorted(v for v in values if math.isfinite(v))
+    if not finite:
+        return {"n": 0}
+    return {
+        "n": len(finite),
+        "min": float(finite[0]),
+        "p05": _quick_quantile(finite, 0.05),
+        "median": _quick_quantile(finite, 0.50),
+        "mean": float(sum(finite) / len(finite)),
+        "p95": _quick_quantile(finite, 0.95),
+        "max": float(finite[-1]),
+    }
+
+
+def _quick_csv_numeric_audit(csv_path: Path, columns: list[str]) -> dict[str, object]:
+    """Summarize numeric row-table columns without pandas."""
+
+    out: dict[str, object] = {
+        "path": str(csv_path),
+        "exists": csv_path.exists(),
+        "rows": 0,
+        "fieldnames": [],
+        "columns": {},
+        "split_counts": {},
+        "group_count": 0,
+        "detector_bin_count": 0,
+        "sg_window_clipped_count": 0,
+    }
+    if not csv_path.exists():
+        return out
+    values: dict[str, list[float]] = {column: [] for column in columns}
+    split_counts: dict[str, int] = {}
+    groups: set[str] = set()
+    detector_bins: set[str] = set()
+    clipped = 0
+    try:
+        with csv_path.open(newline="") as handle:
+            reader = csv.DictReader(handle)
+            out["fieldnames"] = list(reader.fieldnames or [])
+            for row in reader:
+                out["rows"] = int(out["rows"]) + 1
+                split = str(row.get("split") or "unknown")
+                split_counts[split] = split_counts.get(split, 0) + 1
+                if row.get("group") not in {None, ""}:
+                    groups.add(str(row.get("group")))
+                if row.get("detector_bin") not in {None, ""}:
+                    detector_bins.add(str(row.get("detector_bin")))
+                if str(row.get("sg_window_clipped", "")).strip() in {"1", "true", "True"}:
+                    clipped += 1
+                for column in columns:
+                    value = _quick_float(row.get(column))
+                    if math.isfinite(value):
+                        values[column].append(value)
+    except OSError as exc:
+        out["error"] = str(exc)
+        return out
+    out["split_counts"] = split_counts
+    out["group_count"] = len(groups)
+    out["detector_bin_count"] = len(detector_bins)
+    out["sg_window_clipped_count"] = clipped
+    out["columns"] = {column: _quick_numeric_distribution(vals) for column, vals in values.items()}
+    return out
+
+
+def _quick_distribution_row(summary: Mapping[str, object], label: str, units: str = "") -> str:
+    """Format one numeric-distribution row for a Markdown table."""
+
+    if int(summary.get("n", 0) or 0) <= 0:
+        return f"| {label} | {units} | n/a | n/a | n/a | n/a | n/a | n/a | n/a |"
+    return (
+        f"| {label} | {units} | {summary.get('n', 'n/a')} | "
+        f"{_quick_number(summary.get('min'), 6)} | {_quick_number(summary.get('p05'), 6)} | "
+        f"{_quick_number(summary.get('median'), 6)} | {_quick_number(summary.get('mean'), 6)} | "
+        f"{_quick_number(summary.get('p95'), 6)} | {_quick_number(summary.get('max'), 6)} |"
+    )
+
+
+def _write_bloch_diagnostics_report(
+    out_dir: Path,
+    final_run: Path | None,
+    final_summary: Mapping[str, object],
+    row_metrics: Mapping[str, object],
+    file_block: Mapping[str, str],
+) -> Path:
+    """Write a human-readable Bloch-matrix/row-contract audit report."""
+
+    report = out_dir / "BLOCH_DIAGNOSTICS.md"
+    row_table = final_run / "native_dyn_calc.csv" if final_run else Path(str(file_block.get("publication_row_table") or ""))
+    config = final_summary.get("config") if isinstance(final_summary.get("config"), Mapping) else {}
+    best_native = _quick_best_native(final_summary)
+    nuisance = _quick_nuisance(final_summary)
+    native_weight = best_native.get("native_weight") if isinstance(best_native.get("native_weight"), Mapping) else {}
+    basis_stats = best_native.get("basis_size_stats") if isinstance(best_native.get("basis_size_stats"), Mapping) else {}
+    row_selection = final_summary.get("row_selection") if isinstance(final_summary.get("row_selection"), Mapping) else {}
+    filters = final_summary.get("filters") if isinstance(final_summary.get("filters"), Mapping) else {}
+    diagnostics = final_summary.get("diagnostics") if isinstance(final_summary.get("diagnostics"), Mapping) else {}
+    kernel = final_summary.get("bloch_kernel_contract") if isinstance(final_summary.get("bloch_kernel_contract"), Mapping) else {}
+    metadata = row_metrics.get("metadata", {}) if isinstance(row_metrics.get("metadata"), Mapping) else {}
+    columns = [
+        "d_A",
+        "basis_size",
+        "q_dyn_over_born",
+        "center_sg_inv_A",
+        "max_sg_solve_residual",
+        "sg_window_inv_A",
+        "sg_window_raw_inv_A",
+        "sg_window_half_frames",
+        "sg_dSg_domega_inv_A_per_deg",
+        "sg_dSg_dframe_inv_A",
+        "sg_jitter_sigma_inv_A",
+        "sg_profile_points_total",
+        "sg_profile_weight_sum",
+        "omega_bragg_minus_center_deg",
+        "row_resolution_factor",
+        "dyn_residual_over_sigma",
+        "born_residual_over_sigma",
+        "sigma_eff",
+        "peak",
+        "corr",
+        "rlp",
+    ]
+    audit = _quick_csv_numeric_audit(row_table, columns)
+    column_stats = audit.get("columns") if isinstance(audit.get("columns"), Mapping) else {}
+    basis_summary = column_stats.get("basis_size") if isinstance(column_stats.get("basis_size"), Mapping) else {}
+    basis_median = _quick_float(basis_summary.get("median", basis_stats.get("median")))
+    basis_p95 = _quick_float(basis_summary.get("p95", basis_stats.get("p95")))
+    basis_max = _quick_float(basis_summary.get("max", basis_stats.get("max")))
+    bethe_strong = _quick_float(config.get("bethe_strong_count"), 0.0)
+    if not math.isfinite(bethe_strong) or bethe_strong <= 0.0:
+        bethe_strong = _quick_float(kernel.get("bethe_strong_count"), 0.0)
+
+    def strong_weak_text(basis_value: float) -> str:
+        if not math.isfinite(basis_value) or basis_value <= 0 or not math.isfinite(bethe_strong) or bethe_strong <= 0:
+            return "n/a"
+        strong = min(int(round(bethe_strong)), int(round(basis_value)))
+        weak = max(0, int(round(basis_value)) - strong)
+        return f"{strong} strong / {weak} weak"
+
+    row_plan = diagnostics.get("row_plan_cache") if isinstance(diagnostics.get("row_plan_cache"), Mapping) else {}
+    ug_cache = diagnostics.get("ug_cache") if isinstance(diagnostics.get("ug_cache"), Mapping) else {}
+    geometry = row_selection.get("geometry_filter") if isinstance(row_selection.get("geometry_filter"), Mapping) else {}
+    row_count = audit.get("rows") or row_selection.get("selected_rows") or filters.get("selected_rows") or metadata.get("row_count", "n/a")
+    lines = [
+        "# GROND Bloch Diagnostics",
+        "",
+        "This report audits the forward Bloch calculation and row contract used by the final GROND row table. It is meant for later method review, not for endpoint promotion by itself.",
+        "",
+        "## Inputs",
+        "",
+        "| item | value |",
+        "|---|---|",
+        f"| final row table | `{row_table}` |",
+        f"| row table exists | `{audit.get('exists')}` |",
+        f"| rows in audit table | `{row_count}` |",
+        f"| split counts | `{audit.get('split_counts', {})}` |",
+        f"| scale groups / detector bins | `{audit.get('group_count', 'n/a')}` / `{audit.get('detector_bin_count', 'n/a')}` |",
+        f"| final model | `{file_block.get('final_feedback_res', '')}` |",
+        "",
+        "## Bloch Kernel Contract",
+        "",
+        "| item | value |",
+        "|---|---|",
+        f"| backend | `{config.get('compute_backend', kernel.get('compute_backend', 'n/a'))}` |",
+        f"| N / Q | `{config.get('n_basis', metadata.get('n_basis', 'n/a'))}` / `{config.get('n_points', metadata.get('n_points', 'n/a'))}` |",
+        f"| matrix convention | `{config.get('matrix_convention', nuisance.get('matrix_convention', 'n/a'))}` |",
+        f"| profile quadrature / accumulation | `{config.get('profile_quadrature', 'n/a')}` / `{config.get('profile_accumulation', 'n/a')}` |",
+        f"| max support Sg | `{_quick_number(config.get('max_support_sg'), 6)}` 1/A |",
+        f"| top-up dmin | `{_quick_number(config.get('topup_d_min'), 3)}` A |",
+        f"| row-plan cache | `{row_plan.get('status', row_plan or config.get('row_plan_cache', 'n/a'))}`; unique diffs `{diagnostics.get('row_plan_cache_unique_diffs', 0)}` |",
+        f"| U_g cache | `{ug_cache.get('status', ug_cache or 'n/a')}` |",
+        "",
+        "## Bethe Approximation",
+        "",
+        "| item | value |",
+        "|---|---|",
+        f"| backend requested | `{config.get('compute_backend', 'n/a')}` |",
+        f"| strong-beam request | `{config.get('bethe_strong_count', 'n/a')}` |",
+        f"| variant / promote denom / eps | `{config.get('bethe_variant', 'n/a')}` / `{config.get('bethe_promote_denom', 'n/a')}` / `{config.get('bethe_denom_eps', 'n/a')}` |",
+        f"| median basis strong/weak | `{strong_weak_text(basis_median)}` |",
+        f"| p95 basis strong/weak | `{strong_weak_text(basis_p95)}` |",
+        f"| max basis strong/weak | `{strong_weak_text(basis_max)}` |",
+        "",
+        "If the backend is not `scipy_bethe`, the strong/weak counts are only the configured Bethe diagnostic capacity and no Schur reduction was used for the final prediction.",
+        "",
+        "## Sg, Rocking, And Quadrature",
+        "",
+        "| quantity | units | n | min | p05 | median | mean | p95 | max |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|",
+        _quick_distribution_row(column_stats.get("center_sg_inv_A", {}), "center excitation error Sg", "1/A"),
+        _quick_distribution_row(column_stats.get("max_sg_solve_residual", {}), "max target-Sg solve residual", "1/A"),
+        _quick_distribution_row(column_stats.get("sg_window_inv_A", {}), "accepted Sg window", "1/A"),
+        _quick_distribution_row(column_stats.get("sg_window_raw_inv_A", {}), "raw Sg window before clipping", "1/A"),
+        _quick_distribution_row(column_stats.get("sg_window_half_frames", {}), "Sg window half frames", "frames"),
+        _quick_distribution_row(column_stats.get("sg_dSg_domega_inv_A_per_deg", {}), "dSg/domega", "1/A/deg"),
+        _quick_distribution_row(column_stats.get("sg_dSg_dframe_inv_A", {}), "dSg/dframe", "1/A/frame"),
+        _quick_distribution_row(column_stats.get("sg_jitter_sigma_inv_A", {}), "Sg jitter sigma", "1/A"),
+        _quick_distribution_row(column_stats.get("sg_profile_points_total", {}), "profile points after jitter", "points"),
+        _quick_distribution_row(column_stats.get("sg_profile_weight_sum", {}), "profile weight sum", "weight"),
+        _quick_distribution_row(column_stats.get("omega_bragg_minus_center_deg", {}), "omega Bragg minus row center", "deg"),
+        f"| Sg-window clipped rows | count | {audit.get('sg_window_clipped_count', 0)} | n/a | n/a | n/a | n/a | n/a | n/a |",
+        "",
+        "## Matrix Size And Dynamical Strength",
+        "",
+        "| quantity | units | n | min | p05 | median | mean | p95 | max |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|",
+        _quick_distribution_row(column_stats.get("basis_size", {}), "basis size", "beams"),
+        _quick_distribution_row(column_stats.get("q_dyn_over_born", {}), "q = Idyn/Iborn", "ratio"),
+        _quick_distribution_row(column_stats.get("row_resolution_factor", {}), "row resolution factor", "ratio"),
+        _quick_distribution_row(column_stats.get("dyn_residual_over_sigma", {}), "dynamical residual/sigma", "sigma"),
+        _quick_distribution_row(column_stats.get("born_residual_over_sigma", {}), "Born residual/sigma", "sigma"),
+        "",
+        "## Row Contract And Geometry Proxies",
+        "",
+        "| quantity | units | n | min | p05 | median | mean | p95 | max |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|",
+        _quick_distribution_row(column_stats.get("d_A", {}), "d spacing", "A"),
+        _quick_distribution_row(column_stats.get("sigma_eff", {}), "effective sigma", "I units"),
+        _quick_distribution_row(column_stats.get("peak", {}), "PEAK", "XDS percent"),
+        _quick_distribution_row(column_stats.get("corr", {}), "CORR", "XDS percent"),
+        _quick_distribution_row(column_stats.get("rlp", {}), "RLP", "XDS units"),
+        "",
+        "## Geometry And Nuisance Settings",
+        "",
+        "| item | value |",
+        "|---|---|",
+        f"| row selection min d / min peak | `{config.get('min_d_spacing', 'n/a')}` A / `{config.get('min_peak', 'n/a')}` |",
+        f"| geometry percentile gate | `{config.get('geometry_percentile', 'n/a')}` |",
+        f"| geometry filter summary | `{geometry}` |",
+        f"| thickness model | `{nuisance.get('thickness_model', 'n/a')}`; center `{_quick_number(nuisance.get('thickness_A', nuisance.get('thickness_grid')), 3)}` A; gradient `{_quick_number(nuisance.get('thickness_grad_frac', nuisance.get('thickness_grad_grid')), 6)}` |",
+        f"| Sg jitter | `{nuisance.get('sg_jitter_mode', 'n/a')}`; sigma0 `{_quick_number(nuisance.get('sg_jitter_sigma0'), 6)}`; sigma d^-1 `{_quick_number(nuisance.get('sg_jitter_sigma_d_inv'), 6)}`; sigma frame `{_quick_number(nuisance.get('sg_jitter_sigma_frame'), 6)}`; points `{nuisance.get('sg_jitter_points', 'n/a')}` |",
+        f"| absorption | `{nuisance.get('absorption_mode', 'n/a')}`; mu `{_quick_number(nuisance.get('absorption_mu'), 6)}`; frac `{_quick_number(nuisance.get('absorption_frac'), 6)}` |",
+        f"| scale model | group width `{_quick_number(nuisance.get('group_width_deg'), 6)}` deg; detector bins `{nuisance.get('detector_scale_bins', 'n/a')}`; scale count `{best_native.get('scale_count', 'n/a')}` |",
+        f"| native row weights | a `{_quick_number(native_weight.get('a'), 6)}`; b `{_quick_number(native_weight.get('b'), 6)}` |",
+        "",
+        "## Availability Notes",
+        "",
+        "Rows from older GROND versions may not contain the Sg/quadrature columns. In that case this report still records the high-level config and row residual distributions, but per-row excitation-error distributions require rerunning with this version or using a row-plan cache that records Sg profiles.",
+        "",
+    ]
+    report.write_text("\n".join(lines))
+    return report
+
+
 def _quick_hand_block_z(block: Mapping[str, object], *, final_is_other: bool) -> dict[str, object]:
     """Orient an absolute-structure diagnostic block so positive values favor the final selected hand."""
 
@@ -6004,6 +6267,8 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
     hand_work = hand_blocks.get("work", {}) if isinstance(hand_blocks.get("work"), Mapping) else {}
     hand_free = hand_blocks.get("free", {}) if isinstance(hand_blocks.get("free"), Mapping) else {}
     file_block = _quick_endpoint_file_block(publication_endpoint, final_model)
+    bloch_diagnostics_path = _write_bloch_diagnostics_report(out_dir, final_run, final_summary, row_metrics, file_block)
+    file_block["bloch_diagnostics"] = str(bloch_diagnostics_path)
     input_shelxl = _quick_baseline_shelxl(prep)
     source_structure = Path(prep.structure).expanduser() if prep.structure else None
     source_controls = _quick_source_shelx_controls(source_structure)
@@ -6552,6 +6817,7 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
             f"- Publication endpoint manifest: `{file_block['publication_manifest']}`",
             f"- Frozen Bloch row table used to make endpoint statistics: `{final_run / 'native_dyn_calc.csv' if final_run else ''}`",
             f"- Endpoint replay row table after compact scale selection: `{file_block['publication_row_table']}`",
+            f"- Bloch matrix and row-contract diagnostics: `{bloch_diagnostics_path}`",
             f"- Detailed row/MR table: `{row_metrics_path}`",
             f"- Endpoint calibration report: `{endpoint_calibration.get('report', '') if isinstance(endpoint_calibration, Mapping) else ''}`",
             f"- Publication endpoint chooser: `{out_dir / 'endpoint_chooser' / 'PUBLICATION_ENDPOINT_CHOOSER.md'}`",
@@ -6711,6 +6977,7 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
         f"- Use this corrected HKL with that model: `{file_block['publication_hkl']}`",
         f"- The endpoint statistics above come from: `{file_block['publication_lst']}`",
         f"- Frozen row-level Bloch table: `{console['final_row_model']['row_table']}`",
+        f"- Bloch matrix and row-contract diagnostics: `{bloch_diagnostics_path}`",
         f"- Full quick report: `{quick_path}`",
         f"- Full machine-readable run summary: `{out_dir / 'grond_summary.json'}`",
         "",
