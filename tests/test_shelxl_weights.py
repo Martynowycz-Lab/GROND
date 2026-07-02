@@ -8,6 +8,7 @@ from grond.legacy.engine.native_row_regularize import (
     parse_int_grid,
     parse_lst,
     parse_recommended_wght,
+    parse_shelx_wght_terms,
     promote_recommended_wght,
     write_active_wght,
     write_endpoint_ins,
@@ -34,6 +35,19 @@ def test_parse_recommended_wght_uses_last_scheme(tmp_path: Path):
     assert parse_recommended_wght(lst) == (0.0720, 1.2500)
 
 
+def test_parse_recommended_wght_single_term_does_not_consume_exti(tmp_path: Path):
+    lst = tmp_path / "trial.lst"
+    lst.write_text(" Recommended weighting scheme:  WGHT    1E-4\nEXTI 1320.486328\n")
+
+    assert parse_recommended_wght(lst) == (0.0001, 0.0)
+
+
+def test_parse_shelx_wght_terms_stays_on_one_line():
+    assert parse_shelx_wght_terms("WGHT    0.100000") == [0.1]
+    assert parse_shelx_wght_terms("WGHT    0.100000 EXTI") == [0.1]
+    assert parse_shelx_wght_terms("WGHT    1E-4    -2.5e+1    0.3") == [0.0001, -25.0, 0.3]
+
+
 def test_parse_lst_records_active_wght(tmp_path: Path):
     lst = tmp_path / "trial.lst"
     lst.write_text(
@@ -55,6 +69,26 @@ def test_parse_lst_records_active_wght(tmp_path: Path):
     assert parsed["active_wght_a"] == 0.126534
     assert parsed["active_wght_b"] == 0.0
     assert parsed["wR2_all"] == 0.122
+
+
+def test_parse_lst_one_term_wght_does_not_consume_following_exti(tmp_path: Path):
+    lst = tmp_path / "trial.lst"
+    lst.write_text(
+        "\n".join(
+            [
+                " WGHT    0.100000",
+                " EXTI 1320.486328",
+                " wR2 = 0.1220, GooF = S = 0.384, Restrained GooF = 0.374 for all data",
+            ]
+        )
+        + "\n"
+    )
+
+    parsed = parse_lst(lst)
+
+    assert parsed["active_wght_a"] == 0.1
+    assert parsed["active_wght_b"] == 0.0
+    assert parsed["active_wght_terms"] == [0.1]
 
 
 def test_promote_recommended_wght_replaces_active_and_strips_post_end_tail(tmp_path: Path):
@@ -182,7 +216,7 @@ def test_write_endpoint_ins_strips_acta_and_forces_hklf4(tmp_path: Path):
 
 
 def test_write_endpoint_ins_rejects_unsupported_shelx_endpoint_features(tmp_path: Path):
-    for feature in ["HKLF 5", "TWIN 0 1 0 1 0 0 0 0 -1", "BASF 0.2", "REM PLATON SQUEEZE applied"]:
+    for feature in ["HKLF 5", "TWIN 0 1 0 1 0 0 0 0 -1", "BASF 0.2", "SWAT 0.1 1.0", "REM PLATON SQUEEZE applied"]:
         src = tmp_path / "model.res"
         dst = tmp_path / "model.ins"
         src.write_text(
@@ -201,7 +235,7 @@ def test_write_endpoint_ins_rejects_unsupported_shelx_endpoint_features(tmp_path
         try:
             write_endpoint_ins(src, dst)
         except ValueError as exc:
-            assert any(word in str(exc) for word in ["HKLF", "TWIN", "BASF", "SQUEEZE"])
+            assert any(word in str(exc) for word in ["HKLF", "TWIN", "BASF", "SWAT", "SQUEEZE"])
         else:
             raise AssertionError(f"{feature!r} was not rejected")
 

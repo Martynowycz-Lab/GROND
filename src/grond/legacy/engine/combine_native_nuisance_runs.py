@@ -23,11 +23,11 @@ import numpy as np
 
 try:  # Package import.
     from .bloch_engine import parse_model
-    from .native_row_regularize import write_endpoint_ins
+    from .native_row_regularize import parse_shelx_wght_terms, write_endpoint_ins
     from .post_bloch_sigma import fit_uniform_z_rms_sigma_scale, scale_row_sigmas
 except ImportError:  # Direct script execution from this directory.
     from bloch_engine import parse_model
-    from native_row_regularize import write_endpoint_ins
+    from native_row_regularize import parse_shelx_wght_terms, write_endpoint_ins
     from post_bloch_sigma import fit_uniform_z_rms_sigma_scale, scale_row_sigmas
 
 
@@ -341,14 +341,18 @@ def parse_recommended_wght(lst_path: Path) -> tuple[float, float] | None:
     if not lst_path.exists():
         return None
     text = lst_path.read_text(errors="replace")
-    matches = re.findall(
-        r"Recommended weighting scheme:\s+WGHT\s+([-+0-9.Ee]+)(?:\s+([-+0-9.Ee]+))?",
-        text,
-    )
+    matches = []
+    for line in text.splitlines():
+        upper = line.upper()
+        if "RECOMMENDED WEIGHTING SCHEME" not in upper or "WGHT" not in upper:
+            continue
+        terms = parse_shelx_wght_terms(line[upper.find("WGHT") :])
+        if terms:
+            matches.append(terms)
     if not matches:
         return None
-    a_text, b_text = matches[-1]
-    return float(a_text), float(b_text) if b_text else 0.0
+    terms = matches[-1]
+    return terms[0], terms[1] if len(terms) >= 2 else 0.0
 
 
 def promote_recommended_wght(ins_path: Path, recommended: tuple[float, float] | None) -> dict:

@@ -48,7 +48,6 @@ EXPECTED_CLI_COMMANDS = {
     "scale-polish",
     "scale-replay",
     "sfac-check",
-    "target-ablation",
     "thickness-scout",
     "validate",
     "validate-ls1",
@@ -154,7 +153,12 @@ def test_thickness_scout_parser_exposes_contract_diagnostic_defaults():
     assert args.transform_metadata_min_correlation == 0.70
 
 
-def test_target_ablation_parser_defaults_to_four_xds_contracts():
+def test_target_ablation_is_hidden_from_public_parser():
+    assert "target-ablation" not in cli_command_names(build_parser())
+
+
+def test_target_ablation_parser_defaults_to_four_xds_contracts(monkeypatch):
+    monkeypatch.setenv("GROND_ENABLE_INTERNAL_CLI", "1")
     args = build_parser().parse_args(
         [
             "target-ablation",
@@ -848,6 +852,7 @@ def test_sfac_check_rejects_unsupported_shelx_endpoint_contracts(tmp_path: Path)
         ("HKLF 5", "HKLF 5"),
         ("TWIN 0 1 0 1 0 0 0 0 -1\nHKLF 4", "TWIN"),
         ("BASF 0.2\nHKLF 4", "BASF"),
+        ("SWAT 0.1 1.0\nHKLF 4", "SWAT"),
         ("REM PLATON SQUEEZE applied\nHKLF 4", "SQUEEZE"),
     ]
     for body, expected in cases:
@@ -859,6 +864,17 @@ def test_sfac_check_rejects_unsupported_shelx_endpoint_contracts(tmp_path: Path)
         assert payload["ok"] is False
         assert payload["status"] == "error"
         assert any(expected in item["message"] for item in payload["messages"])
+
+
+def test_quick_lst_diagnostics_one_term_wght_before_exti(tmp_path: Path):
+    lst = tmp_path / "trial.lst"
+    lst.write_text("WGHT    0.100000\nEXTI 1320.486328\n")
+
+    payload = cli._quick_lst_diagnostics(lst)
+
+    assert payload["active_wght_a"] == pytest.approx(0.1)
+    assert payload["active_wght_b"] == pytest.approx(0.0)
+    assert payload["active_wght_terms"] == [pytest.approx(0.1)]
 
 
 def test_doctor_reports_current_install_feature_flags(capsys):

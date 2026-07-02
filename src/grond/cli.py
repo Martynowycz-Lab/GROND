@@ -1185,12 +1185,12 @@ def check_sfac_contract(structure: str | Path) -> dict[str, object]:
                     }
                 )
             continue
-        if head in {"BASF", "TWIN"}:
+        if head in {"BASF", "TWIN", "SWAT"}:
             endpoint_contract["unsupported_features"].append({"line": raw, "feature": head})
             messages.append(
                 {
                     "severity": "error",
-                    "message": f"{head} is not supported by GROND corrected-HKLF4 endpoints yet. Twin/BASF refinement is a current limitation.",
+                    "message": f"{head} is not supported by GROND corrected-HKLF4 endpoints yet. Twin/BASF/SWAT refinement is a current limitation.",
                 }
             )
             continue
@@ -1317,6 +1317,7 @@ def estimate_model_nonh_atoms(structure: str) -> int | None:
             "SHEL",
             "BASF",
             "TWIN",
+            "SWAT",
             "HKLF",
             "END",
             "REM",
@@ -5302,6 +5303,33 @@ def _quick_int(value: object) -> int | None:
     return out
 
 
+_QUICK_SHELX_FLOAT_TOKEN_RE = re.compile(r"[-+]?(?:(?:\d+(?:\.\d*)?)|(?:\.\d+))(?:[Ee][-+]?\d+)?")
+
+
+def _quick_parse_wght_terms(line: str) -> list[float]:
+    """Parse numeric terms from one SHELX WGHT line without crossing lines."""
+
+    parts = line.strip().split()
+    if not parts or parts[0].upper() != "WGHT":
+        return []
+    terms: list[float] = []
+    for token in parts[1:]:
+        if not _QUICK_SHELX_FLOAT_TOKEN_RE.fullmatch(token):
+            break
+        terms.append(float(token))
+    return terms
+
+
+def _quick_iter_recommended_wght_terms(text: str):
+    for line in text.splitlines():
+        upper = line.upper()
+        if "RECOMMENDED WEIGHTING SCHEME" not in upper or "WGHT" not in upper:
+            continue
+        terms = _quick_parse_wght_terms(line[upper.find("WGHT") :])
+        if terms:
+            yield terms
+
+
 def _quick_lst_diagnostics(lst_path: Path | None) -> dict[str, object]:
     """Parse the SHELXL LST fields users need for endpoint sanity checks."""
 
@@ -5347,16 +5375,19 @@ def _quick_lst_diagnostics(lst_path: Path | None) -> dict[str, object]:
         rint, rsigma = matches[-1]
         out["Rint"] = float(rint)
         out["Rsigma"] = float(rsigma)
-    matches = re.findall(r"Recommended weighting scheme:\s+WGHT\s+([-+0-9.Ee]+)(?:\s+([-+0-9.Ee]+))?", text)
-    if matches:
-        a_text, b_text = matches[-1]
-        out["recommended_wght_a"] = float(a_text)
-        out["recommended_wght_b"] = float(b_text) if b_text else 0.0
-    matches = re.findall(r"WGHT\s+([-+0-9.Ee]+)(?:\s+([-+0-9.Ee]+))?", text)
-    if matches:
-        a_text, b_text = matches[0]
-        out["active_wght_a"] = float(a_text)
-        out["active_wght_b"] = float(b_text) if b_text else 0.0
+    recommended_wght_terms = list(_quick_iter_recommended_wght_terms(text))
+    if recommended_wght_terms:
+        terms = recommended_wght_terms[-1]
+        out["recommended_wght_a"] = terms[0]
+        out["recommended_wght_b"] = terms[1] if len(terms) >= 2 else 0.0
+        out["recommended_wght_terms"] = terms
+    for line in text.splitlines():
+        terms = _quick_parse_wght_terms(line)
+        if terms:
+            out["active_wght_a"] = terms[0]
+            out["active_wght_b"] = terms[1] if len(terms) >= 2 else 0.0
+            out["active_wght_terms"] = terms
+            break
     matches = re.findall(r"Total number of l\.s\. parameters =\s+(\d+)", text)
     if matches:
         out["parameters"] = int(matches[-1])
@@ -8607,7 +8638,7 @@ def add_common_run_args(ap: argparse.ArgumentParser, *, expose_lambda_controls: 
     ap.add_argument("--min-d-spacing", type=float, default=0.70)
     ap.add_argument("--min-peak", type=float, default=90.0)
     ap.add_argument("--geometry-percentile", type=float, default=99.0)
-    ap.add_argument("--target-mode", choices=list(XDS_TARGET_MODES), default="iobs")
+    ap.add_argument("--target-mode", choices=list(XDS_TARGET_MODES), default="iobs", help=argparse.SUPPRESS)
     ap.add_argument("--include-nonpositive", action="store_true")
     ap.add_argument("--make-maps", dest="make_maps", action="store_true", default=True)
     ap.add_argument("--no-maps", dest="make_maps", action="store_false")
@@ -9134,40 +9165,41 @@ def build_parser() -> argparse.ArgumentParser:
     p_cal_endpoint.add_argument("--native-wght-b", type=float, default=None)
     p_cal_endpoint.set_defaults(func=cmd_calibrate_endpoint)
 
-    p_target_ablation = sub.add_parser(
-        "target-ablation",
-        help="Run an XDS IOBS/RLP/PEAK target-transform ablation through the same quick auto validation.",
-    )
-    p_target_ablation.add_argument("--xds-dir", default="", help="XDS directory containing INTEGRATE.HKL.")
-    p_target_ablation.add_argument("--hkl", default="", help="Explicit XDS INTEGRATE.HKL path. Use this instead of --xds-dir when needed.")
-    p_target_ablation.add_argument("--structure", required=True)
-    p_target_ablation.add_argument("--baseline-hkl", required=True)
-    p_target_ablation.add_argument("--out-dir", required=True)
-    p_target_ablation.add_argument("--variants", default=",".join(XDS_TARGET_MODES), help="Comma list of XDS target modes, or all.")
-    p_target_ablation.add_argument("--python", default="")
-    add_tool_config_args(p_target_ablation)
-    p_target_ablation.add_argument("--shelxl", default=default_shelxl_executable())
-    p_target_ablation.add_argument("--shelxl-feedback-cycles", type=int, default=5)
-    p_target_ablation.add_argument("--shelxl-feedback-shelxl-iterations", type=int, default=1)
-    p_target_ablation.add_argument("--endpoint-ls-cycles", type=int, default=1)
-    p_target_ablation.add_argument("--hkl-transform", default="identity")
-    p_target_ablation.add_argument("--trust-hkl-transform", action="store_true")
-    p_target_ablation.add_argument("--min-d-spacing", type=float, default=0.70)
-    p_target_ablation.add_argument("--min-peak", type=float, default=90.0)
-    p_target_ablation.add_argument("--geometry-percentile", type=float, default=99.0)
-    p_target_ablation.add_argument("--workers", type=int, default=0)
-    p_target_ablation.add_argument("--max-core-fraction", type=float, default=0.85)
-    p_target_ablation.add_argument("--chunksize", type=int, default=0)
-    p_target_ablation.add_argument("--compute-backend", default="scipy")
-    p_target_ablation.add_argument("--row-plan-cache", choices=["off", "readwrite", "rebuild"], default="off")
-    p_target_ablation.add_argument("--prediction-cache-compression", choices=["compressed", "none"], default="none")
-    p_target_ablation.add_argument("--hand-control", action=argparse.BooleanOptionalAction, default=True)
-    p_target_ablation.add_argument("--make-maps", action=argparse.BooleanOptionalAction, default=False, help="Ablation skips maps by default to keep the four branches fast.")
-    p_target_ablation.add_argument("--resume", action=argparse.BooleanOptionalAction, default=False)
-    p_target_ablation.add_argument("--dry-run", action="store_true")
-    p_target_ablation.add_argument("--fail-fast", action="store_true")
-    p_target_ablation.add_argument("--extra-auto-args", default="", help="Advanced: quoted argument string appended to every inner auto command.")
-    p_target_ablation.set_defaults(func=cmd_target_ablation)
+    if os.environ.get("GROND_ENABLE_INTERNAL_CLI", "").strip() == "1":
+        p_target_ablation = sub.add_parser(
+            "target-ablation",
+            help="Internal diagnostic: run XDS IOBS/RLP/PEAK target-transform ablations.",
+        )
+        p_target_ablation.add_argument("--xds-dir", default="", help="XDS directory containing INTEGRATE.HKL.")
+        p_target_ablation.add_argument("--hkl", default="", help="Explicit XDS INTEGRATE.HKL path. Use this instead of --xds-dir when needed.")
+        p_target_ablation.add_argument("--structure", required=True)
+        p_target_ablation.add_argument("--baseline-hkl", required=True)
+        p_target_ablation.add_argument("--out-dir", required=True)
+        p_target_ablation.add_argument("--variants", default=",".join(XDS_TARGET_MODES), help="Comma list of XDS target modes, or all.")
+        p_target_ablation.add_argument("--python", default="")
+        add_tool_config_args(p_target_ablation)
+        p_target_ablation.add_argument("--shelxl", default=default_shelxl_executable())
+        p_target_ablation.add_argument("--shelxl-feedback-cycles", type=int, default=5)
+        p_target_ablation.add_argument("--shelxl-feedback-shelxl-iterations", type=int, default=1)
+        p_target_ablation.add_argument("--endpoint-ls-cycles", type=int, default=1)
+        p_target_ablation.add_argument("--hkl-transform", default="identity")
+        p_target_ablation.add_argument("--trust-hkl-transform", action="store_true")
+        p_target_ablation.add_argument("--min-d-spacing", type=float, default=0.70)
+        p_target_ablation.add_argument("--min-peak", type=float, default=90.0)
+        p_target_ablation.add_argument("--geometry-percentile", type=float, default=99.0)
+        p_target_ablation.add_argument("--workers", type=int, default=0)
+        p_target_ablation.add_argument("--max-core-fraction", type=float, default=0.85)
+        p_target_ablation.add_argument("--chunksize", type=int, default=0)
+        p_target_ablation.add_argument("--compute-backend", default="scipy")
+        p_target_ablation.add_argument("--row-plan-cache", choices=["off", "readwrite", "rebuild"], default="off")
+        p_target_ablation.add_argument("--prediction-cache-compression", choices=["compressed", "none"], default="none")
+        p_target_ablation.add_argument("--hand-control", action=argparse.BooleanOptionalAction, default=True)
+        p_target_ablation.add_argument("--make-maps", action=argparse.BooleanOptionalAction, default=False, help="Ablation skips maps by default to keep the four branches fast.")
+        p_target_ablation.add_argument("--resume", action=argparse.BooleanOptionalAction, default=False)
+        p_target_ablation.add_argument("--dry-run", action="store_true")
+        p_target_ablation.add_argument("--fail-fast", action="store_true")
+        p_target_ablation.add_argument("--extra-auto-args", default="", help="Advanced: quoted argument string appended to every inner auto command.")
+        p_target_ablation.set_defaults(func=cmd_target_ablation)
 
     p_thick = sub.add_parser("thickness-scout", help="Audit effective thickness sensitivity to row contract, scale model, and accepted nuisance terms.")
     add_common_run_args(p_thick, expose_lambda_controls=False)

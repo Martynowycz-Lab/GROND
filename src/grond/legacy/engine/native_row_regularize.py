@@ -222,14 +222,51 @@ def absorption_parameter_grid(args, mode: str) -> list[dict[str, float | str]]:
     return out
 
 
+_SHELX_FLOAT_TOKEN_RE = re.compile(r"[-+]?(?:(?:\d+(?:\.\d*)?)|(?:\.\d+))(?:[Ee][-+]?\d+)?")
+
+
+def parse_shelx_wght_terms(line: str) -> list[float]:
+    """Return numeric WGHT terms from one SHELX line.
+
+    SHELXL accepts a one-term WGHT record and treats the missing second term as
+    zero.  A line-based parser is important here: using a whitespace regex can
+    accidentally consume the ``E`` from a following EXTI line as a fake WGHT
+    value.
+    """
+
+    parts = line.strip().split()
+    if not parts or parts[0].upper() != "WGHT":
+        return []
+    terms: list[float] = []
+    for token in parts[1:]:
+        if not _SHELX_FLOAT_TOKEN_RE.fullmatch(token):
+            break
+        terms.append(float(token))
+    return terms
+
+
+def parse_shelx_wght_pair(line: str) -> tuple[float, float] | None:
+    terms = parse_shelx_wght_terms(line)
+    if not terms:
+        return None
+    return terms[0], terms[1] if len(terms) >= 2 else 0.0
+
+
+def _iter_recommended_wght_terms(text: str):
+    for line in text.splitlines():
+        upper = line.upper()
+        if "RECOMMENDED WEIGHTING SCHEME" not in upper or "WGHT" not in upper:
+            continue
+        terms = parse_shelx_wght_terms(line[upper.find("WGHT") :])
+        if terms:
+            yield terms
+
+
 def parse_wght(res_path: Path) -> tuple[float, float]:
     for line in res_path.read_text(errors="replace").splitlines():
-        if line.strip().upper().startswith("WGHT"):
-            parts = line.split()
-            if len(parts) >= 2:
-                a = float(parts[1])
-                b = float(parts[2]) if len(parts) >= 3 else 0.0
-                return a, b
+        pair = parse_shelx_wght_pair(line)
+        if pair is not None:
+            return pair
     return 0.05, 0.0
 
 
@@ -342,7 +379,7 @@ def _hklf_order(line: str) -> str:
 def _unsupported_endpoint_reason(line: str) -> str:
     upper = line.strip().upper()
     head = upper.split()[0] if upper.split() else ""
-    if head in {"BASF", "TWIN"}:
+    if head in {"BASF", "TWIN", "SWAT"}:
         return f"{head} is not supported by GROND corrected-HKLF4 endpoints yet"
     if head == "SQUEEZE" or "SQUEEZE" in upper:
         return "SQUEEZE/solvent-mask corrected SHELX models are not supported by GROND corrected-HKLF4 endpoints yet"
@@ -1030,11 +1067,13 @@ def parse_lst(path: Path):
     out["status"] = "ok"
     out.update(parse_shelx_lst_pathologies(path))
     text = path.read_text(errors="replace")
-    m = re.findall(r"^\s*WGHT[ \t]+([-+0-9.Ee]+)(?:[ \t]+([-+0-9.Ee]+))?", text, flags=re.MULTILINE)
-    if m:
-        a_text, b_text = m[0]
-        out["active_wght_a"] = float(a_text)
-        out["active_wght_b"] = float(b_text) if b_text else 0.0
+    for line in text.splitlines():
+        terms = parse_shelx_wght_terms(line)
+        if terms:
+            out["active_wght_a"] = terms[0]
+            out["active_wght_b"] = terms[1] if len(terms) >= 2 else 0.0
+            out["active_wght_terms"] = terms
+            break
     m = re.findall(r"(\d+)\s+Reflections read, of which\s+(\d+)\s+rejected", text)
     if m:
         out["reflections_read"] = int(m[-1][0])
@@ -1070,14 +1109,11 @@ def parse_recommended_wght(lst_path: Path) -> tuple[float, float] | None:
     if not lst_path.exists():
         return None
     text = lst_path.read_text(errors="replace")
-    matches = re.findall(
-        r"Recommended weighting scheme:\s+WGHT\s+([-+0-9.Ee]+)(?:\s+([-+0-9.Ee]+))?",
-        text,
-    )
+    matches = list(_iter_recommended_wght_terms(text))
     if not matches:
         return None
-    a_text, b_text = matches[-1]
-    return float(a_text), float(b_text) if b_text else 0.0
+    terms = matches[-1]
+    return terms[0], terms[1] if len(terms) >= 2 else 0.0
 
 
 def shelx_res_health(res_path: Path, lst_path: Path | None = None) -> dict:
