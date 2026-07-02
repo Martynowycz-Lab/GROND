@@ -5420,6 +5420,17 @@ def _quick_shelxl_details(source: Mapping[str, object] | None = None, lst_path: 
     diagnostics = _quick_lst_diagnostics(lst_path)
     out.setdefault("lst", diagnostics.get("lst", ""))
     out["lst_exists"] = bool(diagnostics.get("exists"))
+    overwrite_diagnostic_keys = {
+        "parameters",
+        "restraints",
+        "npd_count",
+        "npd_atoms",
+        "split_count",
+        "has_npd",
+        "has_split_warnings",
+        "recommended_wght_a",
+        "recommended_wght_b",
+    }
     for key in (
         "R1_gt",
         "R1_all",
@@ -5442,9 +5453,7 @@ def _quick_shelxl_details(source: Mapping[str, object] | None = None, lst_path: 
         "recommended_wght_b",
     ):
         old_value = out.get(key)
-        if key in diagnostics and (old_value is None or old_value == ""):
-            out[key] = diagnostics[key]
-        elif key in diagnostics and key in {"parameters", "restraints", "npd_count", "npd_atoms", "split_count", "has_npd", "has_split_warnings", "recommended_wght_a", "recommended_wght_b"}:
+        if key in diagnostics and ((old_value is None or old_value == "") or key in overwrite_diagnostic_keys):
             out[key] = diagnostics[key]
     return out
 
@@ -5667,21 +5676,20 @@ def _normalize_publication_endpoint_block(endpoint: Mapping[str, object], *, sel
         "shelxl_recommended_wght_a": "recommended_wght_a",
         "shelxl_recommended_wght_b": "recommended_wght_b",
     }
+    overwrite_shelxl_detail_keys = {
+        "shelxl_parameters",
+        "shelxl_restraints",
+        "shelxl_npd_count",
+        "shelxl_npd_atoms",
+        "shelxl_split_count",
+        "shelxl_has_npd",
+        "shelxl_has_split_warnings",
+        "shelxl_recommended_wght_a",
+        "shelxl_recommended_wght_b",
+    }
     for out_key, detail_key in fallback_pairs.items():
         old_value = out.get(out_key)
-        if (old_value is None or old_value == "") and detail_key in shelxl_details:
-            out[out_key] = shelxl_details[detail_key]
-        elif out_key in {
-            "shelxl_parameters",
-            "shelxl_restraints",
-            "shelxl_npd_count",
-            "shelxl_npd_atoms",
-            "shelxl_split_count",
-            "shelxl_has_npd",
-            "shelxl_has_split_warnings",
-            "shelxl_recommended_wght_a",
-            "shelxl_recommended_wght_b",
-        } and detail_key in shelxl_details:
+        if detail_key in shelxl_details and ((old_value is None or old_value == "") or out_key in overwrite_shelxl_detail_keys):
             out[out_key] = shelxl_details[detail_key]
     out["shelxl_lst_exists"] = shelxl_details.get("lst_exists", shelxl_details.get("exists", False))
     return out
