@@ -54,14 +54,14 @@ The recommended multi-dataset command path is:
 GROND prep \
   --structure model.res \
   --baseline-hkl model.hkl \
-  --dataset crystal_370=/data/370/INTEGRATE.HKL \
-  --dataset crystal_366=/data/366/INTEGRATE.HKL \
+  --dataset crystal_370=/data/370/xds_noprf \
+  --dataset crystal_366=/data/366/xds_noprf \
   --out prep_multi.json
 
 GROND auto --prep prep_multi.json --out-dir grond_multi
 ```
 
-This does not merge raw rows first. GROND simulates and regularizes each dataset against the same atomic model, but keeps each dataset's thickness, scan/geometry, scale, and sigma contract separate. It then updates one shared model, recomputes final Bloch rows for every accepted dataset, applies one post-dynamical overlap scale per dataset, inflates merged endpoint sigmas when datasets disagree, and writes one combined corrected-HKL endpoint.
+This does not merge raw rows first. Each `--dataset` should point to the XDS directory, not a copied standalone HKL, so `INTEGRATE.HKL`, `XPARM.XDS` or `GXPARM.XDS`, and the XDS log/metadata files stay together. GROND simulates and regularizes each dataset against the same atomic model, but keeps each dataset's thickness, scan/geometry, scale, and sigma contract separate. It then updates one shared model, recomputes final Bloch rows for every accepted dataset, applies one post-dynamical overlap scale per dataset, inflates merged endpoint sigmas when datasets disagree, and writes one combined corrected-HKL endpoint.
 
 ## A Plain-English Bloch-Wave Picture
 

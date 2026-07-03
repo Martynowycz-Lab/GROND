@@ -8,8 +8,8 @@ The command-line entry point is still `GROND auto`. Put one row-preserving datas
 GROND prep \
   --structure model.res \
   --baseline-hkl model.hkl \
-  --dataset crystal_370=/data/370/no_prf/INTEGRATE.HKL \
-  --dataset crystal_366=/data/366/no_prf/INTEGRATE.HKL \
+  --dataset crystal_370=/data/370/no_prf \
+  --dataset crystal_366=/data/366/no_prf \
   --out prep_366_370.json
 
 GROND auto \
@@ -17,7 +17,7 @@ GROND auto \
   --out-dir grond_366_370
 ```
 
-That is the current gold-standard path. Do not concatenate `INTEGRATE.HKL` files, merge DIALS tables, or make one artificial HKL before GROND. The row-level Bloch prediction needs the signed row identity and the scan geometry from each dataset. The combined endpoint is made only after every accepted dataset has its own final `native_dyn_calc.csv`.
+That is the current gold-standard path. For XDS, give the directory that contains `INTEGRATE.HKL` plus `XPARM.XDS` or `GXPARM.XDS`; do not copy `INTEGRATE.HKL` away from its geometry sidecars. A direct `INTEGRATE.HKL` path is accepted only as shorthand when the XDS metadata files remain in the same parent directory. Do not concatenate `INTEGRATE.HKL` files, merge DIALS tables, or make one artificial HKL before GROND. The row-level Bloch prediction needs the signed row identity and the scan geometry from each dataset. The combined endpoint is made only after every accepted dataset has its own final `native_dyn_calc.csv`.
 
 For each dataset, GROND runs the same row-contract checks and nuisance searches it uses for one crystal. Transform scouting, hand checks, thickness, thickness-gradient, frame offset, row-resolution terms, absorption-like terms, Sg jitter, detector-position scales, and sigma behavior are fitted independently. The shared structure model supplies the atomic scattering factors for every dataset, but the nuisance model remains dataset-specific.
 
