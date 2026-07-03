@@ -373,7 +373,7 @@ def write_policy_artifacts(policy: Mapping, out_dir: Path) -> dict:
         "",
         "This gate decides which crystals should carry raw-row regularization weights and which should only add endpoint completeness. Downweighting is implemented as sigma inflation, so marginal datasets contribute less to weighted residuals without being silently deleted.",
         "",
-        "| dataset | action | raw weight | endpoint weight | rows | unique HKL | unique gain | R1all | wR2all | CC | reason |",
+        "| dataset | action | raw weight | endpoint weight | rows | unique HKL | unique gain | row R(I)all | row wR(I)all | CC | reason |",
         "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
     for row in rows:

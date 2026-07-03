@@ -372,7 +372,7 @@ def report_markdown(result: dict) -> str:
     lines.append("")
     lines.append("For updated-q cycles, native row metrics are aligned to the LS1 endpoint by using the next cycle's q recomputation where available. The final cycle has no post-step native recheck unless another cycle is run.")
     lines.append("")
-    lines.extend(["| cycle | native check | native R1all % | native wR2all all/work/free % | Born wR2all % | endpoint R1all % | endpoint wR2all % | GooF |", "|---|---|---:|---:|---:|---:|---:|---:|"])
+    lines.extend(["| cycle | native check | row R(I)all % | row wR(I)all/work/free % | Born row wR(I)all % | endpoint R1(F)all % | endpoint wR2(F^2)all % | GooF |", "|---|---|---:|---:|---:|---:|---:|---:|"])
     runs = updated.get("runs", [])
     for idx, rec in enumerate(runs):
         inferred_endpoint = runs[idx + 1].get("metrics") if idx + 1 < len(runs) else {}
@@ -387,7 +387,7 @@ def report_markdown(result: dict) -> str:
             f"{pct(endpoint_m.get('endpoint_wR2_all'))} | "
             f"{num(endpoint_m.get('endpoint_GooF'))} |"
         )
-    lines.extend(["", "## Controls", "", "| control | status | native wR2all all/work/free % | endpoint wR2all % | q rows | logq corr | notes |", "|---|---:|---:|---:|---:|---:|---|"])
+    lines.extend(["", "## Controls", "", "| control | status | row wR(I)all/work/free % | endpoint wR2(F^2)all % | q rows | logq corr | notes |", "|---|---:|---:|---:|---:|---:|---|"])
     for ctrl in result.get("controls", []):
         m = ctrl.get("metrics") or {}
         status = ctrl.get("returncode", "")
@@ -411,7 +411,7 @@ def report_markdown(result: dict) -> str:
         "",
         "## Interpretation",
         "",
-        "Updated-q should beat q=1/Born and frozen-q controls on native row-level metrics. If frozen-q is essentially identical to updated-q, the fixed-point update is not doing much for this case. If native polish improves native wR2all by more than about 0.5-1.0 percentage point or causes chemically meaningful shifts, LS1 should be treated as a preconditioner rather than the endpoint.",
+        "Updated-q should beat q=1/Born and frozen-q controls on row-level intensity metrics. If frozen-q is essentially identical to updated-q, the fixed-point update is not doing much for this case. If native polish improves row wR(I)all by more than about 0.5-1.0 percentage point or causes chemically meaningful shifts, LS1 should be treated as a preconditioner rather than the endpoint.",
         "",
         "The shuffled-q controls permute row-space log(Idyn/Iborn) before normal scale fitting and endpoint export. Global shuffle destroys all row identity; shell shuffle preserves the resolution distribution; shell+scan shuffle preserves both resolution and local scan/block distribution while still breaking row identity.",
     ])
@@ -453,7 +453,7 @@ def main() -> None:
     ap.add_argument("--post-bloch-sigma-max-scale", type=float, default=4.0)
     ap.add_argument("--rescale", choices=["median-iobs", "none"], default="median-iobs")
     ap.add_argument("--cache-compression", choices=["compressed", "none"], default="none")
-    ap.add_argument("--best-cycle-tolerance", type=float, default=0.001, help="Earliest cycle within this native wR2all absolute fraction of the best cycle is selected.")
+    ap.add_argument("--best-cycle-tolerance", type=float, default=0.001, help="Earliest cycle within this row wR(I)all absolute fraction of the best cycle is selected.")
     ap.add_argument("--q-control-seed", type=int, default=12345)
     ap.add_argument("--q-control-shells", type=int, default=10)
     ap.add_argument("--skip-controls", action="store_true")

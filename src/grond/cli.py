@@ -137,10 +137,10 @@ def _print_stage_metrics(cmd: list[str]) -> None:
     if dyn_all:
         nuisance = best_native.get("nuisance") or {}
         print(
-            "  raw rows:",
-            f"R1all={_percent(dyn_all.get('R1_all'))}",
-            f"R1strong={_percent(dyn_all.get('R1_gt'))}",
-            f"wR2all={_percent(dyn_all.get('wR2_all'))}",
+            "  row I:",
+            f"R(I)all={_percent(dyn_all.get('R1_all'))}",
+            f"R(I)strong={_percent(dyn_all.get('R1_gt'))}",
+            f"wR(I)all={_percent(dyn_all.get('wR2_all'))}",
             f"CC={safe_float(dyn_all.get('CC'), float('nan')):.5f}",
             f"rowB={safe_float(nuisance.get('row_resolution_b'), 0.0):.3g}",
             flush=True,
@@ -158,9 +158,9 @@ def _print_stage_metrics(cmd: list[str]) -> None:
         print(
             "  SHELXL endpoint:",
             *endpoint_bits,
-            f"R1gt={_percent(shelxl.get('R1_gt'))}",
-            f"R1all={_percent(shelxl.get('R1_all'))}",
-            f"wR2all={_percent(shelxl.get('wR2_all'))}",
+            f"R1(F)gt={_percent(shelxl.get('R1_gt'))}",
+            f"R1(F)all={_percent(shelxl.get('R1_all'))}",
+            f"wR2(F^2)all={_percent(shelxl.get('wR2_all'))}",
             f"Rint={_percent(shelxl.get('Rint'))}",
             f"N={shelxl.get('N_all', shelxl.get('unique', 'n/a'))}",
             flush=True,
@@ -2951,6 +2951,7 @@ def run_publication_endpoint_chooser(prep: PrepConfig, result: dict, args: argpa
         max_modulation_p95=args.publication_endpoint_max_modulation_p95,
         publication_goof_min=args.endpoint_calibration_goof_min,
         publication_goof_max=args.endpoint_calibration_goof_max,
+        allow_npd=bool(getattr(args, "publication_allow_npd", False)),
     )
 
 
@@ -2999,6 +3000,11 @@ def _publication_model_endpoint_candidate(result: Mapping[str, object]) -> dict[
         "GooF": details.get("GooF"),
         "N_gt": details.get("N_gt"),
         "N_all": details.get("N_all"),
+        "npd_count": details.get("npd_count"),
+        "split_count": details.get("split_count"),
+        "npd_atoms": details.get("npd_atoms"),
+        "has_npd": details.get("has_npd"),
+        "has_split_warnings": details.get("has_split_warnings"),
         "hkl": str(hkl) if hkl.exists() else "",
         "lst": str(lst),
         "res": str(res),
@@ -3088,6 +3094,8 @@ def run_endpoint_calibration(prep: PrepConfig, result: dict, args: argparse.Name
         "--instability-u",
         f"{getattr(args, 'instability_u', 0.01):g}",
     ]
+    if bool(getattr(args, "publication_allow_npd", False)):
+        cmd.append("--publication-allow-npd")
     try:
         run_logged(cmd, logs, f"{safe_label(label)}_endpoint_calibration", dry_run=False)
     except subprocess.CalledProcessError as exc:
@@ -5189,6 +5197,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             "enabled": args.publication_endpoint_chooser,
             "min_hkl_safe_factor": args.publication_endpoint_min_hkl_safe_factor,
             "max_modulation_p95": args.publication_endpoint_max_modulation_p95,
+            "allow_npd": args.publication_allow_npd,
         },
         "endpoint_calibration": {
             "mode": args.endpoint_calibration,
@@ -5204,6 +5213,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             "free_wr2_tolerance": args.endpoint_calibration_free_wr2_tolerance,
             "sigma_min_scale": args.endpoint_calibration_sigma_min_scale,
             "sigma_max_scale": args.endpoint_calibration_sigma_max_scale,
+            "allow_npd": args.publication_allow_npd,
         },
     }
     (Path(args.out_dir) / "run_config.json").write_text(json.dumps(config, indent=2) + "\n")
@@ -6435,19 +6445,19 @@ def _quick_source_shelx_control_text(controls: Mapping[str, object]) -> str:
 
 
 def _quick_row_weight_definition(nuisance: Mapping[str, object]) -> str:
-    """Return the exact row wR2 weighting convention used by the final native report."""
+    """Return the exact row intensity weighting convention used by the final native report."""
 
     a = nuisance.get("native_wght_a", nuisance.get("wght_a_grid"))
     b = nuisance.get("native_wght_b", nuisance.get("wght_b_grid"))
     return (
-        "Raw-row `wR2all` is `sqrt(sum_r w_r (Iobs_r - Icalc_r)^2 / sum_r w_r Iobs_r^2)` "
+        "Raw signed-row intensity `wR(I)all` is `sqrt(sum_r w_r (Iobs_r - Icalc_r)^2 / sum_r w_r Iobs_r^2)` "
         "over signed observation rows. For dynamical rows `Icalc_r = Idyn_r`; for matched Born rows "
         "`Icalc_r = Iborn_r` under the same row contract, thickness, geometry, scales, and sigma model. "
         "`w_r = 1 / [sigma_eff_r^2 + (a P_r)^2 + b P_r]`, with "
         "`P_r = (max(Iobs_r, 0) + 2 max(Icalc_r, 0)) / 3`. "
         f"This run reports final native row weights `a={_quick_number(a, 6)}` and `b={_quick_number(b, 6)}`. "
-        "This is the raw signed-row observation-space statistic to compare with native dynamical-refinement row "
-        "targets; it is not SHELXL's merged-reflection `wR2all`."
+        "This is the signed-row intensity statistic to compare with native dynamical-refinement row "
+        "targets; it is not SHELXL's merged-reflection `wR2(F^2)all`."
     )
 
 
@@ -6493,20 +6503,20 @@ def _format_terminal_finish_summary(payload: Mapping[str, object]) -> str:
     endpoint_lines = ["SHELXL endpoint" if publication_is_direct_ls1 else "SHELXL endpoints"]
     if publication_is_direct_ls1:
         endpoint_lines.append(
-            f"  Publication endpoint (direct LS1 corrected-HKL): R1gt {_quick_percent(endpoint.get('R1gt'))}, R1all {_quick_percent(endpoint.get('R1all'))}, wR2all {_quick_percent(endpoint.get('wR2all'))}, GooF {_quick_number(endpoint.get('GooF'), 3)}; NPD {endpoint.get('npd_count', 'n/a')}; split {endpoint.get('split_count', 'n/a')}"
+            f"  Publication endpoint (direct LS1 corrected-HKL): R1(F)gt {_quick_percent(endpoint.get('R1gt'))}, R1(F)all {_quick_percent(endpoint.get('R1all'))}, wR2(F^2)all {_quick_percent(endpoint.get('wR2all'))}, GooF {_quick_number(endpoint.get('GooF'), 3)}; NPD {endpoint.get('npd_count', 'n/a')}; split {endpoint.get('split_count', 'n/a')}"
         )
     else:
         endpoint_lines.extend(
             [
-                f"  Direct LS1 corrected-HKL candidate: R1gt {_quick_percent(feedback.get('R1gt'))}, R1all {_quick_percent(feedback.get('R1all'))}, wR2all {_quick_percent(feedback.get('wR2all'))}, GooF {_quick_number(feedback.get('GooF'), 3)}; NPD {feedback.get('npd_count', 'n/a')}; split {feedback.get('split_count', 'n/a')}",
-                f"  Publication endpoint: R1gt {_quick_percent(endpoint.get('R1gt'))}, R1all {_quick_percent(endpoint.get('R1all'))}, wR2all {_quick_percent(endpoint.get('wR2all'))}, GooF {_quick_number(endpoint.get('GooF'), 3)}; NPD {endpoint.get('npd_count', 'n/a')}; split {endpoint.get('split_count', 'n/a')}",
+                f"  Direct LS1 corrected-HKL candidate: R1(F)gt {_quick_percent(feedback.get('R1gt'))}, R1(F)all {_quick_percent(feedback.get('R1all'))}, wR2(F^2)all {_quick_percent(feedback.get('wR2all'))}, GooF {_quick_number(feedback.get('GooF'), 3)}; NPD {feedback.get('npd_count', 'n/a')}; split {feedback.get('split_count', 'n/a')}",
+                f"  Publication endpoint: R1(F)gt {_quick_percent(endpoint.get('R1gt'))}, R1(F)all {_quick_percent(endpoint.get('R1all'))}, wR2(F^2)all {_quick_percent(endpoint.get('wR2all'))}, GooF {_quick_number(endpoint.get('GooF'), 3)}; NPD {endpoint.get('npd_count', 'n/a')}; split {endpoint.get('split_count', 'n/a')}",
             ]
         )
     if diagnostic and diagnostic.get("R1all") is not None:
         reasons = diagnostic.get("rejection_reasons")
         first_reason = str(reasons[0]) if isinstance(reasons, list) and reasons else "diagnostic-only"
         endpoint_lines.append(
-            f"  Diagnostic endpoint not promoted: {diagnostic.get('source_kind', 'n/a')} R1all {_quick_percent(diagnostic.get('R1all'))}, wR2all {_quick_percent(diagnostic.get('wR2all'))}, GooF {_quick_number(diagnostic.get('GooF'), 3)}; reason: {first_reason}"
+            f"  Diagnostic endpoint not promoted: {diagnostic.get('source_kind', 'n/a')} R1(F)all {_quick_percent(diagnostic.get('R1all'))}, wR2(F^2)all {_quick_percent(diagnostic.get('wR2all'))}, GooF {_quick_number(diagnostic.get('GooF'), 3)}; reason: {first_reason}"
         )
     endpoint_lines.extend(
         [
@@ -6527,15 +6537,15 @@ def _format_terminal_finish_summary(payload: Mapping[str, object]) -> str:
         f"  HKL transform: {transform}",
         "",
         "Starting SHELXL reference",
-        f"  R1gt {_quick_percent(input_shelxl.get('R1gt'))}, R1all {_quick_percent(input_shelxl.get('R1all'))}, wR2all {_quick_percent(input_shelxl.get('wR2all'))}, GooF {_quick_number(input_shelxl.get('GooF'), 3)}",
+        f"  R1(F)gt {_quick_percent(input_shelxl.get('R1gt'))}, R1(F)all {_quick_percent(input_shelxl.get('R1all'))}, wR2(F^2)all {_quick_percent(input_shelxl.get('wR2all'))}, GooF {_quick_number(input_shelxl.get('GooF'), 3)}",
         f"  Parameters/restraints {input_shelxl.get('parameters', 'n/a')} / {input_shelxl.get('restraints', 'n/a')}; NPD {input_shelxl.get('npd_count', 'n/a')}; split {input_shelxl.get('split_count', 'n/a')}",
         "",
-        "Row-level statistics",
-        f"  Input dynamical rows: R1all {_quick_percent(input_model.get('row_R1all'))}, wR2all {_quick_percent(input_model.get('row_wR2all'))}",
-        f"  Input matched Born rows: R1all {_quick_percent(input_model.get('born_R1all'))}, wR2all {_quick_percent(input_model.get('born_wR2all'))}",
-        f"  Final dynamical rows: R1all {_quick_percent(final_row.get('row_R1all'))}, wR2all {_quick_percent(final_row.get('row_wR2all'))}, free wR2all {_quick_percent(final_row.get('row_free_wR2all'))}",
-        f"  Final matched Born rows: R1all {_quick_percent(final_row.get('born_R1all'))}, wR2all {_quick_percent(final_row.get('born_wR2all'))}, free wR2all {_quick_percent(final_row.get('born_free_wR2all'))}",
-        f"  Change: R1all {_quick_delta_percent(input_model.get('row_R1all'), final_row.get('row_R1all'))}, wR2all {_quick_delta_percent(input_model.get('row_wR2all'), final_row.get('row_wR2all'))}",
+        "Row-level intensity statistics",
+        f"  Input dynamical rows: R(I)all {_quick_percent(input_model.get('row_R1all'))}, wR(I)all {_quick_percent(input_model.get('row_wR2all'))}",
+        f"  Input matched Born rows: R(I)all {_quick_percent(input_model.get('born_R1all'))}, wR(I)all {_quick_percent(input_model.get('born_wR2all'))}",
+        f"  Final dynamical rows: R(I)all {_quick_percent(final_row.get('row_R1all'))}, wR(I)all {_quick_percent(final_row.get('row_wR2all'))}, free wR(I)all {_quick_percent(final_row.get('row_free_wR2all'))}",
+        f"  Final matched Born rows: R(I)all {_quick_percent(final_row.get('born_R1all'))}, wR(I)all {_quick_percent(final_row.get('born_wR2all'))}, free wR(I)all {_quick_percent(final_row.get('born_free_wR2all'))}",
+        f"  Change: R(I)all {_quick_delta_percent(input_model.get('row_R1all'), final_row.get('row_R1all'))}, wR(I)all {_quick_delta_percent(input_model.get('row_wR2all'), final_row.get('row_wR2all'))}",
         "",
         *endpoint_lines,
         "",
@@ -6717,7 +6727,7 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
             "",
             "These are the conventional SHELXL values parsed from the supplied starting model's sibling `.lst` file, with `.log` accepted as a front-end fallback. GROND does not rerun this baseline here; if neither file is present, the conventional starting endpoint is reported as unavailable.",
             "",
-            "| RES | HKL | stats file found | R1gt | R1all | wR2all | GooF | parameters | restraints | pathology | WGHT |",
+            "| RES | HKL | stats file found | R1(F)gt | R1(F)all | wR2(F^2)all | GooF | parameters | restraints | pathology | WGHT |",
             "|---|---|---:|---:|---:|---:|---:|---:|---:|---|---|",
             "| "
             + " | ".join(
@@ -6763,21 +6773,21 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
             "",
             "These are the first adaptive-screen row-space statistics for the supplied start model after GROND has selected the row contract used by the run. They are the practical input-model comparator, not final endpoint statistics.",
             "",
-            "| model state | dyn R1all | dyn wR2all | dyn free wR2all | matched Born R1all | matched Born wR2all |",
+            "| model state | dyn R(I)all | dyn wR(I)all | dyn free wR(I)all | matched Born R(I)all | matched Born wR(I)all |",
             "|---|---:|---:|---:|---:|---:|",
             f"| input adaptive screen | `{_quick_percent(_quick_dyn_metric(screen_summary, 'all', 'R1_all'))}` | `{_quick_percent(_quick_dyn_metric(screen_summary, 'all', 'wR2_all'))}` | `{_quick_percent(_quick_dyn_metric(screen_summary, 'free', 'wR2_all'))}` | `{_quick_percent(_quick_born_metric(screen_summary, 'all', 'R1_all'))}` | `{_quick_percent(_quick_born_metric(screen_summary, 'all', 'wR2_all'))}` |",
             "",
             "## Master Comparison Matrix",
             "",
-            "This table separates the objects users need to compare. Rows labeled `raw signed rows` are observation-space intensity residuals on the GROND row contract. Rows labeled `merged SHELXL endpoint` are conventional corrected-HKL refinement endpoints. The two `wR2all` columns have the same name because the communities use that name, but they are different targets and should not be compared as if they had one denominator.",
+            "This table separates the objects users need to compare. Rows labeled `raw signed rows (I)` are observation-space intensity residuals on the GROND row contract and should be compared with JANA-style row statistics. Rows labeled `merged SHELXL endpoint (F/F^2)` are conventional corrected-HKL refinement endpoints, where SHELXL reports R1 on F and wR2 on F^2. Do not compare row `wR(I)all` and endpoint `wR2(F^2)all` as if they had one denominator.",
             "",
-            "| object | target class | R1gt | R1all | wR2all | free/held-out wR2all | GooF | N/reflections | parameters/scales | source and notes |",
+            "| object | target class | Rgt | Rall | weighted R | free/held-out weighted R | GooF | N/reflections | parameters/scales | source and notes |",
             "|---|---|---:|---:|---:|---:|---:|---:|---|---|",
             "| "
             + " | ".join(
                 [
                     "input conventional SHELXL",
-                    "merged SHELXL endpoint",
+                    "merged SHELXL endpoint (F/F^2)",
                     _quick_percent(input_shelxl.get("R1_gt")),
                     _quick_percent(input_shelxl.get("R1_all")),
                     _quick_percent(input_shelxl.get("wR2_all")),
@@ -6793,7 +6803,7 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
             + " | ".join(
                 [
                     "input matched Born rows",
-                    "raw signed rows, matched Born",
+                    "raw signed rows (I), matched Born",
                     "n/a",
                     _quick_percent(_quick_born_metric(screen_summary, "all", "R1_all")),
                     _quick_percent(_quick_born_metric(screen_summary, "all", "wR2_all")),
@@ -6809,7 +6819,7 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
             + " | ".join(
                 [
                     "input dynamical rows",
-                    "raw signed rows, Bloch dynamical",
+                    "raw signed rows (I), Bloch dynamical",
                     "n/a",
                     _quick_percent(_quick_dyn_metric(screen_summary, "all", "R1_all")),
                     _quick_percent(_quick_dyn_metric(screen_summary, "all", "wR2_all")),
@@ -6825,7 +6835,7 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
             + " | ".join(
                 [
                     "final matched Born rows",
-                    "raw signed rows, matched Born",
+                    "raw signed rows (I), matched Born",
                     "n/a",
                     _quick_percent(_quick_metric(native_metrics, "all", "born", "R1_all")),
                     _quick_percent(_quick_metric(native_metrics, "all", "born", "wR2_all")),
@@ -6841,7 +6851,7 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
             + " | ".join(
                 [
                     "final dynamical rows",
-                    "raw signed rows, Bloch dynamical",
+                    "raw signed rows (I), Bloch dynamical",
                     "n/a",
                     _quick_percent(_quick_metric(native_metrics, "all", "dyn", "R1_all")),
                     _quick_percent(_quick_metric(native_metrics, "all", "dyn", "wR2_all")),
@@ -6857,7 +6867,7 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
             + " | ".join(
                 [
                     "direct LS1 corrected-HKL candidate",
-                    "merged SHELXL endpoint",
+                    "merged SHELXL endpoint (F/F^2)",
                     _quick_percent(final_feedback_shelxl.get("R1_gt")),
                     _quick_percent(final_feedback_shelxl.get("R1_all")),
                     _quick_percent(final_feedback_shelxl.get("wR2_all")),
@@ -6873,7 +6883,7 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
             + " | ".join(
                 [
                     "best diagnostic endpoint, not promoted",
-                    "merged SHELXL endpoint",
+                    "merged SHELXL endpoint (F/F^2)",
                     _quick_percent(diagnostic_shelxl.get("R1_gt")),
                     _quick_percent(diagnostic_shelxl.get("R1_all")),
                     _quick_percent(diagnostic_shelxl.get("wR2_all")),
@@ -6889,7 +6899,7 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
             + " | ".join(
                 [
                     "publication corrected-HKL endpoint",
-                    "merged SHELXL endpoint",
+                    "merged SHELXL endpoint (F/F^2)",
                     _quick_percent(publication_shelxl.get("R1_gt")),
                     _quick_percent(publication_shelxl.get("R1_all")),
                     _quick_percent(publication_shelxl.get("wR2_all")),
@@ -6906,7 +6916,7 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
             "",
             "Negative values are improvements for R factors. Deltas are only meaningful within the same target class.",
             "",
-            "| comparison | target class | dR1all | dwR2all | d free/held-out wR2all | interpretation |",
+            "| comparison | target class | dRall | d weighted R | d free/held-out weighted R | interpretation |",
             "|---|---|---:|---:|---:|---|",
             "| "
             + " | ".join(
@@ -6975,7 +6985,7 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
             + " | ".join(
                 [
                     "publication endpoint minus input conventional SHELXL",
-                    "merged SHELXL endpoint",
+                    "merged SHELXL endpoint (F/F^2)",
                     _quick_delta_percent(input_shelxl.get("R1_all"), publication_shelxl.get("R1_all")),
                     _quick_delta_percent(input_shelxl.get("wR2_all"), publication_shelxl.get("wR2_all")),
                     "n/a",
@@ -6987,7 +6997,7 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
             + " | ".join(
                 [
                     "direct LS1 endpoint minus input conventional SHELXL",
-                    "merged SHELXL endpoint",
+                    "merged SHELXL endpoint (F/F^2)",
                     _quick_delta_percent(input_shelxl.get("R1_all"), final_feedback_shelxl.get("R1_all")),
                     _quick_delta_percent(input_shelxl.get("wR2_all"), final_feedback_shelxl.get("wR2_all")),
                     "n/a",
@@ -7008,7 +7018,7 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
             )
             + " |",
             "",
-            "## Row-Level wR2all Definition",
+            "## Row Intensity R-Factor Definitions",
             "",
             _quick_row_weight_definition(nuisance),
             "",
@@ -7020,8 +7030,8 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
             f"| frame and rocking | frame offset `{_quick_number(nuisance.get('frame_offset', nuisance.get('frame_offset_grid')), 3)}`; Sg window `{metadata.get('sg_window', 'n/a')}`; matrix `{nuisance.get('matrix_convention', 'n/a')}` |",
             f"| absorption and jitter | absorption `{nuisance.get('absorption_mode', nuisance.get('absorption_mode_grid', 'n/a'))}`; frac `{_quick_number(nuisance.get('absorption_frac', nuisance.get('absorption_frac_grid')), 4)}`; jitter `{nuisance.get('sg_jitter_mode', nuisance.get('sg_jitter_mode_grid', 'n/a'))}` |",
             f"| native row weights | a `{_quick_number(nuisance.get('native_wght_a', nuisance.get('wght_a_grid')), 6)}`; b `{_quick_number(nuisance.get('native_wght_b', nuisance.get('wght_b_grid')), 6)}` |",
-            f"| row dyn R1all / wR2all / free wR2all | `{_quick_percent(_quick_metric(native_metrics, 'all', 'dyn', 'R1_all'))}` / `{_quick_percent(_quick_metric(native_metrics, 'all', 'dyn', 'wR2_all'))}` / `{_quick_percent(_quick_metric(native_metrics, 'free', 'dyn', 'wR2_all'))}` |",
-            f"| row Born R1all / wR2all / free wR2all | `{_quick_percent(_quick_metric(native_metrics, 'all', 'born', 'R1_all'))}` / `{_quick_percent(_quick_metric(native_metrics, 'all', 'born', 'wR2_all'))}` / `{_quick_percent(_quick_metric(native_metrics, 'free', 'born', 'wR2_all'))}` |",
+            f"| row dyn R(I)all / wR(I)all / free wR(I)all | `{_quick_percent(_quick_metric(native_metrics, 'all', 'dyn', 'R1_all'))}` / `{_quick_percent(_quick_metric(native_metrics, 'all', 'dyn', 'wR2_all'))}` / `{_quick_percent(_quick_metric(native_metrics, 'free', 'dyn', 'wR2_all'))}` |",
+            f"| row Born R(I)all / wR(I)all / free wR(I)all | `{_quick_percent(_quick_metric(native_metrics, 'all', 'born', 'R1_all'))}` / `{_quick_percent(_quick_metric(native_metrics, 'all', 'born', 'wR2_all'))}` / `{_quick_percent(_quick_metric(native_metrics, 'free', 'born', 'wR2_all'))}` |",
             f"| q p05 / median / p95 | `{_quick_number(best_endpoint.get('q_p05'), 3)}` / `{_quick_number(best_endpoint.get('q_median'), 3)}` / `{_quick_number(best_endpoint.get('q_p95'), 3)}` |",
             "",
         ]
@@ -7031,7 +7041,7 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
         [
             "## Completeness, Integration, And Row/MR Statistics",
             "",
-            "These rows keep integration/completeness-style quantities separate from endpoint refinement. `Nobs/Nall` is the accepted observed-row coverage at that resolution gate; the MR columns are merged-row diagnostics from the frozen row table, not SHELXL least-squares statistics.",
+            "These rows keep integration/completeness-style quantities separate from endpoint refinement. `Nobs/Nall` is the accepted observed-row coverage at that resolution gate; `Rall`, `wRall`, `MRall`, and `MwRall` are intensity-space row/MR diagnostics from the frozen row table, not SHELXL least-squares statistics.",
             "",
             "| endpoint | dmin A | scales | Nobs/Nall | dyn Rall | dyn wRall | dyn MRall | dyn MwRall | kin Rall | kin wRall |",
             "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
@@ -7074,7 +7084,7 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
             "",
             "This is the endpoint GROND currently recommends opening for the final structure. The endpoint-calibration table below remains the conservative scale-replay audit.",
             "",
-            "| source | kind/spec | WGHT | scales | R1gt | R1all | wR2all | GooF | params/restraints | pathology |",
+            "| source | kind/spec | WGHT | scales | R1(F)gt | R1(F)all | wR2(F^2)all | GooF | params/restraints | pathology |",
             "|---|---|---|---:|---:|---:|---:|---:|---:|---|",
             "| "
             + " | ".join(
@@ -7104,7 +7114,7 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
             "",
             f"Selection policy: `{selection_policy}`; information criterion: `{information_criterion}`.",
             "",
-            "| branch | spec | WGHT | scales | R1all | wR2all | GooF | row-free wR2all | sigma scale |",
+            "| branch | spec | WGHT | scales | R1(F)all | wR2(F^2)all | GooF | row-free wR(I)all | sigma scale |",
             "|---|---|---|---:|---:|---:|---:|---:|---:|",
         ]
     )
@@ -7283,26 +7293,26 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
         "",
         "## Statistics",
         "",
-        "Rows labeled `raw signed rows` report signed-row intensity residuals. Endpoint rows report merged corrected-HKL SHELXL refinement statistics. Read `QUICK_STATS.md` for the full definition, denominator, and delta matrix.",
+        "Rows labeled `raw signed rows (I)` report signed-row intensity residuals. Endpoint rows report merged corrected-HKL SHELXL refinement statistics, with R1 on F and wR2 on F^2. Read `QUICK_STATS.md` for the full definition, denominator, and delta matrix.",
         "",
-        "| state | target class | R1gt | R1all | wR2all | free/held-out wR2all | GooF | parameters | NPD/split |",
+        "| state | target class | Rgt | Rall | weighted R | free/held-out weighted R | GooF | parameters | NPD/split |",
         "|---|---|---:|---:|---:|---:|---:|---:|---:|",
-        f"| input conventional SHELXL | merged SHELXL endpoint | `{_quick_percent(input_shelxl.get('R1_gt'))}` | `{_quick_percent(input_shelxl.get('R1_all'))}` | `{_quick_percent(input_shelxl.get('wR2_all'))}` | n/a | `{_quick_number(input_shelxl.get('GooF'), 3)}` | `{input_shelxl.get('parameters', 'n/a')}` | `{input_shelxl.get('npd_count', 'n/a')}` / `{input_shelxl.get('split_count', 'n/a')}` |",
-        f"| input dynamical rows | raw signed rows | n/a | `{_quick_percent(input_row_r1)}` | `{_quick_percent(input_row_wr2)}` | `{_quick_percent(_quick_dyn_metric(screen_summary, 'free', 'wR2_all'))}` | n/a | n/a | n/a |",
-        f"| input matched Born rows | raw signed rows | n/a | `{_quick_percent(_quick_born_metric(screen_summary, 'all', 'R1_all'))}` | `{_quick_percent(_quick_born_metric(screen_summary, 'all', 'wR2_all'))}` | `{_quick_percent(_quick_born_metric(screen_summary, 'free', 'wR2_all'))}` | n/a | n/a | n/a |",
-        f"| final dynamical rows | raw signed rows | n/a | `{_quick_percent(final_row_r1)}` | `{_quick_percent(final_row_wr2)}` | `{_quick_percent(final_free_wr2)}` | n/a | n/a | n/a |",
-        f"| final matched Born rows | raw signed rows | n/a | `{_quick_percent(_quick_metric(native_metrics, 'all', 'born', 'R1_all'))}` | `{_quick_percent(_quick_metric(native_metrics, 'all', 'born', 'wR2_all'))}` | `{_quick_percent(_quick_metric(native_metrics, 'free', 'born', 'wR2_all'))}` | n/a | n/a | n/a |",
-        f"| direct LS1 corrected-HKL candidate | merged SHELXL endpoint | `{_quick_percent(final_feedback_shelxl.get('R1_gt'))}` | `{_quick_percent(final_feedback_shelxl.get('R1_all'))}` | `{_quick_percent(final_feedback_shelxl.get('wR2_all'))}` | n/a | `{_quick_number(final_feedback_shelxl.get('GooF'), 3)}` | `{final_feedback_shelxl.get('parameters', 'n/a')}` | `{final_feedback_shelxl.get('npd_count', 'n/a')}` / `{final_feedback_shelxl.get('split_count', 'n/a')}` |",
-        f"| best diagnostic endpoint, not promoted | merged SHELXL endpoint | `{_quick_percent(diagnostic_shelxl.get('R1_gt'))}` | `{_quick_percent(diagnostic_shelxl.get('R1_all'))}` | `{_quick_percent(diagnostic_shelxl.get('wR2_all'))}` | n/a | `{_quick_number(diagnostic_shelxl.get('GooF'), 3)}` | `{diagnostic_shelxl.get('parameters', 'n/a')}` | `{diagnostic_shelxl.get('npd_count', 'n/a')}` / `{diagnostic_shelxl.get('split_count', 'n/a')}` |" if diagnostic_endpoint else "",
-        f"| publication corrected-HKL endpoint | merged SHELXL endpoint | `{_quick_percent(publication_shelxl.get('R1_gt'))}` | `{_quick_percent(publication_shelxl.get('R1_all'))}` | `{_quick_percent(publication_shelxl.get('wR2_all'))}` | `{_quick_percent(selected_row.get('native_free_wR2_all'))}` | `{_quick_number(publication_shelxl.get('GooF'), 3)}` | `{publication_shelxl.get('parameters', 'n/a')}` | `{publication_shelxl.get('npd_count', 'n/a')}` / `{publication_shelxl.get('split_count', 'n/a')}` |",
+        f"| input conventional SHELXL | merged SHELXL endpoint (F/F^2) | `{_quick_percent(input_shelxl.get('R1_gt'))}` | `{_quick_percent(input_shelxl.get('R1_all'))}` | `{_quick_percent(input_shelxl.get('wR2_all'))}` | n/a | `{_quick_number(input_shelxl.get('GooF'), 3)}` | `{input_shelxl.get('parameters', 'n/a')}` | `{input_shelxl.get('npd_count', 'n/a')}` / `{input_shelxl.get('split_count', 'n/a')}` |",
+        f"| input dynamical rows | raw signed rows (I) | n/a | `{_quick_percent(input_row_r1)}` | `{_quick_percent(input_row_wr2)}` | `{_quick_percent(_quick_dyn_metric(screen_summary, 'free', 'wR2_all'))}` | n/a | n/a | n/a |",
+        f"| input matched Born rows | raw signed rows (I) | n/a | `{_quick_percent(_quick_born_metric(screen_summary, 'all', 'R1_all'))}` | `{_quick_percent(_quick_born_metric(screen_summary, 'all', 'wR2_all'))}` | `{_quick_percent(_quick_born_metric(screen_summary, 'free', 'wR2_all'))}` | n/a | n/a | n/a |",
+        f"| final dynamical rows | raw signed rows (I) | n/a | `{_quick_percent(final_row_r1)}` | `{_quick_percent(final_row_wr2)}` | `{_quick_percent(final_free_wr2)}` | n/a | n/a | n/a |",
+        f"| final matched Born rows | raw signed rows (I) | n/a | `{_quick_percent(_quick_metric(native_metrics, 'all', 'born', 'R1_all'))}` | `{_quick_percent(_quick_metric(native_metrics, 'all', 'born', 'wR2_all'))}` | `{_quick_percent(_quick_metric(native_metrics, 'free', 'born', 'wR2_all'))}` | n/a | n/a | n/a |",
+        f"| direct LS1 corrected-HKL candidate | merged SHELXL endpoint (F/F^2) | `{_quick_percent(final_feedback_shelxl.get('R1_gt'))}` | `{_quick_percent(final_feedback_shelxl.get('R1_all'))}` | `{_quick_percent(final_feedback_shelxl.get('wR2_all'))}` | n/a | `{_quick_number(final_feedback_shelxl.get('GooF'), 3)}` | `{final_feedback_shelxl.get('parameters', 'n/a')}` | `{final_feedback_shelxl.get('npd_count', 'n/a')}` / `{final_feedback_shelxl.get('split_count', 'n/a')}` |",
+        f"| best diagnostic endpoint, not promoted | merged SHELXL endpoint (F/F^2) | `{_quick_percent(diagnostic_shelxl.get('R1_gt'))}` | `{_quick_percent(diagnostic_shelxl.get('R1_all'))}` | `{_quick_percent(diagnostic_shelxl.get('wR2_all'))}` | n/a | `{_quick_number(diagnostic_shelxl.get('GooF'), 3)}` | `{diagnostic_shelxl.get('parameters', 'n/a')}` | `{diagnostic_shelxl.get('npd_count', 'n/a')}` / `{diagnostic_shelxl.get('split_count', 'n/a')}` |" if diagnostic_endpoint else "",
+        f"| publication corrected-HKL endpoint | merged SHELXL endpoint (F/F^2) | `{_quick_percent(publication_shelxl.get('R1_gt'))}` | `{_quick_percent(publication_shelxl.get('R1_all'))}` | `{_quick_percent(publication_shelxl.get('wR2_all'))}` | `{_quick_percent(selected_row.get('native_free_wR2_all'))}` | `{_quick_number(publication_shelxl.get('GooF'), 3)}` | `{publication_shelxl.get('parameters', 'n/a')}` | `{publication_shelxl.get('npd_count', 'n/a')}` / `{publication_shelxl.get('split_count', 'n/a')}` |",
         "",
         "## Deltas",
         "",
-        "| comparison | target class | dR1all | dwR2all | d free/held-out wR2all |",
+        "| comparison | target class | dRall | d weighted R | d free/held-out weighted R |",
         "|---|---|---:|---:|---:|",
-        f"| final dynamical rows minus final matched Born rows | raw signed rows | `{_quick_delta_percent(_quick_metric(native_metrics, 'all', 'born', 'R1_all'), _quick_metric(native_metrics, 'all', 'dyn', 'R1_all'))}` | `{_quick_delta_percent(_quick_metric(native_metrics, 'all', 'born', 'wR2_all'), _quick_metric(native_metrics, 'all', 'dyn', 'wR2_all'))}` | `{_quick_delta_percent(_quick_metric(native_metrics, 'free', 'born', 'wR2_all'), _quick_metric(native_metrics, 'free', 'dyn', 'wR2_all'))}` |",
-        f"| final dynamical rows minus input dynamical rows | raw signed rows | `{_quick_delta_percent(input_row_r1, final_row_r1)}` | `{_quick_delta_percent(input_row_wr2, final_row_wr2)}` | `{_quick_delta_percent(_quick_dyn_metric(screen_summary, 'free', 'wR2_all'), final_free_wr2)}` |",
-        f"| publication endpoint minus input conventional SHELXL | merged SHELXL endpoint | `{_quick_delta_percent(input_shelxl.get('R1_all'), publication_shelxl.get('R1_all'))}` | `{_quick_delta_percent(input_shelxl.get('wR2_all'), publication_shelxl.get('wR2_all'))}` | n/a |",
+        f"| final dynamical rows minus final matched Born rows | raw signed rows (I) | `{_quick_delta_percent(_quick_metric(native_metrics, 'all', 'born', 'R1_all'), _quick_metric(native_metrics, 'all', 'dyn', 'R1_all'))}` | `{_quick_delta_percent(_quick_metric(native_metrics, 'all', 'born', 'wR2_all'), _quick_metric(native_metrics, 'all', 'dyn', 'wR2_all'))}` | `{_quick_delta_percent(_quick_metric(native_metrics, 'free', 'born', 'wR2_all'), _quick_metric(native_metrics, 'free', 'dyn', 'wR2_all'))}` |",
+        f"| final dynamical rows minus input dynamical rows | raw signed rows (I) | `{_quick_delta_percent(input_row_r1, final_row_r1)}` | `{_quick_delta_percent(input_row_wr2, final_row_wr2)}` | `{_quick_delta_percent(_quick_dyn_metric(screen_summary, 'free', 'wR2_all'), final_free_wr2)}` |",
+        f"| publication endpoint minus input conventional SHELXL | merged SHELXL endpoint (F/F^2) | `{_quick_delta_percent(input_shelxl.get('R1_all'), publication_shelxl.get('R1_all'))}` | `{_quick_delta_percent(input_shelxl.get('wR2_all'), publication_shelxl.get('wR2_all'))}` | n/a |",
         "",
         f"**Endpoint warning:** {endpoint_warning}." if endpoint_warning else "",
         "",
@@ -7777,6 +7787,7 @@ def shelx_label_element(label: str) -> str:
 def prepare_push_endpoint_model(args: argparse.Namespace, out_dir: Path) -> tuple[Path, Path | None]:
     """Prepare the start model for an endpoint-push run."""
 
+    out_dir.mkdir(parents=True, exist_ok=True)
     source = Path(args.start_res).expanduser().resolve()
     if args.model_prep == "as-is" and int(args.set_ls_cycles) <= 0:
         return source, None
@@ -7831,11 +7842,51 @@ def prepare_push_endpoint_model(args: argparse.Namespace, out_dir: Path) -> tupl
 
     remove_restraints = args.model_prep in {"no-restraints", "free-h-anis-no-restraints"}
     free_h_anis = args.model_prep == "free-h-anis-no-restraints"
+    adp_stabilized = args.model_prep == "adp-stabilized"
+    npd_diagnostics = _quick_lst_diagnostics(source.with_suffix(".lst"))
+    if not npd_diagnostics.get("exists"):
+        npd_diagnostics = _quick_lst_diagnostics(source.with_suffix(".log"))
+    npd_targets = {str(atom) for atom in (npd_diagnostics.get("npd_atoms") or [])}
+    existing_restraints = {line.split()[0].upper() for line in active if line.split() and line.split()[0].upper() in SHELX_RESTRAINT_COMMANDS}
     new_lines: list[str] = []
     removed_restraints: list[str] = []
     removed_afix = 0
     converted_h: list[dict[str, object]] = []
+    adp_isotropic: list[dict[str, object]] = []
+    adp_restraints_added: list[str] = []
     inserted_rem = False
+    inserted_adp_stabilizers = False
+
+    def add_adp_stabilizers() -> None:
+        nonlocal inserted_adp_stabilizers
+        if inserted_adp_stabilizers or not adp_stabilized:
+            return
+        new_lines.append("REM GROND endpoint-push ADP-stabilized replay branch")
+        new_lines.append("REM GROND endpoint-push keeps/adds ADP restraints and converts listed NPD atoms to isotropic fallback")
+        if npd_targets:
+            new_lines.append("REM GROND endpoint-push NPD atoms: " + " ".join(sorted(npd_targets)))
+        if "RIGU" not in existing_restraints:
+            new_lines.append("RIGU")
+            adp_restraints_added.append("RIGU")
+        if "SIMU" not in existing_restraints:
+            new_lines.append("SIMU 0.04 0.08")
+            adp_restraints_added.append("SIMU 0.04 0.08")
+        if npd_targets and "ISOR" not in existing_restraints:
+            labels = sorted(npd_targets)
+            for offset in range(0, len(labels), 8):
+                command = "ISOR 0.02 0.04 " + " ".join(labels[offset : offset + 8])
+                new_lines.append(command)
+                adp_restraints_added.append(command)
+        inserted_adp_stabilizers = True
+
+    def isotropic_atom_line(toks: list[str], u_value: float) -> str:
+        label = toks[0]
+        sfac = int(toks[1])
+        x, y, z = [float(v) for v in toks[2:5]]
+        occ = float(toks[5])
+        u = max(0.006, min(0.08, abs(float(u_value))))
+        return f"{label:<4} {sfac:>2d} {x:11.6f} {y:11.6f} {z:11.6f} {occ:11.5f} {u:10.5f}"
+
     i = 0
     while i < len(active):
         line = active[i]
@@ -7848,6 +7899,8 @@ def prepare_push_endpoint_model(args: argparse.Namespace, out_dir: Path) -> tupl
                 new_lines.append(f"REM GROND endpoint-push set L.S. {int(args.set_ls_cycles)}")
             inserted_rem = True
 
+        if adp_stabilized and not inserted_adp_stabilizers and (is_shelx_atom_line(line) or key == "HKLF" or key == "END"):
+            add_adp_stabilizers()
         if remove_restraints and key in SHELX_RESTRAINT_COMMANDS:
             removed_restraints.append(line)
             i += 1
@@ -7861,10 +7914,28 @@ def prepare_push_endpoint_model(args: argparse.Namespace, out_dir: Path) -> tupl
             i += 1
             continue
         if key == "END":
+            if adp_stabilized and not inserted_adp_stabilizers:
+                add_adp_stabilizers()
             if free_h_anis:
                 new_lines.append(f"REM GROND endpoint-push free anisotropic H count: {len(converted_h)}")
             new_lines.append("END")
             i += 1
+            continue
+        if adp_stabilized and is_shelx_atom_line(line) and toks[0] in npd_targets:
+            label = toks[0]
+            old_u = float(toks[6]) if len(toks) > 6 else 0.02
+            ueq = old_u
+            consumed = 1
+            if line.rstrip().endswith("=") and i + 1 < len(active):
+                cont = active[i + 1].split()
+                try:
+                    ueq = (float(toks[6]) + float(toks[7]) + float(cont[0])) / 3.0
+                    consumed = 2
+                except (ValueError, IndexError):
+                    ueq = old_u
+            new_lines.append(isotropic_atom_line(toks, ueq))
+            adp_isotropic.append({"label": label, "old_u": old_u, "fallback_u": max(0.006, min(0.08, abs(float(ueq))))})
+            i += consumed
             continue
         if free_h_anis and is_shelx_atom_line(line) and shelx_label_element(toks[0]) == "H":
             label = toks[0]
@@ -7900,6 +7971,9 @@ def prepare_push_endpoint_model(args: argparse.Namespace, out_dir: Path) -> tupl
                 "removed_restraints": removed_restraints,
                 "removed_afix": removed_afix,
                 "converted_hydrogens": converted_h,
+                "adp_stabilized_npd_atoms": sorted(npd_targets),
+                "adp_stabilized_restraints_added": adp_restraints_added,
+                "adp_stabilized_isotropic_fallback": adp_isotropic,
             },
             indent=2,
         )
@@ -8026,6 +8100,10 @@ def write_multi_push_endpoint_report(out_dir: Path, *, best_cycle_tolerance: flo
         native = combined_summary.get("native_joint") or {}
         endpoint = combined_summary.get("combined_endpoint") or {}
         shelxl = endpoint.get("shelxl") or {}
+        model_text = str(record.get("output_model") or "")
+        model = None if model_text in {"", "."} else Path(model_text)
+        lst = model.with_suffix(".lst") if model is not None else None
+        shelxl_details = _quick_shelxl_details(shelxl, lst)
         post_sigma = endpoint.get("post_bloch_sigma") or {}
         dyn_all = (native.get("dyn") or {}).get("all") or {}
         born_all = (native.get("born") or {}).get("all") or {}
@@ -8044,19 +8122,48 @@ def write_multi_push_endpoint_report(out_dir: Path, *, best_cycle_tolerance: flo
                 "endpoint_R1_all": shelxl.get("R1_all"),
                 "endpoint_wR2_all": shelxl.get("wR2_all"),
                 "endpoint_GooF": shelxl.get("GooF"),
+                "endpoint_parameters": shelxl_details.get("parameters"),
+                "endpoint_restraints": shelxl_details.get("restraints"),
+                "npd_count": int(shelxl_details.get("npd_count", 0) or 0),
+                "npd_atoms": shelxl_details.get("npd_atoms", []),
+                "split_count": int(shelxl_details.get("split_count", 0) or 0),
                 "sigma_scale": post_sigma.get("sigma_scale"),
             }
         )
     finite = [r for r in rows if r["dyn_wR2_all"] is not None and math.isfinite(float(r["dyn_wR2_all"]))]
     best = min(finite, key=lambda r: float(r["dyn_wR2_all"])) if finite else None
-    threshold = float(best["dyn_wR2_all"]) + best_cycle_tolerance if best else math.inf
-    within = [r for r in finite if float(r["dyn_wR2_all"]) <= threshold]
-    selected = min(within or finite, key=lambda r: r["cycle"]) if finite else None
+    safe = [r for r in finite if int(r.get("npd_count", 0) or 0) == 0 and int(r.get("split_count", 0) or 0) == 0]
+    if safe:
+        best_safe = min(safe, key=lambda r: float(r["dyn_wR2_all"]))
+        threshold = float(best_safe["dyn_wR2_all"]) + best_cycle_tolerance
+        within = [r for r in safe if float(r["dyn_wR2_all"]) <= threshold]
+        selected = min(within or safe, key=lambda r: r["cycle"])
+        selection_status = "promoted_safe_no_npd"
+        selection_reason = "selected earliest no-NPD/no-split cycle within the native row-intensity tolerance"
+    elif finite:
+        best_pathology = min((int(r.get("npd_count", 0) or 0), int(r.get("split_count", 0) or 0)) for r in finite)
+        low_pathology = [
+            r
+            for r in finite
+            if (int(r.get("npd_count", 0) or 0), int(r.get("split_count", 0) or 0)) == best_pathology
+        ]
+        best_low_pathology = min(low_pathology, key=lambda r: float(r["dyn_wR2_all"]))
+        threshold = float(best_low_pathology["dyn_wR2_all"]) + best_cycle_tolerance
+        within = [r for r in low_pathology if float(r["dyn_wR2_all"]) <= threshold]
+        selected = min(within or low_pathology, key=lambda r: r["cycle"])
+        selection_status = "diagnostic_no_safe_cycle"
+        selection_reason = "no no-NPD/no-split cycle was available; selected the lowest-pathology diagnostic cycle instead of chasing row wR(I)"
+    else:
+        selected = None
+        selection_status = "no_finite_row_metrics"
+        selection_reason = "no finite row-level dynamical metrics were found"
     decision = {
         "summary": str(summary_path),
         "best_cycle_tolerance": best_cycle_tolerance,
         "best_native_cycle": best,
         "selected_cycle": selected,
+        "selected_status": selection_status,
+        "selection_reason": selection_reason,
         "rows": rows,
     }
     decision_path = out_dir / "multi_endpoint_push_decision.json"
@@ -8069,23 +8176,29 @@ def write_multi_push_endpoint_report(out_dir: Path, *, best_cycle_tolerance: flo
             "Each cycle recomputes Bloch rows for every dataset from the same edited model, merges corrected endpoint observations, "
             "runs one shared SHELXL LS step, and sends the updated shared model back to all datasets.\n\n"
         )
-        handle.write("| cycle | merge key | unmerged rows | merged rows | dyn R1all | dyn wR2all | Born R1all | Born wR2all | endpoint R1all | endpoint wR2all | GooF | sigma scale | model |\n")
-        handle.write("|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|\n")
+        handle.write("| cycle | merge key | unmerged rows | merged rows | row dyn R(I)all | row dyn wR(I)all | row Born R(I)all | row Born wR(I)all | endpoint R1(F)all | endpoint wR2(F^2)all | GooF | NPD | split | sigma scale | model |\n")
+        handle.write("|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|\n")
         for row in rows:
+            npd_atoms = row.get("npd_atoms")
+            npd_text = str(row.get("npd_count", ""))
+            if isinstance(npd_atoms, list) and npd_atoms:
+                npd_text += f" ({', '.join(str(atom) for atom in npd_atoms[:5])}{', ...' if len(npd_atoms) > 5 else ''})"
             handle.write(
                 f"| {row['cycle']} | {row['merge_key'] or '-'} | {row['unmerged_rows'] or ''} | {row['merged_rows'] or ''} | "
                 f"{100.0 * float(row['dyn_R1_all'] or math.nan):.2f}% | {100.0 * float(row['dyn_wR2_all'] or math.nan):.2f}% | "
                 f"{100.0 * float(row['born_R1_all'] or math.nan):.2f}% | {100.0 * float(row['born_wR2_all'] or math.nan):.2f}% | "
                 f"{100.0 * float(row['endpoint_R1_all'] or math.nan):.2f}% | {100.0 * float(row['endpoint_wR2_all'] or math.nan):.2f}% | "
-                f"{float(row['endpoint_GooF'] or math.nan):.3f} | {float(row['sigma_scale'] or math.nan):.3f} | `{row['model']}` |\n"
+                f"{float(row['endpoint_GooF'] or math.nan):.3f} | {npd_text} | {row.get('split_count', '')} | "
+                f"{float(row['sigma_scale'] or math.nan):.3f} | `{row['model']}` |\n"
             )
         handle.write("\n")
         if selected:
-            handle.write(f"Selected cycle by native-row tolerance: {selected['cycle']} at `{selected['model']}`.\n")
+            handle.write(f"Selected cycle: {selected['cycle']} at `{selected['model']}`.\n\n")
+            handle.write(f"Selection status: `{selection_status}`. {selection_reason}.\n")
         else:
-            handle.write("Selected cycle by native-row tolerance: none. No finite row-level dynamical metrics were found.\n")
+            handle.write(f"Selected cycle: none. {selection_reason}.\n")
         if best:
-            handle.write(f"\nLowest native row wR2all cycle: {best['cycle']} at `{best['model']}`.\n")
+            handle.write(f"\nLowest native row wR(I)all cycle: {best['cycle']} at `{best['model']}`.\n")
     return report_path
 
 
@@ -8211,7 +8324,7 @@ def write_push_endpoint_report(out_dir: Path, *, best_cycle_tolerance: float) ->
     with report_path.open("w") as handle:
         handle.write("# GROND Endpoint Push Report\n\n")
         handle.write("This report summarizes a continuation run from an existing pinned GROND row/nuisance summary. The selected model is the earliest safe cycle within the requested native-row tolerance when possible; cycles with NPD atoms or split warnings are kept as diagnostics, not promoted.\n\n")
-        handle.write("| cycle | status | seconds | params | restraints | NPD atoms | split warnings | native wR2all | native free wR2 | R1all | wR2all | GooF | sigma scale |\n")
+        handle.write("| cycle | status | seconds | params | restraints | NPD atoms | split warnings | row wR(I)all | row free wR(I)all | endpoint R1(F)all | endpoint wR2(F^2)all | GooF | sigma scale |\n")
         handle.write("|---:|---|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|\n")
         for row in rows:
             npd = ",".join(row["npd_atoms"]) if row["npd_atoms"] else "-"
@@ -8228,7 +8341,7 @@ def write_push_endpoint_report(out_dir: Path, *, best_cycle_tolerance: float) ->
         else:
             handle.write("Selected safe cycle: none. All completed cycles had pathology warnings or missing metrics.\n")
         if best_native:
-            handle.write(f"\nLowest native wR2all cycle: {best_native['cycle']} at `{best_native['model']}`.\n")
+            handle.write(f"\nLowest row wR(I)all cycle: {best_native['cycle']} at `{best_native['model']}`.\n")
     return report_path
 
 
@@ -8780,6 +8893,8 @@ def cmd_scale_replay(args: argparse.Namespace) -> int:
         "--publication-information-criterion",
         args.publication_information_criterion,
     ]
+    if bool(getattr(args, "publication_allow_npd", False)):
+        cmd.append("--publication-allow-npd")
     if args.summary:
         cmd += ["--summary", str(Path(args.summary).expanduser().resolve())]
     if args.res:
@@ -9785,6 +9900,7 @@ def add_common_run_args(ap: argparse.ArgumentParser, *, expose_lambda_controls: 
     ap.add_argument("--publication-endpoint-chooser", action=argparse.BooleanOptionalAction, default=True, help="Write the publication endpoint chooser that separates physical and diagnostic corrected-HKL endpoints.")
     ap.add_argument("--publication-endpoint-min-hkl-safe-factor", type=float, default=0.25, help="Minimum fixed-width HKL safety factor for a publication endpoint.")
     ap.add_argument("--publication-endpoint-max-modulation-p95", type=float, default=20.0, help="Maximum 95th-percentile endpoint intensity modulation for a publication endpoint.")
+    ap.add_argument("--publication-allow-npd", action=argparse.BooleanOptionalAction, default=False, help="Explicit diagnostic override allowing endpoints with NPD or split pathology to pass publication selection gates. Default requires NPD == 0 and no split warnings.")
     ap.add_argument("--endpoint-calibration", choices=["auto", "on", "off"], default="auto", help="Replay the final frozen row table through corrected-HKL endpoint calibration after auto completes.")
     ap.add_argument("--endpoint-calibration-specs", default="baseline,adaptive:293:det8,adaptive:200:det8,adaptive:120:det8,adaptive:80:det8,window:0.5:det8,window:1.0:det8,window:1.5:det8,window:3.0:det8,window:5.0:det8,window:1.0:det4,window:3.0:det4,window:5.0:det4,window:3.0:det1")
     if expose_lambda_controls:
@@ -10161,6 +10277,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_scale_replay.add_argument("--publication-max-r1-cost", type=float, default=0.010)
     p_scale_replay.add_argument("--publication-free-wr2-tolerance", type=float, default=0.040)
     p_scale_replay.add_argument("--publication-prefer-wght-mode", default="freeze-zero")
+    p_scale_replay.add_argument("--publication-allow-npd", action=argparse.BooleanOptionalAction, default=False, help="Explicit diagnostic override allowing NPD or split pathology in the selected endpoint. Default requires NPD == 0.")
     p_scale_replay.add_argument(
         "--publication-selection-policy",
         choices=["bic", "gated-smallest"],
@@ -10211,6 +10328,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_cal_endpoint.add_argument("--publication-max-r1-cost", type=float, default=0.010)
     p_cal_endpoint.add_argument("--publication-free-wr2-tolerance", type=float, default=0.040)
     p_cal_endpoint.add_argument("--publication-prefer-wght-mode", default="freeze-zero")
+    p_cal_endpoint.add_argument("--publication-allow-npd", action=argparse.BooleanOptionalAction, default=False, help="Explicit diagnostic override allowing NPD or split pathology in the selected endpoint. Default requires NPD == 0.")
     p_cal_endpoint.add_argument(
         "--publication-selection-policy",
         choices=["bic", "gated-smallest"],
@@ -10332,7 +10450,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_validate_ls1.add_argument("--post-bloch-sigma-max-scale", type=float, default=4.0)
     p_validate_ls1.add_argument("--rescale", choices=["median-iobs", "none"], default="median-iobs")
     p_validate_ls1.add_argument("--prediction-cache-compression", choices=["compressed", "none"], default="none")
-    p_validate_ls1.add_argument("--best-cycle-tolerance", type=float, default=0.001, help="Pick the earliest cycle within this native wR2all fraction of the best cycle.")
+    p_validate_ls1.add_argument("--best-cycle-tolerance", type=float, default=0.001, help="Pick the earliest cycle within this row wR(I)all fraction of the best cycle.")
     p_validate_ls1.add_argument("--q-control-seed", type=int, default=12345)
     p_validate_ls1.add_argument("--q-control-shells", type=int, default=10)
     p_validate_ls1.add_argument("--skip-controls", action="store_true")
@@ -10402,12 +10520,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_push.add_argument("--rescale", choices=["median-iobs", "none"], default="median-iobs")
     p_push.add_argument("--prediction-cache-compression", choices=["compressed", "none"], default="none")
     p_push.add_argument("--make-maps-on-final", action="store_true")
-    p_push.add_argument("--best-cycle-tolerance", type=float, default=0.001, help="Safety report tolerance above the best native wR2all.")
+    p_push.add_argument("--best-cycle-tolerance", type=float, default=0.001, help="Safety report tolerance above the best row wR(I)all.")
     p_push.add_argument(
         "--model-prep",
-        choices=["as-is", "no-restraints", "free-h-anis-no-restraints"],
+        choices=["as-is", "no-restraints", "free-h-anis-no-restraints", "adp-stabilized"],
         default="as-is",
-        help="Optional start-model preparation before the push. The free-H mode is a stress-test branch and is reported with pathology gates.",
+        help="Optional start-model preparation before the push. adp-stabilized adds RIGU/SIMU/targeted ISOR and converts known NPD atoms to isotropic fallback; free-H is a stress-test branch.",
     )
     p_push.add_argument("--set-ls-cycles", type=int, default=1, help="Rewrite L.S. to this value in the prepared start model. Use 0 to preserve it.")
     p_push.set_defaults(func=cmd_push_endpoint)

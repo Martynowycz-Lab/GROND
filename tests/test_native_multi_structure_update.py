@@ -5,7 +5,6 @@ from types import SimpleNamespace
 
 import numpy as np
 
-
 ENGINE_DIR = Path(__file__).resolve().parents[1] / "src" / "grond" / "legacy" / "engine"
 sys.path.insert(0, str(ENGINE_DIR))
 

@@ -121,6 +121,7 @@ def test_thickness_scout_parser_exposes_contract_diagnostic_defaults():
     assert args.publication_endpoint_chooser is True
     assert args.publication_endpoint_min_hkl_safe_factor == 0.25
     assert args.publication_endpoint_max_modulation_p95 == 20.0
+    assert args.publication_allow_npd is False
     assert args.endpoint_calibration == "auto"
     assert "adaptive:120:det8" in args.endpoint_calibration_specs
     assert args.endpoint_calibration_lambda_q == 1.0
@@ -493,7 +494,7 @@ def test_finish_does_not_promote_calibration_when_chooser_rejects_all(tmp_path: 
     assert payload["publication_endpoint"]["R1all"] is None
     assert payload["files"]["publication_res"] == ""
     text = (run / "FINAL_SUMMARY.md").read_text()
-    assert "publication corrected-HKL endpoint | merged SHELXL endpoint | `n/a`" in text
+    assert "publication corrected-HKL endpoint | merged SHELXL endpoint (F/F^2) | `n/a`" in text
 
 
 def test_terminal_finish_summary_is_human_readable():
@@ -556,14 +557,14 @@ def test_terminal_finish_summary_is_human_readable():
     assert "Progress: 25 stages completed; initial estimate was 30." in text
     assert "Hand: alternate (Z all/free = 1.505 / 0.876" in text
     assert "Starting SHELXL reference" in text
-    assert "R1gt 13.82%, R1all 17.14%, wR2all 38.45%, GooF 1.406" in text
-    assert "Input dynamical rows: R1all 22.13%, wR2all 43.41%" in text
-    assert "Input matched Born rows: R1all 28.00%, wR2all 42.00%" in text
-    assert "Final dynamical rows: R1all 21.30%, wR2all 33.10%, free wR2all 33.45%" in text
-    assert "Final matched Born rows: R1all 27.00%, wR2all 41.00%, free wR2all 40.00%" in text
-    assert "Change: R1all -0.83 pp, wR2all -10.31 pp" in text
-    assert "Direct LS1 corrected-HKL candidate: R1gt 11.00%, R1all 16.00%, wR2all 22.00%, GooF 0.950" in text
-    assert "Publication endpoint: R1gt 14.46%, R1all 17.85%, wR2all 25.72%, GooF 1.036" in text
+    assert "R1(F)gt 13.82%, R1(F)all 17.14%, wR2(F^2)all 38.45%, GooF 1.406" in text
+    assert "Input dynamical rows: R(I)all 22.13%, wR(I)all 43.41%" in text
+    assert "Input matched Born rows: R(I)all 28.00%, wR(I)all 42.00%" in text
+    assert "Final dynamical rows: R(I)all 21.30%, wR(I)all 33.10%, free wR(I)all 33.45%" in text
+    assert "Final matched Born rows: R(I)all 27.00%, wR(I)all 41.00%, free wR(I)all 40.00%" in text
+    assert "Change: R(I)all -0.83 pp, wR(I)all -10.31 pp" in text
+    assert "Direct LS1 corrected-HKL candidate: R1(F)gt 11.00%, R1(F)all 16.00%, wR2(F^2)all 22.00%, GooF 0.950" in text
+    assert "Publication endpoint: R1(F)gt 14.46%, R1(F)all 17.85%, wR2(F^2)all 25.72%, GooF 1.036" in text
 
 
 def test_q_field_stability_compares_shared_signed_rows(tmp_path: Path):
@@ -873,6 +874,20 @@ def test_utility_commands_parse():
     assert push.post_bloch_sigma_policy == "none"
     assert push.model_prep == "free-h-anis-no-restraints"
     assert push.set_ls_cycles == 1
+    push_adp = build_parser().parse_args(
+        [
+            "push-endpoint",
+            "--source-summary",
+            "summary.json",
+            "--start-res",
+            "model.res",
+            "--out-dir",
+            "push",
+            "--model-prep",
+            "adp-stabilized",
+        ]
+    )
+    assert push_adp.model_prep == "adp-stabilized"
     push_checkpoint = build_parser().parse_args(
         [
             "push-endpoint",
@@ -891,6 +906,42 @@ def test_utility_commands_parse():
     assert push_checkpoint.chunksize == 4
     assert push_checkpoint.topup_d_min == 0.7
     assert push_checkpoint.post_bloch_sigma_policy == "none"
+
+
+def test_adp_stabilized_model_prep_targets_npd_atoms(tmp_path: Path):
+    res = tmp_path / "model.res"
+    res.write_text(
+        "\n".join(
+            [
+                "TITL test",
+                "CELL 0.025079 7 8 9 90 90 90",
+                "ZERR 1 0 0 0 0 0 0",
+                "LATT -1",
+                "SFAC C O H",
+                "UNIT 1 1 1",
+                "FVAR 1",
+                "C005 1 0.100000 0.200000 0.300000 11.00000 0.00100 0.00200 =",
+                " 0.00300 0.00000 0.00000 0.00000",
+                "O001 2 0.400000 0.500000 0.600000 11.00000 0.02000",
+                "HKLF 4",
+                "END",
+            ]
+        )
+        + "\n"
+    )
+    res.with_suffix(".lst").write_text(" 0.1 0.2 0.3 C005 ** NON POSITIVE DEFINITE **\n")
+    args = argparse.Namespace(start_res=str(res), model_prep="adp-stabilized", set_ls_cycles=1)
+
+    prepared, audit = cli.prepare_push_endpoint_model(args, tmp_path / "push")
+    text = prepared.read_text()
+    payload = json.loads(audit.read_text())
+
+    assert "RIGU" in text
+    assert "SIMU 0.04 0.08" in text
+    assert "ISOR 0.02 0.04 C005" in text
+    assert any(line.startswith("C005") and "0.00600" in line and "=" not in line for line in text.splitlines())
+    assert payload["adp_stabilized_npd_atoms"] == ["C005"]
+    assert payload["adp_stabilized_isotropic_fallback"][0]["label"] == "C005"
 
 
 def test_sfac_check_rejects_element_only_shelx_factors(tmp_path: Path, capsys):
@@ -1563,12 +1614,12 @@ def test_write_quick_stats_summarizes_row_and_endpoint_tables(tmp_path):
     assert "free-row I residual Z | n `2`; RMSZ `1.581`" in text
     assert "thickness | `1100.0 A`; model `uniform_gradient`; gradient `1.200`" in text
     assert "Master Comparison Matrix" in text
-    assert "raw signed rows, Bloch dynamical" in text
-    assert "merged SHELXL endpoint" in text
+    assert "raw signed rows (I), Bloch dynamical" in text
+    assert "merged SHELXL endpoint (F/F^2)" in text
     assert "Master Delta Matrix" in text
     assert "final dynamical rows minus final matched Born rows" in text
-    assert "Row-Level wR2all Definition" in text
-    assert "Raw-row `wR2all` is `sqrt(sum_r w_r (Iobs_r - Icalc_r)^2 / sum_r w_r Iobs_r^2)`" in text
+    assert "Row Intensity R-Factor Definitions" in text
+    assert "Raw signed-row intensity `wR(I)all` is `sqrt(sum_r w_r (Iobs_r - Icalc_r)^2 / sum_r w_r Iobs_r^2)`" in text
     assert "Completeness, Integration, And Row/MR Statistics" in text
     assert "Bloch matrix and row-contract diagnostics" in text
     bloch_diagnostics = out_dir / "BLOCH_DIAGNOSTICS.md"

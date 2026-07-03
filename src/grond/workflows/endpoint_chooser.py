@@ -18,6 +18,16 @@ def _float(value, fallback: float = float("nan")) -> float:
     return out if math.isfinite(out) else fallback
 
 
+def _int(value, fallback: int = 0) -> int:
+    """Convert a scalar to a non-negative integer when possible."""
+
+    try:
+        out = int(value)
+    except (TypeError, ValueError):
+        return fallback
+    return max(0, out)
+
+
 def _read_json(path: Path) -> dict:
     """Read a JSON file and return an empty dict when it is absent or malformed."""
 
@@ -79,6 +89,11 @@ def _normalize_endpoint(label: str, endpoint: Mapping, *, run_dir: Path | None, 
         "N_gt": shelxl.get("N_gt"),
         "N_all": shelxl.get("N_all"),
         "unique": shelxl.get("unique"),
+        "npd_count": _int(shelxl.get("npd_count", endpoint.get("npd_count", 0))),
+        "split_count": _int(shelxl.get("split_count", endpoint.get("split_count", 0))),
+        "npd_atoms": list(shelxl.get("npd_atoms", endpoint.get("npd_atoms", [])) or []),
+        "has_npd": bool(shelxl.get("has_npd", endpoint.get("has_npd", False))),
+        "has_split_warnings": bool(shelxl.get("has_split_warnings", endpoint.get("has_split_warnings", False))),
         "hkl": endpoint.get("hkl", ""),
         "lst": shelxl.get("lst", ""),
         "res": str(Path(shelxl["lst"]).with_suffix(".res")) if shelxl.get("lst") else "",
@@ -163,6 +178,7 @@ def classify_publication_endpoint(
     max_modulation_p95: float = 20.0,
     publication_goof_min: float = 0.85,
     publication_goof_max: float = 1.15,
+    allow_npd: bool = False,
 ) -> dict:
     """Classify one endpoint as publishable physical output or diagnostic only."""
 
@@ -183,6 +199,17 @@ def classify_publication_endpoint(
         reasons.append("nonzero endpoint-B is diagnostic-only because it reshapes corrected HKL intensities and can distort ADPs or maps")
     if source_kind == "observation_polish" and not bool(candidate.get("observation_polish_accepted", False)):
         reasons.append("observation-polish correction did not pass the raw-row and endpoint holdout gates")
+    npd_count = _int(candidate.get("npd_count", 0))
+    split_count = _int(candidate.get("split_count", 0))
+    if not allow_npd:
+        if npd_count > 0 or bool(candidate.get("has_npd", False)):
+            atoms = candidate.get("npd_atoms")
+            atom_text = ""
+            if isinstance(atoms, list) and atoms:
+                atom_text = f" ({', '.join(str(atom) for atom in atoms[:6])}{', ...' if len(atoms) > 6 else ''})"
+            reasons.append(f"endpoint has {npd_count} NPD atom(s){atom_text}; publication endpoints require NPD == 0")
+        if split_count > 0 or bool(candidate.get("has_split_warnings", False)):
+            reasons.append(f"endpoint has {split_count} split-warning atom(s); publication endpoints require no split pathology")
     goof = _float(candidate.get("GooF"))
     if not math.isfinite(goof):
         reasons.append("endpoint GooF is unavailable; publication endpoints must have conventional SHELXL GooF")
@@ -210,6 +237,7 @@ def choose_publication_endpoints(
     publication_goof_min: float = 0.85,
     publication_goof_max: float = 1.15,
     prefer_combined: bool = False,
+    allow_npd: bool = False,
 ) -> dict:
     """Choose best physical and diagnostic endpoints from normalized candidates."""
 
@@ -221,6 +249,7 @@ def choose_publication_endpoints(
             max_modulation_p95=max_modulation_p95,
             publication_goof_min=publication_goof_min,
             publication_goof_max=publication_goof_max,
+            allow_npd=allow_npd,
         )
         classified.append({**candidate, **decision})
 
@@ -262,9 +291,11 @@ def choose_publication_endpoints(
                 f"HKL safety factor >= {min_hkl_safe_factor:g}",
                 f"95th percentile modulation <= {max_modulation_p95:g}",
                 f"SHELXL GooF between {publication_goof_min:g} and {publication_goof_max:g}",
+                "NPD == 0 and no split-warning pathology",
                 "observation-polish endpoints must pass raw-row and endpoint holdout gates",
             ],
-            "ranking": "multi-dataset combined endpoint first when present, then wR2all, R1all, and R1gt",
+            "ranking": "multi-dataset combined endpoint first when present, then endpoint wR2(F^2)all, R1(F)all, and R1(F)gt",
+            "allow_npd_override": bool(allow_npd),
         },
     }
 
@@ -275,12 +306,13 @@ def _candidate_line(candidate: Mapping) -> str:
     reasons = "; ".join(str(r) for r in candidate.get("rejection_reasons", [])[:3])
     goof = _float(candidate.get("GooF"))
     goof_text = "n/a" if not math.isfinite(goof) else f"{goof:.3f}"
+    pathology = f"NPD {_int(candidate.get('npd_count', 0))}; split {_int(candidate.get('split_count', 0))}"
     return (
         f"| {candidate.get('label', '')} | {candidate.get('source_kind', '')} | "
         f"{_float(candidate.get('endpoint_b'), 0.0):.3g} | "
         f"{'on' if candidate.get('keep_exti') else 'off'} | {candidate.get('publication_class', '')} | "
         f"{_percent(candidate.get('R1_gt'))} | {_percent(candidate.get('R1_all'))} | {_percent(candidate.get('wR2_all'))} | "
-        f"{goof_text} | "
+        f"{goof_text} | {pathology} | "
         f"{reasons} |"
     )
 
@@ -301,29 +333,29 @@ def _write_markdown(out_dir: Path, decision: Mapping) -> Path:
     ]
     if best_physical:
         lines.append(
-            f"Best physical endpoint: `{best_physical.get('id')}` with `R1all={_percent(best_physical.get('R1_all'))}` and `wR2all={_percent(best_physical.get('wR2_all'))}`."
+            f"Best physical endpoint: `{best_physical.get('id')}` with `R1(F)all={_percent(best_physical.get('R1_all'))}` and `wR2(F^2)all={_percent(best_physical.get('wR2_all'))}`."
         )
     else:
         lines.append("No physical endpoint passed the publication gate. The run should be reported as diagnostic-only until a no-EXTI, B=0 endpoint with finite metrics is available.")
     if best_diagnostic:
         lines.append(
-            f"Best diagnostic endpoint: `{best_diagnostic.get('id')}` with `R1all={_percent(best_diagnostic.get('R1_all'))}` and `wR2all={_percent(best_diagnostic.get('wR2_all'))}`."
+            f"Best diagnostic endpoint: `{best_diagnostic.get('id')}` with `R1(F)all={_percent(best_diagnostic.get('R1_all'))}` and `wR2(F^2)all={_percent(best_diagnostic.get('wR2_all'))}`."
         )
     else:
         lines.append("No rejected diagnostic endpoint beat or supplemented the physical candidate set.")
     if best_single_physical and best_single_physical.get("id") != best_physical.get("id"):
         lines.append(
-            f"Best single-dataset physical diagnostic: `{best_single_physical.get('id')}` with `R1all={_percent(best_single_physical.get('R1_all'))}` and `wR2all={_percent(best_single_physical.get('wR2_all'))}`."
+            f"Best single-dataset physical diagnostic: `{best_single_physical.get('id')}` with `R1(F)all={_percent(best_single_physical.get('R1_all'))}` and `wR2(F^2)all={_percent(best_single_physical.get('wR2_all'))}`."
         )
     lines.extend(
         [
             "",
-            "Promotion rule: finite endpoint metrics, conventional SHELXL GooF inside the configured gate, full q correction, EXTI off, endpoint-B equal to zero, safe HKL rescaling, bounded intensity modulation, and a passed observation-polish gate when a polish correction is involved.",
+            "Promotion rule: finite endpoint metrics, conventional SHELXL GooF inside the configured gate, full q correction, EXTI off, endpoint-B equal to zero, no NPD or split pathology unless explicitly overridden, safe HKL rescaling, bounded intensity modulation, and a passed observation-polish gate when a polish correction is involved.",
             "",
             "## Endpoint Candidates",
             "",
-            "| label | source | endpoint B | EXTI | class | R1gt | R1all | wR2all | GooF | main rejection reason |",
-            "|---|---|---:|:---:|---|---:|---:|---:|---:|---|",
+            "| label | source | endpoint B | EXTI | class | R1(F)gt | R1(F)all | wR2(F^2)all | GooF | pathology | main rejection reason |",
+            "|---|---|---:|:---:|---|---:|---:|---:|---:|---|---|",
         ]
     )
     for candidate in decision.get("candidates", []):
@@ -364,7 +396,7 @@ def _write_tex(out_dir: Path, decision: Mapping) -> Path:
         [
             r"\begin{tabular}{llrllll}",
             r"\hline",
-            r"Label & Source & B & EXTI & Class & R1all & wR2all \\",
+            r"Label & Source & B & EXTI & Class & R1(F)all & wR2(F^2)all \\",
             r"\hline",
             *rows,
             r"\hline",
@@ -388,6 +420,7 @@ def write_publication_endpoint_choice(
     max_modulation_p95: float = 20.0,
     publication_goof_min: float = 0.85,
     publication_goof_max: float = 1.15,
+    allow_npd: bool = False,
 ) -> dict:
     """Collect endpoint candidates, choose publication endpoints, and write reports."""
 
@@ -404,6 +437,7 @@ def write_publication_endpoint_choice(
         publication_goof_min=publication_goof_min,
         publication_goof_max=publication_goof_max,
         prefer_combined=combined_run is not None,
+        allow_npd=allow_npd,
     )
     json_path = out_dir / "publication_endpoint_choice.json"
     md_path = _write_markdown(out_dir, decision)

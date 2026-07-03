@@ -438,6 +438,7 @@ def choose_publication_endpoint(
     prefer_wght_mode: str,
     selection_policy: str = "bic",
     information_criterion: str = "bic_fitted_variance",
+    allow_npd: bool = False,
 ) -> dict[str, object]:
     """Choose a publication endpoint from replayed scale contracts.
 
@@ -490,10 +491,23 @@ def choose_publication_endpoint(
         r1 = _finite_float(row.get("shelxl_R1all"), float("inf"))
         free_wr2 = _finite_float(row.get("native_free_wR2_all"), float("inf"))
         ic_value = _finite_float(row.get(ic_name), float("inf"))
+        try:
+            npd_count = int(row.get("shelxl_npd_count", 0) or 0)
+            split_count = int(row.get("shelxl_split_count", 0) or 0)
+        except (TypeError, ValueError):
+            npd_count = 0
+            split_count = 0
         if str(row.get("wght_mode")) != prefer:
             reasons.append(f"not preferred weight mode {prefer!r}")
         if goof < float(goof_min) or goof > float(goof_max):
             reasons.append(f"GooF {goof:.3g} outside {goof_min:.3g}-{goof_max:.3g}")
+        if not allow_npd:
+            if npd_count > 0 or bool(row.get("shelxl_has_npd")):
+                atoms = str(row.get("shelxl_npd_atoms", "") or "")
+                atom_text = f" ({atoms})" if atoms else ""
+                reasons.append(f"NPD {npd_count}{atom_text}; publication endpoints require NPD == 0")
+            if split_count > 0 or bool(row.get("shelxl_has_split_warnings")):
+                reasons.append(f"split warnings {split_count}; publication endpoints require no split pathology")
         if policy == "bic" and not math.isfinite(ic_value):
             reasons.append(f"missing finite information criterion {ic_name!r}")
         if policy == "gated-smallest":
@@ -514,6 +528,9 @@ def choose_publication_endpoint(
                     "shelxl_GooF": row.get("shelxl_GooF"),
                     "native_free_wR2_all": row.get("native_free_wR2_all"),
                     "scale_params": row.get("scale_params"),
+                    "shelxl_npd_count": row.get("shelxl_npd_count"),
+                    "shelxl_split_count": row.get("shelxl_split_count"),
+                    "shelxl_npd_atoms": row.get("shelxl_npd_atoms"),
                     information_criterion: row.get(information_criterion),
                     "endpoint_dir": row.get("endpoint_dir"),
                 }
@@ -584,6 +601,7 @@ def choose_publication_endpoint(
             "preferred_wght_mode": prefer,
             "selection_policy": policy,
             "information_criterion": ic_name,
+            "allow_npd": bool(allow_npd),
         },
         "passing_count": len(passing),
         "candidate_count": len(finite),
@@ -617,18 +635,21 @@ def write_publication_report(path: Path, selection: dict[str, object], rows_out:
             f"Scale parameters: `{selected.get('scale_params')}`; total row-model parameters: `{selected.get('total_params')}`.",
             f"Selection IC: `{_finite_float(selected.get(str(selection.get('information_criterion') or 'bic_fitted_variance'))):.3f}`; "
             f"delta from best passing IC `{_finite_float(selection.get('selected_delta_information_criterion')):.3f}`.",
-            f"SHELXL: R1gt `{_percent_or_blank(selected.get('shelxl_R1gt'))}`, "
-            f"R1all `{_percent_or_blank(selected.get('shelxl_R1all'))}`, "
-            f"wR2all `{_percent_or_blank(selected.get('shelxl_wR2all'))}`, "
+            f"SHELXL: R1(F)gt `{_percent_or_blank(selected.get('shelxl_R1gt'))}`, "
+            f"R1(F)all `{_percent_or_blank(selected.get('shelxl_R1all'))}`, "
+            f"wR2(F^2)all `{_percent_or_blank(selected.get('shelxl_wR2all'))}`, "
             f"GooF `{_finite_float(selected.get('shelxl_GooF')):.3f}`.",
-            f"Row-space all: R1all `{_percent_or_blank(selected.get('native_R1_all'))}`, "
-            f"wR2all `{_percent_or_blank(selected.get('native_wR2_all'))}`, "
+            f"Row-space all: R(I)all `{_percent_or_blank(selected.get('native_R1_all'))}`, "
+            f"wR(I)all `{_percent_or_blank(selected.get('native_wR2_all'))}`, "
             f"S_GROND `{_finite_float(selected.get('native_GooF')):.3f}`.",
-            f"Row-space held-out: R1all `{_percent_or_blank(selected.get('native_free_R1_all'))}`, "
-            f"wR2all `{_percent_or_blank(selected.get('native_free_wR2_all'))}`, "
+            f"Row-space held-out: R(I)all `{_percent_or_blank(selected.get('native_free_R1_all'))}`, "
+            f"wR(I)all `{_percent_or_blank(selected.get('native_free_wR2_all'))}`, "
             f"S_GROND_free `{_finite_float(selected.get('native_free_GooF')):.3f}`.",
             f"Endpoint sigma scale: `{_finite_float(selected.get('sigma_scale')):.4g}`; "
             f"held-out RMS(z) after calibration `{_finite_float(selected.get('heldout_rms_z_after')):.3f}`.",
+            f"Endpoint pathology: NPD `{selected.get('shelxl_npd_count', 'n/a')}`"
+            f"{' (' + str(selected.get('shelxl_npd_atoms')) + ')' if selected.get('shelxl_npd_atoms') else ''}; "
+            f"split warnings `{selected.get('shelxl_split_count', 'n/a')}`.",
             f"Files: endpoint directory `{selected.get('endpoint_dir')}`; "
             f"RES `{selected.get('endpoint_res')}`; HKL `{selected.get('endpoint_hkl')}`; "
             f"LST `{selected.get('endpoint_lst')}`.",
@@ -644,10 +665,12 @@ def write_publication_report(path: Path, selection: dict[str, object], rows_out:
             "## Low-R Diagnostic Endpoint",
             "",
             f"Spec: `{low_r.get('spec')}`; weight mode: `{low_r.get('wght_mode')}`.",
-            f"SHELXL: R1all `{_percent_or_blank(low_r.get('shelxl_R1all'))}`, "
-            f"wR2all `{_percent_or_blank(low_r.get('shelxl_wR2all'))}`, "
+            f"SHELXL: R1(F)all `{_percent_or_blank(low_r.get('shelxl_R1all'))}`, "
+            f"wR2(F^2)all `{_percent_or_blank(low_r.get('shelxl_wR2all'))}`, "
             f"GooF `{_finite_float(low_r.get('shelxl_GooF')):.3f}`.",
-            f"Publication R1all cost versus this low-R branch: `{100.0 * r_cost:.2f}%`.",
+            f"Endpoint pathology: NPD `{low_r.get('shelxl_npd_count', 'n/a')}`; "
+            f"split warnings `{low_r.get('shelxl_split_count', 'n/a')}`.",
+            f"Publication R1(F)all cost versus this low-R branch: `{100.0 * r_cost:.2f}%`.",
             f"Files: endpoint directory `{low_r.get('endpoint_dir')}`; "
             f"RES `{low_r.get('endpoint_res')}`; HKL `{low_r.get('endpoint_hkl')}`; "
             f"LST `{low_r.get('endpoint_lst')}`.",
@@ -658,15 +681,15 @@ def write_publication_report(path: Path, selection: dict[str, object], rows_out:
             "## Best Held-Out Row Endpoint",
             "",
             f"Spec: `{best_free.get('spec')}`; weight mode: `{best_free.get('wght_mode')}`; "
-            f"held-out row wR2all `{_percent_or_blank(best_free.get('native_free_wR2_all'))}`.",
+            f"held-out row wR(I)all `{_percent_or_blank(best_free.get('native_free_wR2_all'))}`.",
             "",
         ]
 
     lines += [
         "## Candidate Table",
         "",
-        "| spec | WGHT mode | scale params | selection IC | R1all | wR2all | GooF | row free wR2all | sigma scale | endpoint |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+        "| spec | WGHT mode | scale params | selection IC | R1(F)all | wR2(F^2)all | GooF | NPD | split | row free wR(I)all | sigma scale | endpoint |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
     ic_name = str(selection.get("information_criterion") or "bic_fitted_variance")
     for row in sorted(
@@ -681,7 +704,9 @@ def write_publication_report(path: Path, selection: dict[str, object], rows_out:
             f"| `{row.get('spec')}` | `{row.get('wght_mode')}` | {row.get('scale_params')} | "
             f"{_finite_float(row.get(ic_name)):.3f} | "
             f"{_percent_or_blank(row.get('shelxl_R1all'))} | {_percent_or_blank(row.get('shelxl_wR2all'))} | "
-            f"{_finite_float(row.get('shelxl_GooF')):.3f} | {_percent_or_blank(row.get('native_free_wR2_all'))} | "
+            f"{_finite_float(row.get('shelxl_GooF')):.3f} | "
+            f"{row.get('shelxl_npd_count', '')} | {row.get('shelxl_split_count', '')} | "
+            f"{_percent_or_blank(row.get('native_free_wR2_all'))} | "
             f"{_finite_float(row.get('sigma_scale')):.4g} | `{row.get('endpoint_dir')}` |"
         )
 
@@ -722,6 +747,7 @@ def main() -> None:
     ap.add_argument("--publication-max-r1-cost", type=float, default=0.010)
     ap.add_argument("--publication-free-wr2-tolerance", type=float, default=0.040)
     ap.add_argument("--publication-prefer-wght-mode", default="freeze-zero")
+    ap.add_argument("--publication-allow-npd", action=argparse.BooleanOptionalAction, default=False, help="Explicit diagnostic override allowing NPD or split pathology in the selected endpoint. Default requires NPD == 0.")
     ap.add_argument(
         "--publication-selection-policy",
         choices=["bic", "gated-smallest"],
@@ -837,6 +863,11 @@ def main() -> None:
                 "shelxl_GooF": sh.get("GooF", ""),
                 "shelxl_Rint": sh.get("Rint", ""),
                 "shelxl_Rsigma": sh.get("Rsigma", ""),
+                "shelxl_npd_count": sh.get("npd_count", 0),
+                "shelxl_split_count": sh.get("split_count", 0),
+                "shelxl_npd_atoms": ",".join(str(atom) for atom in (sh.get("npd_atoms") or [])),
+                "shelxl_has_npd": sh.get("has_npd", False),
+                "shelxl_has_split_warnings": sh.get("has_split_warnings", False),
                 "sigma_scale": sig.get("sigma_scale", ""),
                 "heldout_rms_z_after": sig.get("heldout_rms_z_after", ""),
                 "endpoint_dir": str(endpoint_dir),
@@ -859,6 +890,7 @@ def main() -> None:
         prefer_wght_mode=str(args.publication_prefer_wght_mode),
         selection_policy=str(args.publication_selection_policy),
         information_criterion=str(args.publication_information_criterion),
+        allow_npd=bool(args.publication_allow_npd),
     )
     summary_out = {
         "rows": rows_out,

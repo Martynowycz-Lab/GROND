@@ -130,6 +130,72 @@ def test_endpoint_chooser_rejects_high_goof_for_publication():
     assert any("GooF" in reason and "outside" in reason for reason in rejected["rejection_reasons"])
 
 
+def test_endpoint_chooser_requires_no_npd_by_default():
+    candidates = [
+        {
+            "id": "low_r_npd",
+            "label": "combined",
+            "source_kind": "combined_corrected_hkl",
+            "lambda_q": 1.0,
+            "endpoint_b": 0.0,
+            "keep_exti": False,
+            "hkl_safe_factor": 1.0,
+            "modulation_p95": 1.2,
+            "R1_gt": 0.08,
+            "R1_all": 0.09,
+            "wR2_all": 0.15,
+            "GooF": 1.02,
+            "npd_count": 2,
+            "npd_atoms": ["C005", "O001"],
+        },
+        {
+            "id": "clean_slightly_worse",
+            "label": "combined",
+            "source_kind": "combined_corrected_hkl",
+            "lambda_q": 1.0,
+            "endpoint_b": 0.0,
+            "keep_exti": False,
+            "hkl_safe_factor": 1.0,
+            "modulation_p95": 1.2,
+            "R1_gt": 0.10,
+            "R1_all": 0.11,
+            "wR2_all": 0.18,
+            "GooF": 1.02,
+            "npd_count": 0,
+        },
+    ]
+
+    decision = choose_publication_endpoints(candidates)
+
+    assert decision["best_physical_endpoint"]["id"] == "clean_slightly_worse"
+    assert decision["best_diagnostic_endpoint"]["id"] == "low_r_npd"
+    rejected = [c for c in decision["rejected_corrections"] if c["id"] == "low_r_npd"][0]
+    assert any("NPD" in reason and "NPD == 0" in reason for reason in rejected["rejection_reasons"])
+
+
+def test_endpoint_chooser_can_explicitly_allow_npd_diagnostic_override():
+    candidate = {
+        "id": "npd_override",
+        "label": "combined",
+        "source_kind": "combined_corrected_hkl",
+        "lambda_q": 1.0,
+        "endpoint_b": 0.0,
+        "keep_exti": False,
+        "hkl_safe_factor": 1.0,
+        "modulation_p95": 1.2,
+        "R1_gt": 0.08,
+        "R1_all": 0.09,
+        "wR2_all": 0.15,
+        "GooF": 1.02,
+        "npd_count": 1,
+    }
+
+    decision = choose_publication_endpoints([candidate], allow_npd=True)
+
+    assert decision["best_physical_endpoint"]["id"] == "npd_override"
+    assert decision["policy"]["allow_npd_override"] is True
+
+
 def test_write_publication_endpoint_choice_collects_outputs(tmp_path: Path):
     run = tmp_path / "run"
     run.mkdir()
@@ -154,7 +220,7 @@ def test_write_publication_endpoint_choice_collects_outputs(tmp_path: Path):
     assert (out / "PUBLICATION_ENDPOINT_CHOOSER.md").exists()
     report = (out / "PUBLICATION_ENDPOINT_CHOOSER.md").read_text()
     assert "Rejected Corrections" in report
-    assert "| label | source | endpoint B | EXTI | class | R1gt | R1all | wR2all | GooF |" in report
+    assert "| label | source | endpoint B | EXTI | class | R1(F)gt | R1(F)all | wR2(F^2)all | GooF | pathology |" in report
     assert "| label | source | lambda |" not in report
 
 
