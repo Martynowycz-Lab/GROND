@@ -78,7 +78,16 @@ def test_weighted_run_copy_inflates_sigma_and_marks_role(tmp_path: Path):
 
 def test_combiner_uses_endpoint_only_rows_for_endpoint_not_native_metrics(tmp_path: Path):
     res = tmp_path / "model.res"
-    res.write_text("TITL test\nCELL 0.025 10 10 10 90 90 90\nLATT 1\nSFAC C\nUNIT 1\nC1 1 0.1 0.2 0.3 11.0 0.05\nHKLF 4\nEND\n")
+    res.write_text(
+        "TITL test\n"
+        "CELL 0.025 10 10 10 90 90 90\n"
+        "LATT 1\n"
+        "SFAC C 1 0 1 0 1 0 1 0\n"
+        "UNIT 1\n"
+        "C1 1 0.1 0.2 0.3 11.0 0.05\n"
+        "HKLF 4\n"
+        "END\n"
+    )
     for name, role in (("good", "primary"), ("weak", "completeness_only")):
         run = tmp_path / name
         run.mkdir()

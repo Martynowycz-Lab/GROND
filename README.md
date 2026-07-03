@@ -48,6 +48,21 @@ The default `GROND auto` command is the full automatic path, not a toy wrapper. 
 
 For multi-dataset work, GROND keeps thickness, jitter, absorption, scale, and sigma decisions attached to each dataset until the combined endpoint is written. The current shared-model multi-dataset update uses the native finite-difference path; it does not silently reuse the single-dataset SHELXL LS1 feedback loop. See [MULTI_DATASET.md](docs/MULTI_DATASET.md) for the exact merge and weighting contract.
 
+The recommended multi-dataset command path is:
+
+```bash
+GROND prep \
+  --structure model.res \
+  --baseline-hkl model.hkl \
+  --dataset crystal_370=/data/370/INTEGRATE.HKL \
+  --dataset crystal_366=/data/366/INTEGRATE.HKL \
+  --out prep_multi.json
+
+GROND auto --prep prep_multi.json --out-dir grond_multi
+```
+
+This does not merge raw rows first. GROND simulates and regularizes each dataset against the same atomic model, but keeps each dataset's thickness, scan/geometry, scale, and sigma contract separate. It then updates one shared model, recomputes final Bloch rows for every accepted dataset, applies one post-dynamical overlap scale per dataset, inflates merged endpoint sigmas when datasets disagree, and writes one combined corrected-HKL endpoint.
+
 ## A Plain-English Bloch-Wave Picture
 
 The simplest crystallographic treatment uses the Born or kinematic approximation. In that picture, the incident electron beam enters the crystal, scatters once from the electrostatic potential, and the measured intensity for reflection `h` is proportional to `|F(h)|^2` after ordinary scale, geometry, and error-model corrections. That approximation is extremely useful, but electrons scatter strongly. In a nanocrystal, intensity can flow from the direct beam into one reflection, then from that reflection into another reflection, then back into the direct beam or into the target reflection. These multiple-scattering paths are the physical effect that GROND simulates row by row [14-20].

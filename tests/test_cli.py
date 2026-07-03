@@ -1491,7 +1491,7 @@ def test_structure_update_strategy_can_force_shelxl_feedback():
         ]
     )
     assert resolve_structure_update_strategy(args) == "shelxl_feedback"
-    assert resolve_structure_update_strategy(args, multi_dataset=True) == "shelxl_feedback"
+    assert resolve_structure_update_strategy(args, multi_dataset=True) == "native_gradient"
 
 
 def test_shelxl_feedback_current_model_skips_empty_res(tmp_path: Path):
@@ -1663,7 +1663,21 @@ def test_multi_dataset_sigma_auto_uses_conservative_combination_defaults():
 
 
 def test_combine_cmd_forwards_promoted_multi_dataset_sigma_policies(tmp_path: Path):
-    args = build_parser().parse_args(["auto", "--out-dir", "out", "--xds-dir", "xds", "--structure", "model.res"])
+    args = build_parser().parse_args(
+        [
+            "auto",
+            "--out-dir",
+            "out",
+            "--xds-dir",
+            "xds",
+            "--structure",
+            "model.res",
+            "--shelxl",
+            "/opt/shelx/shelxl",
+            "--shelxl-iterations",
+            "3",
+        ]
+    )
 
     cmd = combine_cmd(
         "python",
@@ -1676,6 +1690,8 @@ def test_combine_cmd_forwards_promoted_multi_dataset_sigma_policies(tmp_path: Pa
     assert cmd[cmd.index("--dataset-sigma-policy") + 1] == "uniform_z_rms"
     assert cmd[cmd.index("--merge-sigma-policy") + 1] == "chisq_overdispersion"
     assert cmd[cmd.index("--post-bloch-sigma-policy") + 1] == "uniform_z_rms"
+    assert cmd[cmd.index("--shelxl") + 1] == "/opt/shelx/shelxl"
+    assert cmd[cmd.index("--shelxl-iterations") + 1] == "3"
     assert "--dataset-sigma-holdout-floor" in cmd
 
 

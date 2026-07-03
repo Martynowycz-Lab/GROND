@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from grond.legacy.engine.combine_native_nuisance_runs import (
+    canonical_model_friedel,
     endpoint_hkl_path,
     estimate_overlap_scales,
     merge_hkl_rows,
@@ -22,6 +23,25 @@ def test_overlap_scales_put_datasets_on_common_intensity_scale():
     assert abs(d1_scaled[1][3] - d2_scaled[1][3]) < 1e-6
     assert result["overlap_counts"]["d1"] == 2
     assert result["overlap_counts"]["d2"] == 2
+
+
+def test_overlap_scales_can_use_model_symmetry_key():
+    rows_by_dataset = {
+        "d1": [(1, 2, 0, 10.0, 1.0)],
+        "d2": [(2, 1, 0, 20.0, 1.0)],
+    }
+    swap_hk = [
+        {"rot": [[1, 0, 0], [0, 1, 0], [0, 0, 1]]},
+        {"rot": [[0, 1, 0], [1, 0, 0], [0, 0, 1]]},
+    ]
+    key_for = lambda h, k, l: canonical_model_friedel(h, k, l, swap_hk)
+
+    default = estimate_overlap_scales(rows_by_dataset, iterations=1)
+    symmetry_aware = estimate_overlap_scales(rows_by_dataset, iterations=2, canonicalizer=key_for)
+
+    assert default["overlap_counts"]["d1"] == 0
+    assert symmetry_aware["overlap_counts"]["d1"] == 1
+    assert symmetry_aware["overlap_counts"]["d2"] == 1
 
 
 def test_endpoint_hkl_path_finds_b_zero_noexti_directory(tmp_path: Path):

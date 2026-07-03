@@ -69,6 +69,33 @@ def canonical_p222_friedel(h, k, l):
     return min(variants)
 
 
+def reciprocal_equivalent_keys(
+    h: int,
+    k: int,
+    l: int,
+    symmetry_ops: list[dict],
+    *,
+    merge_friedel: bool = True,
+) -> list[tuple[int, int, int]]:
+    """Return reciprocal equivalents from the model symmetry operations."""
+
+    hkl = np.asarray([int(h), int(k), int(l)], dtype=float)
+    keys: list[tuple[int, int, int]] = []
+    for op in symmetry_ops or [{"rot": np.eye(3).tolist()}]:
+        rot = np.asarray(op.get("rot", np.eye(3)), dtype=float)
+        for mat in (rot, np.linalg.inv(rot)):
+            equiv = np.rint(hkl @ mat).astype(int)
+            key = tuple(int(v) for v in equiv)
+            keys.append(key)
+            if merge_friedel:
+                keys.append(tuple(-v for v in key))
+    return sorted(set(keys))
+
+
+def canonical_model_friedel(h: int, k: int, l: int, symmetry_ops: list[dict]) -> tuple[int, int, int]:
+    return min(reciprocal_equivalent_keys(h, k, l, symmetry_ops, merge_friedel=True))
+
+
 def shelx_weights(obs, sig, pred, a: float, b: float):
     p = (np.maximum(obs, 0.0) + 2.0 * np.maximum(pred, 0.0)) / 3.0
     return 1.0 / np.maximum(sig * sig + (float(a) * p) ** 2 + float(b) * p, 1e-30)
@@ -224,9 +251,10 @@ def apply_sigma_holdout_floor(meta: dict) -> dict:
     return out
 
 
-def estimate_overlap_scales(rows_by_dataset: dict[str, list[tuple]], iterations: int = 6) -> dict:
+def estimate_overlap_scales(rows_by_dataset: dict[str, list[tuple]], iterations: int = 6, canonicalizer=None) -> dict:
     """Estimate per-dataset endpoint scales from overlapping corrected HKLs."""
 
+    key_for = canonicalizer or canonical_p222_friedel
     scales = {name: 1.0 for name in rows_by_dataset}
     overlap_counts = {name: 0 for name in rows_by_dataset}
     if len(rows_by_dataset) <= 1:
@@ -240,7 +268,7 @@ def estimate_overlap_scales(rows_by_dataset: dict[str, list[tuple]], iterations:
                 sigma_s = max(abs(float(sigma) * scale), 1e-6)
                 if not (math.isfinite(value) and value > 0.0 and math.isfinite(sigma_s)):
                     continue
-                key = canonical_p222_friedel(int(h), int(k), int(l))
+                key = key_for(int(h), int(k), int(l))
                 weight = 1.0 / (sigma_s * sigma_s)
                 bucket = bins.setdefault(key, {"w": 0.0, "wI": 0.0, "n": 0})
                 bucket["w"] += weight
@@ -252,7 +280,7 @@ def estimate_overlap_scales(rows_by_dataset: dict[str, list[tuple]], iterations:
             ratios = []
             scale = scales.get(name, 1.0)
             for h, k, l, intensity, _sigma in rows:
-                ref = reference.get(canonical_p222_friedel(int(h), int(k), int(l)))
+                ref = reference.get(key_for(int(h), int(k), int(l)))
                 value = float(intensity) * scale
                 if ref is not None and ref > 0.0 and value > 0.0 and math.isfinite(value):
                     ratios.append(ref / value)
@@ -501,6 +529,9 @@ def main():
     ap.add_argument("--post-bloch-sigma-max-scale", type=float, default=4.0)
     args = ap.parse_args()
 
+    model = parse_model(Path(args.res))
+    symmetry_ops = model.get("symmetry_ops", [])
+
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
     all_rows = []
@@ -524,7 +555,7 @@ def main():
         endpoint_input_rows = [r for r in rows if str(r.get("dataset_role", "primary")) != "exclude" and safe_float(r.get("endpoint_weight"), 1.0) > 0.0]
         all_rows.extend(native_rows)
         exact = {tuple(int(r[x]) for x in ("h", "k", "l")) for r in rows}
-        canon = {canonical_p222_friedel(*hkl) for hkl in exact}
+        canon = {canonical_model_friedel(*hkl, symmetry_ops) for hkl in exact}
         q = np.asarray([safe_float(r["q_dyn_over_born"]) for r in endpoint_input_rows], dtype=float)
         basis = np.asarray([safe_float(r.get("basis_size")) for r in endpoint_input_rows], dtype=float)
         basis = basis[np.isfinite(basis)]
@@ -542,6 +573,7 @@ def main():
                 "raw_row_weight": raw_weight,
                 "endpoint_weight": endpoint_weight,
                 "unique_signed_hkl": len(exact),
+                "unique_symmetry_friedel": len(canon),
                 "unique_p222_friedel": len(canon),
                 "best_native_summary": summary.get("best_native", {}),
                 "basis_size_stats": {
@@ -568,7 +600,6 @@ def main():
         dataset_sigma_by_name[name] = {"policy": args.dataset_sigma_policy, "status": "not_requested"}
 
     if args.dataset_sigma_policy == "uniform_z_rms":
-        model = parse_model(Path(args.res))
         for name, rows_for_dataset in list(endpoint_rows_by_dataset.items()):
             try:
                 sigma_meta = fit_uniform_z_rms_sigma_scale(
@@ -593,7 +624,8 @@ def main():
     wght_a = 0.126534 if wght_a is None else float(wght_a)
     wght_b = 0.0 if wght_b is None else float(wght_b)
     if args.interdataset_scale == "overlap":
-        interdataset_scale = estimate_overlap_scales(endpoint_rows_by_dataset)
+        key_for_overlap = lambda h, k, l: canonical_model_friedel(h, k, l, symmetry_ops)
+        interdataset_scale = estimate_overlap_scales(endpoint_rows_by_dataset, canonicalizer=key_for_overlap)
     else:
         interdataset_scale = {
             "iterations": 0,
@@ -608,7 +640,7 @@ def main():
     for ds in dataset_summaries:
         rows = [r for r in all_rows if r["dataset"] == ds["name"]]
         exact_by_dataset.append({tuple(int(r[x]) for x in ("h", "k", "l")) for r in rows})
-        canon_by_dataset.append({canonical_p222_friedel(*tuple(int(r[x]) for x in ("h", "k", "l"))) for r in rows})
+        canon_by_dataset.append({canonical_model_friedel(*tuple(int(r[x]) for x in ("h", "k", "l")), symmetry_ops) for r in rows})
     exact_union = set().union(*exact_by_dataset) if exact_by_dataset else set()
     canon_union = set().union(*canon_by_dataset) if canon_by_dataset else set()
     exact_intersection = set.intersection(*exact_by_dataset) if len(exact_by_dataset) >= 2 else set()
@@ -629,7 +661,7 @@ def main():
             try:
                 post_bloch_sigma = fit_uniform_z_rms_sigma_scale(
                     merged_endpoint,
-                    parse_model(Path(args.res)),
+                    model,
                     holdout_fraction=float(args.post_bloch_sigma_holdout_fraction),
                     min_scale=float(args.post_bloch_sigma_min_scale),
                     max_scale=float(args.post_bloch_sigma_max_scale),
@@ -669,6 +701,8 @@ def main():
         "interdataset_scale": {"mode": args.interdataset_scale, **interdataset_scale},
         "combined_endpoint": {
             "lambda_q": args.endpoint_lambda,
+            "merge_key": "exact_signed_hkl",
+            "overlap_scale_key": "model_symmetry_plus_friedel",
             "input_unmerged_rows": len(endpoint_rows),
             "merged_exact_hkl_rows": len(merged_endpoint),
             "hkl_safe_factor": hkl_safe_factor if endpoint_rows else 1.0,
@@ -684,7 +718,7 @@ def main():
         "",
         "The per-dataset nuisance fits are kept separate. This report concatenates signed native rows after each dataset has its own scales/thickness/cell/geometry treatment.",
         "",
-        "| dataset | role | raw/endpoint weight | rows native/endpoint | unique signed | unique P222/Friedel | basis median/p95/max | dyn R1 all | dyn wR2 all | born R1 all | born wR2 all | q p05/median/p95 |",
+        "| dataset | role | raw/endpoint weight | rows native/endpoint | unique signed | unique model/Friedel | basis median/p95/max | dyn R1 all | dyn wR2 all | born R1 all | born wR2 all | q p05/median/p95 |",
         "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for ds in dataset_summaries:
@@ -695,7 +729,7 @@ def main():
         bstats = ds.get("basis_size_stats", {})
         lines.append(
             f"| {ds['name']} | {ds['dataset_role']} | {safe_float(ds.get('raw_row_weight')):.3f}/{safe_float(ds.get('endpoint_weight')):.3f} | "
-            f"{ds['native_rows']}/{ds['endpoint_rows']} | {ds['unique_signed_hkl']} | {ds['unique_p222_friedel']} | "
+            f"{ds['native_rows']}/{ds['endpoint_rows']} | {ds['unique_signed_hkl']} | {ds['unique_symmetry_friedel']} | "
             f"{safe_float(bstats.get('median')):.0f}/{safe_float(bstats.get('p95')):.0f}/{safe_float(bstats.get('max')):.0f} | "
             f"{100*safe_float(dyn.get('R1_all')):.2f} | {100*safe_float(dyn.get('wR2_all')):.2f} | "
             f"{100*safe_float(born.get('R1_all')):.2f} | {100*safe_float(born.get('wR2_all')):.2f} | "
@@ -708,7 +742,7 @@ def main():
             "",
             "## Joint Native Metrics",
             "",
-            f"Rows in raw-row joint metrics: `{len(all_rows)}`. Endpoint/completeness rows: `{len(endpoint_rows)}`. Unique signed HKL union over raw-row metric rows: `{len(exact_union)}`. Unique P222/Friedel union: `{len(canon_union)}`.",
+            f"Rows in raw-row joint metrics: `{len(all_rows)}`. Endpoint/completeness rows: `{len(endpoint_rows)}`. Unique signed HKL union over raw-row metric rows: `{len(exact_union)}`. Unique model-symmetry/Friedel union: `{len(canon_union)}`.",
             "",
             f"Bloch joint: `R1_I_all={100*nd['R1_all']:.2f}%`, `R1_I_gt={100*nd['R1_gt']:.2f}%`, `wR2_I_all={100*nd['wR2_all']:.2f}%`, `CC={nd['CC']:.4f}`.",
             f"Born joint: `R1_I_all={100*nb['R1_all']:.2f}%`, `R1_I_gt={100*nb['R1_gt']:.2f}%`, `wR2_I_all={100*nb['wR2_all']:.2f}%`, `CC={nb['CC']:.4f}`.",
@@ -733,6 +767,7 @@ def main():
             f"`{safe_float(merge_sigma.get('inflation_p95')):.3f}`/"
             f"`{safe_float(merge_sigma.get('inflation_max')):.3f}`."
         )
+        lines.append("Overlap scaling uses model symmetry plus Friedel pairing. The written HKLF4 endpoint merge key is exact signed HKL; the endpoint refiner then applies its normal crystallographic merging/statistics.")
         lines.append("")
         lines.append(
             f"Lambda `{args.endpoint_lambda}` merged `{len(endpoint_rows)}` unmerged endpoint rows to `{len(merged_endpoint)}` exact signed HKL rows. SHELXL status `{shelxl.get('status')}`; `R1gt={100*safe_float(shelxl.get('R1_gt')):.2f}%`, `R1all={100*safe_float(shelxl.get('R1_all')):.2f}%`, `wR2all={100*safe_float(shelxl.get('wR2_all')):.2f}%`, `GooF={safe_float(shelxl.get('GooF')):.3f}`."

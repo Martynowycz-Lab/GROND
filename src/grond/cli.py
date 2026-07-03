@@ -595,9 +595,16 @@ def resolve_structure_update_strategy(args: argparse.Namespace, *, multi_dataset
     """
 
     requested = getattr(args, "structure_update", "auto")
+    if multi_dataset:
+        # The multi-dataset workflow has to keep one shared model synchronized
+        # with dataset-local nuisance, sigma, and scale contracts.  Until the
+        # combined LS1 feedback loop exists, active multi-dataset structure
+        # updates use the native shared-row updater even if a single-dataset
+        # feedback engine was requested explicitly.
+        return "native_gradient" if requested != "off" else "off"
     if requested in {"off", "native_gradient", "shelxl_feedback"}:
         return requested
-    if multi_dataset or getattr(args, "fast", False) or getattr(args, "full_fast", False) or getattr(args, "native_only", False):
+    if getattr(args, "fast", False) or getattr(args, "full_fast", False) or getattr(args, "native_only", False):
         return "native_gradient"
     if shelxl_is_available(getattr(args, "shelxl", "shelxl")):
         return "shelxl_feedback"
@@ -2487,6 +2494,10 @@ def combine_cmd(python: str, runs: dict[str, Path], structure: str, out_dir: Pat
         f"{args.post_bloch_sigma_min_scale:g}",
         "--post-bloch-sigma-max-scale",
         f"{args.post_bloch_sigma_max_scale:g}",
+        "--shelxl",
+        str(getattr(args, "shelxl", "") or ""),
+        "--shelxl-iterations",
+        str(getattr(args, "shelxl_iterations", 5)),
     ]
     if args.dataset_sigma_holdout_floor:
         cmd.append("--dataset-sigma-holdout-floor")
@@ -4361,7 +4372,8 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
     datasets_csv = root / "prep_datasets_with_nuisance.csv"
     write_datasets_csv(datasets_csv, prep, apply_dataset_policy_to_nuisance(nuisance, structure_dataset_policy))
     final_model = prep.structure
-    if args.mode in {"regularize", "auto"} and not args.fast:
+    structure_strategy = resolve_structure_update_strategy(args, multi_dataset=True)
+    if args.mode in {"regularize", "auto"} and not args.fast and structure_strategy != "off":
         shared = root / "runs" / "shared_structure_update"
         cmd = [
             python,
@@ -4533,6 +4545,7 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
         "runs": {k: str(v) for k, v in final_runs.items()},
         "combined_input_runs": {k: str(v) for k, v in combined_input_runs.items()},
         "publication_runs": {k: str(v) for k, v in publication_runs.items()},
+        "structure_update_strategy": structure_strategy,
         "forensics": forensic_runs,
         "scale_polish": scale_polish_runs,
         "resolution_limits": resolution_limits,
