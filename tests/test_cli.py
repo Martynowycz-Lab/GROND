@@ -2064,3 +2064,48 @@ def test_missing_map_tool_errors_before_full_auto(tmp_path: Path, monkeypatch):
     assert any("shelx2map" in item for item in errors)
     args.make_maps = False
     assert required_external_tool_errors(args, structure=str(model)) == []
+
+
+def test_combined_summary_exposes_joint_native_metrics(tmp_path: Path):
+    run_dir = tmp_path / "combined"
+    run_dir.mkdir()
+    (run_dir / "combined_summary.json").write_text(
+        json.dumps(
+            {
+                "wght": {"a": 0.12, "b": 0.0},
+                "native_joint": {
+                    "dyn": {
+                        "all": {"R1_all": 0.13, "wR2_all": 0.24},
+                        "work": {"R1_all": 0.131, "wR2_all": 0.241},
+                        "free": {"R1_all": 0.132, "wR2_all": 0.242},
+                    },
+                    "born": {
+                        "all": {"R1_all": 0.17, "wR2_all": 0.30},
+                        "work": {"R1_all": 0.171, "wR2_all": 0.301},
+                        "free": {"R1_all": 0.172, "wR2_all": 0.302},
+                    },
+                },
+            }
+        )
+        + "\n"
+    )
+
+    summary = cli._quick_load_run_summary(run_dir)
+    assert cli._quick_dyn_metric(summary, "all", "R1_all") == 0.13
+    assert cli._quick_born_metric(summary, "free", "wR2_all") == 0.302
+    native = cli._quick_best_native(summary)
+    assert native["native_weight"]["a"] == 0.12
+
+
+def test_publication_endpoint_recovers_hkl_from_res(tmp_path: Path):
+    endpoint_res = tmp_path / "multi_dyn_corrected.res"
+    endpoint_hkl = tmp_path / "multi_dyn_corrected.hkl"
+    endpoint_res.write_text("TITL test\nEND\n")
+    endpoint_hkl.write_text("   0   0   0    0.00    0.00\n")
+
+    endpoint = cli._normalize_publication_endpoint_block(
+        {"res": str(endpoint_res), "shelxl": {"R1_all": 0.1}},
+        selection_source="endpoint_chooser",
+    )
+
+    assert endpoint["endpoint_hkl"] == str(endpoint_hkl)

@@ -5300,18 +5300,68 @@ def _quick_final_run(result: Mapping[str, object]) -> Path | None:
     return None
 
 
+def _quick_load_run_summary(run_dir: Path | None) -> Mapping[str, object]:
+    """Load a single-dataset or combined multi-dataset row summary."""
+
+    if run_dir is None:
+        return {}
+    summary = try_read_json(run_dir / "summary.json")
+    if summary:
+        return summary
+    combined_summary = try_read_json(run_dir / "combined_summary.json")
+    return combined_summary if isinstance(combined_summary, Mapping) else {}
+
+
+def _quick_combined_native_metrics(summary: Mapping[str, object]) -> Mapping[str, object]:
+    """Return single-summary-shaped native metrics for a combined run."""
+
+    native_joint = summary.get("native_joint") if isinstance(summary.get("native_joint"), Mapping) else {}
+    dyn = native_joint.get("dyn") if isinstance(native_joint.get("dyn"), Mapping) else {}
+    born = native_joint.get("born") if isinstance(native_joint.get("born"), Mapping) else {}
+    if not dyn and not born:
+        return {}
+    metrics: dict[str, dict[str, object]] = {}
+    for split in ("all", "work", "free"):
+        metrics[split] = {}
+        if isinstance(dyn.get(split), Mapping):
+            metrics[split]["dyn"] = dyn.get(split)
+        if isinstance(born.get(split), Mapping):
+            metrics[split]["born"] = born.get(split)
+    return metrics
+
+
 def _quick_best_native(summary: Mapping[str, object]) -> Mapping[str, object]:
     """Return the best native block from a native row run summary."""
 
     value = summary.get("best_native")
-    return value if isinstance(value, Mapping) else {}
+    if isinstance(value, Mapping):
+        return value
+    metrics = _quick_combined_native_metrics(summary)
+    if not metrics:
+        return {}
+    wght = summary.get("wght") if isinstance(summary.get("wght"), Mapping) else {}
+    nuisance = {
+        "native_wght_a": wght.get("a"),
+        "native_wght_b": wght.get("b"),
+    }
+    return {
+        "metrics": metrics,
+        "native_weight": wght,
+        "nuisance": nuisance,
+    }
 
 
 def _quick_best_endpoint(summary: Mapping[str, object]) -> Mapping[str, object]:
     """Return the best corrected-HKL endpoint block from a native row run summary."""
 
     value = summary.get("best_endpoint")
-    return value if isinstance(value, Mapping) else {}
+    if isinstance(value, Mapping):
+        return value
+    combined_endpoint = summary.get("combined_endpoint")
+    if isinstance(combined_endpoint, Mapping):
+        shelxl = combined_endpoint.get("shelxl")
+        return {"shelxl": shelxl} if isinstance(shelxl, Mapping) else {}
+    return {}
 
 
 def _quick_nuisance(summary: Mapping[str, object]) -> Mapping[str, object]:
@@ -5966,10 +6016,15 @@ def _normalize_publication_endpoint_block(endpoint: Mapping[str, object], *, sel
     out["endpoint_ins"] = first_text("endpoint_ins", "ins")
     if not out["endpoint_ins"] and out["endpoint_res"]:
         out["endpoint_ins"] = str(Path(out["endpoint_res"]).with_suffix(".ins"))
+    if not out["endpoint_hkl"] and out["endpoint_res"]:
+        endpoint_hkl = Path(out["endpoint_res"]).with_suffix(".hkl")
+        if endpoint_hkl.exists():
+            out["endpoint_hkl"] = str(endpoint_hkl)
     out["endpoint_manifest"] = first_text("endpoint_manifest", "manifest")
     if not out["endpoint_manifest"] and out["endpoint_res"]:
         manifest = Path(out["endpoint_res"]).with_name("manifest.json")
-        out["endpoint_manifest"] = str(manifest)
+        if manifest.exists():
+            out["endpoint_manifest"] = str(manifest)
     out["endpoint_row_table"] = first_text("endpoint_row_table", "row_table")
     if not out["endpoint_row_table"] and str(out.get("source_kind", "")) == "observation_polish":
         run_dir = first_text("run_dir")
@@ -6064,11 +6119,15 @@ def _quick_endpoint_file_block(publication_endpoint: Mapping[str, object], final
 
     final_endpoint_dir = final_model.parent if final_model else None
     final_endpoint_stem = final_model.stem if final_model else ""
+
+    def existing(path: Path | None) -> str:
+        return str(path) if path is not None and path.exists() else ""
+
     return {
         "final_feedback_res": str(final_model or ""),
-        "final_feedback_hkl": str((final_endpoint_dir / (final_endpoint_stem + ".hkl")) if final_endpoint_dir else ""),
-        "final_feedback_lst": str((final_endpoint_dir / (final_endpoint_stem + ".lst")) if final_endpoint_dir else ""),
-        "final_feedback_manifest": str((final_endpoint_dir / "manifest.json") if final_endpoint_dir else ""),
+        "final_feedback_hkl": existing(final_endpoint_dir / (final_endpoint_stem + ".hkl") if final_endpoint_dir else None),
+        "final_feedback_lst": existing(final_endpoint_dir / (final_endpoint_stem + ".lst") if final_endpoint_dir else None),
+        "final_feedback_manifest": existing(final_endpoint_dir / "manifest.json" if final_endpoint_dir else None),
         "publication_res": str(publication_endpoint.get("endpoint_res", "")),
         "publication_ins": str(publication_endpoint.get("endpoint_ins", "")),
         "publication_hkl": str(publication_endpoint.get("endpoint_hkl", "")),
@@ -6301,7 +6360,7 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
     sfac_check = try_read_json(out_dir / "sfac_check.json")
     final_run = _quick_final_run(result)
     final_model = Path(str(result.get("model"))) if result.get("model") else None
-    final_summary = try_read_json(final_run / "summary.json") if final_run else {}
+    final_summary = _quick_load_run_summary(final_run)
     best_native = _quick_best_native(final_summary)
     best_endpoint = _quick_best_endpoint(final_summary)
     native_metrics = best_native.get("metrics") if isinstance(best_native.get("metrics"), Mapping) else {}

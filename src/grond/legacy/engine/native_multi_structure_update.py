@@ -85,6 +85,11 @@ class DatasetState:
     wght_a: float
     wght_b: float
     detector_scale_bins: int
+    min_d_spacing: float
+    min_peak: float
+    target_mode: str
+    dataset_weight: float
+    dataset_role: str
 
 
 class EarlyStopOptimization(Exception):
@@ -127,11 +132,6 @@ def make_early_stop_result(exc: EarlyStopOptimization, eval_count: int):
         early_stop_metric=float(exc.metric),
         early_stop_eval=int(exc.eval_no),
     )
-    min_d_spacing: float
-    min_peak: float
-    target_mode: str
-    dataset_weight: float
-    dataset_role: str
 
 
 def parse_bool(text: str | None, default: bool = False) -> bool:
