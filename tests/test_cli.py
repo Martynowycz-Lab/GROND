@@ -1521,6 +1521,23 @@ def test_structure_update_strategy_can_force_shelxl_feedback():
         ]
     )
     assert resolve_structure_update_strategy(args) == "shelxl_feedback"
+    assert resolve_structure_update_strategy(args, multi_dataset=True) == "shelxl_feedback"
+
+
+def test_structure_update_strategy_keeps_native_gradient_as_explicit_multi_dataset_diagnostic():
+    args = build_parser().parse_args(
+        [
+            "auto",
+            "--out-dir",
+            "out",
+            "--xds-dir",
+            "xds",
+            "--structure",
+            "model.res",
+            "--structure-update",
+            "native_gradient",
+        ]
+    )
     assert resolve_structure_update_strategy(args, multi_dataset=True) == "native_gradient"
 
 

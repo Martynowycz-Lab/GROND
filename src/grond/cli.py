@@ -563,7 +563,6 @@ def required_external_tool_errors(args: argparse.Namespace, *, structure: str = 
         errors.append("shelx2map is required for automatic map generation; set tools.shelx2map in a GROND config, set SHELX2MAP, or add --no-maps.")
     if (
         getattr(args, "structure_update", "auto") == "shelxl_feedback"
-        and not multi_dataset
         and not statuses.get("shelxl", {}).get("available")
     ):
         errors.append("The requested --structure-update shelxl_feedback needs SHELXL; set tools.shelxl or choose native_gradient/off.")
@@ -586,22 +585,16 @@ def raise_for_missing_external_tools(args: argparse.Namespace, *, structure: str
 def resolve_structure_update_strategy(args: argparse.Namespace, *, multi_dataset: bool = False) -> str:
     """Choose the structure-update engine for the current run.
 
-    The SHELXL feedback loop is the preferred single-dataset default whenever a
+    The SHELXL feedback loop is the preferred default whenever a
     SHELXL executable is available because it reaches the same high-N/Q
     row-space endpoint as finite-difference dynamical gradients at a small
-    fraction of the wall time. Multi-dataset shared-structure update still
-    uses the native gradient engine until there is an equivalent combined
-    feedback loop.
+    fraction of the wall time.  Multi-dataset runs use the same lagged LS1
+    idea as single-dataset runs: per-dataset Bloch rows are merged into one
+    corrected endpoint HKL, one shared SHELXL update is run, and the updated
+    shared model is sent back through every dataset.
     """
 
     requested = getattr(args, "structure_update", "auto")
-    if multi_dataset:
-        # The multi-dataset workflow has to keep one shared model synchronized
-        # with dataset-local nuisance, sigma, and scale contracts.  Until the
-        # combined LS1 feedback loop exists, active multi-dataset structure
-        # updates use the native shared-row updater even if a single-dataset
-        # feedback engine was requested explicitly.
-        return "native_gradient" if requested != "off" else "off"
     if requested in {"off", "native_gradient", "shelxl_feedback"}:
         return requested
     if getattr(args, "fast", False) or getattr(args, "full_fast", False) or getattr(args, "native_only", False):
@@ -2460,9 +2453,18 @@ def shelxl_feedback_cmd(
     return cmd
 
 
-def combine_cmd(python: str, runs: dict[str, Path], structure: str, out_dir: Path, args: argparse.Namespace) -> list[str]:
+def combine_cmd(
+    python: str,
+    runs: dict[str, Path],
+    structure: str,
+    out_dir: Path,
+    args: argparse.Namespace,
+    *,
+    shelxl_iterations: int | None = None,
+) -> list[str]:
     """Build the multi-dataset corrected-HKL combination command."""
 
+    iterations = int(shelxl_iterations if shelxl_iterations is not None else getattr(args, "shelxl_iterations", 5))
     cmd = [
         python,
         str(engine_script("combine_native_nuisance_runs.py")),
@@ -2497,7 +2499,7 @@ def combine_cmd(python: str, runs: dict[str, Path], structure: str, out_dir: Pat
         "--shelxl",
         str(getattr(args, "shelxl", "") or ""),
         "--shelxl-iterations",
-        str(getattr(args, "shelxl_iterations", 5)),
+        str(iterations),
     ]
     if args.dataset_sigma_holdout_floor:
         cmd.append("--dataset-sigma-holdout-floor")
@@ -2750,6 +2752,128 @@ def policy_active_runs(runs: dict[str, Path], policy: dict) -> dict[str, Path]:
         if action in {"primary", "downweight"}:
             active[name] = run
     return active or runs
+
+
+def multi_combined_endpoint_model(combined_dir: Path) -> Path | None:
+    """Return the usable shared SHELXL model from a multi-dataset combine run."""
+
+    candidates = [combined_dir / "combined_endpoint_lam_1p0" / "multi_dyn_corrected.res"]
+    candidates.extend(sorted(combined_dir.glob("combined_endpoint_lam_*/multi_dyn_corrected.res")))
+    for candidate in candidates:
+        if shelx_model_is_usable(candidate):
+            return candidate
+    return None
+
+
+def run_multi_shelxl_feedback_loop(
+    prep: PrepConfig,
+    args: argparse.Namespace,
+    python: str,
+    logs: Path,
+    root: Path,
+    *,
+    start_model: str,
+    nuisance: dict[str, dict],
+    structure_dataset_policy: dict,
+) -> tuple[str, dict]:
+    """Run shared-model Bloch -> merged HKL -> SHELXL LS1 macrocycles."""
+
+    feedback_root = root / "runs" / "shared_shelxl_feedback"
+    cycles_requested = max(0, int(getattr(args, "shelxl_feedback_cycles", 0) or 0))
+    summary: dict = {
+        "status": "not_run" if cycles_requested <= 0 else "running",
+        "strategy": "shelxl_feedback",
+        "start_model": start_model,
+        "current_model": start_model,
+        "cycles_requested": cycles_requested,
+        "shelxl_iterations_per_cycle": int(getattr(args, "shelxl_feedback_shelxl_iterations", 1) or 1),
+        "cycles": [],
+    }
+    if cycles_requested <= 0:
+        summary["status"] = "disabled_zero_cycles"
+        write_json(feedback_root / "multi_shelxl_feedback_loop_summary.json", summary)
+        return start_model, summary
+    if args.dry_run:
+        summary["status"] = "dry_run"
+        write_json(feedback_root / "multi_shelxl_feedback_loop_summary.json", summary)
+        return start_model, summary
+
+    current_model = start_model
+    feedback_root.mkdir(parents=True, exist_ok=True)
+    for cycle in range(1, cycles_requested + 1):
+        cycle_label = f"multi_ls1_cycle_{cycle:02d}"
+        cycle_dir = feedback_root / f"cycle_{cycle:02d}"
+        cycle_runs: dict[str, Path] = {}
+        for ds in prep.datasets:
+            run_dir = cycle_dir / ds.name
+            final_n_basis = resolve_final_n_basis(prep, ds, args, python, logs, root, current_model, cycle_label)
+            run_logged(
+                native_stage_cmd(
+                    python,
+                    ds,
+                    current_model,
+                    dataset_baseline_hkl(prep, ds),
+                    run_dir,
+                    args,
+                    n_basis=final_n_basis,
+                    n_points=args.n_points,
+                    stage=cycle_label,
+                    pinned=nuisance[ds.name],
+                    make_maps=False,
+                    endpoint=False,
+                ),
+                logs,
+                f"{ds.name}_{cycle_label}",
+                dry_run=False,
+            )
+            cycle_runs[ds.name] = run_dir
+
+        if structure_dataset_policy.get("status") in {"disabled", "single_dataset", "dry_run", "missing_row_table"}:
+            cycle_input_runs = cycle_runs
+        else:
+            weighted_runs = write_policy_weighted_runs(
+                cycle_runs,
+                structure_dataset_policy,
+                cycle_dir / "weighted_runs",
+                include_endpoint_only=False,
+            )
+            cycle_input_runs = policy_active_runs(weighted_runs or cycle_runs, structure_dataset_policy)
+
+        combined_dir = cycle_dir / "combined"
+        run_logged(
+            combine_cmd(
+                python,
+                cycle_input_runs,
+                current_model,
+                combined_dir,
+                args,
+                shelxl_iterations=int(getattr(args, "shelxl_feedback_shelxl_iterations", 1) or 1),
+            ),
+            logs,
+            f"{cycle_label}_combine",
+            dry_run=False,
+        )
+        output_model = multi_combined_endpoint_model(combined_dir)
+        record = {
+            "cycle": cycle,
+            "label": cycle_label,
+            "input_model": current_model,
+            "output_model": str(output_model) if output_model else "",
+            "combined": str(combined_dir),
+            "runs": {name: str(path) for name, path in cycle_runs.items()},
+            "combined_input_runs": {name: str(path) for name, path in cycle_input_runs.items()},
+        }
+        summary["cycles"].append(record)
+        if output_model is None:
+            summary["status"] = "failed_no_usable_endpoint_model"
+            write_json(feedback_root / "multi_shelxl_feedback_loop_summary.json", summary)
+            raise RuntimeError(f"{cycle_label} did not produce a usable shared SHELXL .res model in {combined_dir}")
+        current_model = str(output_model)
+        summary["current_model"] = current_model
+        summary["status"] = "ok"
+        write_json(feedback_root / "multi_shelxl_feedback_loop_summary.json", summary)
+
+    return current_model, summary
 
 
 def run_publication_report(python: str, prep: PrepConfig, result: dict, args: argparse.Namespace, logs: Path) -> dict:
@@ -4373,72 +4497,88 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
     write_datasets_csv(datasets_csv, prep, apply_dataset_policy_to_nuisance(nuisance, structure_dataset_policy))
     final_model = prep.structure
     structure_strategy = resolve_structure_update_strategy(args, multi_dataset=True)
+    structure_feedback: dict = {"status": "not_run", "strategy": structure_strategy}
     if args.mode in {"regularize", "auto"} and not args.fast and structure_strategy != "off":
-        shared = root / "runs" / "shared_structure_update"
-        cmd = [
-            python,
-            str(engine_script("native_multi_structure_update.py")),
-            "--datasets-csv",
-            str(datasets_csv),
-            "--res",
-            prep.structure,
-            "--out-dir",
-            str(shared),
-            "--n-basis",
-            str(args.structure_n_basis),
-            "--n-points",
-            str(args.structure_n_points),
-            "--topup-d-min",
-            f"{effective_topup_d_min(args, min_d_spacing=min(ds.min_d_spacing for ds in prep.datasets)):g}",
-            "--min-d-spacing",
-            "0.70",
-            "--min-peak",
-            "90",
-            "--geometry-percentile",
-            f"{prep.geometry_percentile:g}",
-            "--block-schedule",
-            args.structure_blocks,
-            "--atom-selection",
-            args.structure_atom_selection,
-            "--max-nfev",
-            str(args.structure_max_nfev),
-            "--compute-backend",
-            args.compute_backend,
-            "--jax-batch-size",
-            str(args.jax_batch_size),
-            "--jax-matrix-bucket-size",
-            str(args.jax_matrix_bucket_size),
-            "--bethe-strong-count",
-            str(args.bethe_strong_count),
-            "--bethe-variant",
-            args.bethe_variant,
-            "--bethe-promote-denom",
-            f"{args.bethe_promote_denom:g}",
-            "--bethe-denom-eps",
-            f"{args.bethe_denom_eps:g}",
-            "--profile-quadrature",
-            args.profile_quadrature,
-            "--profile-accumulation",
-            args.profile_accumulation,
-            "--early-stop-window",
-            str(args.structure_early_stop_window),
-            "--early-stop-min-evals",
-            str(args.structure_early_stop_min_evals),
-            "--early-stop-min-improvement",
-            f"{args.structure_early_stop_min_improvement:g}",
-            "--early-stop-metric",
-            args.structure_early_stop_metric,
-            "--restraints",
-            args.restraints,
-            "--workers",
-            str(args.workers),
-            "--chunksize",
-            str(args.chunksize),
-        ]
-        run_logged(cmd, logs, "shared_structure_update", dry_run=args.dry_run)
-        accepted = shared / "accepted_model.res"
-        if accepted.exists():
-            final_model = str(accepted)
+        if structure_strategy == "shelxl_feedback":
+            final_model, structure_feedback = run_multi_shelxl_feedback_loop(
+                prep,
+                args,
+                python,
+                logs,
+                root,
+                start_model=prep.structure,
+                nuisance=nuisance,
+                structure_dataset_policy=structure_dataset_policy,
+            )
+        elif structure_strategy == "native_gradient":
+            shared = root / "runs" / "shared_structure_update"
+            cmd = [
+                python,
+                str(engine_script("native_multi_structure_update.py")),
+                "--datasets-csv",
+                str(datasets_csv),
+                "--res",
+                prep.structure,
+                "--out-dir",
+                str(shared),
+                "--n-basis",
+                str(args.structure_n_basis),
+                "--n-points",
+                str(args.structure_n_points),
+                "--topup-d-min",
+                f"{effective_topup_d_min(args, min_d_spacing=min(ds.min_d_spacing for ds in prep.datasets)):g}",
+                "--min-d-spacing",
+                "0.70",
+                "--min-peak",
+                "90",
+                "--geometry-percentile",
+                f"{prep.geometry_percentile:g}",
+                "--block-schedule",
+                args.structure_blocks,
+                "--atom-selection",
+                args.structure_atom_selection,
+                "--max-nfev",
+                str(args.structure_max_nfev),
+                "--compute-backend",
+                args.compute_backend,
+                "--jax-batch-size",
+                str(args.jax_batch_size),
+                "--jax-matrix-bucket-size",
+                str(args.jax_matrix_bucket_size),
+                "--bethe-strong-count",
+                str(args.bethe_strong_count),
+                "--bethe-variant",
+                args.bethe_variant,
+                "--bethe-promote-denom",
+                f"{args.bethe_promote_denom:g}",
+                "--bethe-denom-eps",
+                f"{args.bethe_denom_eps:g}",
+                "--profile-quadrature",
+                args.profile_quadrature,
+                "--profile-accumulation",
+                args.profile_accumulation,
+                "--early-stop-window",
+                str(args.structure_early_stop_window),
+                "--early-stop-min-evals",
+                str(args.structure_early_stop_min_evals),
+                "--early-stop-min-improvement",
+                f"{args.structure_early_stop_min_improvement:g}",
+                "--early-stop-metric",
+                args.structure_early_stop_metric,
+                "--restraints",
+                args.restraints,
+                "--workers",
+                str(args.workers),
+                "--chunksize",
+                str(args.chunksize),
+            ]
+            run_logged(cmd, logs, "shared_structure_update", dry_run=args.dry_run)
+            accepted = shared / "accepted_model.res"
+            structure_feedback = {"status": "ok" if accepted.exists() else "no_accepted_model", "strategy": structure_strategy, "run": str(shared)}
+            if accepted.exists():
+                final_model = str(accepted)
+        else:
+            structure_feedback = {"status": "unsupported_strategy", "strategy": structure_strategy}
     final_runs: dict[str, Path] = {}
     forensic_runs: dict[str, dict] = {}
     scale_polish_runs: dict[str, dict] = {}
@@ -4546,6 +4686,7 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
         "combined_input_runs": {k: str(v) for k, v in combined_input_runs.items()},
         "publication_runs": {k: str(v) for k, v in publication_runs.items()},
         "structure_update_strategy": structure_strategy,
+        "structure_feedback": structure_feedback,
         "forensics": forensic_runs,
         "scale_polish": scale_polish_runs,
         "resolution_limits": resolution_limits,
@@ -9303,7 +9444,7 @@ def add_common_run_args(ap: argparse.ArgumentParser, *, expose_lambda_controls: 
     ap.add_argument("--structure-early-stop-min-evals", type=int, default=0, help="Minimum residual calls before a plateau stop can trigger; 0 uses the engine's parameter-count-aware floor.")
     ap.add_argument("--structure-early-stop-min-improvement", type=float, default=2e-5, help="Minimum RMS improvement counted as progress for plateau stopping.")
     ap.add_argument("--structure-early-stop-metric", choices=["total_rms", "data_rms"], default="data_rms", help="Trace column used by the structure-update plateau stop.")
-    ap.add_argument("--structure-update", choices=["auto", "native_gradient", "shelxl_feedback", "off"], default="auto", help="Structure-update engine. Auto uses the high-N/Q SHELXL feedback loop for single-dataset full runs when SHELXL is available; otherwise it uses native finite-difference gradients.")
+    ap.add_argument("--structure-update", choices=["auto", "native_gradient", "shelxl_feedback", "off"], default="auto", help="Structure-update engine. Auto uses the high-N/Q SHELXL feedback loop for full runs when SHELXL is available; native_gradient is the slower finite-difference diagnostic path.")
     ap.add_argument("--structure-blocks", default="adp_ueq")
     ap.add_argument("--structure-atom-selection", choices=["nonh", "all", "labels"], default="nonh")
     ap.add_argument("--restraints", choices=["none", "start_geometry", "cctbx_rigu"], default="cctbx_rigu")
