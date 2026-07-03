@@ -192,6 +192,36 @@ def test_finish_parser_defaults_to_existing_run_dir():
     assert args.map_mode == "native"
 
 
+def test_finish_native_maps_use_publication_runs_for_combined_endpoint(tmp_path: Path):
+    run_a = tmp_path / "weighted_runs" / "a"
+    run_b = tmp_path / "weighted_runs" / "b"
+    run_c = tmp_path / "weighted_runs" / "c_endpoint_only"
+    result = {
+        "combined": str(tmp_path / "runs" / "combined"),
+        "publication_runs": {"b": str(run_b), "a": str(run_a)},
+        "combined_input_runs": {"b": str(run_b), "a": str(run_a), "c": str(run_c)},
+        "publication_endpoint_chooser": {
+            "status": "ok",
+            "best_physical_endpoint": {
+                "label": "combined",
+                "source_kind": "combined_corrected_hkl",
+                "GooF": 1.0,
+                "R1_all": 0.10,
+                "wR2_all": 0.20,
+                "lst": str(tmp_path / "runs" / "combined" / "combined_endpoint_lam_1p0" / "multi_dyn_corrected.lst"),
+            },
+        },
+    }
+
+    row_tables = cli._finish_native_row_tables(result)
+
+    assert row_tables == [
+        ("a", run_a / "native_dyn_calc.csv"),
+        ("b", run_b / "native_dyn_calc.csv"),
+        ("c", run_c / "native_dyn_calc.csv"),
+    ]
+
+
 def test_finish_regenerates_compact_package(tmp_path: Path, capsys):
     run = tmp_path / "grond"
     final_run = run / "runs" / "dataset" / "final"

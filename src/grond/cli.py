@@ -7157,17 +7157,39 @@ def run_finish_endpoint_maps(result: Mapping[str, object], args: argparse.Namesp
     }
 
 
-def _finish_native_row_table(result: Mapping[str, object]) -> Path:
-    """Return the best row table for native dynamical maps."""
+def _finish_native_row_tables(result: Mapping[str, object]) -> list[tuple[str, Path]]:
+    """Return labeled row tables for native dynamical maps."""
 
     endpoint = _publication_endpoint_from_result(result)
+    source_kind = str(endpoint.get("source_kind", "") or "")
     endpoint_row_table = str(endpoint.get("endpoint_row_table", "") or "").strip()
+    endpoint_run_dir = str(endpoint.get("run_dir", "") or "").strip()
+    endpoint_label = str(endpoint.get("label", "") or "publication_endpoint").strip()
+
+    if source_kind in {"native_corrected_hkl", "observation_polish"}:
+        if endpoint_row_table:
+            return [(endpoint_label, Path(endpoint_row_table).expanduser())]
+        if endpoint_run_dir:
+            return [(endpoint_label, Path(endpoint_run_dir).expanduser() / "native_dyn_calc.csv")]
+
+    if source_kind == "combined_corrected_hkl" or result.get("combined"):
+        runs_block = result.get("combined_input_runs") or result.get("publication_runs") or result.get("runs") or {}
+        if isinstance(runs_block, Mapping):
+            tables = [
+                (str(name), Path(str(run_dir)).expanduser() / "native_dyn_calc.csv")
+                for name, run_dir in sorted(runs_block.items(), key=lambda item: str(item[0]))
+                if str(run_dir)
+            ]
+            if tables:
+                return tables
+
     if endpoint_row_table:
-        return Path(endpoint_row_table).expanduser()
+        return [(endpoint_label, Path(endpoint_row_table).expanduser())]
     final_run = _quick_final_run(result)
     if final_run is not None:
-        return final_run / "native_dyn_calc.csv"
-    return Path()
+        label = "combined" if result.get("combined") else "dataset"
+        return [(label, final_run / "native_dyn_calc.csv")]
+    return []
 
 
 def _finish_native_model(result: Mapping[str, object], args: argparse.Namespace) -> Path:
@@ -7187,9 +7209,9 @@ def _finish_native_model(result: Mapping[str, object], args: argparse.Namespace)
 def run_finish_native_dynamic_maps(run_dir: Path, result: Mapping[str, object], args: argparse.Namespace) -> dict[str, object]:
     """Generate native row-level dynamical Fourier maps and coefficient files."""
 
-    row_table = _finish_native_row_table(result)
+    row_tables = _finish_native_row_tables(result)
     model = _finish_native_model(result, args)
-    if not row_table:
+    if not row_tables:
         return {"status": "missing_row_table", "row_table": ""}
     if not model:
         return {"status": "missing_model", "model": ""}
@@ -7201,7 +7223,8 @@ def run_finish_native_dynamic_maps(run_dir: Path, result: Mapping[str, object], 
         max_grid_points=int(getattr(args, "native_map_max_grid_points", 8_000_000)),
     )
     return write_native_dynamic_map_package(
-        row_table=row_table,
+        row_table=[path for _label, path in row_tables],
+        row_table_labels=[label for label, _path in row_tables],
         model_path=model,
         out_dir=run_dir / "native_dynamic_maps",
         options=options,

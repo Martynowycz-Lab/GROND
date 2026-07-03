@@ -46,6 +46,42 @@ def _read_rows(path: Path) -> list[dict[str, str]]:
         return list(csv.DictReader(handle))
 
 
+def _normalize_row_tables(
+    row_table: Path | str | Sequence[Path | str],
+    labels: Sequence[str] | None = None,
+) -> list[tuple[str, Path]]:
+    """Return labeled native row-table paths for one- or multi-dataset maps."""
+
+    if isinstance(row_table, (str, Path)):
+        paths: list[Path | str] = [row_table]
+    else:
+        paths = list(row_table)
+    if not paths:
+        return []
+    label_values = list(labels or [])
+    out: list[tuple[str, Path]] = []
+    for idx, item in enumerate(paths):
+        path = Path(item).expanduser().resolve()
+        label = str(label_values[idx]).strip() if idx < len(label_values) else ""
+        out.append((label or path.parent.name or f"dataset_{idx + 1}", path))
+    return out
+
+
+def _read_labeled_rows(row_tables: Sequence[tuple[str, Path]]) -> list[dict[str, str]]:
+    """Read native row tables and retain dataset provenance in each row."""
+
+    rows: list[dict[str, str]] = []
+    for label, path in row_tables:
+        for row in _read_rows(path):
+            copied = dict(row)
+            if not str(copied.get("dataset", "")).strip():
+                copied["dataset"] = label
+            copied["_grond_row_table_label"] = label
+            copied["_grond_row_table_path"] = str(path)
+            rows.append(copied)
+    return rows
+
+
 def _as_float(row: Mapping[str, object], key: str, default: float = float("nan")) -> float:
     try:
         return float(row.get(key, default))
@@ -191,6 +227,10 @@ def _merge_native_amplitudes(
         fofc = (fobs - fc_ref_abs) * phase_factor
         twofofc = (2.0 * fobs - fc_ref_abs) * phase_factor
         split_values = {str(rows[i].get("split", "")).strip() or "unknown" for i in indices}
+        dataset_values = {
+            str(rows[i].get("dataset", rows[i].get("_grond_row_table_label", ""))).strip() or "unknown"
+            for i in indices
+        }
         scale_values = np.divide(
             dyn_scaled[idx],
             dyn_raw[idx],
@@ -205,6 +245,8 @@ def _merge_native_amplitudes(
                 "d_A": float(np.nanmedian(d_A[idx])),
                 "n_rows": int(len(idx)),
                 "splits": ",".join(sorted(split_values)),
+                "datasets": ",".join(sorted(dataset_values)),
+                "dataset_count": int(len(dataset_values)),
                 "F_dyn_obs": fobs,
                 "sigF_dyn_obs": sigf,
                 "F_dyn_calc": fc_ref_abs,
@@ -312,6 +354,8 @@ def _write_coefficients_csv(path: Path, coefficients: Sequence[Mapping[str, obje
         "d_A",
         "n_rows",
         "splits",
+        "datasets",
+        "dataset_count",
         "F_dyn_obs",
         "sigF_dyn_obs",
         "F_dyn_calc",
@@ -341,7 +385,10 @@ def _write_coefficients_hkl(path: Path, coefficients: Sequence[Mapping[str, obje
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w") as handle:
         handle.write("# GROND native row-level dynamical Fourier coefficients\n")
-        handle.write("# h k l F_dyn_obs sigF_dyn_obs F_dyn_calc phase_calc_deg Fo_real Fo_imag FoFc_real FoFc_imag TwoFoFc_real TwoFoFc_imag n_rows\n")
+        handle.write(
+            "# h k l F_dyn_obs sigF_dyn_obs F_dyn_calc phase_calc_deg Fo_real Fo_imag "
+            "FoFc_real FoFc_imag TwoFoFc_real TwoFoFc_imag n_rows dataset_count datasets\n"
+        )
         for row in coefficients:
             handle.write(
                 f"{int(row['h']):5d} {int(row['k']):5d} {int(row['l']):5d} "
@@ -350,7 +397,7 @@ def _write_coefficients_hkl(path: Path, coefficients: Sequence[Mapping[str, obje
                 f"{float(row['Fo_real']):14.6g} {float(row['Fo_imag']):14.6g} "
                 f"{float(row['FoFc_real']):14.6g} {float(row['FoFc_imag']):14.6g} "
                 f"{float(row['TwoFoFc_real']):14.6g} {float(row['TwoFoFc_imag']):14.6g} "
-                f"{int(row['n_rows']):6d}\n"
+                f"{int(row['n_rows']):6d} {int(row.get('dataset_count', 0)):6d} {str(row.get('datasets', ''))}\n"
             )
 
 
@@ -408,7 +455,7 @@ def _write_dynamic_cif(
     *,
     model: Mapping[str, object],
     model_path: Path,
-    row_table: Path,
+    row_tables: Sequence[tuple[str, Path]],
     coefficients: Sequence[Mapping[str, object]],
     summary: Mapping[str, object],
     maps: Mapping[str, object],
@@ -428,7 +475,7 @@ def _write_dynamic_cif(
         f"_cell_angle_gamma {cell[5]:.8g}",
         "_space_group_name_H-M_alt 'model supplied operations'",
         "_grond_dynamic_map_source_model " + _cif_token(str(model_path)),
-        "_grond_dynamic_map_source_row_table " + _cif_token(str(row_table)),
+        "_grond_dynamic_map_source_row_table_count " + _cif_token(len(row_tables)),
         "_grond_dynamic_map_formula '|F_dyn_obs,row| = |F_model| * sqrt(I_obs / I_dyn_scaled); map phases are model phases'",
         "_grond_dynamic_map_coefficients " + _cif_token(str(summary.get("coefficients_csv", ""))),
         "_grond_dynamic_map_fo " + _cif_token(str(maps.get("fo", {}).get("map", ""))),
@@ -439,9 +486,19 @@ def _write_dynamic_cif(
         f"_grond_dynamic_map_merged_reflections {int(summary.get('merged_reflections', 0))}",
         "",
         "loop_",
-        "_space_group_symop_id",
-        "_space_group_symop_operation_xyz",
+        "_grond_dynamic_map_row_table_dataset",
+        "_grond_dynamic_map_row_table_path",
     ]
+    for label, table in row_tables:
+        lines.append(f"{_cif_token(label)} {_cif_token(str(table))}")
+    lines.extend(
+        [
+            "",
+            "loop_",
+            "_space_group_symop_id",
+            "_space_group_symop_operation_xyz",
+        ]
+    )
     for idx, op in enumerate(model.get("symmetry_ops") or [{"rot": np.eye(3), "trans": np.zeros(3)}], start=1):
         lines.append(f"{idx} {_cif_token(_op_triplet(op))}")
     lines.extend(
@@ -539,6 +596,8 @@ def _write_dynamic_cif(
             "_refln_F_dyn_difference",
             "_refln_F_dyn_2Fo_minus_Fc",
             "_refln_grond_row_count",
+            "_refln_grond_dataset_count",
+            "_refln_grond_datasets",
             "_refln_grond_mean_Iobs",
             "_refln_grond_mean_Idyn_scaled",
             "_refln_grond_mean_Iborn_scaled",
@@ -560,6 +619,8 @@ def _write_dynamic_cif(
                     _cif_token(float(row["F_dyn_obs"]) - float(row["F_dyn_calc"])),
                     _cif_token(2.0 * float(row["F_dyn_obs"]) - float(row["F_dyn_calc"])),
                     str(int(row["n_rows"])),
+                    str(int(row.get("dataset_count", 0))),
+                    _cif_token(row.get("datasets", "")),
                     _cif_token(float(row["mean_Iobs"])),
                     _cif_token(float(row["mean_dyn_scaled"])),
                     _cif_token(float(row["mean_born_scaled"])),
@@ -574,7 +635,8 @@ def _write_dynamic_cif(
 
 def write_native_dynamic_map_package(
     *,
-    row_table: Path,
+    row_table: Path | str | Sequence[Path | str],
+    row_table_labels: Sequence[str] | None = None,
     model_path: Path,
     out_dir: Path,
     options: NativeDynamicMapOptions | None = None,
@@ -582,20 +644,27 @@ def write_native_dynamic_map_package(
     """Write native dynamical coefficients, CCP4 maps, and a GROND CIF."""
 
     options = options or NativeDynamicMapOptions()
-    row_table = Path(row_table).expanduser().resolve()
+    row_tables = _normalize_row_tables(row_table, labels=row_table_labels)
     model_path = Path(model_path).expanduser().resolve()
     out_dir = Path(out_dir).expanduser().resolve()
-    if not row_table.exists():
-        return {"status": "missing_row_table", "row_table": str(row_table)}
+    if not row_tables:
+        return {"status": "missing_row_table", "row_table": ""}
+    missing_tables = [{"label": label, "path": str(path)} for label, path in row_tables if not path.exists()]
+    if missing_tables:
+        return {
+            "status": "missing_row_table",
+            "row_tables": [{"label": label, "path": str(path)} for label, path in row_tables],
+            "missing": missing_tables,
+        }
     if not model_path.exists():
         return {"status": "missing_model", "model": str(model_path)}
-    rows = _read_rows(row_table)
+    rows = _read_labeled_rows(row_tables)
     model = parse_model(model_path)
     coefficients, summary = _merge_native_amplitudes(rows, model, options)
     if not coefficients:
         return {
             "status": "no_coefficients",
-            "row_table": str(row_table),
+            "row_tables": [{"label": label, "path": str(path)} for label, path in row_tables],
             "model": str(model_path),
             "summary": summary,
         }
@@ -614,7 +683,10 @@ def write_native_dynamic_map_package(
         maps[kind] = {"map": str(map_path), "exists": map_path.exists(), **meta}
     summary = {
         **summary,
-        "row_table": str(row_table),
+        "row_table": str(row_tables[0][1]) if len(row_tables) == 1 else "",
+        "row_tables": [{"label": label, "path": str(path)} for label, path in row_tables],
+        "row_table_count": int(len(row_tables)),
+        "datasets": [label for label, _path in row_tables],
         "model": str(model_path),
         "coefficients_csv": str(csv_path),
         "coefficients_hkl": str(hkl_path),
@@ -626,7 +698,7 @@ def write_native_dynamic_map_package(
         cif_path,
         model=model,
         model_path=model_path,
-        row_table=row_table,
+        row_tables=row_tables,
         coefficients=coefficients,
         summary=summary,
         maps=maps,

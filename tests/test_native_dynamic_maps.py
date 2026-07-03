@@ -104,3 +104,48 @@ def test_native_dynamic_cif_normalizes_placeholder_wavelength(tmp_path: Path):
 
     cif_text = Path(manifest["outputs"]["dynamic_cif"]).read_text()
     assert "_diffrn_radiation_wavelength 0.025079" in cif_text
+
+
+def test_native_dynamic_map_package_accepts_labeled_multi_dataset_rows(tmp_path: Path):
+    model = tmp_path / "model.res"
+    model.write_text(
+        "\n".join(
+            [
+                "TITL native map multi smoke",
+                "CELL 0.025079 5 6 7 90 90 90",
+                "LATT -1",
+                "SFAC C 1 0 0 0 0 0 0 0 0",
+                "UNIT 1",
+                "C1 1 0 0 0 1 0.05",
+                "HKLF 4",
+                "END",
+            ]
+        )
+        + "\n"
+    )
+    row_header = "h,k,l,d_A,target_I,sigma_eff,dyn_scaled,split\n"
+    rows_a = tmp_path / "a_native_dyn_calc.csv"
+    rows_b = tmp_path / "b_native_dyn_calc.csv"
+    rows_a.write_text(row_header + "1,0,0,5.0,4.0,1.0,4.0,work\n")
+    rows_b.write_text(row_header + "1,0,0,5.0,9.0,1.0,4.0,free\n")
+
+    manifest = write_native_dynamic_map_package(
+        row_table=[rows_a, rows_b],
+        row_table_labels=["crystal_a", "crystal_b"],
+        model_path=model,
+        out_dir=tmp_path / "native_maps",
+        options=NativeDynamicMapOptions(grid_spacing_A=1.0),
+    )
+
+    assert manifest["status"] == "ok"
+    assert manifest["summary"]["row_table_count"] == 2
+    assert manifest["summary"]["input_rows"] == 2
+    assert manifest["summary"]["merged_reflections"] == 1
+    assert manifest["summary"]["datasets"] == ["crystal_a", "crystal_b"]
+    coeff_text = Path(manifest["outputs"]["coefficients_csv"]).read_text()
+    assert "datasets,dataset_count" in coeff_text
+    assert "crystal_a,crystal_b" in coeff_text
+    cif_text = Path(manifest["outputs"]["dynamic_cif"]).read_text()
+    assert "_grond_dynamic_map_source_row_table_count 2" in cif_text
+    assert "_grond_dynamic_map_row_table_dataset" in cif_text
+    assert "_refln_grond_dataset_count" in cif_text
