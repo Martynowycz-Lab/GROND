@@ -2,7 +2,9 @@ from pathlib import Path
 
 from grond.legacy.engine.combine_native_nuisance_runs import (
     canonical_model_friedel,
+    canonical_model_symmetry,
     endpoint_hkl_path,
+    endpoint_key_function,
     estimate_overlap_scales,
     merge_hkl_rows,
     safe_fixed_width_factor,
@@ -65,6 +67,37 @@ def test_merge_hkl_rows_can_inflate_disagreeing_replicates():
     assert formal_meta["inflated_rows"] == 0
     assert overdispersed_meta["inflated_rows"] == 1
     assert overdispersed_meta["rows_with_multiple_observations"] == 1
+
+
+def test_merge_hkl_rows_can_merge_model_symmetry_before_endpoint_refinement():
+    swap_hk = [
+        {"rot": [[1, 0, 0], [0, 1, 0], [0, 0, 1]]},
+        {"rot": [[0, 1, 0], [1, 0, 0], [0, 0, 1]]},
+    ]
+    rows = [(1, 2, 0, 10.0, 1.0), (2, 1, 0, 14.0, 1.0)]
+    key_for = endpoint_key_function("model_symmetry", swap_hk)
+
+    exact, _exact_meta = merge_hkl_rows(rows, sigma_policy="formal")
+    merged, meta = merge_hkl_rows(rows, sigma_policy="formal", canonicalizer=key_for)
+
+    assert len(exact) == 2
+    assert len(merged) == 1
+    assert merged[0][:3] == canonical_model_symmetry(1, 2, 0, swap_hk)
+    assert abs(merged[0][3] - 12.0) < 1e-12
+    assert abs(merged[0][4] - (0.5**0.5)) < 1e-12
+    assert meta["rows_with_multiple_observations"] == 1
+
+
+def test_model_symmetry_merge_preserves_friedel_opposites_until_requested():
+    identity = [{"rot": [[1, 0, 0], [0, 1, 0], [0, 0, 1]]}]
+    rows = [(1, 0, 0, 10.0, 1.0), (-1, 0, 0, 14.0, 1.0)]
+
+    symmetry_rows, _ = merge_hkl_rows(rows, sigma_policy="formal", canonicalizer=endpoint_key_function("model_symmetry", identity))
+    friedel_rows, _ = merge_hkl_rows(rows, sigma_policy="formal", canonicalizer=endpoint_key_function("model_symmetry_friedel", identity))
+
+    assert len(symmetry_rows) == 2
+    assert len(friedel_rows) == 1
+    assert friedel_rows[0][:3] == canonical_model_friedel(1, 0, 0, identity)
 
 
 def test_safe_fixed_width_factor_keeps_shelxl_fields_in_range():

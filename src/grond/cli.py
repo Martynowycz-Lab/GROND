@@ -2478,6 +2478,8 @@ def combine_cmd(
         "native",
         "--interdataset-scale",
         "overlap",
+        "--endpoint-merge-key",
+        getattr(args, "multi_endpoint_merge_key", "model_symmetry"),
         "--dataset-sigma-policy",
         resolved_dataset_sigma_policy(args, multi_dataset=True),
         "--dataset-sigma-holdout-fraction",
@@ -9578,6 +9580,15 @@ def add_common_run_args(ap: argparse.ArgumentParser, *, expose_lambda_controls: 
     ap.add_argument("--dataset-policy-wr2-scale", type=float, default=0.08)
     ap.add_argument("--dataset-policy-r1-scale", type=float, default=0.08)
     ap.add_argument("--dataset-policy-cc-scale", type=float, default=0.04)
+    ap.add_argument(
+        "--multi-endpoint-merge-key",
+        choices=["model_symmetry", "model_symmetry_friedel", "exact_signed_hkl"],
+        default="model_symmetry",
+        help=(
+            "Multi-dataset corrected-HKL merge key before each shared SHELXL LS step. "
+            "model_symmetry merges symmetry-equivalent corrected observations while preserving Friedel opposites in acentric groups."
+        ),
+    )
     ap.add_argument("--row-resolution-b-grid", default="0.0,14,18", help="Raw-row dynamical resolution-envelope grid. Positive values are the dynamic-gradient counterpart of negative endpoint-B diagnostics.")
     ap.add_argument("--thickness-grid", default="1000,1200,1400")
     ap.add_argument("--thickness-model-grid", default="uniform_gradient")

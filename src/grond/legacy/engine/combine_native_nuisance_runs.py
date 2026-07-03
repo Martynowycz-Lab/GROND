@@ -96,6 +96,22 @@ def canonical_model_friedel(h: int, k: int, l: int, symmetry_ops: list[dict]) ->
     return min(reciprocal_equivalent_keys(h, k, l, symmetry_ops, merge_friedel=True))
 
 
+def canonical_model_symmetry(h: int, k: int, l: int, symmetry_ops: list[dict]) -> tuple[int, int, int]:
+    return min(reciprocal_equivalent_keys(h, k, l, symmetry_ops, merge_friedel=False))
+
+
+def endpoint_key_function(mode: str, symmetry_ops: list[dict]):
+    """Return the HKL key used for endpoint scaling or merging."""
+
+    if mode == "exact_signed_hkl":
+        return lambda h, k, l: (int(h), int(k), int(l))
+    if mode == "model_symmetry":
+        return lambda h, k, l: canonical_model_symmetry(int(h), int(k), int(l), symmetry_ops)
+    if mode == "model_symmetry_friedel":
+        return lambda h, k, l: canonical_model_friedel(int(h), int(k), int(l), symmetry_ops)
+    raise ValueError(f"unknown endpoint merge key {mode!r}")
+
+
 def shelx_weights(obs, sig, pred, a: float, b: float):
     p = (np.maximum(obs, 0.0) + 2.0 * np.maximum(pred, 0.0)) / 3.0
     return 1.0 / np.maximum(sig * sig + (float(a) * p) ** 2 + float(b) * p, 1e-30)
@@ -295,10 +311,11 @@ def estimate_overlap_scales(rows_by_dataset: dict[str, list[tuple]], iterations:
     }
 
 
-def merge_hkl_rows(rows, sigma_policy: str = "formal"):
+def merge_hkl_rows(rows, sigma_policy: str = "formal", canonicalizer=None):
+    key_for = canonicalizer or (lambda h, k, l: (int(h), int(k), int(l)))
     bins: dict[tuple[int, int, int], dict[str, float]] = {}
     for h, k, l, I, sig in rows:
-        key = (int(h), int(k), int(l))
+        key = key_for(int(h), int(k), int(l))
         sig = max(abs(float(sig)), 1e-6)
         w = 1.0 / (sig * sig)
         b = bins.setdefault(key, {"w": 0.0, "wI": 0.0, "n": 0, "values": [], "weights": []})
@@ -488,6 +505,16 @@ def main():
         help="Fit one scalar per dataset from overlapping corrected reflections before merging the multi-dataset endpoint.",
     )
     ap.add_argument(
+        "--endpoint-merge-key",
+        choices=("model_symmetry", "model_symmetry_friedel", "exact_signed_hkl"),
+        default="model_symmetry",
+        help=(
+            "Reflection key used before the shared endpoint LS step. model_symmetry merges corrected observations related "
+            "by the model space-group symmetry while preserving Friedel opposites in acentric groups; model_symmetry_friedel "
+            "also merges Friedel mates; exact_signed_hkl is a diagnostic legacy mode."
+        ),
+    )
+    ap.add_argument(
         "--dataset-sigma-policy",
         choices=("none", "uniform_z_rms"),
         default="none",
@@ -623,9 +650,9 @@ def main():
 
     wght_a = 0.126534 if wght_a is None else float(wght_a)
     wght_b = 0.0 if wght_b is None else float(wght_b)
+    endpoint_key_for = endpoint_key_function(args.endpoint_merge_key, symmetry_ops)
     if args.interdataset_scale == "overlap":
-        key_for_overlap = lambda h, k, l: canonical_model_friedel(h, k, l, symmetry_ops)
-        interdataset_scale = estimate_overlap_scales(endpoint_rows_by_dataset, canonicalizer=key_for_overlap)
+        interdataset_scale = estimate_overlap_scales(endpoint_rows_by_dataset, canonicalizer=endpoint_key_for)
     else:
         interdataset_scale = {
             "iterations": 0,
@@ -654,7 +681,7 @@ def main():
     merge_sigma = {"policy": args.merge_sigma_policy, "status": "skipped_no_endpoint_rows"}
     shelxl = {}
     if endpoint_rows:
-        merged_endpoint, merge_sigma = merge_hkl_rows(endpoint_rows, args.merge_sigma_policy)
+        merged_endpoint, merge_sigma = merge_hkl_rows(endpoint_rows, args.merge_sigma_policy, canonicalizer=endpoint_key_for)
         merge_sigma["status"] = "ok"
         post_bloch_sigma = {"policy": args.post_bloch_sigma_policy, "status": "not_requested"}
         if args.post_bloch_sigma_policy == "uniform_z_rms":
@@ -701,9 +728,10 @@ def main():
         "interdataset_scale": {"mode": args.interdataset_scale, **interdataset_scale},
         "combined_endpoint": {
             "lambda_q": args.endpoint_lambda,
-            "merge_key": "exact_signed_hkl",
-            "overlap_scale_key": "model_symmetry_plus_friedel",
+            "merge_key": args.endpoint_merge_key,
+            "overlap_scale_key": args.endpoint_merge_key if args.interdataset_scale == "overlap" else "none",
             "input_unmerged_rows": len(endpoint_rows),
+            "merged_endpoint_rows": len(merged_endpoint),
             "merged_exact_hkl_rows": len(merged_endpoint),
             "hkl_safe_factor": hkl_safe_factor if endpoint_rows else 1.0,
             "dataset_sigma": dataset_sigma_by_name,
@@ -767,10 +795,14 @@ def main():
             f"`{safe_float(merge_sigma.get('inflation_p95')):.3f}`/"
             f"`{safe_float(merge_sigma.get('inflation_max')):.3f}`."
         )
-        lines.append("Overlap scaling uses model symmetry plus Friedel pairing. The written HKLF4 endpoint merge key is exact signed HKL; the endpoint refiner then applies its normal crystallographic merging/statistics.")
+        lines.append(
+            f"Overlap scaling and endpoint merging use `{args.endpoint_merge_key}`. "
+            "The merged HKLF4 endpoint is written after this GROND-side inverse-variance merge, "
+            "so the shared SHELXL LS step sees one corrected observation per selected merge key."
+        )
         lines.append("")
         lines.append(
-            f"Lambda `{args.endpoint_lambda}` merged `{len(endpoint_rows)}` unmerged endpoint rows to `{len(merged_endpoint)}` exact signed HKL rows. SHELXL status `{shelxl.get('status')}`; `R1gt={100*safe_float(shelxl.get('R1_gt')):.2f}%`, `R1all={100*safe_float(shelxl.get('R1_all')):.2f}%`, `wR2all={100*safe_float(shelxl.get('wR2_all')):.2f}%`, `GooF={safe_float(shelxl.get('GooF')):.3f}`."
+            f"Lambda `{args.endpoint_lambda}` merged `{len(endpoint_rows)}` unmerged endpoint rows to `{len(merged_endpoint)}` corrected endpoint rows. SHELXL status `{shelxl.get('status')}`; `R1gt={100*safe_float(shelxl.get('R1_gt')):.2f}%`, `R1all={100*safe_float(shelxl.get('R1_all')):.2f}%`, `wR2all={100*safe_float(shelxl.get('wR2_all')):.2f}%`, `GooF={safe_float(shelxl.get('GooF')):.3f}`."
         )
         sig_meta = result["combined_endpoint"].get("post_bloch_sigma") or {}
         if sig_meta.get("policy") == "uniform_z_rms":

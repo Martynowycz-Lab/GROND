@@ -61,7 +61,7 @@ GROND prep \
 GROND auto --prep prep_multi.json --out-dir grond_multi
 ```
 
-This does not merge raw rows first. Each `--dataset` should point to the XDS directory, not a copied standalone HKL, so `INTEGRATE.HKL`, `XPARM.XDS` or `GXPARM.XDS`, and the XDS log/metadata files stay together. GROND simulates and regularizes each dataset against the same atomic model, but keeps each dataset's thickness, scan/geometry, scale, and sigma contract separate. It then updates one shared model, recomputes final Bloch rows for every accepted dataset, applies one post-dynamical overlap scale per dataset, inflates merged endpoint sigmas when datasets disagree, and writes one combined corrected-HKL endpoint.
+This does not merge raw rows first. Each `--dataset` should point to the XDS directory, not a copied standalone HKL, so `INTEGRATE.HKL`, `XPARM.XDS` or `GXPARM.XDS`, and the XDS log/metadata files stay together. GROND simulates and regularizes each dataset against the same atomic model, but keeps each dataset's thickness, scan/geometry, scale, and sigma contract separate. It then updates one shared model, recomputes final Bloch rows for every accepted dataset, applies one post-dynamical overlap scale per dataset, merges symmetry-equivalent corrected observations into one endpoint HKL before the shared LS1 step, inflates merged endpoint sigmas when datasets disagree, and writes one combined corrected-HKL endpoint.
 
 ## A Plain-English Bloch-Wave Picture
 
