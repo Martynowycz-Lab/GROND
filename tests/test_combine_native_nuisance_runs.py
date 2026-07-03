@@ -34,7 +34,8 @@ def test_overlap_scales_can_use_model_symmetry_key():
         {"rot": [[1, 0, 0], [0, 1, 0], [0, 0, 1]]},
         {"rot": [[0, 1, 0], [1, 0, 0], [0, 0, 1]]},
     ]
-    key_for = lambda h, k, l: canonical_model_friedel(h, k, l, swap_hk)
+    def key_for(h_index: int, k_index: int, l_index: int):
+        return canonical_model_friedel(h_index, k_index, l_index, swap_hk)
 
     default = estimate_overlap_scales(rows_by_dataset, iterations=1)
     symmetry_aware = estimate_overlap_scales(rows_by_dataset, iterations=2, canonicalizer=key_for)
