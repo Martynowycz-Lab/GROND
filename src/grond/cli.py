@@ -5254,6 +5254,7 @@ def write_continue_checkpoint(prep: PrepConfig, result: Mapping[str, object], ar
     checkpoint_path = out_dir / "grond_continue_checkpoint.json"
     dataset_count = len(prep.datasets)
     dataset_name = prep.datasets[0].name if prep.datasets else "dataset"
+    runs = result.get("runs") if isinstance(result.get("runs"), Mapping) else {}
     source_run = _checkpoint_path(result.get("primary_run"))
     source_summary = _checkpoint_path(Path(source_run) / "summary.json") if source_run else ""
     recommended_start_res = _checkpoint_path(result.get("model"))
@@ -5262,7 +5263,27 @@ def write_continue_checkpoint(prep: PrepConfig, result: Mapping[str, object], ar
     hkl_transform = prep.datasets[0].hkl_transform if prep.datasets else ""
     source_summary_exists = bool(source_summary and Path(source_summary).exists())
     start_model_exists = bool(recommended_start_res and Path(recommended_start_res).exists())
-    ready = bool(source_summary_exists and start_model_exists and dataset_count == 1 and not getattr(args, "dry_run", False))
+    datasets: list[dict[str, object]] = []
+    for ds in prep.datasets:
+        run_text = str(runs.get(ds.name, "")) if runs else (source_run if dataset_count == 1 else "")
+        run_path = Path(run_text).expanduser().resolve() if run_text else None
+        summary_path = run_path / "summary.json" if run_path is not None else None
+        datasets.append(
+            {
+                **asdict(ds),
+                "source_run": str(run_path) if run_path is not None else "",
+                "source_summary": str(summary_path) if summary_path is not None else "",
+                "nuisance": best_nuisance(run_path) if run_path is not None else {},
+            }
+        )
+    dataset_summaries_exist = all(
+        bool(row.get("source_summary") and Path(str(row["source_summary"])).exists()) for row in datasets
+    ) if datasets else False
+    ready = bool(
+        start_model_exists
+        and not getattr(args, "dry_run", False)
+        and ((dataset_count == 1 and source_summary_exists) or (dataset_count > 1 and dataset_summaries_exist))
+    )
     checkpoint = {
         "schema_version": 1,
         "kind": "grond_continue_checkpoint",
@@ -5277,6 +5298,10 @@ def write_continue_checkpoint(prep: PrepConfig, result: Mapping[str, object], ar
         "hkl": hkl,
         "baseline_hkl": baseline_hkl,
         "hkl_transform": hkl_transform,
+        "datasets": datasets,
+        "structure_dataset_policy": ((result.get("dataset_policy") or {}).get("structure_update") or {}),
+        "final_dataset_policy": ((result.get("dataset_policy") or {}).get("final") or {}),
+        "multi_endpoint_merge_key": getattr(args, "multi_endpoint_merge_key", "model_symmetry"),
         "recommended_command": [
             "GROND",
             "push-endpoint",
@@ -5291,16 +5316,19 @@ def write_continue_checkpoint(prep: PrepConfig, result: Mapping[str, object], ar
         ],
         "notes": [
             "Use this for deliberate continuation from a changed model while reusing the pinned GROND row/nuisance contract.",
+            "For multi-dataset checkpoints, GROND recomputes each dataset from the edited shared model, merges corrected endpoint observations, then runs one shared SHELXL LS step per macrocycle.",
             "For an interrupted GROND auto run, rerun the original command with the same --out-dir instead.",
         ],
     }
-    if dataset_count != 1:
-        checkpoint["status_reason"] = "endpoint push currently expects one pinned row summary; multi-dataset continuation is not advertised by this checkpoint."
-    elif not source_summary:
+    if dataset_count == 1 and not source_summary:
         checkpoint["status_reason"] = "no final source summary was recorded"
+    elif dataset_count > 1 and not datasets:
+        checkpoint["status_reason"] = "no datasets were recorded"
+    elif dataset_count > 1 and not dataset_summaries_exist:
+        checkpoint["status_reason"] = "one or more recorded dataset final summaries do not exist yet"
     elif not recommended_start_res:
         checkpoint["status_reason"] = "no recommended start model was recorded"
-    elif not source_summary_exists:
+    elif dataset_count == 1 and not source_summary_exists:
         checkpoint["status_reason"] = "recorded final source summary does not exist yet"
     elif not start_model_exists:
         checkpoint["status_reason"] = "recorded start model does not exist yet"
@@ -7865,22 +7893,228 @@ def apply_push_checkpoint(args: argparse.Namespace) -> dict:
         raise SystemExit(f"{path} cannot be used for endpoint continuation: {reason}")
 
     base = path.parent
+    dataset_count = int(checkpoint.get("dataset_count") or len(checkpoint.get("datasets") or []) or 1)
     if not getattr(args, "source_summary", ""):
         args.source_summary = _checkpoint_path(checkpoint.get("source_summary"), base=base)
     if not getattr(args, "start_res", ""):
         args.start_res = _checkpoint_path(checkpoint.get("recommended_start_res"), base=base)
-    if not getattr(args, "hkl", "") and checkpoint.get("hkl"):
+    if dataset_count == 1 and not getattr(args, "hkl", "") and checkpoint.get("hkl"):
         args.hkl = _checkpoint_path(checkpoint.get("hkl"), base=base)
-    if not getattr(args, "baseline_hkl", "") and checkpoint.get("baseline_hkl"):
+    if dataset_count == 1 and not getattr(args, "baseline_hkl", "") and checkpoint.get("baseline_hkl"):
         args.baseline_hkl = _checkpoint_path(checkpoint.get("baseline_hkl"), base=base)
-    if not getattr(args, "hkl_transform", "") and checkpoint.get("hkl_transform"):
+    if dataset_count == 1 and not getattr(args, "hkl_transform", "") and checkpoint.get("hkl_transform"):
         args.hkl_transform = str(checkpoint.get("hkl_transform"))
+    if dataset_count > 1 and not getattr(args, "multi_endpoint_merge_key", "") and checkpoint.get("multi_endpoint_merge_key"):
+        args.multi_endpoint_merge_key = str(checkpoint.get("multi_endpoint_merge_key"))
 
-    if not getattr(args, "source_summary", ""):
+    if dataset_count == 1 and not getattr(args, "source_summary", ""):
         raise SystemExit(f"{path} does not record source_summary; provide --source-summary.")
     if not getattr(args, "start_res", ""):
         raise SystemExit(f"{path} does not record recommended_start_res; provide --start-res.")
-    return {"checkpoint": str(path), "checkpoint_status": checkpoint.get("status")}
+    return {
+        "checkpoint": str(path),
+        "checkpoint_status": checkpoint.get("status"),
+        "dataset_count": dataset_count,
+        "checkpoint_data": checkpoint,
+    }
+
+
+def hydrate_push_args_for_multi(args: argparse.Namespace) -> argparse.Namespace:
+    """Fill missing multi-dataset continuation attributes from normal run defaults."""
+
+    defaults = build_parser().parse_args(["run", "--out-dir", ".", "--hkl", "INTEGRATE.HKL", "--structure", "model.res"])
+    for key, value in vars(defaults).items():
+        if not hasattr(args, key):
+            setattr(args, key, value)
+    args.fast = False
+    args.native_only = False
+    args.dry_run = bool(getattr(args, "dry_run", False))
+    args.shelxl_feedback_cycles = int(getattr(args, "cycles", 3) or 0)
+    args.shelxl_feedback_shelxl_iterations = int(getattr(args, "shelxl_iterations", 1) or 1)
+    args.shelxl_feedback_endpoint_ls_cycles = int(getattr(args, "endpoint_ls_cycles", 1) or 1)
+    args.shelxl_iterations = int(getattr(args, "shelxl_iterations", 1) or 1)
+    args.n_points = int(getattr(args, "n_points", 20) or 20)
+    args.n_basis = int(getattr(args, "n_basis", 108) or 108)
+    args.final_n_basis = int(getattr(args, "final_n_basis", 0) or 0)
+    args.final_n_points = int(getattr(args, "final_n_points", args.n_points) or args.n_points)
+    args.prediction_cache_compression = getattr(args, "prediction_cache_compression", "none")
+    args.make_maps = bool(getattr(args, "make_maps_on_final", False))
+    args.multi_endpoint_merge_key = getattr(args, "multi_endpoint_merge_key", "model_symmetry") or "model_symmetry"
+    return args
+
+
+def prep_from_multi_checkpoint(checkpoint: Mapping[str, object], start_model: Path | str) -> tuple[PrepConfig, dict[str, dict]]:
+    """Build a multi-dataset PrepConfig and nuisance map from a continue checkpoint."""
+
+    rows = checkpoint.get("datasets")
+    if not isinstance(rows, list) or len(rows) < 2:
+        raise SystemExit("Multi-dataset endpoint continuation needs at least two datasets in the checkpoint.")
+    datasets: list[DatasetSpec] = []
+    nuisance: dict[str, dict] = {}
+    for raw in rows:
+        if not isinstance(raw, Mapping):
+            raise SystemExit("Malformed dataset entry in continue checkpoint.")
+        values = {field: raw[field] for field in DatasetSpec.__dataclass_fields__ if field in raw and raw[field] is not None}
+        ds = DatasetSpec(**values)
+        datasets.append(ds)
+        nuisance[ds.name] = dict(raw.get("nuisance") or {})
+        if not nuisance[ds.name]:
+            summary = _checkpoint_path(raw.get("source_summary"))
+            if summary:
+                nuisance[ds.name] = ((try_read_json(Path(summary)).get("best_native") or {}).get("nuisance") or {})
+        if not nuisance[ds.name]:
+            raise SystemExit(f"Checkpoint does not record a pinned nuisance block for dataset {ds.name!r}.")
+    prep = PrepConfig(
+        structure=str(Path(start_model).expanduser().resolve()),
+        datasets=datasets,
+        baseline_hkl=str(checkpoint.get("baseline_hkl") or ""),
+        default_hkl_transform=str(checkpoint.get("hkl_transform") or "identity"),
+        geometry_percentile=float(checkpoint.get("geometry_percentile") or 99.0),
+        metadata={"continued_from": checkpoint.get("run_dir", "")},
+    )
+    return prep, nuisance
+
+
+def write_multi_push_endpoint_report(out_dir: Path, *, best_cycle_tolerance: float) -> Path | None:
+    """Write a compact safety report for a multi-dataset endpoint-push run."""
+
+    summary_path = out_dir / "runs" / "shared_shelxl_feedback" / "multi_shelxl_feedback_loop_summary.json"
+    if not summary_path.exists():
+        return None
+    summary = read_json(summary_path)
+    rows = []
+    for record in summary.get("cycles", []):
+        combined = Path(str(record.get("combined") or ""))
+        combined_summary = try_read_json(combined / "combined_summary.json")
+        native = combined_summary.get("native_joint") or {}
+        endpoint = combined_summary.get("combined_endpoint") or {}
+        shelxl = endpoint.get("shelxl") or {}
+        post_sigma = endpoint.get("post_bloch_sigma") or {}
+        dyn_all = (native.get("dyn") or {}).get("all") or {}
+        born_all = (native.get("born") or {}).get("all") or {}
+        rows.append(
+            {
+                "cycle": int(record.get("cycle") or len(rows) + 1),
+                "model": str(record.get("output_model") or ""),
+                "combined": str(combined) if str(combined) != "." else "",
+                "merge_key": endpoint.get("merge_key", ""),
+                "unmerged_rows": endpoint.get("input_unmerged_rows"),
+                "merged_rows": endpoint.get("merged_endpoint_rows", endpoint.get("merged_exact_hkl_rows")),
+                "dyn_R1_all": dyn_all.get("R1_all"),
+                "dyn_wR2_all": dyn_all.get("wR2_all"),
+                "born_R1_all": born_all.get("R1_all"),
+                "born_wR2_all": born_all.get("wR2_all"),
+                "endpoint_R1_all": shelxl.get("R1_all"),
+                "endpoint_wR2_all": shelxl.get("wR2_all"),
+                "endpoint_GooF": shelxl.get("GooF"),
+                "sigma_scale": post_sigma.get("sigma_scale"),
+            }
+        )
+    finite = [r for r in rows if r["dyn_wR2_all"] is not None and math.isfinite(float(r["dyn_wR2_all"]))]
+    best = min(finite, key=lambda r: float(r["dyn_wR2_all"])) if finite else None
+    threshold = float(best["dyn_wR2_all"]) + best_cycle_tolerance if best else math.inf
+    within = [r for r in finite if float(r["dyn_wR2_all"]) <= threshold]
+    selected = min(within or finite, key=lambda r: r["cycle"]) if finite else None
+    decision = {
+        "summary": str(summary_path),
+        "best_cycle_tolerance": best_cycle_tolerance,
+        "best_native_cycle": best,
+        "selected_cycle": selected,
+        "rows": rows,
+    }
+    decision_path = out_dir / "multi_endpoint_push_decision.json"
+    decision_path.write_text(json.dumps(decision, indent=2) + "\n")
+    report_path = out_dir / "MULTI_ENDPOINT_PUSH_REPORT.md"
+    with report_path.open("w") as handle:
+        handle.write("# GROND Multi-Dataset Endpoint Push Report\n\n")
+        handle.write(
+            "This report summarizes a deliberate continuation from a finished multi-dataset GROND checkpoint. "
+            "Each cycle recomputes Bloch rows for every dataset from the same edited model, merges corrected endpoint observations, "
+            "runs one shared SHELXL LS step, and sends the updated shared model back to all datasets.\n\n"
+        )
+        handle.write("| cycle | merge key | unmerged rows | merged rows | dyn R1all | dyn wR2all | Born R1all | Born wR2all | endpoint R1all | endpoint wR2all | GooF | sigma scale | model |\n")
+        handle.write("|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|\n")
+        for row in rows:
+            handle.write(
+                f"| {row['cycle']} | {row['merge_key'] or '-'} | {row['unmerged_rows'] or ''} | {row['merged_rows'] or ''} | "
+                f"{100.0 * float(row['dyn_R1_all'] or math.nan):.2f}% | {100.0 * float(row['dyn_wR2_all'] or math.nan):.2f}% | "
+                f"{100.0 * float(row['born_R1_all'] or math.nan):.2f}% | {100.0 * float(row['born_wR2_all'] or math.nan):.2f}% | "
+                f"{100.0 * float(row['endpoint_R1_all'] or math.nan):.2f}% | {100.0 * float(row['endpoint_wR2_all'] or math.nan):.2f}% | "
+                f"{float(row['endpoint_GooF'] or math.nan):.3f} | {float(row['sigma_scale'] or math.nan):.3f} | `{row['model']}` |\n"
+            )
+        handle.write("\n")
+        if selected:
+            handle.write(f"Selected cycle by native-row tolerance: {selected['cycle']} at `{selected['model']}`.\n")
+        else:
+            handle.write("Selected cycle by native-row tolerance: none. No finite row-level dynamical metrics were found.\n")
+        if best:
+            handle.write(f"\nLowest native row wR2all cycle: {best['cycle']} at `{best['model']}`.\n")
+    return report_path
+
+
+def cmd_push_endpoint_multi(
+    args: argparse.Namespace,
+    checkpoint_info: Mapping[str, object],
+    start_model: Path,
+    prep_audit: Path | None,
+    python: str,
+    out_dir: Path,
+) -> int:
+    """Continue a multi-dataset endpoint from a finished GROND checkpoint."""
+
+    checkpoint = checkpoint_info.get("checkpoint_data")
+    if not isinstance(checkpoint, Mapping):
+        raise SystemExit("Internal error: multi-dataset continuation missing checkpoint data.")
+    args = hydrate_push_args_for_multi(args)
+    prep, nuisance = prep_from_multi_checkpoint(checkpoint, start_model)
+    logs = out_dir / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    write_prep(out_dir / "push_prep.json", prep)
+    write_datasets_csv(out_dir / "push_datasets.csv", prep, nuisance)
+    policy = checkpoint.get("structure_dataset_policy")
+    if not isinstance(policy, Mapping) or not policy:
+        policy = all_primary_policy({ds.name: Path(str(ds.hkl)).parent for ds in prep.datasets}, status="checkpoint_no_policy")
+    if args.dry_run:
+        plan = {
+            "mode": "multi_dataset",
+            "checkpoint": checkpoint_info.get("checkpoint", ""),
+            "prepared_start_res": str(start_model),
+            "prepared_audit": str(prep_audit) if prep_audit else "",
+            "cycles": int(args.shelxl_feedback_cycles),
+            "datasets": [asdict(ds) for ds in prep.datasets],
+            "nuisance_datasets": sorted(nuisance),
+            "multi_endpoint_merge_key": args.multi_endpoint_merge_key,
+            "shared_loop": "per-dataset Bloch rows -> GROND-side corrected-HKL merge -> one shared SHELXL LS step -> repeat",
+            "tool_config": getattr(args, "tool_config_path", ""),
+            "external_tools": external_tool_statuses(args),
+        }
+        (out_dir / "push_endpoint_plan.json").write_text(json.dumps(plan, indent=2) + "\n")
+        print(json.dumps(plan, indent=2))
+        return 0
+
+    final_model, feedback = run_multi_shelxl_feedback_loop(
+        prep,
+        args,
+        python,
+        logs,
+        out_dir,
+        start_model=str(start_model),
+        nuisance=nuisance,
+        structure_dataset_policy=dict(policy),
+    )
+    result = {
+        "status": "ok",
+        "mode": "multi_dataset",
+        "checkpoint": checkpoint_info.get("checkpoint", ""),
+        "start_model": str(start_model),
+        "model": final_model,
+        "structure_feedback": feedback,
+    }
+    (out_dir / "push_endpoint_summary.json").write_text(json.dumps(result, indent=2, allow_nan=True) + "\n")
+    report = write_multi_push_endpoint_report(out_dir, best_cycle_tolerance=float(args.best_cycle_tolerance))
+    if report:
+        print(f"Multi-dataset endpoint push report: {report}")
+    return 0
 
 
 def write_push_endpoint_report(out_dir: Path, *, best_cycle_tolerance: float) -> Path | None:
@@ -7969,6 +8203,8 @@ def cmd_push_endpoint(args: argparse.Namespace) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_info = apply_push_checkpoint(args)
     start_model, prep_audit = prepare_push_endpoint_model(args, out_dir)
+    if int(checkpoint_info.get("dataset_count") or 1) > 1:
+        return cmd_push_endpoint_multi(args, checkpoint_info, start_model, prep_audit, python, out_dir)
     cmd = [
         python,
         str(engine_script("shelxl_feedback_loop.py")),
@@ -10088,6 +10324,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_push.add_argument("--hkl", default="", help="Override HKL path if the source summary does not record it.")
     p_push.add_argument("--baseline-hkl", default="", help="Optional conventional HKL for baseline/reference endpoint comparisons.")
     p_push.add_argument("--hkl-transform", default="", help="Override signed HKL transform. Defaults to the source summary.")
+    p_push.add_argument(
+        "--multi-endpoint-merge-key",
+        choices=["model_symmetry", "model_symmetry_friedel", "exact_signed_hkl"],
+        default="",
+        help="For multi-dataset checkpoints, corrected-HKL merge key before each shared SHELXL LS step. Defaults to the checkpoint value or model_symmetry.",
+    )
     p_push.add_argument("--cycles", type=int, default=3, help="Additional Bloch/SHELXL macrocycles.")
     p_push.add_argument("--n-basis", type=int, default=108)
     p_push.add_argument("--n-points", type=int, default=20)

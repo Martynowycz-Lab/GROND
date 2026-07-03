@@ -276,7 +276,7 @@ For final publication adjudication, set `--n-basis` and `--n-points` to the prom
 
 ## Pushing a Finished Endpoint
 
-If a run has a good pinned nuisance contract and you want to continue from a changed model rather than repeat scouting, hand testing, thickness search, and feature gates, use `push-endpoint`. A completed single-dataset `auto` run writes `grond_continue_checkpoint.json` in the run directory. That file points to the selected row-level Bloch settings and final model. Edit or replace the model, then launch a short continuation from the checkpoint:
+If a run has a good pinned nuisance contract and you want to continue from a changed model rather than repeat scouting, hand testing, thickness search, and feature gates, use `push-endpoint`. A completed `auto` run writes `grond_continue_checkpoint.json` in the run directory. For one dataset, that file points to the selected row-level Bloch settings and final model. For multiple datasets, it records every dataset's final row contract, pinned nuisance values, dataset-policy weights, and the corrected-HKL merge key. Edit or replace the model, then launch a short continuation from the checkpoint:
 
 ```bash
 GROND push-endpoint \
@@ -286,7 +286,7 @@ GROND push-endpoint \
   --cycles 3
 ```
 
-If you omit `--start-res`, GROND continues from the model recorded in the checkpoint. If you provide a new `--start-res`, GROND keeps the pinned row/nuisance contract but uses your edited model. This is the right route for small manual changes, H-atom tests, restraint stress tests, or “push this endpoint five more cycles” checks. It is not the same as crash recovery. For an interrupted `auto` run, rerun the original command with the same `--out-dir`; GROND resumes completed stages from `grond_progress.json`. Resume is command-aware: if a completed stage was produced by a different GROND install path or different stage command, GROND recomputes that stage instead of silently mixing outputs.
+If you omit `--start-res`, GROND continues from the model recorded in the checkpoint. If you provide a new `--start-res`, GROND keeps the pinned row/nuisance contract but uses your edited model. This is the right route for small manual changes, H-atom tests, restraint stress tests, or “push this endpoint five more cycles” checks. In a multi-dataset continuation, each macrocycle recomputes Bloch rows separately for each dataset from the edited shared model, merges the corrected endpoint observations with the recorded merge policy, runs one shared SHELXL LS step, and sends the updated model back to all datasets. It is not the same as crash recovery. For an interrupted `auto` run, rerun the original command with the same `--out-dir`; GROND resumes completed stages from `grond_progress.json`. Resume is command-aware: if a completed stage was produced by a different GROND install path or different stage command, GROND recomputes that stage instead of silently mixing outputs.
 
 The older explicit form still works when you want to name the internal summary yourself:
 

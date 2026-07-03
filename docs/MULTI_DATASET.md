@@ -31,6 +31,18 @@ Corrected rows are then merged into a single endpoint HKL before the shared LS1 
 
 The shared LS1 updater uses row-level weights from the per-dataset sigma model and the dataset-policy weight before the corrected rows are merged. This is the fast production route. If you request `--structure-update native_gradient`, the finite-difference shared-model updater uses the same per-dataset sigma and dataset-policy weights directly in the native row target. Use that mode when you specifically want a diagnostic check on whether the LS1 approximation is leaving a native row-level downhill direction.
 
+Completed multi-dataset `auto` runs write `grond_continue_checkpoint.json`. Use it when you have manually edited the shared model, removed restraints, or want to push the same endpoint for more macrocycles without redoing transform scouting, hand checks, thickness search, or nuisance gates:
+
+```bash
+GROND push-endpoint \
+  --checkpoint grond_multi/grond_continue_checkpoint.json \
+  --start-res edited_joint_model.res \
+  --out-dir grond_multi/push_edited_joint_model \
+  --cycles 10
+```
+
+The continuation keeps the recorded per-dataset nuisance contracts and dataset-policy weights. Each push macrocycle recomputes Bloch rows for every dataset from the edited shared model, merges the corrected endpoint observations using the checkpoint merge key, runs one shared SHELXL LS step, and feeds that one model back to all datasets. The output report is `MULTI_ENDPOINT_PUSH_REPORT.md`; it lists the row-level dynamical and matched Born metrics, merged endpoint size, endpoint R values, GooF, and selected cycle for the push.
+
 The files to read first are:
 
 ```text

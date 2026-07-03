@@ -1106,6 +1106,49 @@ def test_write_continue_checkpoint_records_single_dataset_paths(tmp_path):
     assert saved["hkl_transform"] == "identity"
 
 
+def test_write_continue_checkpoint_records_multi_dataset_contract(tmp_path):
+    out_dir = tmp_path / "grond_multi"
+    model = out_dir / "final_model.res"
+    model.parent.mkdir(parents=True, exist_ok=True)
+    model.write_text("TITL final\nCELL 0.025079 5 6 7 90 90 90\nEND\n")
+    run_a = out_dir / "runs" / "a" / "final"
+    run_b = out_dir / "runs" / "b" / "final"
+    for run, thickness in [(run_a, 1000.0), (run_b, 1200.0)]:
+        run.mkdir(parents=True)
+        (run / "summary.json").write_text(json.dumps({"best_native": {"nuisance": {"thickness_A": thickness}}}) + "\n")
+    hkl_a = tmp_path / "a" / "INTEGRATE.HKL"
+    hkl_b = tmp_path / "b" / "INTEGRATE.HKL"
+    hkl_a.parent.mkdir()
+    hkl_b.parent.mkdir()
+    hkl_a.write_text("! a\n")
+    hkl_b.write_text("! b\n")
+    prep = PrepConfig(
+        structure=str(model),
+        datasets=[
+            DatasetSpec(name="a", hkl=str(hkl_a), hkl_transform="identity"),
+            DatasetSpec(name="b", hkl=str(hkl_b), hkl_transform="-h,k,l"),
+        ],
+    )
+    args = argparse.Namespace(out_dir=str(out_dir), dry_run=False, multi_endpoint_merge_key="model_symmetry")
+
+    checkpoint = cli.write_continue_checkpoint(
+        prep,
+        {
+            "runs": {"a": str(run_a), "b": str(run_b)},
+            "model": str(model),
+            "dataset_policy": {"structure_update": {"status": "disabled"}},
+        },
+        args,
+    )
+    saved = json.loads((out_dir / "grond_continue_checkpoint.json").read_text())
+
+    assert checkpoint["status"] == "ready"
+    assert saved["dataset_count"] == 2
+    assert saved["datasets"][0]["source_summary"] == str((run_a / "summary.json").resolve())
+    assert saved["datasets"][1]["nuisance"]["thickness_A"] == 1200.0
+    assert saved["multi_endpoint_merge_key"] == "model_symmetry"
+
+
 def test_push_endpoint_dry_run_accepts_continue_checkpoint(tmp_path):
     source_summary = tmp_path / "summary.json"
     source_summary.write_text("{}\n")
@@ -1152,6 +1195,79 @@ def test_push_endpoint_dry_run_accepts_continue_checkpoint(tmp_path):
     assert command[command.index("--hkl") + 1] == str(hkl.resolve())
     assert "--hkl-transform=identity" in command
     assert plan["checkpoint"] == str(checkpoint.resolve())
+
+
+def test_push_endpoint_dry_run_accepts_multi_continue_checkpoint(tmp_path):
+    out_dir = tmp_path / "push_multi"
+    start_res = tmp_path / "edited.res"
+    start_res.write_text("TITL edited\nCELL 0.025079 5 6 7 90 90 90\nLATT 1\nL.S. 4\nEND\n")
+    run_a = tmp_path / "runs" / "a"
+    run_b = tmp_path / "runs" / "b"
+    for run, thickness in [(run_a, 1000.0), (run_b, 1200.0)]:
+        run.mkdir(parents=True)
+        (run / "summary.json").write_text(json.dumps({"best_native": {"nuisance": {"thickness_A": thickness}}}) + "\n")
+    hkl_a = tmp_path / "a" / "INTEGRATE.HKL"
+    hkl_b = tmp_path / "b" / "INTEGRATE.HKL"
+    hkl_a.parent.mkdir()
+    hkl_b.parent.mkdir()
+    hkl_a.write_text("! a\n")
+    hkl_b.write_text("! b\n")
+    checkpoint = tmp_path / "grond_continue_checkpoint.json"
+    checkpoint.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "grond_continue_checkpoint",
+                "status": "ready",
+                "dataset_count": 2,
+                "recommended_start_res": str(start_res),
+                "multi_endpoint_merge_key": "model_symmetry",
+                "datasets": [
+                    {
+                        "name": "a",
+                        "hkl": str(hkl_a),
+                        "hkl_transform": "identity",
+                        "source_run": str(run_a),
+                        "source_summary": str(run_a / "summary.json"),
+                        "nuisance": {"thickness_A": 1000.0},
+                    },
+                    {
+                        "name": "b",
+                        "hkl": str(hkl_b),
+                        "hkl_transform": "-h,k,l",
+                        "source_run": str(run_b),
+                        "source_summary": str(run_b / "summary.json"),
+                        "nuisance": {"thickness_A": 1200.0},
+                    },
+                ],
+                "structure_dataset_policy": {"status": "disabled"},
+            }
+        )
+        + "\n"
+    )
+    args = build_parser().parse_args(
+        [
+            "push-endpoint",
+            "--checkpoint",
+            str(checkpoint),
+            "--start-res",
+            str(start_res),
+            "--out-dir",
+            str(out_dir),
+            "--cycles",
+            "10",
+            "--dry-run",
+        ]
+    )
+
+    assert args.func(args) == 0
+    plan = json.loads((out_dir / "push_endpoint_plan.json").read_text())
+
+    assert plan["mode"] == "multi_dataset"
+    assert plan["cycles"] == 10
+    assert plan["multi_endpoint_merge_key"] == "model_symmetry"
+    assert [row["name"] for row in plan["datasets"]] == ["a", "b"]
+    assert "GROND-side corrected-HKL merge" in plan["shared_loop"]
 
 
 def test_write_push_endpoint_report_handles_missing_output_model(tmp_path):
