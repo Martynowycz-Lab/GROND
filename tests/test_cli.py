@@ -866,8 +866,11 @@ def test_utility_commands_parse():
     assert push.cycles == 3
     assert push.n_basis == 108
     assert push.n_points == 20
-    assert push.compute_backend == "scipy_bethe"
-    assert push.row_plan_cache == "readwrite"
+    assert push.compute_backend == "scipy"
+    assert push.row_plan_cache == "off"
+    assert push.chunksize == 4
+    assert push.topup_d_min == 0.7
+    assert push.post_bloch_sigma_policy == "none"
     assert push.model_prep == "free-h-anis-no-restraints"
     assert push.set_ls_cycles == 1
     push_checkpoint = build_parser().parse_args(
@@ -883,6 +886,11 @@ def test_utility_commands_parse():
     assert push_checkpoint.checkpoint == "grond_continue_checkpoint.json"
     assert push_checkpoint.source_summary == ""
     assert push_checkpoint.start_res == ""
+    assert push_checkpoint.compute_backend == "scipy"
+    assert push_checkpoint.row_plan_cache == "off"
+    assert push_checkpoint.chunksize == 4
+    assert push_checkpoint.topup_d_min == 0.7
+    assert push_checkpoint.post_bloch_sigma_policy == "none"
 
 
 def test_sfac_check_rejects_element_only_shelx_factors(tmp_path: Path, capsys):
@@ -1113,9 +1121,24 @@ def test_write_continue_checkpoint_records_multi_dataset_contract(tmp_path):
     model.write_text("TITL final\nCELL 0.025079 5 6 7 90 90 90\nEND\n")
     run_a = out_dir / "runs" / "a" / "final"
     run_b = out_dir / "runs" / "b" / "final"
-    for run, thickness in [(run_a, 1000.0), (run_b, 1200.0)]:
+    for run, thickness, transform in [(run_a, 1000.0, "-h,k,l"), (run_b, 1200.0, "identity")]:
         run.mkdir(parents=True)
-        (run / "summary.json").write_text(json.dumps({"best_native": {"nuisance": {"thickness_A": thickness}}}) + "\n")
+        (run / "summary.json").write_text(
+            json.dumps(
+                {
+                    "config": {
+                        "hkl_transform": transform,
+                        "topup_d_min": 0.7,
+                        "compute_backend": "scipy",
+                        "row_plan_cache": "off",
+                        "chunksize": 4,
+                        "post_bloch_sigma_policy": "none",
+                    },
+                    "best_native": {"nuisance": {"thickness_A": thickness}},
+                }
+            )
+            + "\n"
+        )
     hkl_a = tmp_path / "a" / "INTEGRATE.HKL"
     hkl_b = tmp_path / "b" / "INTEGRATE.HKL"
     hkl_a.parent.mkdir()
@@ -1145,7 +1168,9 @@ def test_write_continue_checkpoint_records_multi_dataset_contract(tmp_path):
     assert checkpoint["status"] == "ready"
     assert saved["dataset_count"] == 2
     assert saved["datasets"][0]["source_summary"] == str((run_a / "summary.json").resolve())
+    assert saved["datasets"][0]["hkl_transform"] == "-h,k,l"
     assert saved["datasets"][1]["nuisance"]["thickness_A"] == 1200.0
+    assert saved["datasets"][1]["final_config"]["topup_d_min"] == 0.7
     assert saved["multi_endpoint_merge_key"] == "model_symmetry"
 
 

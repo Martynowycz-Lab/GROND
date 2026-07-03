@@ -5247,6 +5247,41 @@ def _checkpoint_path(raw: object, *, base: Path | None = None) -> str:
     return str(path.resolve())
 
 
+def _summary_section(summary: Mapping[str, object], key: str) -> Mapping[str, object]:
+    value = summary.get(key)
+    return value if isinstance(value, Mapping) else {}
+
+
+def _checkpoint_dataset_contract(ds: DatasetSpec, summary_path: Path | None) -> tuple[dict[str, object], dict[str, object]]:
+    """Return checkpoint dataset fields, preferring the final row-contract summary."""
+
+    row: dict[str, object] = asdict(ds)
+    final_config: dict[str, object] = {}
+    if summary_path is not None and summary_path.exists():
+        summary = try_read_json(summary_path)
+        config = _summary_section(summary, "config")
+        inputs = _summary_section(summary, "inputs")
+        hkl_transform = str(config.get("hkl_transform") or inputs.get("hkl_transform") or "").strip()
+        if hkl_transform:
+            row["hkl_transform"] = hkl_transform
+        for key in (
+            "hkl_transform",
+            "n_basis",
+            "n_points",
+            "topup_d_min",
+            "compute_backend",
+            "row_plan_cache",
+            "chunksize",
+            "post_bloch_sigma_policy",
+            "min_d_spacing",
+            "min_peak",
+            "geometry_percentile",
+        ):
+            if key in config and config[key] not in (None, ""):
+                final_config[key] = config[key]
+    return row, final_config
+
+
 def write_continue_checkpoint(prep: PrepConfig, result: Mapping[str, object], args: argparse.Namespace) -> dict:
     """Write the small JSON file used to continue a finished endpoint."""
 
@@ -5268,12 +5303,14 @@ def write_continue_checkpoint(prep: PrepConfig, result: Mapping[str, object], ar
         run_text = str(runs.get(ds.name, "")) if runs else (source_run if dataset_count == 1 else "")
         run_path = Path(run_text).expanduser().resolve() if run_text else None
         summary_path = run_path / "summary.json" if run_path is not None else None
+        dataset_contract, final_config = _checkpoint_dataset_contract(ds, summary_path)
         datasets.append(
             {
-                **asdict(ds),
+                **dataset_contract,
                 "source_run": str(run_path) if run_path is not None else "",
                 "source_summary": str(summary_path) if summary_path is not None else "",
                 "nuisance": best_nuisance(run_path) if run_path is not None else {},
+                "final_config": final_config,
             }
         )
     dataset_summaries_exist = all(
@@ -10339,9 +10376,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_push.add_argument("--shelxl-iterations", type=int, default=1, help="SHELXL executable calls per macrocycle.")
     p_push.add_argument("--endpoint-ls-cycles", type=int, default=1, help="Diagnostic internal L.S./CGLS cycle count for each generated endpoint. Production keeps this at 1.")
     p_push.add_argument("--workers", type=int, default=auto_worker_count(0, 0.85))
-    p_push.add_argument("--chunksize", type=int, default=0)
-    p_push.add_argument("--compute-backend", choices=["scipy", "scipy_bethe", "scipy_expm", "scipy_expm_multiply", "jax", "jax_auto", "jax_cpu", "jax_mps", "jax_cuda", "jax_padded", "jax_auto_padded", "jax_cpu_padded", "jax_mps_padded", "jax_cuda_padded", "jax_cpu_real_expm", "jax_mps_real_expm", "jax_mps_real_expm_padded"], default="scipy_bethe")
-    p_push.add_argument("--row-plan-cache", choices=["off", "readwrite", "rebuild"], default="readwrite")
+    p_push.add_argument("--chunksize", type=int, default=4)
+    p_push.add_argument("--compute-backend", choices=["scipy", "scipy_bethe", "scipy_expm", "scipy_expm_multiply", "jax", "jax_auto", "jax_cpu", "jax_mps", "jax_cuda", "jax_padded", "jax_auto_padded", "jax_cpu_padded", "jax_mps_padded", "jax_cuda_padded", "jax_cpu_real_expm", "jax_mps_real_expm", "jax_mps_real_expm_padded"], default="scipy")
+    p_push.add_argument("--row-plan-cache", choices=["off", "readwrite", "rebuild"], default="off")
     p_push.add_argument("--jax-batch-size", type=int, default=0)
     p_push.add_argument("--jax-matrix-bucket-size", type=int, default=0)
     p_push.add_argument("--bethe-strong-count", type=int, default=48)
@@ -10349,11 +10386,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_push.add_argument("--bethe-promote-denom", type=float, default=0.005)
     p_push.add_argument("--bethe-denom-eps", type=float, default=1e-5)
     p_push.add_argument("--min-d-spacing", type=float, default=0.0)
-    p_push.add_argument("--topup-d-min", type=float, default=0.0)
+    p_push.add_argument("--topup-d-min", type=float, default=0.7)
     p_push.add_argument("--min-peak", type=float, default=-1.0)
     p_push.add_argument("--geometry-percentile", type=float, default=0.0)
     p_push.add_argument("--max-rows", type=int, default=0)
-    p_push.add_argument("--post-bloch-sigma-policy", choices=["none", "uniform_z_rms"], default="uniform_z_rms")
+    p_push.add_argument("--post-bloch-sigma-policy", choices=["none", "uniform_z_rms"], default="none")
     p_push.add_argument("--post-bloch-sigma-holdout-fraction", type=float, default=0.20)
     p_push.add_argument("--post-bloch-sigma-min-scale", type=float, default=0.25)
     p_push.add_argument("--post-bloch-sigma-max-scale", type=float, default=4.0)
