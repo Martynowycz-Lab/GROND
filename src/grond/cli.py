@@ -2407,6 +2407,10 @@ def shelxl_feedback_cmd(
         str(args.shelxl_feedback_endpoint_ls_cycles),
         "--endpoint-wght-mode",
         str(getattr(args, "endpoint_wght_mode", "freeze-zero")),
+        "--npd-damp-retries",
+        str(getattr(args, "npd_damp_retries", "0.5,0.25,0.1")),
+        "--npd-damp-limse",
+        f"{float(getattr(args, 'npd_damp_limse', 15.0)):g}",
         "--post-bloch-sigma-policy",
         resolved_post_bloch_sigma_policy(args, feedback_loop=True),
         "--post-bloch-sigma-holdout-fraction",
@@ -2502,6 +2506,10 @@ def combine_cmd(
         str(getattr(args, "shelxl", "") or ""),
         "--shelxl-iterations",
         str(iterations),
+        "--npd-damp-retries",
+        str(getattr(args, "npd_damp_retries", "0.5,0.25,0.1")),
+        "--npd-damp-limse",
+        f"{float(getattr(args, 'npd_damp_limse', 15.0)):g}",
     ]
     if args.dataset_sigma_holdout_floor:
         cmd.append("--dataset-sigma-holdout-floor")
@@ -5829,7 +5837,16 @@ def _quick_shelxl_issue_text(details: Mapping[str, object]) -> str:
     if isinstance(atoms, list) and atoms:
         shown = ", ".join(str(v) for v in atoms[:5])
         atom_text = f" ({shown}{', ...' if len(atoms) > 5 else ''})"
-    return f"NPD `{npd if npd is not None else 'n/a'}`{atom_text}; split `{split if split is not None else 'n/a'}`"
+    text = f"NPD `{npd if npd is not None else 'n/a'}`{atom_text}; split `{split if split is not None else 'n/a'}`"
+    damp_count = _quick_int(details.get("damp_retry_count"))
+    active_damp = _quick_float(details.get("active_damp"))
+    if damp_count and damp_count > 0:
+        accepted = bool(details.get("damp_retry_accepted"))
+        damp_text = f"; DAMP retry {'accepted' if accepted else 'tried'}"
+        if math.isfinite(active_damp):
+            damp_text += f" `{active_damp:.3f}`"
+        text += damp_text
+    return text
 
 
 def _quick_shelxl_weight_text(details: Mapping[str, object]) -> str:
@@ -6503,13 +6520,13 @@ def _format_terminal_finish_summary(payload: Mapping[str, object]) -> str:
     endpoint_lines = ["SHELXL endpoint" if publication_is_direct_ls1 else "SHELXL endpoints"]
     if publication_is_direct_ls1:
         endpoint_lines.append(
-            f"  Publication endpoint (direct LS1 corrected-HKL): R1(F)gt {_quick_percent(endpoint.get('R1gt'))}, R1(F)all {_quick_percent(endpoint.get('R1all'))}, wR2(F^2)all {_quick_percent(endpoint.get('wR2all'))}, GooF {_quick_number(endpoint.get('GooF'), 3)}; NPD {endpoint.get('npd_count', 'n/a')}; split {endpoint.get('split_count', 'n/a')}"
+            f"  Publication endpoint (direct LS1 corrected-HKL): R1(F)gt {_quick_percent(endpoint.get('R1gt'))}, R1(F)all {_quick_percent(endpoint.get('R1all'))}, wR2(F^2)all {_quick_percent(endpoint.get('wR2all'))}, GooF {_quick_number(endpoint.get('GooF'), 3)}; {_quick_shelxl_issue_text(endpoint)}"
         )
     else:
         endpoint_lines.extend(
             [
-                f"  Direct LS1 corrected-HKL candidate: R1(F)gt {_quick_percent(feedback.get('R1gt'))}, R1(F)all {_quick_percent(feedback.get('R1all'))}, wR2(F^2)all {_quick_percent(feedback.get('wR2all'))}, GooF {_quick_number(feedback.get('GooF'), 3)}; NPD {feedback.get('npd_count', 'n/a')}; split {feedback.get('split_count', 'n/a')}",
-                f"  Publication endpoint: R1(F)gt {_quick_percent(endpoint.get('R1gt'))}, R1(F)all {_quick_percent(endpoint.get('R1all'))}, wR2(F^2)all {_quick_percent(endpoint.get('wR2all'))}, GooF {_quick_number(endpoint.get('GooF'), 3)}; NPD {endpoint.get('npd_count', 'n/a')}; split {endpoint.get('split_count', 'n/a')}",
+                f"  Direct LS1 corrected-HKL candidate: R1(F)gt {_quick_percent(feedback.get('R1gt'))}, R1(F)all {_quick_percent(feedback.get('R1all'))}, wR2(F^2)all {_quick_percent(feedback.get('wR2all'))}, GooF {_quick_number(feedback.get('GooF'), 3)}; {_quick_shelxl_issue_text(feedback)}",
+                f"  Publication endpoint: R1(F)gt {_quick_percent(endpoint.get('R1gt'))}, R1(F)all {_quick_percent(endpoint.get('R1all'))}, wR2(F^2)all {_quick_percent(endpoint.get('wR2all'))}, GooF {_quick_number(endpoint.get('GooF'), 3)}; {_quick_shelxl_issue_text(endpoint)}",
             ]
         )
     if diagnostic and diagnostic.get("R1all") is not None:
@@ -7223,6 +7240,9 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
             "restraints": final_feedback_shelxl.get("restraints"),
             "npd_count": final_feedback_shelxl.get("npd_count"),
             "split_count": final_feedback_shelxl.get("split_count"),
+            "damp_retry_count": final_feedback_shelxl.get("damp_retry_count"),
+            "damp_retry_accepted": final_feedback_shelxl.get("damp_retry_accepted"),
+            "active_damp": final_feedback_shelxl.get("active_damp"),
             "lst": final_feedback_shelxl.get("lst", file_block["final_feedback_lst"]),
         },
         "publication_endpoint": {
@@ -7237,6 +7257,9 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
             "restraints": publication_shelxl.get("restraints"),
             "npd_count": publication_shelxl.get("npd_count"),
             "split_count": publication_shelxl.get("split_count"),
+            "damp_retry_count": publication_shelxl.get("damp_retry_count"),
+            "damp_retry_accepted": publication_shelxl.get("damp_retry_accepted"),
+            "active_damp": publication_shelxl.get("active_damp"),
             "source": selected_row.get("selection_source", ""),
             "source_kind": selected_row.get("source_kind", ""),
             "selection_policy": endpoint_selection.get("selection_policy", "") if isinstance(endpoint_selection, Mapping) else "",
@@ -9886,6 +9909,8 @@ def add_common_run_args(ap: argparse.ArgumentParser, *, expose_lambda_controls: 
     ap.add_argument("--shelxl-feedback-cycles", type=int, default=5, help="Number of high-N/Q Bloch -> one-SHELXL-LS feedback cycles used by the automatic SHELXL structure-update strategy.")
     ap.add_argument("--shelxl-feedback-shelxl-iterations", type=int, default=1, help="SHELXL passes per feedback cycle. Default 1 keeps each feedback update to one least-squares model update.")
     ap.add_argument("--shelxl-feedback-endpoint-ls-cycles", type=int, default=1, help="Diagnostic internal L.S./CGLS cycle count for each SHELXL feedback macrocycle. Production keeps this at 1.")
+    ap.add_argument("--npd-damp-retries", default="0.5,0.25,0.1", help="DAMP values retried only when a SHELXL corrected-HKL endpoint has NPD or split pathology. Use off to disable.")
+    ap.add_argument("--npd-damp-limse", type=float, default=15.0, help="Default SHELXL DAMP LIMSE used for NPD/split retry values.")
     ap.add_argument("--dataset-sigma-policy", choices=["auto", "none", "uniform_z_rms"], default="auto", help="Per-dataset endpoint sigma policy for multi-dataset combination. Auto calibrates each crystal independently before merging.")
     ap.add_argument("--dataset-sigma-holdout-fraction", type=float, default=0.20, help="Deterministic HKL holdout fraction reported for per-dataset endpoint sigma calibration.")
     ap.add_argument("--dataset-sigma-min-scale", type=float, default=0.25, help="Lower guardrail for per-dataset endpoint sigma scaling.")

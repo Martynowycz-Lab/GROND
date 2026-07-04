@@ -21,6 +21,7 @@ from grond.cli import (
     resolved_merge_sigma_policy,
     resolved_post_bloch_sigma_policy,
     resolved_sg_window_mode,
+    shelxl_feedback_cmd,
     transform_scout_job_count,
 )
 from grond.io.config import DatasetSpec, PrepConfig, write_prep
@@ -1931,7 +1932,50 @@ def test_combine_cmd_forwards_promoted_multi_dataset_sigma_policies(tmp_path: Pa
     assert cmd[cmd.index("--post-bloch-sigma-policy") + 1] == "uniform_z_rms"
     assert cmd[cmd.index("--shelxl") + 1] == "/opt/shelx/shelxl"
     assert cmd[cmd.index("--shelxl-iterations") + 1] == "3"
+    assert cmd[cmd.index("--npd-damp-retries") + 1] == "0.5,0.25,0.1"
+    assert cmd[cmd.index("--npd-damp-limse") + 1] == "15"
     assert "--dataset-sigma-holdout-floor" in cmd
+
+
+def test_auto_forwards_npd_damp_retry_settings_to_feedback_and_combine(tmp_path: Path):
+    args = build_parser().parse_args(
+        [
+            "auto",
+            "--out-dir",
+            "out",
+            "--xds-dir",
+            "xds",
+            "--structure",
+            "model.res",
+            "--npd-damp-retries",
+            "0.4,0.2",
+            "--npd-damp-limse",
+            "12",
+        ]
+    )
+    ds = DatasetSpec(name="dataset", hkl="INTEGRATE.HKL")
+
+    feedback = shelxl_feedback_cmd(
+        "python",
+        ds,
+        "model.res",
+        tmp_path / "summary.json",
+        "temp_a.hkl",
+        tmp_path / "feedback",
+        args,
+        n_basis=108,
+    )
+    combined = combine_cmd(
+        "python",
+        {"a": tmp_path / "run_a", "b": tmp_path / "run_b"},
+        "model.res",
+        tmp_path / "combined",
+        args,
+    )
+
+    for cmd in (feedback, combined):
+        assert cmd[cmd.index("--npd-damp-retries") + 1] == "0.4,0.2"
+        assert cmd[cmd.index("--npd-damp-limse") + 1] == "12"
 
 
 def test_auto_parser_accepts_cuda_jax_backend_explicitly():

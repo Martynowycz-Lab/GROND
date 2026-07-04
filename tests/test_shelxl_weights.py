@@ -5,6 +5,7 @@ sys.path.append(str(Path(__file__).resolve().parents[1] / "src" / "grond" / "leg
 
 from grond.legacy.engine.native_row_regularize import (
     normalize_shelx_cell_wavelength,
+    parse_damp_retry_grid,
     parse_int_grid,
     parse_lst,
     parse_recommended_wght,
@@ -18,6 +19,11 @@ from grond.legacy.engine.native_row_regularize import (
 def test_parse_int_grid_accepts_detector_scale_candidates():
     assert parse_int_grid("0,8,12") == [0, 8, 12]
     assert parse_int_grid("8 12") == [8, 12]
+
+
+def test_parse_damp_retry_grid_accepts_values_and_limse_pairs():
+    assert parse_damp_retry_grid("0.5, 0.25/10 0.1:8", 15.0) == [(0.5, 15.0), (0.25, 10.0), (0.1, 8.0)]
+    assert parse_damp_retry_grid("off") == []
 
 
 def test_parse_recommended_wght_uses_last_scheme(tmp_path: Path):
@@ -216,6 +222,34 @@ def test_write_endpoint_ins_can_write_diagnostic_shelxl_cycle_count(tmp_path: Pa
     text = dst.read_text()
     assert "L.S. 20" in text
     assert "L.S. 1" not in text
+
+
+def test_write_endpoint_ins_can_force_single_active_damp_line(tmp_path: Path):
+    src = tmp_path / "model.res"
+    dst = tmp_path / "model.ins"
+    src.write_text(
+        "\n".join(
+            [
+                "TITL trial",
+                "CELL 0.02508 5.0 6.0 7.0 90 90 90",
+                "SFAC C 1 0 1 0 1 0 1 0",
+                "L.S. 1",
+                "DAMP 0.9000 15.0000",
+                "FVAR 1.0",
+                "HKLF 4",
+                "END",
+                "DAMP 0.1000 15.0000",
+            ]
+        )
+        + "\n"
+    )
+
+    write_endpoint_ins(src, dst, hkl_name="dyn_nuisance_corrected.hkl", damp=(0.25, 10.0))
+
+    lines = dst.read_text().splitlines()
+    damp_lines = [line for line in lines if line.strip().upper().startswith("DAMP")]
+    assert damp_lines == ["DAMP      0.2500     10.0000"]
+    assert lines.index("DAMP      0.2500     10.0000") < lines.index("FVAR 1.0")
 
 
 def test_write_endpoint_ins_strips_acta_and_forces_hklf4(tmp_path: Path):
