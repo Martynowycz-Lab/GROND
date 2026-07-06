@@ -469,10 +469,9 @@ def shelxl_feedback_record_safe_for_reuse(record: Mapping[str, object]) -> bool:
         return False
     try:
         npd_count = int(health.get("npd_count", 0) or 0)
-        split_count = int(health.get("split_count", 0) or 0)
     except (TypeError, ValueError):
-        return not bool(health.get("has_npd") or health.get("has_split_warnings"))
-    return npd_count <= 0 and split_count <= 0 and not bool(health.get("has_npd") or health.get("has_split_warnings"))
+        return not bool(health.get("has_npd"))
+    return npd_count <= 0 and not bool(health.get("has_npd"))
 
 
 def best_endpoint_model(run_dir: Path) -> Path | None:
@@ -2407,10 +2406,6 @@ def shelxl_feedback_cmd(
         str(args.shelxl_feedback_endpoint_ls_cycles),
         "--endpoint-wght-mode",
         str(getattr(args, "endpoint_wght_mode", "freeze-zero")),
-        "--npd-damp-retries",
-        str(getattr(args, "npd_damp_retries", "0.5,0.25,0.1")),
-        "--npd-damp-limse",
-        f"{float(getattr(args, 'npd_damp_limse', 15.0)):g}",
         "--post-bloch-sigma-policy",
         resolved_post_bloch_sigma_policy(args, feedback_loop=True),
         "--post-bloch-sigma-holdout-fraction",
@@ -2506,10 +2501,6 @@ def combine_cmd(
         str(getattr(args, "shelxl", "") or ""),
         "--shelxl-iterations",
         str(iterations),
-        "--npd-damp-retries",
-        str(getattr(args, "npd_damp_retries", "0.5,0.25,0.1")),
-        "--npd-damp-limse",
-        f"{float(getattr(args, 'npd_damp_limse', 15.0)):g}",
     ]
     if args.dataset_sigma_holdout_floor:
         cmd.append("--dataset-sigma-holdout-floor")
@@ -5837,16 +5828,7 @@ def _quick_shelxl_issue_text(details: Mapping[str, object]) -> str:
     if isinstance(atoms, list) and atoms:
         shown = ", ".join(str(v) for v in atoms[:5])
         atom_text = f" ({shown}{', ...' if len(atoms) > 5 else ''})"
-    text = f"NPD `{npd if npd is not None else 'n/a'}`{atom_text}; split `{split if split is not None else 'n/a'}`"
-    damp_count = _quick_int(details.get("damp_retry_count"))
-    active_damp = _quick_float(details.get("active_damp"))
-    if damp_count and damp_count > 0:
-        accepted = bool(details.get("damp_retry_accepted"))
-        damp_text = f"; DAMP retry {'accepted' if accepted else 'tried'}"
-        if math.isfinite(active_damp):
-            damp_text += f" `{active_damp:.3f}`"
-        text += damp_text
-    return text
+    return f"NPD `{npd if npd is not None else 'n/a'}`{atom_text}; split `{split if split is not None else 'n/a'}`"
 
 
 def _quick_shelxl_weight_text(details: Mapping[str, object]) -> str:
@@ -7240,9 +7222,6 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
             "restraints": final_feedback_shelxl.get("restraints"),
             "npd_count": final_feedback_shelxl.get("npd_count"),
             "split_count": final_feedback_shelxl.get("split_count"),
-            "damp_retry_count": final_feedback_shelxl.get("damp_retry_count"),
-            "damp_retry_accepted": final_feedback_shelxl.get("damp_retry_accepted"),
-            "active_damp": final_feedback_shelxl.get("active_damp"),
             "lst": final_feedback_shelxl.get("lst", file_block["final_feedback_lst"]),
         },
         "publication_endpoint": {
@@ -7257,9 +7236,6 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
             "restraints": publication_shelxl.get("restraints"),
             "npd_count": publication_shelxl.get("npd_count"),
             "split_count": publication_shelxl.get("split_count"),
-            "damp_retry_count": publication_shelxl.get("damp_retry_count"),
-            "damp_retry_accepted": publication_shelxl.get("damp_retry_accepted"),
-            "active_damp": publication_shelxl.get("active_damp"),
             "source": selected_row.get("selection_source", ""),
             "source_kind": selected_row.get("source_kind", ""),
             "selection_policy": endpoint_selection.get("selection_policy", "") if isinstance(endpoint_selection, Mapping) else "",
@@ -8155,27 +8131,27 @@ def write_multi_push_endpoint_report(out_dir: Path, *, best_cycle_tolerance: flo
         )
     finite = [r for r in rows if r["dyn_wR2_all"] is not None and math.isfinite(float(r["dyn_wR2_all"]))]
     best = min(finite, key=lambda r: float(r["dyn_wR2_all"])) if finite else None
-    safe = [r for r in finite if int(r.get("npd_count", 0) or 0) == 0 and int(r.get("split_count", 0) or 0) == 0]
+    safe = [r for r in finite if int(r.get("npd_count", 0) or 0) == 0]
     if safe:
         best_safe = min(safe, key=lambda r: float(r["dyn_wR2_all"]))
         threshold = float(best_safe["dyn_wR2_all"]) + best_cycle_tolerance
         within = [r for r in safe if float(r["dyn_wR2_all"]) <= threshold]
         selected = min(within or safe, key=lambda r: r["cycle"])
         selection_status = "promoted_safe_no_npd"
-        selection_reason = "selected earliest no-NPD/no-split cycle within the native row-intensity tolerance"
+        selection_reason = "selected earliest no-NPD cycle within the native row-intensity tolerance; split warnings are reported only"
     elif finite:
-        best_pathology = min((int(r.get("npd_count", 0) or 0), int(r.get("split_count", 0) or 0)) for r in finite)
+        best_pathology = min(int(r.get("npd_count", 0) or 0) for r in finite)
         low_pathology = [
             r
             for r in finite
-            if (int(r.get("npd_count", 0) or 0), int(r.get("split_count", 0) or 0)) == best_pathology
+            if int(r.get("npd_count", 0) or 0) == best_pathology
         ]
         best_low_pathology = min(low_pathology, key=lambda r: float(r["dyn_wR2_all"]))
         threshold = float(best_low_pathology["dyn_wR2_all"]) + best_cycle_tolerance
         within = [r for r in low_pathology if float(r["dyn_wR2_all"]) <= threshold]
         selected = min(within or low_pathology, key=lambda r: r["cycle"])
         selection_status = "diagnostic_no_safe_cycle"
-        selection_reason = "no no-NPD/no-split cycle was available; selected the lowest-pathology diagnostic cycle instead of chasing row wR(I)"
+        selection_reason = "no no-NPD cycle was available; selected the lowest-NPD diagnostic cycle instead of chasing row wR(I)"
     else:
         selected = None
         selection_status = "no_finite_row_metrics"
@@ -8331,7 +8307,7 @@ def write_push_endpoint_report(out_dir: Path, *, best_cycle_tolerance: float) ->
     finite_rows = [r for r in rows if r["native_wR2_all"] is not None and math.isfinite(float(r["native_wR2_all"]))]
     best_native = min(finite_rows, key=lambda r: float(r["native_wR2_all"])) if finite_rows else None
     threshold = float(best_native["native_wR2_all"]) + best_cycle_tolerance if best_native else math.inf
-    safe_rows = [r for r in finite_rows if not r["npd_atoms"] and int(r["split_count"]) == 0]
+    safe_rows = [r for r in finite_rows if not r["npd_atoms"]]
     within = [r for r in safe_rows if float(r["native_wR2_all"]) <= threshold]
     selected = min(within or safe_rows, key=lambda r: (r["cycle"], float(r["native_wR2_all"]))) if safe_rows else None
     decision = {
@@ -8346,7 +8322,7 @@ def write_push_endpoint_report(out_dir: Path, *, best_cycle_tolerance: float) ->
     report_path = out_dir / "ENDPOINT_PUSH_REPORT.md"
     with report_path.open("w") as handle:
         handle.write("# GROND Endpoint Push Report\n\n")
-        handle.write("This report summarizes a continuation run from an existing pinned GROND row/nuisance summary. The selected model is the earliest safe cycle within the requested native-row tolerance when possible; cycles with NPD atoms or split warnings are kept as diagnostics, not promoted.\n\n")
+        handle.write("This report summarizes a continuation run from an existing pinned GROND row/nuisance summary. The selected model is the earliest no-NPD cycle within the requested native-row tolerance when possible. Cycles with NPD atoms are kept as diagnostics, not promoted; split warnings are reported but do not block selection.\n\n")
         handle.write("| cycle | status | seconds | params | restraints | NPD atoms | split warnings | row wR(I)all | row free wR(I)all | endpoint R1(F)all | endpoint wR2(F^2)all | GooF | sigma scale |\n")
         handle.write("|---:|---|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|\n")
         for row in rows:
@@ -9909,8 +9885,6 @@ def add_common_run_args(ap: argparse.ArgumentParser, *, expose_lambda_controls: 
     ap.add_argument("--shelxl-feedback-cycles", type=int, default=5, help="Number of high-N/Q Bloch -> one-SHELXL-LS feedback cycles used by the automatic SHELXL structure-update strategy.")
     ap.add_argument("--shelxl-feedback-shelxl-iterations", type=int, default=1, help="SHELXL passes per feedback cycle. Default 1 keeps each feedback update to one least-squares model update.")
     ap.add_argument("--shelxl-feedback-endpoint-ls-cycles", type=int, default=1, help="Diagnostic internal L.S./CGLS cycle count for each SHELXL feedback macrocycle. Production keeps this at 1.")
-    ap.add_argument("--npd-damp-retries", default="0.5,0.25,0.1", help="DAMP values retried only when a SHELXL corrected-HKL endpoint has NPD or split pathology. Use off to disable.")
-    ap.add_argument("--npd-damp-limse", type=float, default=15.0, help="Default SHELXL DAMP LIMSE used for NPD/split retry values.")
     ap.add_argument("--dataset-sigma-policy", choices=["auto", "none", "uniform_z_rms"], default="auto", help="Per-dataset endpoint sigma policy for multi-dataset combination. Auto calibrates each crystal independently before merging.")
     ap.add_argument("--dataset-sigma-holdout-fraction", type=float, default=0.20, help="Deterministic HKL holdout fraction reported for per-dataset endpoint sigma calibration.")
     ap.add_argument("--dataset-sigma-min-scale", type=float, default=0.25, help="Lower guardrail for per-dataset endpoint sigma scaling.")
@@ -9925,7 +9899,7 @@ def add_common_run_args(ap: argparse.ArgumentParser, *, expose_lambda_controls: 
     ap.add_argument("--publication-endpoint-chooser", action=argparse.BooleanOptionalAction, default=True, help="Write the publication endpoint chooser that separates physical and diagnostic corrected-HKL endpoints.")
     ap.add_argument("--publication-endpoint-min-hkl-safe-factor", type=float, default=0.25, help="Minimum fixed-width HKL safety factor for a publication endpoint.")
     ap.add_argument("--publication-endpoint-max-modulation-p95", type=float, default=20.0, help="Maximum 95th-percentile endpoint intensity modulation for a publication endpoint.")
-    ap.add_argument("--publication-allow-npd", action=argparse.BooleanOptionalAction, default=False, help="Explicit diagnostic override allowing endpoints with NPD or split pathology to pass publication selection gates. Default requires NPD == 0 and no split warnings.")
+    ap.add_argument("--publication-allow-npd", action=argparse.BooleanOptionalAction, default=False, help="Explicit diagnostic override allowing endpoints with NPD pathology to pass publication selection gates. Default requires NPD == 0; split warnings are reported but do not block selection.")
     ap.add_argument("--endpoint-calibration", choices=["auto", "on", "off"], default="auto", help="Replay the final frozen row table through corrected-HKL endpoint calibration after auto completes.")
     ap.add_argument("--endpoint-calibration-specs", default="baseline,adaptive:293:det8,adaptive:200:det8,adaptive:120:det8,adaptive:80:det8,window:0.5:det8,window:1.0:det8,window:1.5:det8,window:3.0:det8,window:5.0:det8,window:1.0:det4,window:3.0:det4,window:5.0:det4,window:3.0:det1")
     if expose_lambda_controls:
@@ -10302,7 +10276,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_scale_replay.add_argument("--publication-max-r1-cost", type=float, default=0.010)
     p_scale_replay.add_argument("--publication-free-wr2-tolerance", type=float, default=0.040)
     p_scale_replay.add_argument("--publication-prefer-wght-mode", default="freeze-zero")
-    p_scale_replay.add_argument("--publication-allow-npd", action=argparse.BooleanOptionalAction, default=False, help="Explicit diagnostic override allowing NPD or split pathology in the selected endpoint. Default requires NPD == 0.")
+    p_scale_replay.add_argument("--publication-allow-npd", action=argparse.BooleanOptionalAction, default=False, help="Explicit diagnostic override allowing NPD pathology in the selected endpoint. Default requires NPD == 0; split warnings are reported but do not block selection.")
     p_scale_replay.add_argument(
         "--publication-selection-policy",
         choices=["bic", "gated-smallest"],
@@ -10353,7 +10327,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_cal_endpoint.add_argument("--publication-max-r1-cost", type=float, default=0.010)
     p_cal_endpoint.add_argument("--publication-free-wr2-tolerance", type=float, default=0.040)
     p_cal_endpoint.add_argument("--publication-prefer-wght-mode", default="freeze-zero")
-    p_cal_endpoint.add_argument("--publication-allow-npd", action=argparse.BooleanOptionalAction, default=False, help="Explicit diagnostic override allowing NPD or split pathology in the selected endpoint. Default requires NPD == 0.")
+    p_cal_endpoint.add_argument("--publication-allow-npd", action=argparse.BooleanOptionalAction, default=False, help="Explicit diagnostic override allowing NPD pathology in the selected endpoint. Default requires NPD == 0; split warnings are reported but do not block selection.")
     p_cal_endpoint.add_argument(
         "--publication-selection-policy",
         choices=["bic", "gated-smallest"],

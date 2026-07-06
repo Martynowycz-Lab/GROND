@@ -493,10 +493,8 @@ def choose_publication_endpoint(
         ic_value = _finite_float(row.get(ic_name), float("inf"))
         try:
             npd_count = int(row.get("shelxl_npd_count", 0) or 0)
-            split_count = int(row.get("shelxl_split_count", 0) or 0)
         except (TypeError, ValueError):
             npd_count = 0
-            split_count = 0
         if str(row.get("wght_mode")) != prefer:
             reasons.append(f"not preferred weight mode {prefer!r}")
         if goof < float(goof_min) or goof > float(goof_max):
@@ -506,8 +504,6 @@ def choose_publication_endpoint(
                 atoms = str(row.get("shelxl_npd_atoms", "") or "")
                 atom_text = f" ({atoms})" if atoms else ""
                 reasons.append(f"NPD {npd_count}{atom_text}; publication endpoints require NPD == 0")
-            if split_count > 0 or bool(row.get("shelxl_has_split_warnings")):
-                reasons.append(f"split warnings {split_count}; publication endpoints require no split pathology")
         if policy == "bic" and not math.isfinite(ic_value):
             reasons.append(f"missing finite information criterion {ic_name!r}")
         if policy == "gated-smallest":
@@ -747,7 +743,7 @@ def main() -> None:
     ap.add_argument("--publication-max-r1-cost", type=float, default=0.010)
     ap.add_argument("--publication-free-wr2-tolerance", type=float, default=0.040)
     ap.add_argument("--publication-prefer-wght-mode", default="freeze-zero")
-    ap.add_argument("--publication-allow-npd", action=argparse.BooleanOptionalAction, default=False, help="Explicit diagnostic override allowing NPD or split pathology in the selected endpoint. Default requires NPD == 0.")
+    ap.add_argument("--publication-allow-npd", action=argparse.BooleanOptionalAction, default=False, help="Explicit diagnostic override allowing NPD pathology in the selected endpoint. Default requires NPD == 0; split warnings are reported but do not block selection.")
     ap.add_argument(
         "--publication-selection-policy",
         choices=["bic", "gated-smallest"],

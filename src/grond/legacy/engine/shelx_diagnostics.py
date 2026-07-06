@@ -59,8 +59,13 @@ def parse_shelx_lst_pathologies(path: Path) -> dict[str, object]:
 
 
 def shelx_pathology_safe_for_feedback(pathology: dict[str, object]) -> bool:
-    """Return true when SHELXL pathology diagnostics are clean or unavailable."""
+    """Return true when SHELXL diagnostics are usable as feedback.
+
+    NPD atoms indicate an unstable ADP update and are not fed into later
+    Bloch cycles automatically. Split warnings are reported but remain a
+    modeler-facing decision rather than a GROND feedback blocker.
+    """
 
     if str(pathology.get("pathology_status", "missing")) == "missing":
         return True
-    return not bool(pathology.get("has_npd")) and not bool(pathology.get("has_split_warnings"))
+    return not bool(pathology.get("has_npd"))

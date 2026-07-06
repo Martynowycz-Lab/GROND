@@ -200,16 +200,12 @@ def classify_publication_endpoint(
     if source_kind == "observation_polish" and not bool(candidate.get("observation_polish_accepted", False)):
         reasons.append("observation-polish correction did not pass the raw-row and endpoint holdout gates")
     npd_count = _int(candidate.get("npd_count", 0))
-    split_count = _int(candidate.get("split_count", 0))
-    if not allow_npd:
-        if npd_count > 0 or bool(candidate.get("has_npd", False)):
-            atoms = candidate.get("npd_atoms")
-            atom_text = ""
-            if isinstance(atoms, list) and atoms:
-                atom_text = f" ({', '.join(str(atom) for atom in atoms[:6])}{', ...' if len(atoms) > 6 else ''})"
-            reasons.append(f"endpoint has {npd_count} NPD atom(s){atom_text}; publication endpoints require NPD == 0")
-        if split_count > 0 or bool(candidate.get("has_split_warnings", False)):
-            reasons.append(f"endpoint has {split_count} split-warning atom(s); publication endpoints require no split pathology")
+    if not allow_npd and (npd_count > 0 or bool(candidate.get("has_npd", False))):
+        atoms = candidate.get("npd_atoms")
+        atom_text = ""
+        if isinstance(atoms, list) and atoms:
+            atom_text = f" ({', '.join(str(atom) for atom in atoms[:6])}{', ...' if len(atoms) > 6 else ''})"
+        reasons.append(f"endpoint has {npd_count} NPD atom(s){atom_text}; publication endpoints require NPD == 0")
     goof = _float(candidate.get("GooF"))
     if not math.isfinite(goof):
         reasons.append("endpoint GooF is unavailable; publication endpoints must have conventional SHELXL GooF")
@@ -291,7 +287,7 @@ def choose_publication_endpoints(
                 f"HKL safety factor >= {min_hkl_safe_factor:g}",
                 f"95th percentile modulation <= {max_modulation_p95:g}",
                 f"SHELXL GooF between {publication_goof_min:g} and {publication_goof_max:g}",
-                "NPD == 0 and no split-warning pathology",
+                "NPD == 0; split warnings are reported but do not block promotion",
                 "observation-polish endpoints must pass raw-row and endpoint holdout gates",
             ],
             "ranking": "multi-dataset combined endpoint first when present, then endpoint wR2(F^2)all, R1(F)all, and R1(F)gt",
@@ -350,7 +346,7 @@ def _write_markdown(out_dir: Path, decision: Mapping) -> Path:
     lines.extend(
         [
             "",
-            "Promotion rule: finite endpoint metrics, conventional SHELXL GooF inside the configured gate, full q correction, EXTI off, endpoint-B equal to zero, no NPD or split pathology unless explicitly overridden, safe HKL rescaling, bounded intensity modulation, and a passed observation-polish gate when a polish correction is involved.",
+            "Promotion rule: finite endpoint metrics, conventional SHELXL GooF inside the configured gate, full q correction, EXTI off, endpoint-B equal to zero, no NPD pathology unless explicitly overridden, safe HKL rescaling, bounded intensity modulation, and a passed observation-polish gate when a polish correction is involved. Split warnings are reported but do not block promotion.",
             "",
             "## Endpoint Candidates",
             "",

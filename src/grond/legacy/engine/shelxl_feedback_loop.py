@@ -315,10 +315,6 @@ def native_command(
         str(int(args.endpoint_ls_cycles)),
         "--endpoint-wght-mode",
         str(getattr(args, "endpoint_wght_mode", "freeze-zero")),
-        "--npd-damp-retries",
-        str(getattr(args, "npd_damp_retries", "0.5,0.25,0.1")),
-        "--npd-damp-limse",
-        grid_value(getattr(args, "npd_damp_limse", 15.0), "15.0"),
         "--post-bloch-sigma-policy",
         str(args.post_bloch_sigma_policy),
         "--post-bloch-sigma-holdout-fraction",
@@ -460,8 +456,6 @@ def main() -> None:
     ap.add_argument("--shelxl-iterations", type=int, default=3)
     ap.add_argument("--endpoint-ls-cycles", type=int, default=1, help="Internal L.S./CGLS cycles used inside each generated SHELXL endpoint input.")
     ap.add_argument("--endpoint-wght-mode", choices=["freeze-zero", "inherit", "promote"], default="freeze-zero")
-    ap.add_argument("--npd-damp-retries", default="0.5,0.25,0.1", help="DAMP values retried when a SHELXL endpoint has NPD or split pathology. Use off to disable.")
-    ap.add_argument("--npd-damp-limse", type=float, default=15.0, help="Default SHELXL DAMP LIMSE for NPD/split retry values.")
     ap.add_argument("--post-bloch-sigma-policy", choices=["none", "uniform_z_rms"], default="uniform_z_rms", help="Endpoint sigma calibration applied before each SHELXL feedback update.")
     ap.add_argument("--post-bloch-sigma-holdout-fraction", type=float, default=0.20)
     ap.add_argument("--post-bloch-sigma-min-scale", type=float, default=0.25)

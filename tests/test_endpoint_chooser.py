@@ -173,6 +173,33 @@ def test_endpoint_chooser_requires_no_npd_by_default():
     assert any("NPD" in reason and "NPD == 0" in reason for reason in rejected["rejection_reasons"])
 
 
+def test_endpoint_chooser_reports_split_but_does_not_reject_publication_candidate():
+    candidate = {
+        "id": "split_only",
+        "label": "combined",
+        "source_kind": "combined_corrected_hkl",
+        "lambda_q": 1.0,
+        "endpoint_b": 0.0,
+        "keep_exti": False,
+        "hkl_safe_factor": 1.0,
+        "modulation_p95": 1.2,
+        "R1_gt": 0.08,
+        "R1_all": 0.09,
+        "wR2_all": 0.15,
+        "GooF": 1.02,
+        "npd_count": 0,
+        "split_count": 3,
+        "has_split_warnings": True,
+    }
+
+    decision = choose_publication_endpoints([candidate])
+
+    assert decision["best_physical_endpoint"]["id"] == "split_only"
+    assert decision["best_physical_endpoint"]["split_count"] == 3
+    assert not decision["best_physical_endpoint"]["rejection_reasons"]
+    assert any("split warnings are reported" in item for item in decision["policy"]["physical_endpoint_requires"])
+
+
 def test_endpoint_chooser_can_explicitly_allow_npd_diagnostic_override():
     candidate = {
         "id": "npd_override",

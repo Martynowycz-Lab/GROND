@@ -371,67 +371,6 @@ def set_active_wght_lines(lines: list[str], a: float, b: float) -> list[str]:
     return out
 
 
-def _format_damp_line(damp: float, limse: float) -> str:
-    return f"DAMP      {float(damp):.4f}     {float(limse):.4f}"
-
-
-def set_active_damp_lines(lines: list[str], damp: float, limse: float = 15.0) -> list[str]:
-    """Return SHELX input lines with exactly one active pre-END DAMP line."""
-
-    out: list[str] = []
-    inserted = False
-    damp_line = _format_damp_line(damp, limse)
-    for line in lines:
-        upper = line.strip().upper()
-        if upper.startswith("DAMP"):
-            if not inserted:
-                out.append(damp_line)
-                inserted = True
-            continue
-        if not inserted and upper.startswith("FVAR"):
-            out.append(damp_line)
-            inserted = True
-        out.append(line)
-    if not inserted:
-        insert_at = len(out)
-        for i, line in enumerate(out):
-            if line.strip().upper().startswith(("HKLF", "END")):
-                insert_at = i
-                break
-        out.insert(insert_at, damp_line)
-    return out
-
-
-def parse_damp_retry_grid(text: str | None, limse: float = 15.0) -> list[tuple[float, float]]:
-    """Parse a comma/space DAMP retry list.
-
-    Entries may be plain DAMP values, or ``damp:limse``/``damp/limse`` pairs.
-    Empty, ``off`` and ``none`` disable retries.
-    """
-
-    raw = str(text or "").strip()
-    if not raw or raw.lower() in {"off", "none", "false", "0"}:
-        return []
-    retries: list[tuple[float, float]] = []
-    for token in re.split(r"[\s,;]+", raw):
-        if not token:
-            continue
-        if token.lower() in {"off", "none", "false"}:
-            continue
-        parts = re.split(r"[:/]", token, maxsplit=1)
-        try:
-            damp = float(parts[0])
-            retry_limse = float(parts[1]) if len(parts) > 1 and parts[1] else float(limse)
-        except ValueError as exc:
-            raise ValueError(f"Invalid DAMP retry value {token!r}") from exc
-        if not math.isfinite(damp) or damp <= 0.0:
-            raise ValueError(f"Invalid DAMP retry value {token!r}; DAMP must be positive")
-        if not math.isfinite(retry_limse) or retry_limse <= 0.0:
-            raise ValueError(f"Invalid DAMP LIMSE value {token!r}; LIMSE must be positive")
-        retries.append((damp, retry_limse))
-    return retries
-
-
 def _hklf_order(line: str) -> str:
     parts = line.split()
     return parts[1] if len(parts) > 1 else ""
@@ -457,7 +396,6 @@ def write_endpoint_ins(
     hkl_name: str = "dyn_nuisance_corrected.hkl",
     keep_exti: bool = False,
     wght: tuple[float, float] | None = None,
-    damp: tuple[float, float] | None = None,
     ls_cycles: int = 1,
 ) -> None:
     """Write the corrected-HKL endpoint input with GROND's endpoint contract."""
@@ -504,8 +442,6 @@ def write_endpoint_ins(
         out.insert(insert_at, "HKLF 4")
     if wght is not None:
         out = set_active_wght_lines(out, float(wght[0]), float(wght[1]))
-    if damp is not None:
-        out = set_active_damp_lines(out, float(damp[0]), float(damp[1]))
     dst_ins.write_text("\n".join(out) + "\n")
 
 
@@ -1256,21 +1192,6 @@ def write_active_wght(path: Path, a: float, b: float) -> dict:
     return {"written": True, "active_wght_a": float(a), "active_wght_b": float(b)}
 
 
-def write_active_damp(path: Path, damp: float, limse: float = 15.0) -> dict:
-    """Force one active DAMP line in a SHELX input file."""
-
-    if not path.exists():
-        return {"written": False, "reason": "missing_file"}
-    lines = []
-    for line in path.read_text(errors="replace").splitlines():
-        lines.append(line)
-        if line.strip().upper().startswith("END"):
-            break
-    lines = set_active_damp_lines(lines, damp, limse)
-    path.write_text("\n".join(lines).rstrip() + "\n")
-    return {"written": True, "active_damp": float(damp), "active_damp_limse": float(limse)}
-
-
 def promote_recommended_wght(ins_path: Path, recommended: tuple[float, float] | None) -> dict:
     """Move SHELXL's recommended WGHT into the active pre-END input block.
 
@@ -1310,16 +1231,7 @@ def _active_wght_from_stats(stats: dict) -> tuple[float, float] | None:
     return a, b
 
 
-def run_shelxl(
-    work_dir: Path,
-    stem: str,
-    iterations: int = 1,
-    wght_mode: str = "freeze-zero",
-    endpoint_ls_cycles: int = 1,
-    endpoint_damp: tuple[float, float] | None = None,
-    npd_damp_retries: list[tuple[float, float]] | str | None = None,
-    npd_damp_limse: float = 15.0,
-):
+def run_shelxl(work_dir: Path, stem: str, iterations: int = 1, wght_mode: str = "freeze-zero", endpoint_ls_cycles: int = 1):
     exe = str(SHELXL)
     if ("/" in exe and not Path(exe).exists()) or ("/" not in exe and shutil.which(exe) is None):
         msg = f"SHELXL executable not found: {SHELXL}\n"
@@ -1332,81 +1244,36 @@ def run_shelxl(
     freeze_zero = mode == "freeze-zero"
     if mode not in {"inherit", "freeze-zero", "promote"}:
         return {"returncode": None, "status": "invalid_wght_mode", "wght_mode": mode}
-    if isinstance(npd_damp_retries, str):
-        damp_retries = parse_damp_retry_grid(npd_damp_retries, npd_damp_limse)
-    else:
-        damp_retries = list(npd_damp_retries or [])
-    active_damp = endpoint_damp
     if freeze_zero:
         write_active_wght(work_dir / f"{stem}.ins", 0.0, 0.0)
-    if active_damp is not None:
-        write_active_damp(work_dir / f"{stem}.ins", active_damp[0], active_damp[1])
-
-    def run_once(iteration: int, *, retry: int | None = None, damp: tuple[float, float] | None = None) -> tuple[subprocess.CompletedProcess[str], dict, tuple[float, float] | None]:
-        label = f"shelxl_iter_{iteration}" if retry is None else f"shelxl_iter_{iteration}_damp_retry_{retry}"
+    for i in range(n_iter):
+        if freeze_zero:
+            write_active_wght(work_dir / f"{stem}.ins", 0.0, 0.0)
         proc = subprocess.run([exe, stem], cwd=str(work_dir), text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        (work_dir / f"{label}.log").write_text(proc.stdout)
+        last_proc = proc
+        (work_dir / f"shelxl_iter_{i + 1}.log").write_text(proc.stdout)
         lst = work_dir / f"{stem}.lst"
-        stats = {"iteration": iteration, "returncode": proc.returncode, **parse_lst(lst)}
-        if retry is not None:
-            stats["retry"] = retry
-            stats["retry_reason"] = "adp_pathology"
-        if damp is not None:
-            stats["active_damp"] = float(damp[0])
-            stats["active_damp_limse"] = float(damp[1])
+        stats = {"iteration": i + 1, "returncode": proc.returncode, **parse_lst(lst)}
         recommended_wght = parse_recommended_wght(lst)
         if recommended_wght is not None:
             stats["recommended_wght_a"] = recommended_wght[0]
             stats["recommended_wght_b"] = recommended_wght[1]
-        health = shelx_res_health(work_dir / f"{stem}.res", lst)
+        history.append(stats)
+        res = work_dir / f"{stem}.res"
+        ins = work_dir / f"{stem}.ins"
+        health = shelx_res_health(res, lst)
         stats["res_health"] = health
         if not health["ok"]:
             stats["status"] = "invalid_res_output"
             stats["invalid_res_reason"] = health["reason"]
-        elif health.get("safe_for_feedback") is False:
-            stats["status"] = "adp_pathology"
-            stats["invalid_res_reason"] = "adp_pathology"
-        return proc, stats, recommended_wght
-
-    for i in range(n_iter):
-        ins = work_dir / f"{stem}.ins"
-        base_ins_text = ins.read_text(errors="replace") if ins.exists() else ""
-        if freeze_zero:
-            write_active_wght(ins, 0.0, 0.0)
-        if active_damp is not None:
-            write_active_damp(ins, active_damp[0], active_damp[1])
-        proc, stats, recommended_wght = run_once(i + 1, damp=active_damp)
-        last_proc = proc
-        history.append(stats)
-        res = work_dir / f"{stem}.res"
-        health = stats["res_health"]
-        if not health["ok"]:
             break
         if health.get("safe_for_feedback") is False:
-            accepted_retry = False
-            for retry_index, retry_damp in enumerate(damp_retries, start=1):
-                if base_ins_text:
-                    ins.write_text(base_ins_text)
-                if freeze_zero:
-                    write_active_wght(ins, 0.0, 0.0)
-                write_active_damp(ins, retry_damp[0], retry_damp[1])
-                retry_proc, retry_stats, retry_wght = run_once(i + 1, retry=retry_index, damp=retry_damp)
-                last_proc = retry_proc
-                history.append(retry_stats)
-                retry_health = retry_stats["res_health"]
-                if retry_health["ok"] and retry_health.get("safe_for_feedback") is not False:
-                    stats = retry_stats
-                    health = retry_health
-                    recommended_wght = retry_wght
-                    active_damp = retry_damp
-                    accepted_retry = True
-                    retry_stats["status"] = "accepted_damp_retry"
-                    break
-            if not accepted_retry:
-                break
+            stats["status"] = "adp_pathology"
+            stats["invalid_res_reason"] = "adp_pathology"
+            break
         if i + 1 < n_iter and res.exists():
             active = (0.0, 0.0) if freeze_zero else _active_wght_from_stats(stats)
-            write_endpoint_ins(res, ins, hkl_name=f"{stem}.hkl", keep_exti=False, wght=active, damp=active_damp, ls_cycles=endpoint_ls_cycles)
+            write_endpoint_ins(res, ins, hkl_name=f"{stem}.hkl", keep_exti=False, wght=active, ls_cycles=endpoint_ls_cycles)
             if mode == "promote":
                 stats["next_wght"] = promote_recommended_wght(ins, recommended_wght)
             elif freeze_zero:
@@ -1428,7 +1295,6 @@ def run_shelxl(
             hkl_name=f"{stem}.hkl",
             keep_exti=False,
             wght=active,
-            damp=active_damp,
             ls_cycles=endpoint_ls_cycles,
         )
         final["res_normalized_for_reopen"] = True
@@ -1436,12 +1302,12 @@ def run_shelxl(
     final["endpoint_ls_cycles"] = max(1, int(endpoint_ls_cycles))
     final["iteration_history"] = history
     final["wght_mode"] = mode
-    final["npd_damp_retries"] = [{"damp": float(d), "limse": float(l)} for d, l in damp_retries]
-    final["damp_retry_count"] = sum(1 for item in history if "retry" in item)
-    final["damp_retry_accepted"] = any(item.get("status") == "accepted_damp_retry" for item in history)
-    if active_damp is not None:
-        final["active_damp"] = float(active_damp[0])
-        final["active_damp_limse"] = float(active_damp[1])
+    pathology = final.get("res_health") or {}
+    final["npd_count"] = int(pathology.get("npd_count", 0) or 0)
+    final["split_count"] = int(pathology.get("split_count", 0) or 0)
+    final["npd_atoms"] = pathology.get("npd_atoms", [])
+    final["has_npd"] = bool(pathology.get("has_npd", False))
+    final["has_split_warnings"] = bool(pathology.get("has_split_warnings", False))
     return final
 
 
@@ -1526,8 +1392,6 @@ def export_corrected_endpoint(
     post_bloch_sigma_min_scale: float = 0.25,
     post_bloch_sigma_max_scale: float = 4.0,
     endpoint_wght_mode: str = "freeze-zero",
-    npd_damp_retries: list[tuple[float, float]] | str | None = None,
-    npd_damp_limse: float = 15.0,
 ):
     out_dir.mkdir(parents=True, exist_ok=True)
     arrays = best_eval["arrays"]
@@ -1609,8 +1473,6 @@ def export_corrected_endpoint(
         iterations=shelxl_iterations,
         wght_mode=endpoint_wght_mode,
         endpoint_ls_cycles=endpoint_ls_cycles,
-        npd_damp_retries=npd_damp_retries,
-        npd_damp_limse=npd_damp_limse,
     )
     maps = run_maps(out_dir, "dyn_nuisance_corrected") if make_maps else {}
     manifest = {
@@ -1625,14 +1487,6 @@ def export_corrected_endpoint(
         "shelxl_iterations": int(max(1, shelxl_iterations)),
         "endpoint_ls_cycles": int(max(1, endpoint_ls_cycles)),
         "endpoint_wght_mode": str(endpoint_wght_mode),
-        "npd_damp_retries": [
-            {"damp": float(d), "limse": float(l)}
-            for d, l in (
-                parse_damp_retry_grid(npd_damp_retries, npd_damp_limse)
-                if isinstance(npd_damp_retries, str)
-                else list(npd_damp_retries or [])
-            )
-        ],
         "post_bloch_sigma": post_bloch_sigma,
         "rows_unmerged": len(rows_unmerged),
         "rows_merged_exact_hkl": len(rows_merged),
@@ -1666,15 +1520,14 @@ def copy_baseline(out_dir: Path, res_path: Path, hkl_path: Path):
 
 
 def endpoint_has_adp_pathology(endpoint: dict) -> bool:
-    """Return true when a SHELXL endpoint has NPD/split pathology warnings."""
+    """Return true when a SHELXL endpoint has NPD pathology."""
 
     shelxl = endpoint.get("shelxl") or {}
     try:
         npd_count = int(shelxl.get("npd_count", 0) or 0)
-        split_count = int(shelxl.get("split_count", 0) or 0)
     except (TypeError, ValueError):
-        return bool(shelxl.get("has_npd") or shelxl.get("has_split_warnings"))
-    return npd_count > 0 or split_count > 0 or bool(shelxl.get("has_npd") or shelxl.get("has_split_warnings"))
+        return bool(shelxl.get("has_npd"))
+    return npd_count > 0 or bool(shelxl.get("has_npd"))
 
 
 def write_row_table(path: Path, data: XDSData, target, best_eval, masks):
@@ -1872,12 +1725,6 @@ def main():
         default="freeze-zero",
         help="SHELXL WGHT policy for corrected-HKL endpoints. freeze-zero is the production default after GROND sigma calibration; inherit keeps the source-model WGHT; promote uses SHELXL recommendations on later external passes.",
     )
-    ap.add_argument(
-        "--npd-damp-retries",
-        default="off",
-        help="Comma/space DAMP values retried when a SHELXL endpoint has NPD or split pathology. Use off to disable; pairs like 0.5:15 override LIMSE per retry.",
-    )
-    ap.add_argument("--npd-damp-limse", type=float, default=15.0, help="Default SHELXL DAMP LIMSE used for NPD/split retry values.")
     ap.add_argument("--skip-endpoint-refinement", action="store_true", help="Run the fixed-model Bloch row calculation and row reports only. No corrected-HKL SHELXL endpoint is written or refined.")
     ap.add_argument("--post-bloch-sigma-policy", choices=["none", "uniform_z_rms"], default="none", help="Endpoint uncertainty policy applied after Bloch correction and before SHELXL. uniform_z_rms fits one residual RMS(z) scalar from the current model and scales endpoint sigmas only.")
     ap.add_argument("--post-bloch-sigma-holdout-fraction", type=float, default=0.20, help="Deterministic HKL holdout fraction reported for uniform_z_rms diagnostics.")
@@ -2165,8 +2012,6 @@ def main():
                             post_bloch_sigma_min_scale=args.post_bloch_sigma_min_scale,
                             post_bloch_sigma_max_scale=args.post_bloch_sigma_max_scale,
                             endpoint_wght_mode=args.endpoint_wght_mode,
-                            npd_damp_retries=args.npd_damp_retries,
-                            npd_damp_limse=args.npd_damp_limse,
                         )
                     )
     endpoint_results = sorted(endpoint_results, key=lambda r: (r["shelxl"].get("wR2_all", 999), r["shelxl"].get("R1_all", 999)))
