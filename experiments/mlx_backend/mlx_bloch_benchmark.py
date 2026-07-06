@@ -40,6 +40,7 @@ from grond.legacy.engine.bloch_engine import (
     sha256,
 )
 
+
 def import_mlx():
     """Import MLX lazily so the script can still report a useful error."""
 

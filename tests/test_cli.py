@@ -1931,6 +1931,8 @@ def test_combine_cmd_forwards_promoted_multi_dataset_sigma_policies(tmp_path: Pa
     assert cmd[cmd.index("--post-bloch-sigma-policy") + 1] == "uniform_z_rms"
     assert cmd[cmd.index("--shelxl") + 1] == "/opt/shelx/shelxl"
     assert cmd[cmd.index("--shelxl-iterations") + 1] == "3"
+    assert cmd[cmd.index("--endpoint-ls-cycles") + 1] == "1"
+    assert cmd[cmd.index("--endpoint-wght-mode") + 1] == "freeze-zero"
     assert "--dataset-sigma-holdout-floor" in cmd
 
 

@@ -7,8 +7,10 @@ from grond.legacy.engine.combine_native_nuisance_runs import (
     endpoint_key_function,
     estimate_overlap_scales,
     merge_hkl_rows,
+    run_shelxl,
     safe_fixed_width_factor,
     scale_hkl_rows,
+    write_no_exti_ins,
 )
 
 
@@ -105,3 +107,101 @@ def test_safe_fixed_width_factor_keeps_shelxl_fields_in_range():
     factor = safe_fixed_width_factor([(1, 0, 0, 12000.0, 5.0)])
     assert 0.0 < factor < 1.0
     assert abs(12000.0 * factor - 9000.0) < 1e-9
+
+
+def test_combined_endpoint_writer_forces_zero_wght_and_ls1(tmp_path: Path):
+    src = tmp_path / "model.res"
+    dst = tmp_path / "multi_dyn_corrected.ins"
+    src.write_text(
+        "\n".join(
+            [
+                "TITL combined",
+                "CELL 1.0 5.0 6.0 7.0 90 90 90",
+                "SFAC C 1 0 1 0 1 0 1 0",
+                "WGHT 0.200000 1.000000",
+                "EXTI 0.123",
+                "CGLS 10",
+                "FVAR 1.0",
+                "HKLF 3",
+                "END",
+                "WGHT 0.1111 0.2222",
+            ]
+        )
+        + "\n"
+    )
+
+    write_no_exti_ins(src, dst, "multi_dyn_corrected.hkl", wght=(0.0, 0.0), ls_cycles=1)
+
+    text = dst.read_text()
+    assert "WGHT      0.0000      0.0000" in text
+    assert "WGHT 0.200000" not in text
+    assert "WGHT 0.1111" not in text
+    assert "EXTI" not in text
+    assert "CGLS 1" in text
+    assert "CGLS 10" not in text
+    assert "HKLF 4" in text
+
+
+def test_combined_run_shelxl_freeze_zero_survives_multiple_passes(tmp_path: Path):
+    work = tmp_path / "work"
+    work.mkdir()
+    stem = "multi_dyn_corrected"
+    src = tmp_path / "model.res"
+    src.write_text(
+        "\n".join(
+            [
+                "TITL combined",
+                "CELL 0.025079 5.0 6.0 7.0 90 90 90",
+                "SFAC C 1 0 1 0 1 0 1 0",
+                "WGHT 0.200000 1.000000",
+                "FVAR 1.0",
+                "L.S. 10",
+                "HKLF 4",
+                "END",
+            ]
+        )
+        + "\n"
+    )
+    write_no_exti_ins(src, work / f"{stem}.ins", f"{stem}.hkl", wght=(0.0, 0.0), ls_cycles=1)
+    (work / f"{stem}.hkl").write_text("   1   0   0  100.00   10.00\n   0   0   0    0.00    0.00\n")
+    fake_shelxl = tmp_path / "fake_shelxl"
+    fake_shelxl.write_text(
+        """#!/usr/bin/env python3
+from pathlib import Path
+import sys
+stem = sys.argv[1]
+ins = Path(stem + ".ins").read_text(errors="replace")
+wght = next((line for line in ins.splitlines() if line.strip().upper().startswith("WGHT")), "WGHT 9.0000 9.0000")
+Path(stem + ".lst").write_text("\\n".join([
+    wght,
+    " 1 Unique reflections, of which 0 suppressed",
+    " wR2 = 0.1234, GooF = S = 0.987, Restrained GooF = 0.987 for all data",
+    " R1 = 0.0500 for 1 Fo > 4sig(Fo) and 0.0600 for all 1 data",
+    " Recommended weighting scheme:  WGHT    0.3210    0.6540",
+]) + "\\n")
+Path(stem + ".res").write_text("\\n".join([
+    "TITL combined output",
+    "CELL 0.025079 5.0 6.0 7.0 90 90 90",
+    "SFAC C 1 0 1 0 1 0 1 0",
+    wght,
+    "FVAR 1.0",
+    "L.S. 10",
+    "HKLF 4",
+    "END",
+    "WGHT 0.3210 0.6540",
+]) + "\\n")
+"""
+    )
+    fake_shelxl.chmod(0o755)
+
+    result = run_shelxl(work, stem, str(fake_shelxl), iterations=2, wght_mode="freeze-zero", endpoint_ls_cycles=1)
+
+    assert result["status"] == "ok"
+    assert result["wght_mode"] == "freeze-zero"
+    assert result["active_wght_a"] == 0.0
+    assert result["active_wght_b"] == 0.0
+    text = (work / f"{stem}.res").read_text()
+    assert "WGHT      0.0000      0.0000" in text
+    assert "WGHT 0.3210" not in text
+    assert "L.S. 1" in text
+    assert "L.S. 10" not in text

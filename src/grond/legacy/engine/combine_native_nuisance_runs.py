@@ -23,11 +23,11 @@ import numpy as np
 
 try:  # Package import.
     from .bloch_engine import parse_model
-    from .native_row_regularize import parse_shelx_wght_terms, shelx_res_health, write_endpoint_ins
+    from .native_row_regularize import parse_shelx_wght_terms, shelx_res_health, write_active_wght, write_endpoint_ins
     from .post_bloch_sigma import fit_uniform_z_rms_sigma_scale, scale_row_sigmas
 except ImportError:  # Direct script execution from this directory.
     from bloch_engine import parse_model
-    from native_row_regularize import parse_shelx_wght_terms, shelx_res_health, write_endpoint_ins
+    from native_row_regularize import parse_shelx_wght_terms, shelx_res_health, write_active_wght, write_endpoint_ins
     from post_bloch_sigma import fit_uniform_z_rms_sigma_scale, scale_row_sigmas
 
 
@@ -58,12 +58,12 @@ def read_rows(run_dir: Path, name: str) -> list[dict]:
     return rows
 
 
-def canonical_p222_friedel(h, k, l):
+def canonical_p222_friedel(h, k, ell):
     variants = [
-        (h, k, l),
-        (-h, -k, l),
-        (h, -k, -l),
-        (-h, k, -l),
+        (h, k, ell),
+        (-h, -k, ell),
+        (h, -k, -ell),
+        (-h, k, -ell),
     ]
     variants += [(-a, -b, -c) for a, b, c in variants]
     return min(variants)
@@ -72,14 +72,14 @@ def canonical_p222_friedel(h, k, l):
 def reciprocal_equivalent_keys(
     h: int,
     k: int,
-    l: int,
+    ell: int,
     symmetry_ops: list[dict],
     *,
     merge_friedel: bool = True,
 ) -> list[tuple[int, int, int]]:
     """Return reciprocal equivalents from the model symmetry operations."""
 
-    hkl = np.asarray([int(h), int(k), int(l)], dtype=float)
+    hkl = np.asarray([int(h), int(k), int(ell)], dtype=float)
     keys: list[tuple[int, int, int]] = []
     for op in symmetry_ops or [{"rot": np.eye(3).tolist()}]:
         rot = np.asarray(op.get("rot", np.eye(3)), dtype=float)
@@ -92,23 +92,23 @@ def reciprocal_equivalent_keys(
     return sorted(set(keys))
 
 
-def canonical_model_friedel(h: int, k: int, l: int, symmetry_ops: list[dict]) -> tuple[int, int, int]:
-    return min(reciprocal_equivalent_keys(h, k, l, symmetry_ops, merge_friedel=True))
+def canonical_model_friedel(h: int, k: int, ell: int, symmetry_ops: list[dict]) -> tuple[int, int, int]:
+    return min(reciprocal_equivalent_keys(h, k, ell, symmetry_ops, merge_friedel=True))
 
 
-def canonical_model_symmetry(h: int, k: int, l: int, symmetry_ops: list[dict]) -> tuple[int, int, int]:
-    return min(reciprocal_equivalent_keys(h, k, l, symmetry_ops, merge_friedel=False))
+def canonical_model_symmetry(h: int, k: int, ell: int, symmetry_ops: list[dict]) -> tuple[int, int, int]:
+    return min(reciprocal_equivalent_keys(h, k, ell, symmetry_ops, merge_friedel=False))
 
 
 def endpoint_key_function(mode: str, symmetry_ops: list[dict]):
     """Return the HKL key used for endpoint scaling or merging."""
 
     if mode == "exact_signed_hkl":
-        return lambda h, k, l: (int(h), int(k), int(l))
+        return lambda h, k, ell: (int(h), int(k), int(ell))
     if mode == "model_symmetry":
-        return lambda h, k, l: canonical_model_symmetry(int(h), int(k), int(l), symmetry_ops)
+        return lambda h, k, ell: canonical_model_symmetry(int(h), int(k), int(ell), symmetry_ops)
     if mode == "model_symmetry_friedel":
-        return lambda h, k, l: canonical_model_friedel(int(h), int(k), int(l), symmetry_ops)
+        return lambda h, k, ell: canonical_model_friedel(int(h), int(k), int(ell), symmetry_ops)
     raise ValueError(f"unknown endpoint merge key {mode!r}")
 
 
@@ -168,36 +168,36 @@ def read_hkl(path: Path):
             continue
         parts = line.split()
         if len(parts) >= 5:
-            h, k, l = int(parts[0]), int(parts[1]), int(parts[2])
-            I = safe_float(parts[3])
+            h, k, ell = int(parts[0]), int(parts[1]), int(parts[2])
+            intensity = safe_float(parts[3])
             sig = safe_float(parts[4])
         else:
-            h, k, l = int(line[:4]), int(line[4:8]), int(line[8:12])
-            I = safe_float(line[12:20])
+            h, k, ell = int(line[:4]), int(line[4:8]), int(line[8:12])
+            intensity = safe_float(line[12:20])
             sig = safe_float(line[20:28])
-        if h == k == l == 0:
+        if h == k == ell == 0:
             continue
-        rows.append((h, k, l, I, sig))
+        rows.append((h, k, ell, intensity, sig))
     return rows
 
 
 def write_hkl(path: Path, rows):
-    max_abs = max((max(abs(float(I)), abs(float(sig))) for _, _, _, I, sig in rows), default=0.0)
+    max_abs = max((max(abs(float(intensity)), abs(float(sig))) for _, _, _, intensity, sig in rows), default=0.0)
     if max_abs >= 9999.995:
         raise ValueError(
             f"{path} would overflow SHELXL HKLF4 8.2 intensity fields; "
             "normalize endpoint HKLs before combination"
         )
     with path.open("w") as f:
-        for h, k, l, I, sig in rows:
-            f.write(f"{int(h):4d}{int(k):4d}{int(l):4d}{float(I):8.2f}{float(sig):8.2f}\n")
+        for h, k, ell, intensity, sig in rows:
+            f.write(f"{int(h):4d}{int(k):4d}{int(ell):4d}{float(intensity):8.2f}{float(sig):8.2f}\n")
         f.write(f"{0:4d}{0:4d}{0:4d}{0.0:8.2f}{0.0:8.2f}\n")
 
 
 def safe_fixed_width_factor(rows) -> float:
     """Return a common multiplier that keeps HKLF4 8.2 fields in range."""
 
-    max_abs = max((max(abs(float(I)), abs(float(sig))) for _, _, _, I, sig in rows), default=0.0)
+    max_abs = max((max(abs(float(intensity)), abs(float(sig))) for _, _, _, intensity, sig in rows), default=0.0)
     if max_abs <= 0.0 or max_abs < 9999.995:
         return 1.0
     return 9000.0 / max_abs
@@ -228,12 +228,12 @@ def apply_hkl_weight(rows, weight: float):
     if weight <= 0.0 or abs(weight - 1.0) < 1e-12:
         return rows
     factor = 1.0 / math.sqrt(max(weight, 1e-12))
-    return [(h, k, l, I, sig * factor) for h, k, l, I, sig in rows]
+    return [(h, k, ell, intensity, sig * factor) for h, k, ell, intensity, sig in rows]
 
 
 def scale_hkl_rows(rows, scale: float):
     scale = float(scale)
-    return [(h, k, l, I * scale, sig * abs(scale)) for h, k, l, I, sig in rows]
+    return [(h, k, ell, intensity * scale, sig * abs(scale)) for h, k, ell, intensity, sig in rows]
 
 
 def apply_sigma_holdout_floor(meta: dict) -> dict:
@@ -279,12 +279,12 @@ def estimate_overlap_scales(rows_by_dataset: dict[str, list[tuple]], iterations:
         bins: dict[tuple[int, int, int], dict[str, float]] = {}
         for name, rows in rows_by_dataset.items():
             scale = scales.get(name, 1.0)
-            for h, k, l, intensity, sigma in rows:
+            for h, k, ell, intensity, sigma in rows:
                 value = float(intensity) * scale
                 sigma_s = max(abs(float(sigma) * scale), 1e-6)
                 if not (math.isfinite(value) and value > 0.0 and math.isfinite(sigma_s)):
                     continue
-                key = key_for(int(h), int(k), int(l))
+                key = key_for(int(h), int(k), int(ell))
                 weight = 1.0 / (sigma_s * sigma_s)
                 bucket = bins.setdefault(key, {"w": 0.0, "wI": 0.0, "n": 0})
                 bucket["w"] += weight
@@ -295,8 +295,8 @@ def estimate_overlap_scales(rows_by_dataset: dict[str, list[tuple]], iterations:
         for name, rows in rows_by_dataset.items():
             ratios = []
             scale = scales.get(name, 1.0)
-            for h, k, l, intensity, _sigma in rows:
-                ref = reference.get(key_for(int(h), int(k), int(l)))
+            for h, k, ell, intensity, _sigma in rows:
+                ref = reference.get(key_for(int(h), int(k), int(ell)))
                 value = float(intensity) * scale
                 if ref is not None and ref > 0.0 and value > 0.0 and math.isfinite(value):
                     ratios.append(ref / value)
@@ -312,17 +312,17 @@ def estimate_overlap_scales(rows_by_dataset: dict[str, list[tuple]], iterations:
 
 
 def merge_hkl_rows(rows, sigma_policy: str = "formal", canonicalizer=None):
-    key_for = canonicalizer or (lambda h, k, l: (int(h), int(k), int(l)))
+    key_for = canonicalizer or (lambda h, k, ell: (int(h), int(k), int(ell)))
     bins: dict[tuple[int, int, int], dict[str, float]] = {}
-    for h, k, l, I, sig in rows:
-        key = key_for(int(h), int(k), int(l))
+    for h, k, ell, intensity, sig in rows:
+        key = key_for(int(h), int(k), int(ell))
         sig = max(abs(float(sig)), 1e-6)
         w = 1.0 / (sig * sig)
         b = bins.setdefault(key, {"w": 0.0, "wI": 0.0, "n": 0, "values": [], "weights": []})
         b["w"] += w
-        b["wI"] += w * float(I)
+        b["wI"] += w * float(intensity)
         b["n"] += 1
-        b["values"].append(float(I))
+        b["values"].append(float(intensity))
         b["weights"].append(float(w))
     out = []
     inflations = []
@@ -353,8 +353,15 @@ def merge_hkl_rows(rows, sigma_policy: str = "formal", canonicalizer=None):
     return out, meta
 
 
-def write_no_exti_ins(src_res: Path, dst_ins: Path, hkl_name: str):
-    write_endpoint_ins(src_res, dst_ins, hkl_name=hkl_name, keep_exti=False)
+def write_no_exti_ins(
+    src_res: Path,
+    dst_ins: Path,
+    hkl_name: str,
+    *,
+    wght: tuple[float, float] | None = None,
+    ls_cycles: int = 1,
+):
+    write_endpoint_ins(src_res, dst_ins, hkl_name=hkl_name, keep_exti=False, wght=wght, ls_cycles=ls_cycles)
 
 
 def parse_lst(path: Path):
@@ -363,6 +370,13 @@ def parse_lst(path: Path):
         return out
     text = path.read_text(errors="replace")
     out["status"] = "ok"
+    for line in text.splitlines():
+        terms = parse_shelx_wght_terms(line)
+        if terms:
+            out["active_wght_a"] = terms[0]
+            out["active_wght_b"] = terms[1] if len(terms) >= 2 else 0.0
+            out["active_wght_terms"] = terms
+            break
     m = re.findall(r"wR2 =\s*([0-9.]+), GooF = S =\s*([0-9.]+).* for all data", text)
     if m:
         out["wR2_all"] = float(m[-1][0])
@@ -431,7 +445,26 @@ def promote_recommended_wght(ins_path: Path, recommended: tuple[float, float] | 
     return {"promoted": True, "active_wght_a": float(a), "active_wght_b": float(b)}
 
 
-def run_shelxl(work: Path, stem: str, shelxl: str, iterations: int = 5):
+def _active_wght_from_stats(stats: dict) -> tuple[float, float] | None:
+    try:
+        a = float(stats["active_wght_a"])
+        b = float(stats.get("active_wght_b", 0.0))
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not math.isfinite(a) or not math.isfinite(b):
+        return None
+    return a, b
+
+
+def run_shelxl(
+    work: Path,
+    stem: str,
+    shelxl: str,
+    iterations: int = 5,
+    *,
+    wght_mode: str = "freeze-zero",
+    endpoint_ls_cycles: int = 1,
+):
     exe = shelxl or shutil.which("shelxl") or shutil.which("shelxl2019") or ""
     if not exe:
         return {"status": "missing_shelxl", "executable": ""}
@@ -440,7 +473,14 @@ def run_shelxl(work: Path, stem: str, shelxl: str, iterations: int = 5):
     history = []
     last_stdout = ""
     n_iter = max(1, int(iterations))
+    n_ls = max(1, int(endpoint_ls_cycles))
+    mode = str(wght_mode or "freeze-zero")
+    freeze_zero = mode == "freeze-zero"
+    if mode not in {"inherit", "freeze-zero", "promote"}:
+        return {"returncode": None, "status": "invalid_wght_mode", "wght_mode": mode}
     for i in range(n_iter):
+        if freeze_zero:
+            write_active_wght(work / f"{stem}.ins", 0.0, 0.0)
         proc = subprocess.run([exe, stem], cwd=str(work), text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         last_stdout = proc.stdout
         (work / f"shelxl_iter_{i + 1}.log").write_text(proc.stdout)
@@ -462,18 +502,41 @@ def run_shelxl(work: Path, stem: str, shelxl: str, iterations: int = 5):
         if stats.get("status") in {"invalid_res_output", "adp_pathology"}:
             break
         if i + 1 < n_iter and (work / f"{stem}.res").exists():
-            write_endpoint_ins(work / f"{stem}.res", work / f"{stem}.ins", hkl_name=f"{stem}.hkl", keep_exti=False)
-            stats["next_wght"] = promote_recommended_wght(work / f"{stem}.ins", recommended)
+            active = (0.0, 0.0) if freeze_zero else _active_wght_from_stats(stats)
+            write_endpoint_ins(
+                work / f"{stem}.res",
+                work / f"{stem}.ins",
+                hkl_name=f"{stem}.hkl",
+                keep_exti=False,
+                wght=active,
+                ls_cycles=n_ls,
+            )
+            if mode == "promote":
+                stats["next_wght"] = promote_recommended_wght(work / f"{stem}.ins", recommended)
+            elif freeze_zero:
+                stats["next_wght"] = {"promoted": False, "frozen": True, "active_wght_a": 0.0, "active_wght_b": 0.0}
+            else:
+                stats["next_wght"] = {"promoted": False, "inherited": True}
     (work / "shelxl_stdout.log").write_text(last_stdout)
     final = dict(history[-1]) if history else {"status": "not_run"}
     final.setdefault("res_health", shelx_res_health(work / f"{stem}.res", work / f"{stem}.lst"))
     if final["res_health"].get("ok"):
-        write_endpoint_ins(work / f"{stem}.res", work / f"{stem}.res", hkl_name=f"{stem}.hkl", keep_exti=False)
+        active = (0.0, 0.0) if freeze_zero else _active_wght_from_stats(final)
+        write_endpoint_ins(
+            work / f"{stem}.res",
+            work / f"{stem}.res",
+            hkl_name=f"{stem}.hkl",
+            keep_exti=False,
+            wght=active,
+            ls_cycles=n_ls,
+        )
         final["res_normalized_for_reopen"] = True
     else:
         final["status"] = "invalid_res_output"
         final["invalid_res_reason"] = final["res_health"].get("reason")
     final["iterations"] = n_iter
+    final["endpoint_ls_cycles"] = n_ls
+    final["wght_mode"] = mode
     final["iteration_history"] = history
     pathology = final.get("res_health") or {}
     final["npd_count"] = int(pathology.get("npd_count", 0) or 0)
@@ -565,6 +628,21 @@ def main():
     )
     ap.add_argument("--shelxl", default="")
     ap.add_argument("--shelxl-iterations", type=int, default=5)
+    ap.add_argument(
+        "--endpoint-ls-cycles",
+        type=int,
+        default=1,
+        help="Internal L.S./CGLS cycle count written to the combined corrected-HKL endpoint. Production keeps this at 1.",
+    )
+    ap.add_argument(
+        "--endpoint-wght-mode",
+        choices=("freeze-zero", "inherit", "promote"),
+        default="freeze-zero",
+        help=(
+            "SHELXL weight policy for the shared combined endpoint. freeze-zero is the production default after "
+            "GROND sigma calibration; inherit preserves the source active WGHT; promote uses SHELXL recommendations on later passes."
+        ),
+    )
     ap.add_argument(
         "--post-bloch-sigma-policy",
         choices=("none", "uniform_z_rms"),
@@ -727,14 +805,34 @@ def main():
                 }
         hkl_safe_factor = min(safe_fixed_width_factor(endpoint_rows), safe_fixed_width_factor(merged_endpoint))
         if hkl_safe_factor < 1.0:
-            endpoint_rows = [(h, k, l, I * hkl_safe_factor, sig * hkl_safe_factor) for h, k, l, I, sig in endpoint_rows]
-            merged_endpoint = [(h, k, l, I * hkl_safe_factor, sig * hkl_safe_factor) for h, k, l, I, sig in merged_endpoint]
+            endpoint_rows = [
+                (h, k, ell, intensity * hkl_safe_factor, sig * hkl_safe_factor)
+                for h, k, ell, intensity, sig in endpoint_rows
+            ]
+            merged_endpoint = [
+                (h, k, ell, intensity * hkl_safe_factor, sig * hkl_safe_factor)
+                for h, k, ell, intensity, sig in merged_endpoint
+            ]
         ep_dir = out / f"combined_endpoint_lam_{args.endpoint_lambda.replace('.', 'p')}"
         ep_dir.mkdir(exist_ok=True)
         hkl_name = "multi_dyn_corrected.hkl"
         write_hkl(ep_dir / hkl_name, merged_endpoint)
-        write_no_exti_ins(Path(args.res), ep_dir / "multi_dyn_corrected.ins", hkl_name)
-        shelxl = run_shelxl(ep_dir, "multi_dyn_corrected", args.shelxl, iterations=args.shelxl_iterations)
+        initial_wght = (0.0, 0.0) if args.endpoint_wght_mode == "freeze-zero" else None
+        write_no_exti_ins(
+            Path(args.res),
+            ep_dir / "multi_dyn_corrected.ins",
+            hkl_name,
+            wght=initial_wght,
+            ls_cycles=args.endpoint_ls_cycles,
+        )
+        shelxl = run_shelxl(
+            ep_dir,
+            "multi_dyn_corrected",
+            args.shelxl,
+            iterations=args.shelxl_iterations,
+            wght_mode=args.endpoint_wght_mode,
+            endpoint_ls_cycles=args.endpoint_ls_cycles,
+        )
 
     result = {
         "runs": dataset_summaries,
@@ -761,6 +859,8 @@ def main():
             "merge_sigma": merge_sigma,
             "post_bloch_sigma": post_bloch_sigma if endpoint_rows else {"policy": args.post_bloch_sigma_policy, "status": "skipped_no_endpoint_rows"},
             "shelxl": shelxl,
+            "endpoint_wght_mode": args.endpoint_wght_mode,
+            "endpoint_ls_cycles": max(1, int(args.endpoint_ls_cycles)),
         },
     }
     (out / "combined_summary.json").write_text(json.dumps(result, indent=2, allow_nan=True) + "\n")
@@ -822,6 +922,11 @@ def main():
             f"Overlap scaling and endpoint merging use `{args.endpoint_merge_key}`. "
             "The merged HKLF4 endpoint is written after this GROND-side inverse-variance merge, "
             "so the shared SHELXL LS step sees one corrected observation per selected merge key."
+        )
+        lines.append(
+            f"Shared endpoint SHELXL policy: `{args.endpoint_wght_mode}` weights and `L.S./CGLS {max(1, int(args.endpoint_ls_cycles))}`. "
+            f"Active WGHT reported by SHELXL: `{safe_float(shelxl.get('active_wght_a')):.4f}` "
+            f"`{safe_float(shelxl.get('active_wght_b')):.4f}`."
         )
         lines.append("")
         lines.append(

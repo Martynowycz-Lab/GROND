@@ -2464,6 +2464,9 @@ def combine_cmd(
     """Build the multi-dataset corrected-HKL combination command."""
 
     iterations = int(shelxl_iterations if shelxl_iterations is not None else getattr(args, "shelxl_iterations", 5))
+    endpoint_ls_cycles = int(
+        getattr(args, "shelxl_feedback_endpoint_ls_cycles", getattr(args, "endpoint_ls_cycles", 1)) or 1
+    )
     cmd = [
         python,
         str(engine_script("combine_native_nuisance_runs.py")),
@@ -2501,6 +2504,10 @@ def combine_cmd(
         str(getattr(args, "shelxl", "") or ""),
         "--shelxl-iterations",
         str(iterations),
+        "--endpoint-ls-cycles",
+        str(endpoint_ls_cycles),
+        "--endpoint-wght-mode",
+        str(getattr(args, "endpoint_wght_mode", "freeze-zero")),
     ]
     if args.dataset_sigma_holdout_floor:
         cmd.append("--dataset-sigma-holdout-floor")
