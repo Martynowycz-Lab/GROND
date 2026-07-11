@@ -79,6 +79,7 @@ def smoke_install_wheel(dist_dir: Path) -> None:
         python = venv_python(venv_dir)
 
         run_checked([python, "-m", "pip", "install", "--disable-pip-version-check", str(wheel)], cwd=tmp_dir)
+        run_checked([python, "-m", "pip", "check"], cwd=tmp_dir)
         run_checked([python, "-m", "grond", "--help"], cwd=tmp_dir)
         run_checked([python, "-m", "grond", "validate"], cwd=tmp_dir)
         assert_current_install(run_json_checked([python, "-m", "grond", "doctor", "--probe-bloch"], cwd=tmp_dir))

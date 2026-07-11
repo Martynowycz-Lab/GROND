@@ -11,6 +11,16 @@ dist/
 outputs/
 grond_out/
 paper/
+manuscript/
+experiments/
+OpenDM/
+openDM/
+opendm/
+open_direct_methods/
+open-direct-methods/
+raw_data/
+raw-data/
+cache/
 *.log
 *.npz
 *.npy

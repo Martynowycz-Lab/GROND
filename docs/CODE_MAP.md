@@ -94,7 +94,7 @@ flowchart TD
     W --> X["models, maps, tables, logs, and resume state"]
 ```
 
-For multi-dataset jobs, `cli.run_multi` runs the same per-dataset gates, then `workflows.dataset_policy` assigns each crystal to the primary, downweight, completeness-only, or exclude role. `native_multi_structure_update.py` processes the shared native-gradient model update, and `combine_native_nuisance_runs.py` performs the corrected-HKL merge with one overlap scale per accepted dataset before endpoint tables are written. Per-dataset thickness, jitter, absorption, scale, and sigma policies remain attached to their own row tables until this final combination step.
+For multi-dataset jobs, `cli.run_multi` runs the same per-dataset gates, then `workflows.dataset_policy` assigns each crystal to the primary, downweight, completeness-only, or exclude role. The production shared-model path is `cli.run_multi_shelxl_feedback_loop`: it recalculates each active dataset from one model, asks `combine_native_nuisance_runs.py` to scale and merge the corrected rows, runs one shared SHELXL LS step, and repeats. `native_multi_structure_update.py` is the slower native-gradient diagnostic selected with `--structure-update native_gradient`. Per-dataset thickness, jitter, absorption, scale, and sigma policies remain attached to their own row tables until combination.
 
 ## Single-Row Bloch Calculation
 
@@ -155,7 +155,7 @@ and returns the squared amplitude transferred from the direct beam into the targ
 
 `continuous_thickness_polish.py` is the fast thickness polish. It caches eigensystems from a selected row subset, then searches continuous thickness and thickness-gradient values without rebuilding every Hamiltonian for every scalar trial. This is why modern auto runs can report non-round thicknesses rather than only the coarse grid value.
 
-`shelxl_feedback_loop.py` is the default fast single-dataset full-mode structure feedback loop when SHELXL is configured. It runs a high-N/Q Bloch correction, performs one least-squares update with the declared endpoint `WGHT` policy, and repeats. After the last SHELXL update it runs one final Bloch-only row recompute on the final coordinates so the reported row statistics correspond to the final structure. The native finite-difference alternatives are `native_structure_update.py` for one dataset and `native_multi_structure_update.py` for shared multi-dataset regularization.
+`shelxl_feedback_loop.py` is the default fast single-dataset full-mode structure feedback loop when SHELXL is configured. It runs a high-N/Q Bloch correction, performs one least-squares update with the declared endpoint `WGHT` policy, and repeats. After the last SHELXL update it runs one final Bloch-only row recompute on the final coordinates so the reported row statistics correspond to the final structure. The native finite-difference diagnostics are `native_structure_update.py` for one dataset and `native_multi_structure_update.py` for several datasets.
 
 `src/grond/refine/endpoints.py` is the interface layer for model-update backends. It declares the implemented SHELXL endpoint, the no-refiner Bloch-only path, the slow native-gradient diagnostic, and the custom command-template adapter. The registry is intentionally separate from the working numerical path: it tells users what each endpoint must accept and return without pretending every external refiner is already a fully tested `auto` replacement.
 

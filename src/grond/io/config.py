@@ -2,9 +2,51 @@ from __future__ import annotations
 
 import csv
 import json
+import math
+import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
+
+DATASET_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
+TARGET_MODES = {"iobs", "iobs_over_rlp", "iobs_times_peak", "recorded_proxy"}
+DATASET_OPTION_KEYS = {
+    "baseline_hkl",
+    "dmin",
+    "geometry_percentile",
+    "hkl_transform",
+    "include_nonpositive",
+    "min_d_spacing",
+    "min_peak",
+    "target_mode",
+}
+TRUE_TEXT = {"1", "true", "yes", "on"}
+FALSE_TEXT = {"0", "false", "no", "off"}
+
+
+def validate_hkl_transform(value: str) -> None:
+    """Validate a signed permutation of the crystallographic h, k, l axes."""
+
+    if value == "identity":
+        return
+    axes = [part.strip() for part in value.split(",")]
+    if (
+        len(axes) != 3
+        or {axis.lstrip("+-") for axis in axes} != {"h", "k", "l"}
+        or any(not re.fullmatch(r"[+-]?[hkl]", axis) for axis in axes)
+    ):
+        raise ValueError(
+            "hkl_transform must be 'identity' or a signed permutation such as 'l,-k,h'"
+        )
+
+
+def parse_bool_text(value: str, *, field: str) -> bool:
+    text = str(value).strip().lower()
+    if text in TRUE_TEXT:
+        return True
+    if text in FALSE_TEXT:
+        return False
+    raise ValueError(f"{field} must be one of {sorted(TRUE_TEXT | FALSE_TEXT)}, got {value!r}")
 
 
 @dataclass
@@ -22,6 +64,29 @@ class DatasetSpec:
     include_nonpositive: bool = False
     geometry_percentile: float = 99.0
 
+    def __post_init__(self) -> None:
+        if not DATASET_NAME_RE.fullmatch(self.name):
+            raise ValueError(
+                "dataset name must start with a letter or number and contain only "
+                "letters, numbers, dots, underscores, or hyphens"
+            )
+        if not str(self.hkl).strip():
+            raise ValueError(f"dataset {self.name!r} has no HKL path")
+        validate_hkl_transform(self.hkl_transform)
+        if self.target_mode not in TARGET_MODES:
+            raise ValueError(
+                f"dataset {self.name!r} target_mode must be one of {sorted(TARGET_MODES)}"
+            )
+        d_min = float(self.min_d_spacing)
+        peak = float(self.min_peak)
+        percentile = float(self.geometry_percentile)
+        if not math.isfinite(d_min) or d_min <= 0.0:
+            raise ValueError(f"dataset {self.name!r} min_d_spacing must be > 0")
+        if not math.isfinite(peak) or not 0.0 <= peak <= 100.0:
+            raise ValueError(f"dataset {self.name!r} min_peak must be in [0, 100]")
+        if not math.isfinite(percentile) or not 0.0 < percentile <= 100.0:
+            raise ValueError(f"dataset {self.name!r} geometry_percentile must be in (0, 100]")
+
 
 @dataclass
 class PrepConfig:
@@ -34,6 +99,27 @@ class PrepConfig:
     default_hkl_transform: str = "identity"
     geometry_percentile: float = 99.0
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not str(self.structure).strip():
+            raise ValueError("structure path must not be empty")
+        if not self.datasets:
+            raise ValueError("at least one dataset is required")
+        names = [dataset.name for dataset in self.datasets]
+        folded_names = [name.casefold() for name in names]
+        duplicates = sorted(
+            {
+                names[index]
+                for index, folded in enumerate(folded_names)
+                if folded_names.count(folded) > 1
+            }
+        )
+        if duplicates:
+            raise ValueError(f"dataset names must be unique; repeated: {', '.join(duplicates)}")
+        validate_hkl_transform(self.default_hkl_transform)
+        percentile = float(self.geometry_percentile)
+        if not math.isfinite(percentile) or not 0.0 < percentile <= 100.0:
+            raise ValueError("geometry_percentile must be in (0, 100]")
 
 
 def resolve_hkl(path_text: str) -> tuple[str, str]:
@@ -71,6 +157,9 @@ def parse_dataset_spec(text: str, *, default_hkl_transform: str = "identity", ge
             raise ValueError(f"dataset option {item!r} must be key=value")
         key, value = item.split("=", 1)
         values[key.strip().replace("-", "_")] = value.strip()
+    unknown = sorted(set(values) - DATASET_OPTION_KEYS)
+    if unknown:
+        raise ValueError(f"unknown dataset option(s): {', '.join(unknown)}")
     return DatasetSpec(
         name=name.strip(),
         hkl=hkl,
@@ -80,7 +169,10 @@ def parse_dataset_spec(text: str, *, default_hkl_transform: str = "identity", ge
         min_d_spacing=float(values.get("dmin", values.get("min_d_spacing", 0.70))),
         min_peak=float(values.get("min_peak", 90.0)),
         target_mode=values.get("target_mode", "iobs"),
-        include_nonpositive=values.get("include_nonpositive", "false").lower() in {"1", "true", "yes", "on"},
+        include_nonpositive=parse_bool_text(
+            values.get("include_nonpositive", "false"),
+            field="include_nonpositive",
+        ),
         geometry_percentile=float(values.get("geometry_percentile", geometry_percentile)),
     )
 

@@ -52,7 +52,7 @@ This backend exists because Apple MPS currently exposes useful matrix multiplica
 
 with the `2*pi*thickness` factor applied, then evaluates the first propagated column with a fixed Taylor polynomial plus scaling and squaring. This is mathematically close to `scipy.linalg.expm` on small Hermitian test cases, but it is not the same numerical method as the SciPy eigensolver reference and on MPS it runs in float32.
 
-On the local 370 benchmark with N24/Q10 and 64 rows, `jax_mps_real_expm` matched the displayed residuals but took 2.07 s wall time versus 2.02 s for dense SciPy and 1.19 s for `scipy_bethe`. On a harder N108/Q20, 8-row check, it matched row intensities to roughly `2e-4` maximum relative `dyn_raw` difference but again lost on wall time. It should therefore remain opt-in and guarded. Promotion would require float64 support or a substantially faster same-size batched implementation that beats SciPy on full 370-style runs.
+Bounded agreement checks found that `jax_mps_real_expm` reproduced displayed residuals but did not beat the dense SciPy or `scipy_bethe` references. At larger support it also showed a maximum relative `dyn_raw` difference on the order of `2e-4`. It should therefore remain opt-in and guarded. Promotion requires float64 support or a substantially faster same-size batched implementation that wins complete, dataset-independent agreement benchmarks.
 
 ## Bucketed Matrix Snapshot
 

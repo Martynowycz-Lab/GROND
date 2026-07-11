@@ -66,6 +66,12 @@
           "items": {
             "$ref": "#/$defs/matrix3"
           }
+        },
+        "fixed_rotation_matrix": {
+          "$ref": "#/$defs/matrix3"
+        },
+        "setting_rotation_matrix": {
+          "$ref": "#/$defs/matrix3"
         }
       },
       "anyOf": [

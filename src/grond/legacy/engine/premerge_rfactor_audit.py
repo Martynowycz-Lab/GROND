@@ -11,14 +11,17 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-import math
 from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
 
-from native_row_regularize import DEFAULT_HKL, DEFAULT_RES, native_metrics, parse_wght, shelx_weights
-from bloch_engine import XDSData
+if __package__:
+    from .bloch_engine import XDSData
+    from .native_row_regularize import DEFAULT_HKL, DEFAULT_RES, native_metrics, parse_wght, shelx_weights
+else:  # pragma: no cover - direct script execution
+    from bloch_engine import XDSData
+    from native_row_regularize import DEFAULT_HKL, DEFAULT_RES, native_metrics, parse_wght, shelx_weights
 
 
 def read_rows(path: Path) -> list[dict[str, str]]:
@@ -187,7 +190,6 @@ def group_summary(
             within_obs.extend(om.tolist())
             within_pred.extend(pm.tolist())
         residual = obs_g - pred_g
-        floor_residual = obs_g - floor_g
         q_g = q[idx] if q is not None else np.full(len(idx), np.nan)
         group_rows.append(
             {
@@ -321,7 +323,7 @@ def hkl_class(h: int, k: int, l: int) -> str:
 
 
 def hkl_class_bins(rows, h, k, l, obs, sig, pred, valid, wght_a, wght_b) -> list[dict]:
-    classes = np.asarray([hkl_class(a, b, c) for a, b, c in zip(h, k, l)])
+    classes = np.asarray([hkl_class(a, b, c) for a, b, c in zip(h, k, l, strict=False)])
     total_abs = np.nansum(np.abs(obs[valid] - pred[valid]))
     total_weighted = np.nansum(shelx_weights(obs[valid], sig[valid], pred[valid], wght_a, wght_b) * (obs[valid] - pred[valid]) ** 2)
     out = []
@@ -358,7 +360,7 @@ def hkl_class_bins(rows, h, k, l, obs, sig, pred, valid, wght_a, wght_b) -> list
 
 
 def hkl_class_equiv_modulation(h, k, l, obs, sig, pred, valid, groups: dict[tuple[int, int, int], np.ndarray]) -> list[dict]:
-    classes = np.asarray([hkl_class(a, b, c) for a, b, c in zip(h, k, l)])
+    classes = np.asarray([hkl_class(a, b, c) for a, b, c in zip(h, k, l, strict=False)])
     out = []
     for cls in sorted(set(classes[valid])):
         obs_dev = []

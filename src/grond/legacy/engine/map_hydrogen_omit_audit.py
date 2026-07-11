@@ -19,10 +19,10 @@ from pathlib import Path
 import gemmi
 import numpy as np
 
-try:
-    from bloch_engine import parse_model
-except ModuleNotFoundError:
+if __package__:
     from .bloch_engine import parse_model
+else:  # pragma: no cover - direct script execution
+    from bloch_engine import parse_model
 
 
 def parse_map_specs(specs: list[str]) -> list[tuple[str, Path]]:

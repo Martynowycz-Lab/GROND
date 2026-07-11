@@ -394,17 +394,6 @@ def policy_by_name(policy: Mapping) -> dict[str, dict]:
     return {str(row.get("name")): dict(row) for row in policy.get("datasets", [])}
 
 
-def inflate_sigma(value: object, weight: float) -> str:
-    """Inflate sigma so a row has the requested effective weight."""
-
-    sigma = safe_float(value)
-    if not math.isfinite(sigma):
-        return str(value)
-    if weight <= 0:
-        return f"{sigma:.17g}"
-    return f"{sigma / math.sqrt(max(weight, 1e-12)):.17g}"
-
-
 def write_policy_weighted_runs(
     runs: Mapping[str, Path],
     policy: Mapping,
@@ -412,7 +401,7 @@ def write_policy_weighted_runs(
     *,
     include_endpoint_only: bool = True,
 ) -> dict[str, Path]:
-    """Write row-table run copies with dataset policy metadata and sigma weights."""
+    """Write run copies annotated with policy weights for downstream application."""
 
     out_dir.mkdir(parents=True, exist_ok=True)
     decisions = policy_by_name(policy)
@@ -428,9 +417,6 @@ def write_policy_weighted_runs(
         dst = out_dir / name
         dst.mkdir(parents=True, exist_ok=True)
         rows = read_row_table(src / "native_dyn_calc.csv", name)
-        weight = safe_float(decision.get("raw_row_weight"), 1.0)
-        if action == "completeness_only":
-            weight = safe_float(decision.get("endpoint_weight"), 0.25)
         weighted_rows = []
         for row in rows:
             new = dict(row)
@@ -439,7 +425,7 @@ def write_policy_weighted_runs(
             new["raw_row_weight"] = f"{safe_float(decision.get('raw_row_weight'), 0.0):.17g}"
             new["endpoint_weight"] = f"{safe_float(decision.get('endpoint_weight'), 0.0):.17g}"
             new["sigma_eff_original"] = row.get("sigma_eff", "")
-            new["sigma_eff"] = inflate_sigma(row.get("sigma_eff"), weight)
+            new["policy_sigma_weight_applied"] = "false"
             weighted_rows.append(new)
         write_row_table(dst / "native_dyn_calc.csv", weighted_rows)
         summary = read_json(src / "summary.json")

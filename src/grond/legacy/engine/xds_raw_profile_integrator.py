@@ -19,10 +19,24 @@ import json
 import math
 from pathlib import Path
 
-import fabio
 import numpy as np
 
-from bloch_engine import XDSData, sha256
+if __package__:
+    from .bloch_engine import XDSData, sha256
+else:  # pragma: no cover - direct script execution
+    from bloch_engine import XDSData, sha256
+
+
+def require_fabio():
+    """Load the optional raw-image reader when this workflow is used."""
+    try:
+        import fabio
+    except ImportError as exc:  # pragma: no cover - depends on optional install
+        raise RuntimeError(
+            "Raw CBF extraction requires the optional 'fabio' dependency. "
+            "Install it with: pip install 'grond[raw]'"
+        ) from exc
+    return fabio
 
 
 def circle_masks(radius, bg_inner, bg_outer):
@@ -42,6 +56,7 @@ class FrameCache:
     def __init__(self, cbf_dir: Path, max_items=16):
         self.cbf_dir = Path(cbf_dir)
         self.max_items = int(max_items)
+        self._fabio = require_fabio()
         self.cache = {}
         self.order = []
 
@@ -52,7 +67,7 @@ class FrameCache:
         p = frame_path(self.cbf_dir, frame)
         if not p.exists():
             return None
-        arr = fabio.open(str(p)).data.astype(np.float32)
+        arr = self._fabio.open(str(p)).data.astype(np.float32)
         self.cache[frame] = arr
         self.order.append(frame)
         while len(self.order) > self.max_items:
@@ -123,7 +138,7 @@ def write_xds_like(path: Path, data: XDSData, selected_rows, results, source_pat
             f.write(line + "\n")
         f.write("!RAW_PROFILE_SOURCE= XDS spot centers plus raw CBF aperture/annulus integration\n")
         f.write("!END_OF_HEADER\n")
-        for idx, (I, sig, zcent, _prof) in zip(selected_rows, results):
+        for idx, (I, sig, zcent, _prof) in zip(selected_rows, results, strict=False):
             row = [
                 *data.hkl[idx].tolist(),
                 I,
@@ -198,7 +213,7 @@ def write_dynrows(out_dir: Path, data: XDSData, selected_rows, results, profiles
             f.write(json.dumps(rec, allow_nan=True) + "\n")
 
     with obs_path.open("w") as f:
-        for idx, (I, sig, zcent, prof) in zip(selected_rows, results):
+        for idx, (I, sig, zcent, prof) in zip(selected_rows, results, strict=False):
             z = float(data.zcal[idx])
             rec = {
                 "obs_id": int(idx),

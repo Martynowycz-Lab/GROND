@@ -15,8 +15,12 @@ for _name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "VEC
 
 import numpy as np
 
-from native_row_regularize import TARGET_MODES, row_selection, target_arrays
-from bloch_engine import Config, XDSBlochPort, XDSData, alternate_hand_model, parse_model, sha256
+if __package__:
+    from .bloch_engine import Config, XDSBlochPort, XDSData, alternate_hand_model, parse_model, sha256
+    from .native_row_regularize import TARGET_MODES, row_selection, target_arrays
+else:  # pragma: no cover - direct script execution
+    from bloch_engine import Config, XDSBlochPort, XDSData, alternate_hand_model, parse_model, sha256
+    from native_row_regularize import TARGET_MODES, row_selection, target_arrays
 
 
 _WORKER_PORT = None
@@ -42,8 +46,7 @@ def _basis_size_worker(idx):
     row_idx = int(idx)
     hkl = port.data.hkl[row_idx]
     omega_center = port.omega_from_z(port.data.zcal[row_idx])
-    omega_bragg = port.solve_omega_for_sg(hkl, omega_center, 0.0)
-    basis = port.select_basis(hkl, omega_bragg, row_idx=row_idx)
+    basis = port.select_basis(hkl, omega_center, row_idx=row_idx)
     return row_idx, int(len(basis))
 
 

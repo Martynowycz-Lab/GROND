@@ -20,15 +20,18 @@ import argparse
 import csv
 import hashlib
 import json
-import math
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
 
 import numpy as np
 
-from native_row_regularize import DEFAULT_HKL, DEFAULT_RES, native_metrics, parse_wght, shelx_weights
-from bloch_engine import XDSData, sha256
+if __package__:
+    from .bloch_engine import XDSData, sha256
+    from .native_row_regularize import DEFAULT_HKL, DEFAULT_RES, native_metrics, parse_wght, shelx_weights
+else:  # pragma: no cover - direct script execution
+    from bloch_engine import XDSData, sha256
+    from native_row_regularize import DEFAULT_HKL, DEFAULT_RES, native_metrics, parse_wght, shelx_weights
 
 
 DEFAULT_ROW_TABLE = Path("native_dyn_calc.csv")
@@ -49,7 +52,7 @@ def write_csv(path: Path, rows: list[dict]) -> None:
     fieldnames: list[str] = []
     seen: set[str] = set()
     for row in rows:
-        for key in row.keys():
+        for key in row:
             if key not in seen:
                 seen.add(key)
                 fieldnames.append(key)
@@ -190,7 +193,6 @@ def build_features(
     if include_intercept:
         add_feature(cols, names, penalties, "intercept", np.ones(n), 0.0)
 
-    train_finite_d = train_mask & np.isfinite(d) & (d > 0)
     inv_d2 = 1.0 / np.maximum(d, 1e-12) ** 2
     inv_d = 1.0 / np.maximum(d, 1e-12)
     isigi = obs / np.maximum(sig, 1e-12)
@@ -304,8 +306,8 @@ def build_features(
         keep[0] = True
     return FeatureMatrix(
         raw[:, keep],
-        [name for name, use in zip(names, keep) if use],
-        np.asarray([penalty for penalty, use in zip(penalties, keep) if use], dtype=float),
+        [name for name, use in zip(names, keep, strict=False) if use],
+        np.asarray([penalty for penalty, use in zip(penalties, keep, strict=False) if use], dtype=float),
         means[keep],
         stds[keep],
     )
@@ -382,7 +384,7 @@ def choose_masks(
         split = scol(rows, "split", "")
         free = valid & (split == holdout_name)
     elif mode == "signed_hkl":
-        buckets = np.asarray([stable_signed_hkl_bucket(int(a), int(b), int(c), holdout_mod) for a, b, c in zip(h, k, l)], dtype=int)
+        buckets = np.asarray([stable_signed_hkl_bucket(int(a), int(b), int(c), holdout_mod) for a, b, c in zip(h, k, l, strict=False)], dtype=int)
         free = valid & (buckets == int(holdout_value))
     elif mode in {"frame_mod", "frame_block"}:
         data = XDSData(hkl_path)
@@ -401,7 +403,7 @@ def choose_masks(
         raise ValueError(f"unknown holdout mode {mode!r}")
 
     if np.count_nonzero(free) < 20:
-        buckets = np.asarray([stable_signed_hkl_bucket(int(a), int(b), int(c), 10) for a, b, c in zip(h, k, l)], dtype=int)
+        buckets = np.asarray([stable_signed_hkl_bucket(int(a), int(b), int(c), 10) for a, b, c in zip(h, k, l, strict=False)], dtype=int)
         free = valid & (buckets == 0)
     work = valid & ~free
 
@@ -900,7 +902,7 @@ def main() -> None:
     write_csv(out / "two_part_trials.csv", sorted(trial_rows, key=lambda r: (r["score"], r["free_wR2"])))
 
     corrected = []
-    for r, p0, p, lm, add in zip(rows, pred0, best_pred, best_logm, best_add):
+    for r, p0, p, lm, add in zip(rows, pred0, best_pred, best_logm, best_add, strict=False):
         rr = dict(r)
         rr["two_part_pred_before"] = f"{float(p0):.10g}"
         rr["two_part_log_mult"] = f"{float(lm):.10g}"
@@ -912,11 +914,11 @@ def main() -> None:
 
     write_csv(
         out / "multiplicative_coefficients.csv",
-        [{"feature": name, "coefficient": float(coef), "penalty": float(penalty)} for name, coef, penalty in zip(X_mult.names, best_beta_m, X_mult.penalties)],
+        [{"feature": name, "coefficient": float(coef), "penalty": float(penalty)} for name, coef, penalty in zip(X_mult.names, best_beta_m, X_mult.penalties, strict=False)],
     )
     write_csv(
         out / "additive_coefficients.csv",
-        [{"feature": name, "coefficient": float(coef), "penalty": float(penalty)} for name, coef, penalty in zip(X_add.names, best_beta_a, X_add.penalties)],
+        [{"feature": name, "coefficient": float(coef), "penalty": float(penalty)} for name, coef, penalty in zip(X_add.names, best_beta_a, X_add.penalties, strict=False)],
     )
 
     free_w_gain = baseline["metrics"]["free"]["wR2_all"] - best["metrics"]["free"]["wR2_all"]

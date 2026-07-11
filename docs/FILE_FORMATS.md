@@ -62,14 +62,14 @@ dials_grond_bridge/
   DIALS_BRIDGE_README.md
 ```
 
-The generated `INTEGRATE.HKL` uses `intensity.sum.value * lp / partiality` by
-default, stores `100 * partiality` in the `PEAK` column, stores `lp` in `RLP`,
+The generated `INTEGRATE.HKL` uses `intensity.sum.value * (lp / qe) / partiality` by
+default, stores `100 * partiality` in the `PEAK` column, stores `lp / qe` in `RLP`,
 and keeps the exact signed DIALS `miller_index`. GROND's default `--min-peak 90`
 therefore means DIALS partiality `>= 0.90`. The DIALS bridge also writes
-`!DIALS_SIGMA_MODE` and `!DIALS_SIGMA_MULTIPLIER` header records. In the default
-auto mode, GROND fits an empirical duplicate-scatter variance model when
-enough symmetry-equivalent rows exist and only falls back to detector-gain checks when duplicate support is insufficient. The
-intensities are not changed by sigma scaling.
+`!DIALS_SIGMA_MODE` and `!DIALS_SIGMA_MULTIPLIER` header records. The default
+`raw` mode keeps DIALS' detector-model variance. Empirical duplicate-scatter and
+detector-gain scaling remain explicit diagnostic modes. The intensities are not
+changed by sigma scaling.
 
 For integrations from other software, use the portable row contract documented
 in [PORTABLE_INPUTS_AND_ENDPOINTS.md](PORTABLE_INPUTS_AND_ENDPOINTS.md). The row
@@ -111,9 +111,15 @@ portable_bridge` validates the files and writes a `GROND_PORTABLE_XDS_COMPAT`
 directory that the current engine can process. This bridge is only a compatibility
 layer; it keeps the original source and row-contract manifest in the output.
 
-The structure file supplies the atomic model. GROND accepts `RES` or `CIF`.
-For a CIF, the atom loop has the usual atom labels, element types, fractional
-coordinates, and displacement values.
+The structure file supplies the atomic model. The normal `GROND run` input is a
+SHELX `RES` or `INS` with explicit electron factors. A CIF used by that workflow
+must embed the complete SHELX instruction block needed for model updates. The
+lower-level Bloch parser can also read a coefficient-based CIF: its atom loop has
+the usual atom labels, element types, fractional coordinates, and displacement
+values, while its scattering-factor loop must contain explicit electron
+coefficients and declare `_grond_scattering_factor_kind electron` (or
+`_atom_type_scat_source electron`). GROND does not silently use ordinary X-ray
+Cromer-Mann coefficients for an electron calculation.
 
 ```text
 loop_

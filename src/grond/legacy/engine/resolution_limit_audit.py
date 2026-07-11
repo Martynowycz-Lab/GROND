@@ -13,22 +13,24 @@ import argparse
 import csv
 import json
 import math
-import sys
 from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
 
-SRC_ROOT = Path(__file__).resolve().parents[3]
-if str(SRC_ROOT) not in sys.path:
-    sys.path.insert(0, str(SRC_ROOT))
-
-from grond.forensics.resolution import promote_resolution_limit  # noqa: E402
-
-try:
+if __package__:
+    from ...forensics.resolution import promote_resolution_limit
     from .row_mr_report import canonical_hkl, compute_model_metrics, parse_model, read_csv_rows, safe_float
-except ImportError:  # pragma: no cover - script execution from engine dir.
+else:  # pragma: no cover - direct script execution
+    import sys
+
+    src_root = Path(__file__).resolve().parents[3]
+    if str(src_root) not in sys.path:
+        sys.path.insert(0, str(src_root))
+
     from row_mr_report import canonical_hkl, compute_model_metrics, parse_model, read_csv_rows, safe_float
+
+    from grond.forensics.resolution import promote_resolution_limit
 
 
 def parse_named_path(text: str) -> tuple[str, Path]:

@@ -49,8 +49,8 @@ try:  # Package import.
         Config,
         XDSBlochPort,
         XDSData,
-        frozen_kernel_contract,
         alternate_hand_model,
+        frozen_kernel_contract,
         parse_model,
         sha256,
         split_masks,
@@ -62,8 +62,8 @@ except ImportError:  # Direct script execution from this directory.
         Config,
         XDSBlochPort,
         XDSData,
-        frozen_kernel_contract,
         alternate_hand_model,
+        frozen_kernel_contract,
         parse_model,
         sha256,
         split_masks,
@@ -86,6 +86,7 @@ TARGET_MODE_LABELS = {
     "recorded_proxy": "IOBS*PEAK/(100*RLP)",
 }
 DEFAULT_ELECTRON_WAVELENGTH_A = 0.025079
+PREDICTION_CACHE_SCHEMA = 3
 
 
 @dataclass(frozen=True)
@@ -451,7 +452,7 @@ def write_no_exti_ins(src_res: Path, dst_ins: Path, hkl_name: str = "dyn_nuisanc
 
 def exact_hkl_merge(hkls, intensities, sigmas):
     bins: dict[tuple[int, int, int], dict[str, float]] = {}
-    for hkl, I, sig in zip(hkls, intensities, sigmas):
+    for hkl, I, sig in zip(hkls, intensities, sigmas, strict=True):
         h = tuple(int(v) for v in hkl)
         sig = max(abs(float(sig)), 1e-6)
         w = 1.0 / (sig * sig)
@@ -518,9 +519,11 @@ def detector_bin_indices(data: XDSData, n_bins: int):
     return yb * int(n_bins) + xb
 
 
-def shelx_weights(obs, sig, pred, a: float, b: float):
+def shelx_weights(obs, sig, pred, a: float | np.ndarray, b: float | np.ndarray):
     p = (np.maximum(obs, 0.0) + 2.0 * np.maximum(pred, 0.0)) / 3.0
-    return 1.0 / np.maximum(sig * sig + (float(a) * p) ** 2 + float(b) * p, 1e-30)
+    a = np.asarray(a, dtype=float)
+    b = np.asarray(b, dtype=float)
+    return 1.0 / np.maximum(sig * sig + (a * p) ** 2 + b * p, 1e-30)
 
 
 def solve_regularized_scales(diag_sums, x_y_sums, unique_groups, lambda_smooth):
@@ -549,21 +552,58 @@ def solve_regularized_scales(diag_sums, x_y_sums, unique_groups, lambda_smooth):
     x[-1] = d_prime[n-1]
     for i in range(n - 2, -1, -1):
         x[i] = d_prime[i] - c_prime[i] * x[i+1]
-    return {int(g): max(float(val), 1e-30) for g, val in zip(unique_groups, x)}
+    return {int(g): max(float(val), 1e-30) for g, val in zip(unique_groups, x, strict=True)}
+
+
+def _scale_fit_mask(obs, sig, pred, fit_mask):
+    return (
+        np.asarray(fit_mask, dtype=bool)
+        & np.isfinite(obs)
+        & np.isfinite(sig)
+        & (np.asarray(sig, dtype=float) > 0.0)
+        & np.isfinite(pred)
+        & (np.asarray(pred, dtype=float) > 0.0)
+    )
+
+
+def _fit_global_scale(obs, sig, pred, fit_mask, wght_a: float, wght_b: float, n_iter: int):
+    fit = _scale_fit_mask(obs, sig, pred, fit_mask)
+    if np.count_nonzero(fit) < 2:
+        raise ValueError("at least two work rows with positive sigma and prediction are required to fit scales")
+    x = np.asarray(pred[fit], dtype=float)
+    y = np.asarray(obs[fit], dtype=float)
+    sfit = np.asarray(sig[fit], dtype=float)
+    w = 1.0 / (sfit * sfit)
+    scale = max(float(np.sum(w * x * y) / max(np.sum(w * x * x), 1e-30)), 1e-30)
+    for _ in range(int(n_iter)):
+        w = shelx_weights(y, sfit, scale * x, wght_a, wght_b)
+        new_scale = max(float(np.sum(w * x * y) / max(np.sum(w * x * x), 1e-30)), 1e-30)
+        if abs(new_scale - scale) <= 1e-8 * max(1.0, abs(scale)):
+            return new_scale
+        scale = new_scale
+    return scale
 
 
 def fit_group_scales(obs, sig, pred, groups, fit_mask, wght_a: float, wght_b: float, n_iter: int = 6, scale_smoothness: float = 0.0):
+    obs = np.asarray(obs, dtype=float)
+    sig = np.asarray(sig, dtype=float)
+    pred = np.asarray(pred, dtype=float)
+    groups = np.asarray(groups)
+    fit_mask = np.asarray(fit_mask, dtype=bool)
+    if not (len(obs) == len(sig) == len(pred) == len(groups) == len(fit_mask)):
+        raise ValueError("observation, sigma, prediction, group, and fit-mask lengths differ")
     scaled = np.full_like(pred, np.nan, dtype=float)
     scales: dict[int, float] = {}
     unique_groups = np.unique(groups)
     if len(unique_groups) == 0:
         return scaled, scales
+    global_scale = _fit_global_scale(obs, sig, pred, fit_mask, wght_a, wght_b, n_iter)
 
     if scale_smoothness > 0.0:
         diag_sums = np.zeros(len(unique_groups), dtype=float)
         x_y_sums = np.zeros(len(unique_groups), dtype=float)
         for j, g in enumerate(unique_groups):
-            fit = (groups == g) & fit_mask & np.isfinite(obs) & np.isfinite(sig) & np.isfinite(pred) & (pred > 0)
+            fit = (groups == g) & _scale_fit_mask(obs, sig, pred, fit_mask)
             if np.count_nonzero(fit) >= 2:
                 x = pred[fit]
                 y = obs[fit]
@@ -573,13 +613,14 @@ def fit_group_scales(obs, sig, pred, groups, fit_mask, wght_a: float, wght_b: fl
                 x_y_sums[j] = np.sum(w * x * y)
         solved = solve_regularized_scales(diag_sums, x_y_sums, unique_groups, scale_smoothness)
         for g in unique_groups:
-            scales[int(g)] = solved[int(g)]
+            value = float(solved[int(g)])
+            scales[int(g)] = value if np.isfinite(value) and value > 1e-20 else global_scale
 
         for _ in range(int(n_iter)):
             diag_sums = np.zeros(len(unique_groups), dtype=float)
             x_y_sums = np.zeros(len(unique_groups), dtype=float)
             for j, g in enumerate(unique_groups):
-                fit = (groups == g) & fit_mask & np.isfinite(obs) & np.isfinite(sig) & np.isfinite(pred) & (pred > 0)
+                fit = (groups == g) & _scale_fit_mask(obs, sig, pred, fit_mask)
                 if np.count_nonzero(fit) >= 2:
                     x = pred[fit]
                     y = obs[fit]
@@ -593,7 +634,8 @@ def fit_group_scales(obs, sig, pred, groups, fit_mask, wght_a: float, wght_b: fl
             for g in unique_groups:
                 max_diff = max(max_diff, abs(solved[int(g)] - scales[int(g)]) / max(1.0, abs(scales[int(g)])))
             for g in unique_groups:
-                scales[int(g)] = solved[int(g)]
+                value = float(solved[int(g)])
+                scales[int(g)] = value if np.isfinite(value) and value > 1e-20 else global_scale
             if max_diff <= 1e-8:
                 break
 
@@ -602,22 +644,23 @@ def fit_group_scales(obs, sig, pred, groups, fit_mask, wght_a: float, wght_b: fl
             scaled[apply] = pred[apply] * scales[int(g)]
     else:
         for g in unique_groups:
-            fit = (groups == g) & fit_mask & np.isfinite(obs) & np.isfinite(sig) & np.isfinite(pred) & (pred > 0)
+            fit = (groups == g) & _scale_fit_mask(obs, sig, pred, fit_mask)
             apply = (groups == g) & np.isfinite(pred)
             if np.count_nonzero(fit) < 2:
-                scales[int(g)] = 0.0
+                scales[int(g)] = global_scale
+                scaled[apply] = pred[apply] * global_scale
                 continue
             x = pred[fit]
             y = obs[fit]
             sfit = sig[fit]
             w = 1.0 / np.maximum(sfit * sfit, 1e-30)
             scale = float(np.sum(w * x * y) / max(np.sum(w * x * x), 1e-30))
-            scale = max(scale, 0.0)
+            scale = scale if np.isfinite(scale) and scale > 1e-20 else global_scale
             for _ in range(int(n_iter)):
                 pcalc = scale * x
                 w = shelx_weights(y, sfit, pcalc, wght_a, wght_b)
                 new_scale = float(np.sum(w * x * y) / max(np.sum(w * x * x), 1e-30))
-                new_scale = max(new_scale, 0.0)
+                new_scale = new_scale if np.isfinite(new_scale) and new_scale > 1e-20 else global_scale
                 if abs(new_scale - scale) <= 1e-8 * max(1.0, abs(scale)):
                     scale = new_scale
                     break
@@ -628,12 +671,21 @@ def fit_group_scales(obs, sig, pred, groups, fit_mask, wght_a: float, wght_b: fl
 
 
 def fit_frame_detector_scales(obs, sig, pred, groups, det_bins, fit_mask, wght_a: float, wght_b: float, n_iter: int = 12, scale_smoothness: float = 0.0):
+    obs = np.asarray(obs, dtype=float)
+    sig = np.asarray(sig, dtype=float)
+    pred = np.asarray(pred, dtype=float)
+    groups = np.asarray(groups)
+    det_bins = np.asarray(det_bins)
+    fit_mask = np.asarray(fit_mask, dtype=bool)
+    if not (len(obs) == len(sig) == len(pred) == len(groups) == len(det_bins) == len(fit_mask)):
+        raise ValueError("observation, sigma, prediction, scale-group, detector-bin, and fit-mask lengths differ")
     scaled = np.full_like(pred, np.nan, dtype=float)
     frame_scales: dict[int, float] = {}
     det_scales: dict[int, float] = {}
-    good = fit_mask & np.isfinite(obs) & np.isfinite(sig) & np.isfinite(pred) & (pred > 0)
-    unique_groups = np.asarray(sorted(np.unique(groups[np.isfinite(groups) & good])), dtype=int)
-    unique_det = np.asarray(sorted(np.unique(det_bins[np.isfinite(det_bins) & good])), dtype=int)
+    good = _scale_fit_mask(obs, sig, pred, fit_mask)
+    global_scale = _fit_global_scale(obs, sig, pred, fit_mask, wght_a, wght_b, n_iter)
+    unique_groups = np.asarray(sorted(np.unique(groups[np.isfinite(groups)])), dtype=int)
+    unique_det = np.asarray(sorted(np.unique(det_bins[np.isfinite(det_bins)])), dtype=int)
     if len(unique_groups) == 0 or len(unique_det) == 0:
         return scaled, frame_scales, det_scales
     gmap = {int(g): i for i, g in enumerate(unique_groups)}
@@ -642,15 +694,14 @@ def fit_frame_detector_scales(obs, sig, pred, groups, det_bins, fit_mask, wght_a
     di = np.asarray([dmap.get(int(d), -1) for d in det_bins], dtype=int)
     frame = np.ones(len(unique_groups), dtype=float)
     det = np.ones(len(unique_det), dtype=float)
-    global_scale = float(np.sum(pred[good] * obs[good]) / max(np.sum(pred[good] * pred[good]), 1e-30))
-    frame[:] = max(global_scale, 1e-30)
+    frame[:] = global_scale
     det[:] = 1.0
     for _ in range(int(n_iter)):
         base = pred * det[np.maximum(di, 0)]
         if scale_smoothness > 0.0:
             diag_sums = np.zeros(len(unique_groups), dtype=float)
             x_y_sums = np.zeros(len(unique_groups), dtype=float)
-            for j, g in enumerate(unique_groups):
+            for j, _g in enumerate(unique_groups):
                 m = good & (gi == j) & np.isfinite(base) & (base > 0)
                 if np.count_nonzero(m) >= 2:
                     x = base[m]
@@ -661,9 +712,10 @@ def fit_frame_detector_scales(obs, sig, pred, groups, det_bins, fit_mask, wght_a
                     x_y_sums[j] = np.sum(w * x * y)
             solved_scales = solve_regularized_scales(diag_sums, x_y_sums, unique_groups, scale_smoothness)
             for j, g in enumerate(unique_groups):
-                frame[j] = solved_scales[int(g)]
+                value = float(solved_scales[int(g)])
+                frame[j] = value if np.isfinite(value) and value > 1e-20 else global_scale
         else:
-            for j, g in enumerate(unique_groups):
+            for j, _g in enumerate(unique_groups):
                 m = good & (gi == j) & np.isfinite(base) & (base > 0)
                 if np.count_nonzero(m) < 2:
                     continue
@@ -673,7 +725,7 @@ def fit_frame_detector_scales(obs, sig, pred, groups, det_bins, fit_mask, wght_a
                 w = shelx_weights(y, sfit, x * frame[j], wght_a, wght_b)
                 frame[j] = max(float(np.sum(w * x * y) / max(np.sum(w * x * x), 1e-30)), 1e-30)
         base = pred * frame[np.maximum(gi, 0)]
-        for j, d in enumerate(unique_det):
+        for j, _d in enumerate(unique_det):
             m = good & (di == j) & np.isfinite(base) & (base > 0)
             if np.count_nonzero(m) < 10:
                 continue
@@ -694,9 +746,15 @@ def fit_frame_detector_scales(obs, sig, pred, groups, det_bins, fit_mask, wght_a
 
 
 def native_metrics(obs, sig, pred, mask, wght_a: float, wght_b: float, n_params: int = 0):
-    m = np.asarray(mask, dtype=bool) & np.isfinite(obs) & np.isfinite(sig) & np.isfinite(pred)
+    m = (
+        np.asarray(mask, dtype=bool)
+        & np.isfinite(obs)
+        & np.isfinite(sig)
+        & (np.asarray(sig, dtype=float) > 0.0)
+        & np.isfinite(pred)
+    )
     obs_m = obs[m]
-    sig_m = np.maximum(sig[m], 1e-12)
+    sig_m = sig[m]
     pred_m = pred[m]
     if len(obs_m) == 0:
         return {"n": 0, "n_gt": 0, "R1_all": float("nan"), "R1_gt": float("nan"), "R2_all": float("nan"), "wR2_all": float("nan"), "GooF": float("nan"), "mean_weighted_abs_residual": float("nan"), "CC": float("nan")}
@@ -733,9 +791,16 @@ def native_metrics(obs, sig, pred, mask, wght_a: float, wght_b: float, n_params:
 
 
 def prediction_cache_key(data: XDSData, hkl: Path, res: Path, cfg: Config, indices, model_tag: str = "original"):
+    scan_matrix_path = getattr(data, "a_scan_points_path", None)
+    scan_matrix_sha256 = ""
+    if scan_matrix_path:
+        scan_matrix_path = Path(scan_matrix_path)
+        if scan_matrix_path.exists():
+            scan_matrix_sha256 = sha256(scan_matrix_path)
     payload = {
-        "cache_schema": 2,
+        "cache_schema": PREDICTION_CACHE_SCHEMA,
         "hkl_sha256": sha256(hkl),
+        "scan_matrix_sha256": scan_matrix_sha256,
         "res_sha256": sha256(res),
         "model_tag": str(model_tag),
         "hkl_transform": str(getattr(data, "hkl_transform_spec", "identity")),
@@ -784,6 +849,9 @@ def read_prediction_cache(path: Path) -> dict:
     pred = {}
     skipped = []
     with np.load(path, allow_pickle=False) as loaded:
+        if "meta_json" not in loaded.files:
+            raise ValueError(f"prediction cache {path} has no metadata")
+        pred["prediction_cache_meta"] = json.loads(str(loaded["meta_json"]))
         for key in loaded.files:
             if key == "meta_json":
                 continue
@@ -805,19 +873,54 @@ def read_prediction_cache(path: Path) -> dict:
     return pred
 
 
+def prediction_cache_validation_errors(pred: dict, payload: dict, indices) -> list[str]:
+    """Return reasons a prediction cache cannot satisfy the requested calculation."""
+
+    errors = []
+    meta = pred.get("prediction_cache_meta")
+    if meta != payload:
+        errors.append("metadata does not match the requested prediction contract")
+    expected_indices = np.asarray(indices, dtype=np.int64)
+    cached_indices = np.asarray(pred.get("indices", []), dtype=np.int64)
+    if not np.array_equal(cached_indices, expected_indices):
+        errors.append("cached row indices differ")
+    for key in ("dyn", "born"):
+        values = np.asarray(pred.get(key, []))
+        if values.shape != (len(expected_indices),):
+            errors.append(f"{key} has shape {values.shape}, expected {(len(expected_indices),)}")
+        elif not np.all(np.isfinite(values)) or np.any(values < 0.0):
+            errors.append(f"{key} contains non-finite or negative predictions")
+    if "basis_size" in pred:
+        basis_size = np.asarray(pred["basis_size"])
+        if basis_size.shape != (len(expected_indices),) or np.any(basis_size < 2):
+            errors.append("basis_size is incomplete or invalid")
+    return errors
+
+
 def predict_with_cache(data, model, res_hash, hkl_path, res_path, cfg, indices, cache_dir: Path, workers: int, chunksize: int, model_tag: str = "original", cache_compression: str = "compressed"):
     cache_dir.mkdir(parents=True, exist_ok=True)
     key, payload = prediction_cache_key(data, hkl_path, res_path, cfg, indices, model_tag=model_tag)
     path = cache_dir / f"native_pred_{key}.npz"
     if path.exists():
-        pred = read_prediction_cache(path)
-        pred["cache_status"] = "hit"
-        pred["cache_path"] = str(path)
-        return pred
+        try:
+            pred = read_prediction_cache(path)
+            errors = prediction_cache_validation_errors(pred, payload, indices)
+            if not errors:
+                pred.pop("prediction_cache_meta", None)
+                pred["cache_status"] = "hit"
+                pred["cache_path"] = str(path)
+                return pred
+            print(f"Ignoring stale prediction cache {path}: {'; '.join(errors)}", flush=True)
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            print(f"Ignoring unreadable prediction cache {path}: {type(exc).__name__}: {exc}", flush=True)
     ug_cache_dir = runtime_cache_dir("native_row_regularize", "ug")
     port = XDSBlochPort(data, model, cfg, cache_dir=ug_cache_dir, res_hash=res_hash)
     pred = port.predict_rows(indices, workers=workers, chunksize=chunksize)
     save = cacheable_prediction_arrays(pred)
+    validation_view = {**save, "prediction_cache_meta": payload}
+    errors = prediction_cache_validation_errors(validation_view, payload, indices)
+    if errors:
+        raise ValueError(f"new prediction cache failed validation: {'; '.join(errors)}")
     write_prediction_cache(path, save, payload, cache_compression)
     pred["cache_status"] = "built"
     pred["cache_path"] = str(path)
@@ -844,7 +947,7 @@ def resolution_shell_bins(data: XDSData, valid, shell_count: int) -> np.ndarray:
     quantiles = np.linspace(0.0, 1.0, n_shells + 1)
     edges = np.quantile(values, quantiles)
     edges = np.maximum.accumulate(edges)
-    for i, val in zip(np.where(finite)[0], inv_d[finite]):
+    for i, val in zip(np.where(finite)[0], inv_d[finite], strict=True):
         shell = int(np.searchsorted(edges, val, side="right") - 1)
         bins[i] = min(max(shell, 0), n_shells - 1)
     return bins
@@ -947,11 +1050,27 @@ def evaluate_trial(data, target, base_sig, pred, indices, masks, nui: Nuisance, 
     use_wght_a = float(nui.native_wght_a) if np.isfinite(float(nui.native_wght_a)) else float(wght_a)
     use_wght_b = float(nui.native_wght_b) if np.isfinite(float(nui.native_wght_b)) else float(wght_b)
     q_control_meta = {}
-    valid = np.isfinite(dyn) & np.isfinite(born) & (dyn > 0.0) & (born > 0.0)
+    valid = (
+        np.isfinite(target)
+        & np.isfinite(sig)
+        & (sig > 0.0)
+        & np.isfinite(dyn)
+        & np.isfinite(born)
+        & (dyn > 0.0)
+        & (born > 0.0)
+    )
     dyn, q_control_meta = apply_q_control(data, dyn, born, valid, groups, q_control_args)
     row_mod, row_mod_meta = row_resolution_modulation(data, valid, nui.row_resolution_b)
     dyn = dyn * row_mod
-    valid = np.isfinite(dyn) & np.isfinite(born) & (dyn > 0.0) & (born > 0.0)
+    valid = (
+        np.isfinite(target)
+        & np.isfinite(sig)
+        & (sig > 0.0)
+        & np.isfinite(dyn)
+        & np.isfinite(born)
+        & (dyn > 0.0)
+        & (born > 0.0)
+    )
     if scale_fit_split not in masks:
         raise ValueError(f"unknown scale_fit_split={scale_fit_split!r}; choices are {sorted(masks)}")
     scale_fit = masks[scale_fit_split] & valid
@@ -1071,7 +1190,14 @@ def geometry_tail_mask(data: XDSData, base_mask, percentile: float = 100.0):
 
 
 def row_selection(data: XDSData, target, positive_only: bool, min_d: float, min_peak: float, max_rows: int = 0, geometry_percentile: float = 100.0):
-    mask = np.ones(len(target), dtype=bool)
+    mask = (
+        np.isfinite(target)
+        & np.isfinite(data.sigma)
+        & (np.asarray(data.sigma, dtype=float) > 0.0)
+        & np.isfinite(data.zcal)
+        & np.isfinite(data.rlp)
+        & (np.asarray(data.rlp, dtype=float) > 0.0)
+    )
     if positive_only:
         mask &= target > 0.0
     if min_peak > 0:
@@ -1083,7 +1209,37 @@ def row_selection(data: XDSData, target, positive_only: bool, min_d: float, min_
     mask &= geom_keep
     idx = np.where(mask)[0]
     if max_rows > 0 and len(idx) > max_rows:
-        idx = idx[: int(max_rows)]
+        n_bins = max(1, min(10, int(math.sqrt(int(max_rows)))))
+        dvals = np.asarray(
+            [data.cell.calculate_d(tuple(int(v) for v in data.hkl[i])) for i in idx],
+            dtype=float,
+        )
+        frames = np.asarray(data.zcal[idx], dtype=float)
+        isigi = np.asarray(target[idx], dtype=float) / np.asarray(data.sigma[idx], dtype=float)
+
+        def rank_bins(values):
+            order = np.argsort(values, kind="mergesort")
+            bins = np.empty(len(values), dtype=int)
+            bins[order] = np.minimum(n_bins - 1, np.arange(len(values)) * n_bins // len(values))
+            return bins
+
+        frame_bins = rank_bins(frames)
+        resolution_bins = rank_bins(1.0 / np.maximum(dvals, 1e-12))
+        strata = {}
+        for local, row_idx in enumerate(idx):
+            strata.setdefault((int(frame_bins[local]), int(resolution_bins[local])), []).append(
+                (float(isigi[local]), int(row_idx))
+            )
+        queues = [
+            [row_idx for _score, row_idx in sorted(rows, key=lambda item: (item[0], -item[1]))]
+            for _key, rows in sorted(strata.items())
+        ]
+        selected = []
+        while len(selected) < int(max_rows) and any(queues):
+            for queue in queues:
+                if queue and len(selected) < int(max_rows):
+                    selected.append(queue.pop())
+        idx = np.asarray(selected, dtype=int)
     return idx
 
 
@@ -1249,18 +1405,25 @@ def run_shelxl(work_dir: Path, stem: str, iterations: int = 1, wght_mode: str = 
     for i in range(n_iter):
         if freeze_zero:
             write_active_wght(work_dir / f"{stem}.ins", 0.0, 0.0)
+        res = work_dir / f"{stem}.res"
+        lst = work_dir / f"{stem}.lst"
+        res.unlink(missing_ok=True)
+        lst.unlink(missing_ok=True)
         proc = subprocess.run([exe, stem], cwd=str(work_dir), text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         last_proc = proc
         (work_dir / f"shelxl_iter_{i + 1}.log").write_text(proc.stdout)
-        lst = work_dir / f"{stem}.lst"
         stats = {"iteration": i + 1, "returncode": proc.returncode, **parse_lst(lst)}
         recommended_wght = parse_recommended_wght(lst)
         if recommended_wght is not None:
             stats["recommended_wght_a"] = recommended_wght[0]
             stats["recommended_wght_b"] = recommended_wght[1]
         history.append(stats)
-        res = work_dir / f"{stem}.res"
         ins = work_dir / f"{stem}.ins"
+        if proc.returncode != 0:
+            stats["status"] = "shelxl_failed"
+            stats["invalid_res_reason"] = f"SHELXL returned {proc.returncode}"
+            stats["res_health"] = shelx_res_health(res, lst)
+            break
         health = shelx_res_health(res, lst)
         stats["res_health"] = health
         if not health["ok"]:
@@ -1284,7 +1447,10 @@ def run_shelxl(work_dir: Path, stem: str, iterations: int = 1, wght_mode: str = 
         (work_dir / "shelxl_stdout.log").write_text(last_proc.stdout)
     final = dict(history[-1]) if history else {"returncode": None, "status": "not_run"}
     final.setdefault("res_health", shelx_res_health(work_dir / f"{stem}.res", work_dir / f"{stem}.lst"))
-    if not final["res_health"].get("ok"):
+    if final.get("returncode") not in {None, 0}:
+        final["status"] = "shelxl_failed"
+        final["invalid_res_reason"] = f"SHELXL returned {final['returncode']}"
+    elif not final["res_health"].get("ok"):
         final["status"] = "invalid_res_output"
         final["invalid_res_reason"] = final["res_health"].get("reason")
     else:
@@ -1396,10 +1562,9 @@ def export_corrected_endpoint(
     out_dir.mkdir(parents=True, exist_ok=True)
     arrays = best_eval["arrays"]
     q = arrays["dyn_raw"] / np.maximum(arrays["born_raw"], 1e-30)
-    valid = arrays["valid"] & np.isfinite(q) & (q > 0)
     q_clip = np.clip(q, 0.05, 20.0)
     groups = arrays["groups"]
-    scales = np.ones(len(target), dtype=float)
+    scales = np.full(len(target), np.nan, dtype=float)
     for g, scale in best_eval["dyn_scales"].items():
         scales[groups == int(g)] = float(scale)
     if best_eval.get("dyn_detector_scales"):
@@ -1407,7 +1572,21 @@ def export_corrected_endpoint(
         if det_bins is not None:
             for d, scale in best_eval["dyn_detector_scales"].items():
                 scales[det_bins == int(d)] *= float(scale)
-    denom = np.maximum(scales * (q_clip ** float(lambda_q)), 1e-30)
+    valid = (
+        arrays["valid"]
+        & np.isfinite(target)
+        & np.isfinite(sig)
+        & (np.asarray(sig, dtype=float) > 0.0)
+        & np.isfinite(arrays["dyn_scaled"])
+        & (arrays["dyn_scaled"] > 0.0)
+        & np.isfinite(q)
+        & (q > 0.0)
+        & np.isfinite(scales)
+        & (scales > 0.0)
+    )
+    if not np.any(valid):
+        raise ValueError("no finite rows with positive sigma, prediction, and fitted scale are available for endpoint export")
+    denom = scales * (q_clip ** float(lambda_q))
     Icorr = target / denom
     sigcorr = sig / denom
     modulation, modulation_meta = endpoint_resolution_modulation(data, valid, endpoint_b)
@@ -1626,6 +1805,12 @@ def trial_metric(trial, metric_name: str) -> float:
     return float(trial["metrics"][split]["dyn"][key])
 
 
+def rank_trials(trials, metric_name: str):
+    """Rank nuisance trials without using held-out rows as an implicit tie-breaker."""
+
+    return sorted(trials, key=lambda trial: trial_metric(trial, metric_name))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--hkl", default=str(DEFAULT_HKL))
@@ -1765,11 +1950,16 @@ def main():
         base_pre_geom &= dvals_for_geom >= args.min_d_spacing
     _geom_keep, geometry_summary = geometry_tail_mask(data, base_pre_geom, args.geometry_percentile)
     indices = row_selection(data, target, args.positive_only, args.min_d_spacing, args.min_peak, args.max_rows, args.geometry_percentile)
-    masks = split_masks(data.hkl, args.free_fraction, args.split_seed)
+    model = parse_model(Path(args.res))
+    masks = split_masks(
+        data.hkl,
+        args.free_fraction,
+        args.split_seed,
+        symmetry_ops=model.get("symmetry_ops"),
+    )
     selected_mask = np.zeros(len(target), dtype=bool)
     selected_mask[indices] = True
     masks = {k: v & selected_mask for k, v in masks.items()}
-    model = parse_model(Path(args.res))
     model_tag = "alternate_fractional_xyz" if args.alternate_hand else "original"
     model_tag = f"{model_tag};hkl_transform={data.hkl_transform_spec}"
     if args.alternate_hand:
@@ -1946,7 +2136,8 @@ def main():
                                                             ev["prediction_cache"] = {"status": pred.get("cache_status"), "path": pred.get("cache_path")}
                                                             all_trials.append(ev)
 
-    best = min(all_trials, key=lambda e: (trial_metric(e, args.selection_metric), e["metrics"]["free"]["dyn"]["wR2_all"]))
+    all_trials_sorted = rank_trials(all_trials, args.selection_metric)
+    best = all_trials_sorted[0]
     if args.fail_if_born_r1gt_above > 0.0 and best["metrics"]["all"]["born"]["R1_gt"] > float(args.fail_if_born_r1gt_above):
         failure = {
             "reason": "matched_born_gate_failed",
@@ -1965,7 +2156,6 @@ def main():
             f"matched Born gate failed: R1gt={failure['born_R1_gt']:.4f} > "
             f"{failure['threshold_R1_gt']:.4f}; hkl_transform={data.hkl_transform_spec}"
         )
-    all_trials_sorted = sorted(all_trials, key=lambda e: (trial_metric(e, args.selection_metric), e["metrics"]["free"]["dyn"]["wR2_all"]))
     rows = [metric_row(t) for t in all_trials_sorted]
     with (out / "nuisance_trials.csv").open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
@@ -2154,11 +2344,34 @@ def main():
                 n_basis=args.n_basis,
                 n_points=args.n_points,
                 sg_window=args.sg_window,
+                sg_window_mode=args.sg_window_mode,
+                sg_window_min=args.sg_window_min,
+                sg_window_max=args.sg_window_max,
+                sg_window_scale=args.sg_window_scale,
+                sg_window_frame_floor=args.sg_window_frame_floor,
+                sg_jitter_mode=best["nuisance"]["sg_jitter_mode"],
+                sg_jitter_sigma0=best["nuisance"]["sg_jitter_sigma0"],
+                sg_jitter_sigma_d_inv=best["nuisance"]["sg_jitter_sigma_d_inv"],
+                sg_jitter_sigma_frame=best["nuisance"]["sg_jitter_sigma_frame"],
+                sg_jitter_points=args.sg_jitter_points,
+                sg_jitter_student_df=args.sg_jitter_student_df,
+                sg_jitter_width_factor=args.sg_jitter_width_factor,
                 profile_quadrature=args.profile_quadrature,
                 profile_accumulation=args.profile_accumulation,
+                topup_d_min=effective_topup_d_min,
+                max_support_sg=args.max_support_sg,
+                thickness_A=best["nuisance"]["thickness_A"],
                 thickness_model=best["nuisance"]["thickness_model"],
                 thickness_grad_frac=best["nuisance"]["thickness_grad_frac"],
                 thickness_sigma_frac=best["nuisance"]["thickness_sigma_frac"],
+                thickness_points=args.thickness_points,
+                group_width_deg=best["nuisance"]["group_width_deg"],
+                free_fraction=args.free_fraction,
+                split_seed=args.split_seed,
+                variance_a=best["nuisance"]["variance_a"],
+                variance_b_corr=best["nuisance"]["variance_b_corr"],
+                variance_c_peak=best["nuisance"]["variance_c_peak"],
+                frame_offset=best["nuisance"]["frame_offset"],
                 absorption_mode=best["nuisance"]["absorption_mode"],
                 absorption_mu=best["nuisance"]["absorption_mu"],
                 absorption_frac=best["nuisance"]["absorption_frac"],
@@ -2168,7 +2381,15 @@ def main():
                 dose_b_mode=best["nuisance"]["dose_b_mode"],
                 dose_b_per_frame=best["nuisance"]["dose_b_per_frame"],
                 dose_b_ref_frame=best["nuisance"]["dose_b_ref_frame"],
+                compute_backend=args.compute_backend,
+                jax_batch_size=args.jax_batch_size,
+                jax_matrix_bucket_size=args.jax_matrix_bucket_size,
+                bethe_strong_count=args.bethe_strong_count,
+                bethe_variant=args.bethe_variant,
+                bethe_promote_denom=args.bethe_promote_denom,
+                bethe_denom_eps=args.bethe_denom_eps,
                 matrix_convention=args.matrix_convention,
+                row_plan_cache=args.row_plan_cache,
             )
         ),
         "row_selection": {

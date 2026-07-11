@@ -13,8 +13,6 @@ import argparse
 import csv
 import json
 import math
-import os
-import re
 import shutil
 import subprocess
 from collections import defaultdict
@@ -610,10 +608,7 @@ def summary_metadata(rows: list[dict], model: dict, run_summaries: list[dict]) -
             return "n/a"
         out = []
         for value in values:
-            if isinstance(value, str):
-                text = value
-            else:
-                text = fmt_float(value, digits)
+            text = value if isinstance(value, str) else fmt_float(value, digits)
             if text not in out:
                 out.append(text)
         return ", ".join(out)

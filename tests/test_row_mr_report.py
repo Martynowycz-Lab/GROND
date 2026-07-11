@@ -37,7 +37,7 @@ def test_row_mr_report_cli_writes_markdown_tex_and_json(tmp_path: Path):
                 "TITL test",
                 "CELL 0.02508 10 11 12 90 90 90",
                 "LATT 1",
-                "SFAC C 0 0 0 0 0 0 0 0 0",
+                "SFAC C 1 0 0 0 0 0 0 0 0",
                 "UNIT 1",
                 "C1 1 0.1 0.2 0.3 11.0 0.05",
                 "HKLF 4",

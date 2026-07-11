@@ -30,6 +30,7 @@ are explicit raw-image observation contracts that can be audited row by row.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import glob
 import gzip
 import json
@@ -37,28 +38,59 @@ import math
 import re
 from pathlib import Path
 
-import fabio
 import gemmi
 import numpy as np
 
-from dynrow_contract import (
-    DYNROW_SCHEMA_VERSION,
-    FROZEN_ENGINE_CONTRACT,
-    FROZEN_ENGINE_CONTRACT_VERSION,
-    contract_metadata,
-    frame_contract_fields,
-    observation_contract_fields,
-    summarize_contract_validation,
-)
-from bloch_engine import (
-    Config,
-    XDSBlochPort,
-    XDSData,
-    parse_model,
-    parse_res,
-    rotation_matrix,
-    sha256,
-)
+if __package__:
+    from .bloch_engine import (
+        Config,
+        XDSBlochPort,
+        XDSData,
+        parse_model,
+        parse_res,
+        rotation_matrix,
+        sha256,
+    )
+    from .dynrow_contract import (
+        DYNROW_SCHEMA_VERSION,
+        FROZEN_ENGINE_CONTRACT,
+        FROZEN_ENGINE_CONTRACT_VERSION,
+        contract_metadata,
+        frame_contract_fields,
+        observation_contract_fields,
+        summarize_contract_validation,
+    )
+else:  # pragma: no cover - direct script execution
+    from bloch_engine import (
+        Config,
+        XDSBlochPort,
+        XDSData,
+        parse_model,
+        parse_res,
+        rotation_matrix,
+        sha256,
+    )
+    from dynrow_contract import (
+        DYNROW_SCHEMA_VERSION,
+        FROZEN_ENGINE_CONTRACT,
+        FROZEN_ENGINE_CONTRACT_VERSION,
+        contract_metadata,
+        frame_contract_fields,
+        observation_contract_fields,
+        summarize_contract_validation,
+    )
+
+
+def require_fabio():
+    """Load the optional raw-image reader when this workflow is used."""
+    try:
+        import fabio
+    except ImportError as exc:  # pragma: no cover - depends on optional install
+        raise RuntimeError(
+            "Raw CBF extraction requires the optional 'fabio' dependency. "
+            "Install it with: pip install 'grond[raw]'"
+        ) from exc
+    return fabio
 
 
 def header_vector(data: XDSData, key: str, default=None):
@@ -87,10 +119,8 @@ def header_detector_geometry(data: XDSData):
     for i, tok in enumerate(tokens):
         u = tok.upper()
         if i == 0:
-            try:
+            with contextlib.suppress(ValueError):
                 nx = int(float(tok))
-            except ValueError:
-                pass
         elif u == "NY" and i + 1 < len(tokens):
             ny = int(float(tokens[i + 1]))
         elif u == "QX" and i + 1 < len(tokens):
@@ -218,8 +248,12 @@ def frame_geometry_record(
         "wavelength_A": float(data.wavelength),
         "k_inv_A": float(data.k),
         "s0_lab": data.s0.astype(float).tolist(),
-        "rotation_axis_lab": data.axis.astype(float).tolist(),
-        "UB": data.A.astype(float).tolist(),
+        "rotation_axis_lab": data.rotation_axis_lab.astype(float).tolist(),
+        "UB": (
+            data.setting_rotation
+            @ data.fixed_rotation
+            @ data.A_for_omega(angle)
+        ).astype(float).tolist(),
         "detector_origin_mm": detector["detector_origin_mm"],
         "detector_fast_axis": detector["detector_fast_axis"],
         "detector_slow_axis": detector["detector_slow_axis"],
@@ -241,12 +275,24 @@ def frame_geometry_record(
     }
 
 
+def gvec_for_hkl(data: XDSData, hkl, omega_deg: float) -> np.ndarray:
+    """Map one signed HKL through the complete S R F A geometry chain."""
+
+    return (
+        data.setting_rotation
+        @ rotation_matrix(data.axis, omega_deg)
+        @ data.fixed_rotation
+        @ data.A_for_omega(omega_deg)
+        @ np.asarray(hkl, dtype=float)
+    )
+
+
 def replay_detector_xy(data: XDSData, hkl, omega_deg: float, detector: dict):
     fast = np.asarray(detector["detector_fast_axis"], dtype=float)
     slow = np.asarray(detector["detector_slow_axis"], dtype=float)
     origin = np.asarray(detector["detector_origin_mm"], dtype=float)
     qx, qy = [float(v) for v in detector["pixel_size_mm"]]
-    g = rotation_matrix(data.axis, omega_deg) @ data.A @ np.asarray(hkl, dtype=float)
+    g = gvec_for_hkl(data, hkl, omega_deg)
     ray = data.s0 + g
     mat = np.stack([fast, slow, -ray], axis=1)
     try:
@@ -271,7 +317,7 @@ def geometry_replay_summary(
         z_center = float(data.zcal[idx]) + float(calibration_by_idx.get(int(idx), 0.0))
         omega = float(data.omega_from_z(z_center))
         hkl = data.hkl[idx]
-        g = rotation_matrix(data.axis, omega) @ data.A @ np.asarray(hkl, dtype=float)
+        g = gvec_for_hkl(data, hkl, omega)
         sg = (data.k**2 - float(np.sum((data.s0 + g) ** 2))) / (2.0 * data.k)
         x_pred, y_pred = replay_detector_xy(data, hkl, omega, detector)
         sg_abs.append(abs(float(sg)))
@@ -311,6 +357,7 @@ class FrameCache:
         self.cbf_dir = Path(cbf_dir)
         self.pattern = pattern
         self.max_items = int(max_items)
+        self._fabio = require_fabio()
         self.cache = {}
         self.order = []
 
@@ -321,7 +368,7 @@ class FrameCache:
         path = default_frame_path(self.cbf_dir, frame, self.pattern)
         if not path.exists():
             return None, path
-        arr = fabio.open(str(path)).data.astype(np.float32)
+        arr = self._fabio.open(str(path)).data.astype(np.float32)
         self.cache[frame] = (arr, path)
         self.order.append(frame)
         while len(self.order) > self.max_items:
@@ -442,7 +489,7 @@ class BlochRockingProfileModel:
         if float(np.max(arr)) <= 0.0:
             arr = np.ones_like(arr, dtype=float)
         arr /= max(float(np.max(arr)), 1e-30)
-        out = {int(frame): float(v) for frame, v in zip(frames, arr)}
+        out = {int(frame): float(v) for frame, v in zip(frames, arr, strict=False)}
         self._cache[key] = dict(out)
         return out
 
@@ -804,7 +851,6 @@ def integrate_observation(cache: FrameCache, data: XDSData, row_idx: int, args, 
     centroid_resid = math.sqrt(
         (x_centroid - xcal) ** 2 + (y_centroid - ycal) ** 2 + (z_centroid - zcal) ** 2
     )
-    max_fg_by_frame = max((p["n_foreground_pixels"] for p in profile), default=0)
     observed_profile_fraction = float(n_fg_valid / max(n_fg_possible, 1))
     return (
         {
@@ -915,7 +961,7 @@ def z_from_omega(data: XDSData, omega_deg: float) -> float:
 
 
 def sg_for_hkl(data: XDSData, hkl, omega_deg: float) -> float:
-    g = rotation_matrix(data.axis, omega_deg) @ data.A @ np.asarray(hkl, dtype=float)
+    g = gvec_for_hkl(data, hkl, omega_deg)
     return float((data.k**2 - float(np.sum((data.s0 + g) ** 2))) / (2.0 * data.k))
 
 
@@ -1007,7 +1053,7 @@ def fit_geometry_calibration(
     omega0 = np.asarray([float(data.omega_from_z(z)) for z in zcal], dtype=float)
     zero_angles = []
     zero_resid = []
-    for idx, om in zip(row_indices, omega0):
+    for idx, om in zip(row_indices, omega0, strict=False):
         angle, resid = solve_zero_sg_angle(data, data.hkl[idx], om)
         zero_angles.append(angle)
         zero_resid.append(resid)
@@ -1081,7 +1127,7 @@ def fit_geometry_calibration(
                 break
     selected_deltas = candidates[selected]
     calibration_by_idx = {
-        int(idx): float(delta) for idx, delta in zip(row_indices, selected_deltas)
+        int(idx): float(delta) for idx, delta in zip(row_indices, selected_deltas, strict=False)
     }
     return {
         "enabled": requested_model != "none",
@@ -1202,8 +1248,12 @@ def observation_group_record(
         "wavelength_A": float(data.wavelength),
         "k_inv_A": float(data.k),
         "s0_lab": data.s0.astype(float).tolist(),
-        "rotation_axis_lab": data.axis.astype(float).tolist(),
-        "UB": data.A.astype(float).tolist(),
+        "rotation_axis_lab": data.rotation_axis_lab.astype(float).tolist(),
+        "UB": (
+            data.setting_rotation
+            @ data.fixed_rotation
+            @ data.A_for_omega(center_angle)
+        ).astype(float).tolist(),
         "detector_origin_mm": detector["detector_origin_mm"],
         "detector_fast_axis": detector["detector_fast_axis"],
         "detector_slow_axis": detector["detector_slow_axis"],
@@ -1635,7 +1685,7 @@ def write_xds_like(
                 "!RAW_DYNROWS_TARGET_DEFINITION= IOBS=I_raw_sum*RLP/(PEAK/100) SIGMA=sigma_raw_sum*RLP/(PEAK/100)\n"
             )
         f.write("!END_OF_HEADER\n")
-        for idx, integ in zip(row_indices, integrations):
+        for idx, integ in zip(row_indices, integrations, strict=False):
             if target_mode == "recorded_raw":
                 iobs = float(integ["I_raw_sum"])
                 sig = float(integ["sigma_raw_sum"])
@@ -2178,7 +2228,7 @@ def main():
     )
     dynrow_records = [
         observation_record(data, idx, integration, args, observation_group_assignment)
-        for idx, integration in zip(written_indices, integrations)
+        for idx, integration in zip(written_indices, integrations, strict=False)
     ]
     mark_overlap_flags(dynrow_records, args.overlap_xy_px, args.overlap_z_frames)
     contract_validation = summarize_contract_validation(dynrow_records)
@@ -2193,7 +2243,7 @@ def main():
         dynrow_records, quality_mask_path, geometry_calibration, args
     )
     with gzip.open(shoebox_path, "wt") as f:
-        for idx, rec, integration in zip(written_indices, dynrow_records, integrations):
+        for idx, rec, integration in zip(written_indices, dynrow_records, integrations, strict=False):
             f.write(
                 json.dumps(
                     {
@@ -2266,7 +2316,7 @@ def main():
     sig_i = np.asarray([r["sigma_Iobs_raw"] for r in integrations], dtype=float)
     complete_i = []
     complete_sig = []
-    for idx, integ in zip(written_indices, integrations):
+    for idx, integ in zip(written_indices, integrations, strict=False):
         peak_fraction = max(float(data.peak[idx]) / 100.0, 1e-12)
         factor = float(data.rlp[idx]) / peak_fraction
         complete_i.append(float(integ["I_raw_sum"] * factor))

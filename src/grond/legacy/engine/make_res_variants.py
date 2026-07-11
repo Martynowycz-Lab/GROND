@@ -6,8 +6,12 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from native_structure_update import update_res_coordinates
-from bloch_engine import alternate_hand_model, parse_model
+if __package__:
+    from .bloch_engine import alternate_hand_model, parse_model
+    from .native_structure_update import update_res_coordinates
+else:  # pragma: no cover - direct script execution
+    from bloch_engine import alternate_hand_model, parse_model
+    from native_structure_update import update_res_coordinates
 
 
 def sfac_elements(lines: list[str]) -> dict[int, str]:
@@ -113,10 +117,7 @@ def main() -> None:
         update_res_coordinates(src, dst, model)
         tmp = dst
     if args.remove_h:
-        if tmp == dst and args.alternate_hand:
-            src_for_strip = dst
-        else:
-            src_for_strip = src
+        src_for_strip = dst if tmp == dst and args.alternate_hand else src
         strip_hydrogens(src_for_strip, dst)
     if not args.alternate_hand and not args.remove_h:
         dst.write_text(src.read_text(errors="replace"))

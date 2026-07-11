@@ -4,11 +4,16 @@ import math
 from pathlib import Path
 
 from grond.io.config import DatasetSpec
-from grond.workflows.decision import expand_transform_candidates, preflight_dataset, score_native_summary
+from grond.workflows.decision import (
+    apply_preflight,
+    expand_transform_candidates,
+    preflight_dataset,
+    score_native_summary,
+)
 from grond.workflows.transform_metadata import metadata_prefilter_transforms
 
 
-def _write_minimal_xds(path: Path, n: int = 300) -> None:
+def _write_minimal_xds(path: Path, n: int = 300, sigma: float = 10.0) -> None:
     lines = ["!UNIT_CELL_CONSTANTS= 5 6 7 90 90 90\n"]
     for i in range(n):
         h = i % 4 + 1
@@ -22,7 +27,7 @@ def _write_minimal_xds(path: Path, n: int = 300) -> None:
             k,
             ell,
             1000.0 + i,
-            10.0,
+            sigma,
             x,
             y,
             z,
@@ -65,6 +70,47 @@ def test_preflight_keeps_healthy_minimal_xds(tmp_path: Path):
     assert decision.row_count == 300
     assert decision.scout_max_rows == 300
     assert decision.recommended_min_peak == 90.0
+
+
+def test_preflight_rejects_rows_with_negative_sigmas(tmp_path: Path):
+    hkl = tmp_path / "INTEGRATE.HKL"
+    _write_minimal_xds(hkl, sigma=-5.0)
+    ds = DatasetSpec(name="bad_sigma", hkl=str(hkl), min_peak=90.0, geometry_percentile=99.0)
+
+    decision = preflight_dataset(
+        ds,
+        requested_min_peak=90.0,
+        requested_geometry_percentile=99.0,
+        requested_scout_rows=500,
+    )
+
+    assert decision.status == "fatal"
+    assert decision.sigma_positive_fraction == 0.0
+    assert decision.scout_max_rows == 0
+    assert "few rows have finite intensity and positive sigma" in decision.warnings
+
+
+def test_apply_preflight_preserves_dataset_baseline_and_paths(tmp_path: Path):
+    hkl = tmp_path / "INTEGRATE.HKL"
+    _write_minimal_xds(hkl)
+    ds = DatasetSpec(
+        name="dataset",
+        hkl=str(hkl),
+        xds_dir=str(tmp_path),
+        baseline_hkl=str(tmp_path / "baseline.hkl"),
+        hkl_transform="-h,k,l",
+    )
+    decision = preflight_dataset(
+        ds,
+        requested_min_peak=75.0,
+        requested_geometry_percentile=97.5,
+        requested_scout_rows=500,
+    )
+    updated = apply_preflight(ds, decision)
+
+    assert updated.baseline_hkl == ds.baseline_hkl
+    assert updated.xds_dir == ds.xds_dir
+    assert updated.hkl_transform == ds.hkl_transform
 
 
 def test_metadata_transform_prefilter_promotes_hkl_overlap(tmp_path: Path):

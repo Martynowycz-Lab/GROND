@@ -18,6 +18,41 @@ GENERATED_NAME_TERMS = (
     ".pytest_cache",
 )
 
+REPOSITORY_BOUNDARY_NAME_TERMS = (
+    "exper" + "iments/",
+    "open" + "dm/",
+    "open_direct_" + "methods/",
+    "open-direct-" + "methods/",
+    "pa" + "per/",
+    "manu" + "script/",
+    "raw_" + "data/",
+    "raw-" + "data/",
+    "/raw/data/",
+    "/cache/",
+    "outputs/",
+    "grond_out/",
+)
+
+RAW_DATA_SUFFIXES = (
+    ".cbf",
+    ".eer",
+    ".expt",
+    ".h5",
+    ".hdf5",
+    ".hkl",
+    ".img",
+    ".mrc",
+    ".mrcs",
+    ".mtz",
+    ".nxs",
+    ".npy",
+    ".npz",
+    ".pickle",
+    ".pkl",
+    ".refl",
+    ".smv",
+)
+
 NON_PYTHON_PACKAGE_NAME_TERMS = (
     "package.json",
     "package-lock.json",
@@ -54,10 +89,25 @@ PACKAGE_BOUNDARY_TERMS = (
     "3D-" + "ED",
 )
 
+REPOSITORY_BOUNDARY_TEXT_TERMS = (
+    "exper" + "iments/",
+    "open" + "dm",
+    "open_direct_" + "methods",
+    "open-direct-" + "methods",
+    "open direct " + "methods",
+    "pa" + "per/",
+    "manu" + "script",
+)
+
 REQUIRED_SDIST_SUFFIXES = (
+    "ACKNOWLEDGMENTS.md",
+    "DATA_POLICY.md",
+    "RELEASE_CHECKLIST.md",
+    "SECURITY.md",
     "docs/DEVELOPMENT.md",
     "docs/INSTALL.md",
     "docs/QUICKSTART.md",
+    "docs/REFERENCES.md",
     "scripts/check_release_artifacts.py",
     "scripts/smoke_install_wheel.py",
     "tests/test_package_metadata.py",
@@ -88,8 +138,15 @@ def scan_name(artifact: Path, name: str, failures: list[str]) -> None:
         if term in name:
             failures.append(f"{artifact.name}: {name}: name contains {term!r}")
             return
-    if name.endswith(NON_PYTHON_PACKAGE_SUFFIXES):
+    folded_name = name.casefold()
+    for term in REPOSITORY_BOUNDARY_NAME_TERMS:
+        if term.casefold() in folded_name:
+            failures.append(f"{artifact.name}: {name}: name crosses repository boundary {term!r}")
+            return
+    if folded_name.endswith(NON_PYTHON_PACKAGE_SUFFIXES):
         failures.append(f"{artifact.name}: {name}: name has a non-Python package suffix")
+    elif folded_name.endswith(RAW_DATA_SUFFIXES):
+        failures.append(f"{artifact.name}: {name}: name has a raw-data suffix")
 
 
 def scan_text(artifact: Path, name: str, text: str, failures: list[str]) -> None:
@@ -98,6 +155,11 @@ def scan_text(artifact: Path, name: str, text: str, failures: list[str]) -> None
     for term in NON_PYTHON_PACKAGE_TEXT_TERMS + PACKAGE_BOUNDARY_TERMS:
         if term in text:
             failures.append(f"{artifact.name}: {name}: text contains {term!r}")
+            return
+    folded_text = text.casefold()
+    for term in REPOSITORY_BOUNDARY_TEXT_TERMS:
+        if term.casefold() in folded_text:
+            failures.append(f"{artifact.name}: {name}: text crosses repository boundary {term!r}")
             return
 
 

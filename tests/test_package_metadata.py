@@ -24,18 +24,32 @@ TEXT_SUFFIXES = {
     ".yml",
 }
 DOC_COMMAND_FILES = (ROOT / "README.md", *sorted((ROOT / "docs").glob("*.md")))
+ROOT_DOCUMENT_FILES = (
+    ROOT / "ACKNOWLEDGMENTS.md",
+    ROOT / "CHANGELOG.md",
+    ROOT / "CONTRIBUTING.md",
+    ROOT / "DATA_POLICY.md",
+    ROOT / "LIMITATIONS.md",
+    ROOT / "PROVENANCE.md",
+    ROOT / "RELEASE_CHECKLIST.md",
+    ROOT / "SECURITY.md",
+)
 MARKDOWN_LINK_RE = re.compile(r"(?<!!)\[[^\]]+\]\(([^)]+)\)")
 CODE_SPAN_RE = re.compile(r"`([^`]+)`")
 REPO_PATH_PREFIXES = (".github/", "docs/", "examples/", "schemas/", "scripts/", "src/", "tests/")
 REPO_ROOT_FILES = {
+    "ACKNOWLEDGMENTS.md",
     "CHANGELOG.md",
     "CITATION.cff",
     "CONTRIBUTING.md",
+    "DATA_POLICY.md",
     "LICENSE",
     "LIMITATIONS.md",
     "MANIFEST.in",
     "PROVENANCE.md",
     "README.md",
+    "RELEASE_CHECKLIST.md",
+    "SECURITY.md",
     "constraints.txt",
     "environment.yml",
     "pyproject.toml",
@@ -51,7 +65,7 @@ NON_PYTHON_PACKAGE_SUFFIXES = {".js", ".jsx", ".ts", ".tsx"}
 
 def tracked_files() -> list[Path]:
     out = subprocess.check_output(["git", "ls-files"], cwd=ROOT, text=True)
-    return [Path(line) for line in out.splitlines()]
+    return [Path(line) for line in out.splitlines() if (ROOT / line).is_file()]
 
 
 def fenced_grond_commands() -> list[tuple[Path, int, str]]:
@@ -99,12 +113,7 @@ def commands_from_block(path: Path, block_start: int, block: list[str]) -> list[
 
 def local_markdown_links() -> list[tuple[Path, int, str]]:
     links: list[tuple[Path, int, str]] = []
-    for path in DOC_COMMAND_FILES + (
-        ROOT / "CHANGELOG.md",
-        ROOT / "CONTRIBUTING.md",
-        ROOT / "LIMITATIONS.md",
-        ROOT / "PROVENANCE.md",
-    ):
+    for path in DOC_COMMAND_FILES + ROOT_DOCUMENT_FILES:
         for line_number, line in enumerate(path.read_text().splitlines(), start=1):
             for match in MARKDOWN_LINK_RE.finditer(line):
                 target = match.group(1).strip()
@@ -121,12 +130,7 @@ def local_markdown_links() -> list[tuple[Path, int, str]]:
 
 def documented_repo_paths() -> list[tuple[Path, int, str]]:
     paths: list[tuple[Path, int, str]] = []
-    for path in DOC_COMMAND_FILES + (
-        ROOT / "CHANGELOG.md",
-        ROOT / "CONTRIBUTING.md",
-        ROOT / "LIMITATIONS.md",
-        ROOT / "PROVENANCE.md",
-    ):
+    for path in DOC_COMMAND_FILES + ROOT_DOCUMENT_FILES:
         for line_number, line in enumerate(path.read_text().splitlines(), start=1):
             for match in CODE_SPAN_RE.finditer(line):
                 target = match.group(1).strip().rstrip(".,:;")
@@ -155,9 +159,50 @@ def test_citation_title_matches_package_title():
     assert "Global Regularization Of Non-kinematical Diffraction" in package_title
 
 
-def test_no_tracked_paper_workspace():
-    paper_dir = "pa" + "per" + "/"
-    assert not any(str(path).startswith(paper_dir) for path in tracked_files())
+def test_release_version_metadata_matches():
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    package_version = str(pyproject["project"]["version"])
+    init_text = (ROOT / "src" / "grond" / "__init__.py").read_text()
+    citation_text = (ROOT / "CITATION.cff").read_text()
+    changelog_text = (ROOT / "CHANGELOG.md").read_text()
+
+    init_match = re.search(r'^__version__\s*=\s*["\']([^"\']+)["\']', init_text, re.MULTILINE)
+    citation_match = re.search(r"^version:\s*['\"]?([^'\"\s]+)", citation_text, re.MULTILINE)
+
+    assert init_match is not None
+    assert citation_match is not None
+    assert init_match.group(1) == package_version
+    assert citation_match.group(1) == package_version
+    assert f"## {package_version}" in changelog_text
+
+
+def test_project_urls_point_to_canonical_repository():
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    urls = pyproject["project"]["urls"]
+
+    assert urls["Homepage"] == "https://github.com/Martynowycz-Lab/GROND"
+    assert urls["Repository"] == urls["Homepage"]
+    assert urls["Issues"] == f"{urls['Homepage']}/issues"
+    assert urls["Changelog"].endswith("/blob/main/CHANGELOG.md")
+
+
+def test_no_tracked_external_workspaces():
+    forbidden_roots = {
+        "exper" + "iments",
+        "open" + "dm",
+        "open_direct_" + "methods",
+        "open-direct-" + "methods",
+        "pa" + "per",
+        "manu" + "script",
+        "raw_" + "data",
+        "raw-" + "data",
+        "cache",
+        "outputs",
+        "grond_out",
+    }
+    offenders = [str(path) for path in tracked_files() if path.parts and path.parts[0].casefold() in forbidden_roots]
+
+    assert offenders == []
 
 
 def test_tracked_text_is_portable():

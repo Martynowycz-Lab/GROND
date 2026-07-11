@@ -31,29 +31,72 @@ import gemmi
 import numpy as np
 from scipy.optimize import least_squares
 
-from bloch_engine import Config, XDSBlochPort, XDSData, alternate_hand_model, parse_model, sha256, split_masks
-from native_row_regularize import (
-    DEFAULT_BASELINE_HKL,
-    DEFAULT_HKL,
-    DEFAULT_RES,
-    TARGET_MODES,
-    Nuisance,
-    copy_baseline,
-    evaluate_trial,
-    export_corrected_endpoint,
-    detector_bin_indices,
-    fit_frame_detector_scales,
-    fit_group_scales,
-    group_indices,
-    native_metrics,
-    parse_float_grid,
-    parse_wght,
-    row_resolution_modulation,
-    row_selection,
-    shelx_weights,
-    sigma_eff,
-    target_arrays,
-)
+if __package__:
+    from .bloch_engine import (
+        Config,
+        XDSBlochPort,
+        XDSData,
+        alternate_hand_model,
+        parse_model,
+        sha256,
+        shelx_u_cart_matrix,
+        split_masks,
+    )
+    from .native_row_regularize import (
+        DEFAULT_BASELINE_HKL,
+        DEFAULT_HKL,
+        DEFAULT_RES,
+        TARGET_MODES,
+        Nuisance,
+        copy_baseline,
+        detector_bin_indices,
+        evaluate_trial,
+        export_corrected_endpoint,
+        fit_frame_detector_scales,
+        fit_group_scales,
+        group_indices,
+        native_metrics,
+        parse_float_grid,
+        parse_wght,
+        row_resolution_modulation,
+        row_selection,
+        shelx_weights,
+        sigma_eff,
+        target_arrays,
+    )
+else:  # pragma: no cover - direct script execution
+    from bloch_engine import (
+        Config,
+        XDSBlochPort,
+        XDSData,
+        alternate_hand_model,
+        parse_model,
+        sha256,
+        shelx_u_cart_matrix,
+        split_masks,
+    )
+    from native_row_regularize import (
+        DEFAULT_BASELINE_HKL,
+        DEFAULT_HKL,
+        DEFAULT_RES,
+        TARGET_MODES,
+        Nuisance,
+        copy_baseline,
+        detector_bin_indices,
+        evaluate_trial,
+        export_corrected_endpoint,
+        fit_frame_detector_scales,
+        fit_group_scales,
+        group_indices,
+        native_metrics,
+        parse_float_grid,
+        parse_wght,
+        row_resolution_modulation,
+        row_selection,
+        shelx_weights,
+        sigma_eff,
+        target_arrays,
+    )
 
 
 class EarlyStopOptimization(Exception):
@@ -107,16 +150,16 @@ def atom_is_refinable(atom, selection: str, labels: set[str]) -> bool:
     raise ValueError(f"unknown atom selection {selection!r}")
 
 
-def atom_ueq(atom) -> float:
+def atom_ueq(atom, cell_tuple) -> float:
     if atom.get("adp_type") == "anis":
-        return float(atom["u11"] + atom["u22"] + atom["u33"]) / 3.0
+        return float(np.trace(shelx_u_cart_matrix(atom, cell_tuple))) / 3.0
     return float(atom.get("uiso", 0.05))
 
 
-def set_atom_ueq(atom, value: float) -> None:
+def set_atom_ueq(atom, value: float, cell_tuple) -> None:
     value = max(float(value), 1e-5)
     if atom.get("adp_type") == "anis":
-        start = atom_ueq(atom)
+        start = atom_ueq(atom, cell_tuple)
         scale = value / max(start, 1e-8)
         for key in ("u11", "u22", "u33", "u23", "u13", "u12"):
             atom[key] = float(atom[key]) * scale
@@ -136,7 +179,7 @@ def parameter_layout(model, selection: str, label_text: str, parameter_mode: str
                 params.append({"kind": "xyz", "atom_index": ai, "atom": atom["name"], "coord": coord, "start": float(atom[coord])})
                 x0.append(float(atom[coord]))
         if parameter_mode in {"adp_ueq", "xyz_adp_ueq"}:
-            ueq = atom_ueq(atom)
+            ueq = atom_ueq(atom, model["cell"])
             params.append(
                 {
                     "kind": "adp_ueq",
@@ -155,12 +198,12 @@ def parameter_layout(model, selection: str, label_text: str, parameter_mode: str
 
 def model_from_vector(base_model, params, x):
     model = copy.deepcopy(base_model)
-    for p, value in zip(params, x):
+    for p, value in zip(params, x, strict=False):
         atom = model["atoms"][p["atom_index"]]
         if p.get("kind", "xyz") == "xyz":
             atom[p["coord"]] = float(value) % 1.0
         elif p["kind"] == "adp_ueq":
-            set_atom_ueq(atom, float(value))
+            set_atom_ueq(atom, float(value), model["cell"])
         else:
             raise ValueError(f"unknown parameter kind {p.get('kind')!r}")
     return model
@@ -168,7 +211,7 @@ def model_from_vector(base_model, params, x):
 
 def parameter_bounds(params, x0, max_shift_frac: float, adp_shift: float, adp_min: float, adp_max: float):
     lo, hi = [], []
-    for p, v in zip(params, x0):
+    for p, v in zip(params, x0, strict=False):
         if p.get("kind", "xyz") == "xyz":
             lo.append(float(v) - float(max_shift_frac))
             hi.append(float(v) + float(max_shift_frac))
@@ -185,7 +228,7 @@ def parameter_bounds(params, x0, max_shift_frac: float, adp_shift: float, adp_mi
 
 def parameter_prior(params, x, x0, xyz_sigma: float, adp_sigma: float):
     out = []
-    for p, value, start in zip(params, x, x0):
+    for p, value, start in zip(params, x, x0, strict=False):
         sigma = float(adp_sigma) if p.get("kind") == "adp_ueq" else float(xyz_sigma)
         out.append((float(value) - float(start)) / max(sigma, 1e-12))
     return np.asarray(out, dtype=float)
@@ -209,9 +252,55 @@ def frac_xyz(atom):
     return np.asarray([float(atom["x"]), float(atom["y"]), float(atom["z"])], dtype=float)
 
 
-def frac_delta_min_image(atom_i, atom_j):
-    d = frac_xyz(atom_j) - frac_xyz(atom_i)
-    return d - np.round(d)
+def frac_delta_min_image(atom_i, atom_j, cell_tuple):
+    """Return the closest periodic image under the full unit-cell metric."""
+
+    delta = frac_xyz(atom_j) - frac_xyz(atom_i)
+    basis = np.column_stack(
+        [
+            cart_delta(cell_tuple, np.asarray([1.0, 0.0, 0.0])),
+            cart_delta(cell_tuple, np.asarray([0.0, 1.0, 0.0])),
+            cart_delta(cell_tuple, np.asarray([0.0, 0.0, 1.0])),
+        ]
+    )
+    _q, upper = np.linalg.qr(basis)
+    target = upper @ delta
+    if np.any(np.abs(np.diag(upper)) <= np.finfo(float).eps):
+        raise ValueError("unit-cell basis is singular; no periodic closest image exists")
+
+    # Babai's nearest-plane point supplies a finite initial radius. A short
+    # three-dimensional sphere search then proves the closest lattice vector,
+    # even when a highly skew, non-reduced cell needs a translation beyond +/-1.
+    best_translation = np.zeros(3, dtype=int)
+    for index in range(2, -1, -1):
+        tail = float(upper[index, index + 1 :] @ best_translation[index + 1 :])
+        best_translation[index] = int(np.rint((target[index] - tail) / upper[index, index]))
+    best_distance2 = float(np.sum((target - upper @ best_translation) ** 2))
+    candidate = np.zeros(3, dtype=int)
+
+    def search(index: int, partial_distance2: float) -> None:
+        nonlocal best_distance2, best_translation
+        if index < 0:
+            if partial_distance2 < best_distance2:
+                best_distance2 = partial_distance2
+                best_translation = candidate.copy()
+            return
+        remaining = max(best_distance2 - partial_distance2, 0.0)
+        tail = float(upper[index, index + 1 :] @ candidate[index + 1 :])
+        center = (target[index] - tail) / upper[index, index]
+        radius = math.sqrt(remaining) / abs(float(upper[index, index]))
+        lower = math.ceil(center - radius - 1e-12)
+        upper_bound = math.floor(center + radius + 1e-12)
+        values = sorted(range(lower, upper_bound + 1), key=lambda value: abs(value - center))
+        for value in values:
+            residual = target[index] - tail - upper[index, index] * value
+            new_distance2 = partial_distance2 + float(residual * residual)
+            if new_distance2 <= best_distance2 + 1e-15:
+                candidate[index] = int(value)
+                search(index - 1, new_distance2)
+
+    search(2, 0.0)
+    return np.asarray(delta - best_translation, dtype=float)
 
 
 def cart_delta(cell_tuple, frac_delta):
@@ -225,7 +314,7 @@ def cart_delta(cell_tuple, frac_delta):
 
 
 def atom_distance_A(model, ai: int, aj: int) -> float:
-    dfrac = frac_delta_min_image(model["atoms"][ai], model["atoms"][aj])
+    dfrac = frac_delta_min_image(model["atoms"][ai], model["atoms"][aj], model["cell"])
     return float(np.linalg.norm(cart_delta(model["cell"], dfrac)))
 
 
@@ -261,7 +350,7 @@ def build_start_restraints(model, selection: str, label_text: str, tolerance_A: 
                     "element_i": ei,
                     "element_j": ej,
                     "target_A": float(target),
-                    "start_ueq_diff": atom_ueq(ai) - atom_ueq(aj),
+                    "start_ueq_diff": atom_ueq(ai, model["cell"]) - atom_ueq(aj, model["cell"]),
                     "updates_i": bool(update_i),
                     "updates_j": bool(update_j),
                 }
@@ -289,7 +378,7 @@ def adp_similarity_residuals(model, restraints, sigma_u: float):
         aj = atoms[int(r["j"])]
         if ai.get("element", "").upper() == "H" or aj.get("element", "").upper() == "H":
             continue
-        diff = atom_ueq(ai) - atom_ueq(aj)
+        diff = atom_ueq(ai, model["cell"]) - atom_ueq(aj, model["cell"])
         out.append((diff - float(r["start_ueq_diff"])) / float(sigma_u))
     return np.asarray(out, dtype=float)
 
@@ -417,7 +506,7 @@ class CctbxRiguEvaluator:
         atom_by_name = {a["name"]: a for a in model["atoms"]}
         sites = []
         u_cart = []
-        for label, base_site, base_u in zip(self._labels, self._base_sites, self._base_u_cart):
+        for label, base_site, base_u in zip(self._labels, self._base_sites, self._base_u_cart, strict=False):
             atom = atom_by_name.get(label)
             if atom is None:
                 sites.append(base_site)
@@ -425,9 +514,10 @@ class CctbxRiguEvaluator:
                 continue
             sites.append((float(atom["x"]) % 1.0, float(atom["y"]) % 1.0, float(atom["z"]) % 1.0))
             if atom.get("adp_type") == "anis":
-                u_cart.append(tuple(float(atom[k]) for k in ("u11", "u22", "u33", "u12", "u13", "u23")))
+                u = shelx_u_cart_matrix(atom, model["cell"])
+                u_cart.append((u[0, 0], u[1, 1], u[2, 2], u[0, 1], u[0, 2], u[1, 2]))
             else:
-                u = atom_ueq(atom)
+                u = atom_ueq(atom, model["cell"])
                 u_cart.append((u, u, u, 0.0, 0.0, 0.0))
         xs = self._xray_structure.deep_copy_scatterers()
         xs.set_sites_frac(self._flex.vec3_double(sites))
@@ -453,7 +543,7 @@ def choose_objective_rows(data: XDSData, indices, masks, target, sig, n_rows: in
     bins = np.array_split(order, max(1, int(n_bins)))
     chosen = []
     remaining = int(n_rows)
-    for bi, b in enumerate(bins):
+    for _bi, b in enumerate(bins):
         if len(b) == 0:
             continue
         quota = int(round(n_rows * len(b) / max(len(candidates), 1)))
@@ -684,7 +774,7 @@ def write_parameter_csv(path: Path, params, x0, x_final):
     with path.open("w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=["atom", "kind", "coord", "start", "final", "shift"])
         w.writeheader()
-        for p, a, b in zip(params, x0, x_final):
+        for p, a, b in zip(params, x0, x_final, strict=False):
             w.writerow({"atom": p["atom"], "kind": p.get("kind", "xyz"), "coord": p["coord"], "start": float(a), "final": float(b), "shift": float(b - a)})
 
 
@@ -705,9 +795,10 @@ def write_model_delta_csv(path: Path, start_model, final_model):
                     "dx": float(atom["x"]) - float(start["x"]),
                     "dy": float(atom["y"]) - float(start["y"]),
                     "dz": float(atom["z"]) - float(start["z"]),
-                    "start_ueq": atom_ueq(start),
-                    "final_ueq": atom_ueq(atom),
-                    "delta_ueq": atom_ueq(atom) - atom_ueq(start),
+                    "start_ueq": atom_ueq(start, start_model["cell"]),
+                    "final_ueq": atom_ueq(atom, final_model["cell"]),
+                    "delta_ueq": atom_ueq(atom, final_model["cell"])
+                    - atom_ueq(start, start_model["cell"]),
                 }
             )
 
@@ -767,7 +858,7 @@ def main():
     ap.add_argument("--group-width-deg", type=float, default=1.0)
     ap.add_argument("--frame-offset", type=float, default=0.0)
     ap.add_argument("--row-resolution-b", type=float, default=0.0, help="Raw-row dynamical resolution-envelope B from nuisance regularization.")
-    ap.add_argument("--ug-d-min", type=float, default=0.55, help="Speed/accuracy limit for the model-dependent U_g cache during finite-difference structure update.")
+    ap.add_argument("--ug-d-min", type=float, default=0.30, help="Model-dependent U_g cutoff used by the production kernel; raising it is an explicit speed/accuracy tradeoff.")
     ap.add_argument("--sg-jitter-mode", choices=["none", "gaussian", "student_t"], default="none", help="Accepted rocking-profile Sg jitter model from the production row regularizer.")
     ap.add_argument("--sg-jitter-sigma0", type=float, default=0.0, help="Base Sg jitter sigma in inverse Angstrom.")
     ap.add_argument("--sg-jitter-sigma-d-inv", type=float, default=0.0, help="Resolution-dependent Sg jitter coefficient.")
@@ -826,7 +917,12 @@ def main():
         base_model = alternate_hand_model(base_model)
     target, base_sig = target_arrays(data, args.target_mode)
     target_indices = row_selection(data, target, not args.include_nonpositive, args.min_d_spacing, args.min_peak, 0, args.geometry_percentile)
-    masks = split_masks(data.hkl, args.free_fraction, args.split_seed)
+    masks = split_masks(
+        data.hkl,
+        args.free_fraction,
+        args.split_seed,
+        symmetry_ops=base_model.get("symmetry_ops"),
+    )
     selected_mask = np.zeros(len(target), dtype=bool)
     selected_mask[target_indices] = True
     masks = {k: v & selected_mask for k, v in masks.items()}

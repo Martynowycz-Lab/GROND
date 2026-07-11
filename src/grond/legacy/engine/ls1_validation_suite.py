@@ -16,6 +16,7 @@ useful lagged dynamical surrogate from a cosmetic corrected-HKL loop:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import shlex
@@ -24,7 +25,10 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
-import shelxl_feedback_loop as fb
+if __package__:
+    from . import shelxl_feedback_loop as fb
+else:  # pragma: no cover - direct script execution
+    import shelxl_feedback_loop as fb
 
 
 def shell_join(cmd: list[str]) -> str:
@@ -157,10 +161,8 @@ def run_updated_q_loop(args: argparse.Namespace, source_summary: dict, out: Path
         metric = endpoint_metrics.get("native_dyn_wR2_all")
         if metric is None and len(runs) == 1:
             metric = rec.get("metrics", {}).get("native_dyn_wR2_all")
-        try:
+        with contextlib.suppress(TypeError, ValueError):
             finite.append((float(metric), rec))
-        except (TypeError, ValueError):
-            pass
     best_metric = min((x[0] for x in finite), default=float("nan"))
     tolerance = float(args.best_cycle_tolerance)
     selected = None
