@@ -438,7 +438,7 @@ def log_scale_step_rms(scales: dict[str, float]) -> float:
     """Estimate roughness of adjacent fitted frame/group scales in log space."""
 
     vals = []
-    for key, value in sorted(scales.items(), key=lambda kv: int(kv[0])):
+    for _key, value in sorted(scales.items(), key=lambda kv: int(kv[0])):
         v = safe_float(value)
         if np.isfinite(v) and v > 0:
             vals.append(math.log(v))
@@ -903,7 +903,7 @@ def main() -> None:
 
     if "fixed" in frame_models:
         for stride in group_strides:
-            if args.scan_offsets and int(stride) < 10**8:
+            if args.scan_offsets and int(stride) < 10**8:  # noqa: SIM108 - clearer than an inline range expression
                 offsets = range(max(1, int(stride)))
             else:
                 offsets = range(1)

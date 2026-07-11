@@ -20,23 +20,21 @@ import argparse
 import csv
 import json
 import math
-import sys
 import time
 from dataclasses import asdict
 from pathlib import Path
 
 import numpy as np
 from numpy.polynomial.legendre import leggauss
-from scipy.linalg import eig, eigh
+from scipy.linalg import eigh
 from scipy.optimize import minimize, minimize_scalar
 
-
-ENGINE_ROOT = Path(__file__).resolve().parent
-if str(ENGINE_ROOT) not in sys.path:
-    sys.path.insert(0, str(ENGINE_ROOT))
-
-from bloch_engine import Config, XDSBlochPort, XDSData, parse_model, sha256, split_masks  # noqa: E402
-import native_row_regularize as nrf  # noqa: E402
+if __package__:
+    from . import native_row_regularize as nrf
+    from .bloch_engine import Config, XDSBlochPort, XDSData, parse_model, sha256, split_masks
+else:  # pragma: no cover - direct script execution
+    import native_row_regularize as nrf
+    from bloch_engine import Config, XDSBlochPort, XDSData, parse_model, sha256, split_masks
 
 
 DEFAULT_HKL = Path("INTEGRATE.HKL")
@@ -112,20 +110,21 @@ def selected_indices(data: XDSData, target: np.ndarray, args) -> np.ndarray:
     return np.asarray(idx, dtype=int)
 
 
-def eig_coupling(H: np.ndarray, absorptive: bool) -> tuple[np.ndarray, np.ndarray]:
-    """Return eigenvalues and direct-to-target coupling for one Hamiltonian."""
+def propagation_spec(H: np.ndarray, absorptive: bool) -> dict[str, np.ndarray]:
+    """Cache a stable direct-to-target propagator for one Hamiltonian."""
 
     if absorptive:
-        vals, vecs = eig(H)
-        try:
-            inv_vecs = np.linalg.inv(vecs)
-        except np.linalg.LinAlgError:
-            inv_vecs = np.linalg.pinv(vecs)
-        coupling = vecs[1, :] * inv_vecs[:, 0]
+        spectral = XDSBlochPort._nonhermitian_spectral_target_coupling(H)
+        if spectral is None:
+            return {"matrix": np.asarray(H, dtype=np.complex128)}
+        vals, coupling = spectral
     else:
         vals, vecs = eigh(H)
         coupling = vecs[1, :] * np.conj(vecs[0, :])
-    return np.asarray(vals, dtype=np.complex128), np.asarray(coupling, dtype=np.complex128)
+    return {
+        "vals": np.asarray(vals, dtype=np.complex128),
+        "coupling": np.asarray(coupling, dtype=np.complex128),
+    }
 
 
 def build_response_cache(
@@ -143,44 +142,29 @@ def build_response_cache(
     records: list[dict] = []
     t0 = time.perf_counter()
     for n, row_idx in enumerate(indices, start=1):
-        hkl = data.hkl[int(row_idx)]
-        omega_center = port.omega_from_z(data.zcal[int(row_idx)])
-        center_sg = float(port.sg_for_hkls(np.asarray([hkl], dtype=int), omega_center)[0])
-        omega_bragg = port.solve_omega_for_sg(hkl, omega_center, 0.0)
-        basis = port.select_basis(hkl, omega_bragg, row_idx=int(row_idx))
-        sg_window_i, sg_meta = port.row_sg_window(int(row_idx), hkl, omega_bragg)
-        requested, profile_weights, jitter_meta = port.row_profile_sg_points(
-            int(row_idx), hkl, sg_window_i
-        )
-
-        dyn_specs = []
-        born_specs = []
-        sg_resid = []
-        for target_sg in requested:
-            omega = port.solve_omega_for_sg(hkl, omega_bragg, target_sg)
-            sg_basis = port.sg_for_hkls(basis, omega)
-            sg_resid.append(float(sg_basis[1] - target_sg))
-            H_dyn = port.hamiltonian(basis, sg_basis, absorb=True, row_idx=int(row_idx))
-            H_born = port.hamiltonian(basis, sg_basis, absorb=False, row_idx=int(row_idx))
-            vals, coupling = eig_coupling(H_dyn, absorptive=absorptive)
-            dyn_specs.append({"vals": vals, "coupling": coupling})
-            h10 = H_born[1, 0]
-            delta = float(np.real(H_born[1, 1] - H_born[0, 0]))
-            born_specs.append({"h10_abs2": float(abs(h10) ** 2), "delta": delta})
+        plan = port.row_prediction_plan(int(row_idx))
+        dyn_specs = [
+            propagation_spec(matrix, absorptive=absorptive)
+            for matrix in plan["_dyn_matrices"]
+        ]
+        born_specs = [
+            {
+                "h10_abs2": float(plan["_born_h10_abs2"]),
+                "delta": float(delta),
+            }
+            for delta in plan["_born_deltas"]
+        ]
+        metadata = {key: value for key, value in plan.items() if not key.startswith("_")}
+        sg_resid = np.asarray(plan["_sg_resid"], dtype=float)
 
         records.append(
             {
                 "row_index": int(row_idx),
-                "profile_weights": np.asarray(profile_weights, dtype=float),
+                "profile_weights": np.asarray(plan["_profile_weights"], dtype=float),
                 "dyn_specs": dyn_specs,
                 "born_specs": born_specs,
-                "basis_size": int(len(basis)),
-                "center_sg_inv_A": center_sg,
-                "omega_bragg_deg": float(omega_bragg),
-                "sg_window_inv_A": float(sg_window_i),
-                "max_sg_solve_residual": float(np.max(np.abs(sg_resid))) if sg_resid else 0.0,
-                **sg_meta,
-                **jitter_meta,
+                "max_sg_solve_residual": float(np.max(np.abs(sg_resid))) if sg_resid.size else 0.0,
+                **metadata,
             }
         )
         if n % int(args_progress_every) == 0 or n == len(indices):
@@ -194,7 +178,12 @@ def build_response_cache(
     return records
 
 
-def dyn_from_spec(vals: np.ndarray, coupling: np.ndarray, thick: np.ndarray, weights: np.ndarray) -> float:
+def dyn_from_spec(spec: dict[str, np.ndarray], thick: np.ndarray, weights: np.ndarray) -> float:
+    if "matrix" in spec:
+        per_t = XDSBlochPort._nonhermitian_target_intensities(spec["matrix"], thick)
+        return float(np.sum(weights * per_t))
+    vals = spec["vals"]
+    coupling = spec["coupling"]
     phase = np.exp((2j * np.pi) * vals[:, None] * thick[None, :])
     per_t = np.abs(np.sum(coupling[:, None] * phase, axis=0)) ** 2
     return float(np.sum(weights * per_t))
@@ -220,7 +209,7 @@ def predict_from_response(records: list[dict], n_rows: int, t0: float, grad: flo
     for i, rec in enumerate(records):
         pw = np.asarray(rec["profile_weights"], dtype=float)
         dyn_points = [
-            dyn_from_spec(s["vals"], s["coupling"], thick, thick_w)
+            dyn_from_spec(s, thick, thick_w)
             for s in rec["dyn_specs"]
         ]
         born_points = [
@@ -260,6 +249,8 @@ def make_nuisance(args, t0: float, grad: float) -> nrf.Nuisance:
 
 
 def metric_value(ev: dict, metric: str) -> float:
+    if metric == "work_wR2":
+        return float(ev["metrics"]["work"]["dyn"]["wR2_all"])
     if metric == "all_wR2":
         return float(ev["metrics"]["all"]["dyn"]["wR2_all"])
     if metric == "free_wR2":
@@ -308,8 +299,12 @@ def main() -> int:
     ap.add_argument("--matrix-convention", default="j_minus_i")
     ap.add_argument("--free-fraction", type=float, default=0.1)
     ap.add_argument("--split-seed", type=int, default=42)
-    ap.add_argument("--scale-fit-split", choices=["all", "work", "free"], default="all")
-    ap.add_argument("--selection-metric", choices=["all_wR2", "free_wR2", "all_R1", "all_R1gt"], default="all_wR2")
+    ap.add_argument("--scale-fit-split", choices=["all", "work", "free"], default="work")
+    ap.add_argument(
+        "--selection-metric",
+        choices=["work_wR2", "all_wR2", "free_wR2", "all_R1", "all_R1gt"],
+        default="work_wR2",
+    )
     ap.add_argument("--strong-rows", type=int, default=500)
     ap.add_argument("--max-rows", type=int, default=0)
     ap.add_argument("--bracket-frac", type=float, default=0.35)
@@ -336,11 +331,16 @@ def main() -> int:
     data = XDSData(Path(args.hkl), hkl_transform=args.hkl_transform)
     target, base_sig = nrf.target_arrays(data, args.target_mode)
     indices = selected_indices(data, target, args)
-    masks_all = split_masks(data.hkl, float(args.free_fraction), int(args.split_seed))
+    model = parse_model(Path(args.res))
+    masks_all = split_masks(
+        data.hkl,
+        float(args.free_fraction),
+        int(args.split_seed),
+        symmetry_ops=model.get("symmetry_ops"),
+    )
     selected = np.zeros(len(target), dtype=bool)
     selected[indices] = True
     masks = {k: v & selected for k, v in masks_all.items()}
-    model = parse_model(Path(args.res))
     cfg = build_base_config(args)
     wght_a, wght_b = nrf.parse_wght(Path(args.res))
     print(
@@ -424,7 +424,7 @@ def main() -> int:
     xs = np.asarray([max(float(args.t_min), t0 - step), t0, min(float(args.t_max), t0 + step)], dtype=float)
     ys = np.asarray([evaluate(float(x), float(args.start_grad), "parabolic_probe")[0] for x in xs], dtype=float)
     coeff = np.polyfit(xs, ys, 2)
-    if coeff[0] > 0:
+    if coeff[0] > 0:  # noqa: SIM108 - keep the fitted and fallback branches explicit
         t_parab = float(np.clip(-coeff[1] / (2.0 * coeff[0]), lo, hi))
     else:
         t_parab = float(xs[int(np.argmin(ys))])
@@ -611,7 +611,7 @@ def main() -> int:
         "| strategy | thickness A | thickness nm | grad | all wR2 | all R1 | R1gt | free wR2 |",
         "|---|---:|---:|---:|---:|---:|---:|---:|",
     ]
-    for name, val, tv, gv, ev in candidates:
+    for name, _val, tv, gv, ev in candidates:
         report.append(
             f"| {name} | {tv:.3f} | {tv / 10.0:.3f} | {gv:.4f} | "
             f"{ev['metrics']['all']['dyn']['wR2_all']:.6f} | "

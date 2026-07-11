@@ -131,13 +131,17 @@ def _matrix_from_metadata(metadata: dict[str, Any]) -> np.ndarray:
     geometry = metadata.get("geometry") or {}
     if "reciprocal_A_matrix" in geometry:
         mat = np.asarray(geometry["reciprocal_A_matrix"], dtype=float)
-        if mat.shape != (3, 3):
-            raise ValueError("geometry.reciprocal_A_matrix must be 3x3")
+        if mat.shape != (3, 3) or not np.all(np.isfinite(mat)):
+            raise ValueError("geometry.reciprocal_A_matrix must be a finite 3x3 matrix")
+        if abs(float(np.linalg.det(mat))) <= 1e-15:
+            raise ValueError("geometry.reciprocal_A_matrix must be nonsingular")
         return mat
     if "real_space_axes_A" in geometry:
         real = np.asarray(geometry["real_space_axes_A"], dtype=float)
-        if real.shape != (3, 3):
-            raise ValueError("geometry.real_space_axes_A must be 3x3 with axes as columns")
+        if real.shape != (3, 3) or not np.all(np.isfinite(real)):
+            raise ValueError("geometry.real_space_axes_A must be a finite 3x3 matrix with axes as columns")
+        if abs(float(np.linalg.det(real))) <= 1e-15:
+            raise ValueError("geometry.real_space_axes_A must be nonsingular")
         return np.linalg.inv(real).T
     raise ValueError("row metadata must include geometry.reciprocal_A_matrix or geometry.real_space_axes_A")
 
@@ -150,6 +154,21 @@ def _real_space_axes_from_metadata(metadata: dict[str, Any]) -> np.ndarray:
             raise ValueError("geometry.real_space_axes_A must be 3x3 with axes as columns")
         return real
     return np.linalg.inv(_matrix_from_metadata(metadata).T)
+
+
+def _rotation_matrix_from_metadata(geometry: dict[str, Any], key: str) -> np.ndarray:
+    """Return an optional proper rotation matrix from portable geometry metadata."""
+
+    if key not in geometry:
+        return np.eye(3, dtype=float)
+    matrix = np.asarray(geometry[key], dtype=float)
+    if matrix.shape != (3, 3) or not np.all(np.isfinite(matrix)):
+        raise ValueError(f"geometry.{key} must be a finite 3x3 matrix")
+    if not np.allclose(matrix.T @ matrix, np.eye(3), atol=1e-6, rtol=0.0):
+        raise ValueError(f"geometry.{key} must be an orthogonal rotation matrix")
+    if not math.isclose(float(np.linalg.det(matrix)), 1.0, abs_tol=1e-6):
+        raise ValueError(f"geometry.{key} must be a proper rotation matrix")
+    return matrix
 
 
 def _required_geometry(metadata: dict[str, Any]) -> dict[str, Any]:
@@ -174,7 +193,66 @@ def _required_geometry(metadata: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("row metadata is missing geometry field(s): " + ", ".join(missing))
     if len(geometry["unit_cell"]) != 6:
         raise ValueError("geometry.unit_cell must have six values: a,b,c,alpha,beta,gamma")
-    _matrix_from_metadata(metadata)
+    wavelength = float(geometry["wavelength_A"])
+    if not math.isfinite(wavelength) or wavelength <= 0.0:
+        raise ValueError("geometry.wavelength_A must be finite and positive")
+    beam = np.asarray(geometry["incident_beam_direction"], dtype=float)
+    if beam.shape != (3,) or not np.all(np.isfinite(beam)) or float(np.linalg.norm(beam)) <= 0.0:
+        raise ValueError("geometry.incident_beam_direction must be a finite nonzero 3-vector")
+    cell = np.asarray(geometry["unit_cell"], dtype=float)
+    if (
+        not np.all(np.isfinite(cell))
+        or np.any(cell[:3] <= 0.0)
+        or np.any(cell[3:] <= 0.0)
+        or np.any(cell[3:] >= 180.0)
+    ):
+        raise ValueError("geometry.unit_cell must contain positive lengths and angles between 0 and 180 degrees")
+    alpha, beta, gamma = np.radians(cell[3:])
+    expected_metric = np.asarray(
+        [
+            [cell[0] ** 2, cell[0] * cell[1] * np.cos(gamma), cell[0] * cell[2] * np.cos(beta)],
+            [cell[0] * cell[1] * np.cos(gamma), cell[1] ** 2, cell[1] * cell[2] * np.cos(alpha)],
+            [cell[0] * cell[2] * np.cos(beta), cell[1] * cell[2] * np.cos(alpha), cell[2] ** 2],
+        ],
+        dtype=float,
+    )
+    if float(np.linalg.det(expected_metric)) <= 1e-12:
+        raise ValueError("geometry.unit_cell has zero or invalid volume")
+    scan_values = np.asarray(
+        [
+            geometry["starting_frame"],
+            geometry["starting_angle_deg"],
+            geometry["oscillation_range_deg"],
+        ],
+        dtype=float,
+    )
+    if not np.all(np.isfinite(scan_values)):
+        raise ValueError("geometry scan origin and oscillation values must be finite")
+    rotation_axis = np.asarray(geometry["rotation_axis"], dtype=float)
+    if (
+        rotation_axis.shape != (3,)
+        or not np.all(np.isfinite(rotation_axis))
+        or float(np.linalg.norm(rotation_axis)) <= 0.0
+    ):
+        raise ValueError("geometry.rotation_axis must be a finite nonzero 3-vector")
+    reciprocal = _matrix_from_metadata(metadata)
+    real = np.linalg.inv(reciprocal).T
+    if "real_space_axes_A" in geometry:
+        declared_real = np.asarray(geometry["real_space_axes_A"], dtype=float)
+        if not np.allclose(declared_real, real, rtol=1e-7, atol=1e-9):
+            raise ValueError("geometry reciprocal_A_matrix and real_space_axes_A are inconsistent")
+    if not np.allclose(real.T @ real, expected_metric, rtol=1e-5, atol=1e-7):
+        raise ValueError("geometry reciprocal/real-space axes are inconsistent with geometry.unit_cell")
+    for index, matrix in enumerate(geometry.get("A_scan_points", [])):
+        scan_matrix = np.asarray(matrix, dtype=float)
+        if (
+            scan_matrix.shape != (3, 3)
+            or not np.all(np.isfinite(scan_matrix))
+            or abs(float(np.linalg.det(scan_matrix))) <= 1e-15
+        ):
+            raise ValueError(f"geometry.A_scan_points[{index}] must be a finite nonsingular 3x3 matrix")
+    _rotation_matrix_from_metadata(geometry, "fixed_rotation_matrix")
+    _rotation_matrix_from_metadata(geometry, "setting_rotation_matrix")
     return geometry
 
 
@@ -202,11 +280,15 @@ def validate_row_contract(rows: list[dict[str, Any]], metadata: dict[str, Any]) 
             raise ValueError(f"row {index}: provide either frame or alpha_deg")
 
     if positive_sigma_rows != len(rows):
-        warnings.append("some rows have non-positive or non-finite sigma_Iobs and will be unusable for weighted scoring")
+        warnings.append(
+            "some rows have non-positive or non-finite sigma_Iobs and will be unusable for weighted scoring"
+        )
     if len(dataset_ids) > 1:
         warnings.append("portable row files should normally contain one dataset; use prep JSON for multiple datasets")
     if abs(float(geometry["oscillation_range_deg"])) < 1e-12:
-        warnings.append("oscillation_range_deg is near zero; alpha_deg rows can still be converted but frame rows are ambiguous")
+        warnings.append(
+            "oscillation_range_deg is near zero; alpha_deg rows can still be converted but frame rows are ambiguous"
+        )
 
     return RowContractSummary(
         schema_version=str(metadata.get("schema_version") or GROND_ROW_SCHEMA_VERSION),
@@ -313,7 +395,9 @@ def example_metadata() -> dict[str, Any]:
                 [0.0, 0.125, 0.0],
                 [0.0, 0.0, 0.1111111111],
             ],
-            "notes": "reciprocal_A_matrix maps signed h,k,l to a reciprocal vector in lab coordinates before goniometer rotation.",
+            "fixed_rotation_matrix": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            "setting_rotation_matrix": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            "notes": "Geometry uses g(alpha) = S R(alpha) F A(alpha) h; rotation_axis is the axis of R.",
         },
         "columns": {
             "Iobs": "background-subtracted integrated intensity before GROND correction",
@@ -360,7 +444,9 @@ def write_xds_compatibility_dir(
 
     summary = validate_row_contract(rows, metadata)
     if summary.finite_rows != len(rows):
-        raise ValueError("all portable rows must have finite Iobs and sigma_Iobs before writing the compatibility directory")
+        raise ValueError(
+            "all portable rows must have finite Iobs and sigma_Iobs before writing the compatibility directory"
+        )
     if summary.positive_sigma_rows != len(rows):
         raise ValueError("all portable rows must have positive sigma_Iobs before writing the compatibility directory")
 
@@ -372,6 +458,10 @@ def write_xds_compatibility_dir(
         raise FileExistsError(f"Refusing to overwrite existing file: {hkl_path}")
 
     real = _real_space_axes_from_metadata(metadata)
+    fixed_rotation = _rotation_matrix_from_metadata(geometry, "fixed_rotation_matrix")
+    setting_rotation = _rotation_matrix_from_metadata(geometry, "setting_rotation_matrix")
+    rotation_axis = np.asarray(geometry["rotation_axis"], dtype=float)
+    rotation_axis_lab = setting_rotation @ rotation_axis
     scan_points = metadata.get("geometry", {}).get("A_scan_points")
     scan_points_name = ""
     if scan_points:
@@ -391,8 +481,19 @@ def write_xds_compatibility_dir(
         handle.write(f"!STARTING_FRAME= {float(geometry['starting_frame']):.12g}\n")
         handle.write(f"!STARTING_ANGLE= {float(geometry['starting_angle_deg']):.12g}\n")
         handle.write(f"!OSCILLATION_RANGE= {float(geometry['oscillation_range_deg']):.12g}\n")
-        handle.write("!ROTATION_AXIS= " + " ".join(f"{float(v):.12g}" for v in geometry["rotation_axis"]) + "\n")
-        handle.write("!INCIDENT_BEAM_DIRECTION= " + " ".join(f"{float(v):.12g}" for v in geometry["incident_beam_direction"]) + "\n")
+        handle.write("!ROTATION_AXIS= " + " ".join(f"{float(v):.12g}" for v in rotation_axis_lab) + "\n")
+        handle.write("!GROND_ROTATION_AXIS_DATUM= " + " ".join(f"{float(v):.12g}" for v in rotation_axis) + "\n")
+        handle.write(
+            "!GROND_FIXED_ROTATION= " + " ".join(f"{float(v):.12g}" for v in fixed_rotation.reshape(-1)) + "\n"
+        )
+        handle.write(
+            "!GROND_SETTING_ROTATION= " + " ".join(f"{float(v):.12g}" for v in setting_rotation.reshape(-1)) + "\n"
+        )
+        handle.write(
+            "!INCIDENT_BEAM_DIRECTION= "
+            + " ".join(f"{float(v):.12g}" for v in geometry["incident_beam_direction"])
+            + "\n"
+        )
         handle.write("!UNIT_CELL_CONSTANTS= " + " ".join(f"{float(v):.12g}" for v in geometry["unit_cell"]) + "\n")
         handle.write("!UNIT_CELL_A-AXIS= " + " ".join(f"{float(v):.12g}" for v in real[:, 0]) + "\n")
         handle.write("!UNIT_CELL_B-AXIS= " + " ".join(f"{float(v):.12g}" for v in real[:, 1]) + "\n")
@@ -400,7 +501,9 @@ def write_xds_compatibility_dir(
         handle.write("!VARIANCE_MODEL= 1.0 0.0\n")
         if scan_points_name:
             handle.write(f"!DIALS_A_AT_SCAN_POINTS_FILE= {scan_points_name}\n")
-        handle.write("!H K L IOBS SIGMA XCAL YCAL ZCAL RLP PEAK CORR MAXC XOBS YOBS ZOBS ALF0 BET0 ALF1 BET1 PSI ISEG\n")
+        handle.write(
+            "!H K L IOBS SIGMA XCAL YCAL ZCAL RLP PEAK CORR MAXC XOBS YOBS ZOBS ALF0 BET0 ALF1 BET1 PSI ISEG\n"
+        )
         for row in rows:
             frame = _row_frame(row, geometry)
             xcal = float(row.get("x_px", 0.0))

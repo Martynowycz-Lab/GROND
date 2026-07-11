@@ -12,24 +12,35 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-import math
 import shutil
 from pathlib import Path
 
 import numpy as np
 
-from native_row_regularize import (
-    DEFAULT_HKL,
-    DEFAULT_RES,
-    exact_hkl_merge,
-    native_metrics,
-    parse_wght,
-    run_maps,
-    run_shelxl,
-    shelx_weights,
-    write_hkl,
-    write_no_exti_ins,
-)
+if __package__:
+    from .native_row_regularize import (
+        DEFAULT_HKL,
+        DEFAULT_RES,
+        exact_hkl_merge,
+        native_metrics,
+        parse_wght,
+        run_maps,
+        run_shelxl,
+        write_hkl,
+        write_no_exti_ins,
+    )
+else:  # pragma: no cover - direct script execution
+    from native_row_regularize import (
+        DEFAULT_HKL,
+        DEFAULT_RES,
+        exact_hkl_merge,
+        native_metrics,
+        parse_wght,
+        run_maps,
+        run_shelxl,
+        write_hkl,
+        write_no_exti_ins,
+    )
 
 
 def read_rows(path: Path) -> list[dict[str, str]]:
@@ -105,7 +116,7 @@ def assert_same_rows(base: list[dict[str, str]], other: list[dict[str, str]], la
         raise ValueError(f"{label}: row count mismatch {len(other)} != {len(base)}")
     b = row_key_arrays(base)
     o = row_key_arrays(other)
-    for name, lhs, rhs in zip(("row_index", "h", "k", "l"), b, o):
+    for name, lhs, rhs in zip(("row_index", "h", "k", "l"), b, o, strict=False):
         if not np.array_equal(lhs, rhs):
             raise ValueError(f"{label}: {name} values do not match row table")
 
@@ -491,7 +502,7 @@ def main() -> None:
     (out_dir / "REPORT.md").write_text("\n".join(report_lines(summary)) + "\n")
 
     corrected_rows = []
-    for r, add, lm, pp in zip(rows, additive, log_mult, polished_pred):
+    for r, add, lm, pp in zip(rows, additive, log_mult, polished_pred, strict=False):
         rr = dict(r)
         rr["promoted_additive"] = f"{float(add):.10g}"
         rr["promoted_log_mult"] = f"{float(lm):.10g}"

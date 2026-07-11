@@ -25,15 +25,26 @@ from pathlib import Path
 
 import numpy as np
 
-from native_row_regularize import (
-    DEFAULT_HKL,
-    DEFAULT_RES,
-    fit_frame_detector_scales,
-    fit_group_scales,
-    native_metrics,
-    parse_wght,
-)
-from bloch_engine import XDSData, sha256
+if __package__:
+    from .bloch_engine import XDSData, sha256
+    from .native_row_regularize import (
+        DEFAULT_HKL,
+        DEFAULT_RES,
+        fit_frame_detector_scales,
+        fit_group_scales,
+        native_metrics,
+        parse_wght,
+    )
+else:  # pragma: no cover - direct script execution
+    from bloch_engine import XDSData, sha256
+    from native_row_regularize import (
+        DEFAULT_HKL,
+        DEFAULT_RES,
+        fit_frame_detector_scales,
+        fit_group_scales,
+        native_metrics,
+        parse_wght,
+    )
 
 
 def read_rows(path: Path) -> list[dict[str, str]]:
@@ -340,7 +351,7 @@ def main() -> None:
 
     coef_rows = [
         {"feature": name, "coefficient": float(c), "feature_scale": float(s)}
-        for name, c, s in zip(full_feature_names, full_coeff, full_scales)
+        for name, c, s in zip(full_feature_names, full_coeff, full_scales, strict=False)
     ]
     write_csv(out / "sigma_variance_coefficients.csv", coef_rows)
 

@@ -83,6 +83,7 @@ def test_run_parser_exposes_staged_feature_grids():
     assert args.absorption_mu_theta2_grid == "0.0"
     assert args.absorption_tds_b_grid == "0.0"
     assert args.dose_b_mode_grid == "none"
+    assert args.production_scales is False
 
 
 def test_thickness_scout_parser_exposes_contract_diagnostic_defaults():
@@ -617,6 +618,8 @@ def test_auto_parser_hides_lambda_controls(capsys):
     assert args.sg_window_scout_max_rows == 0
     assert args.sg_window_scout_min_wR2_gain == 0.002
     assert args.sg_window_scout_free_wR2_tolerance == 0.003
+    assert args.selection_metric == "work_wR2"
+    assert args.continuous_thickness_metric == "work_wR2"
     assert args.n_points == 20
     assert args.screen_n_basis == 24
     assert args.hand_n_basis == 24
@@ -958,6 +961,49 @@ def test_sfac_check_rejects_element_only_shelx_factors(tmp_path: Path, capsys):
     assert "explicit electron scattering coefficient rows" in payload["messages"][1]["message"]
 
 
+def test_sfac_check_rejects_cif_without_electron_factor_contract(tmp_path: Path):
+    model = tmp_path / "ordinary.cif"
+    model.write_text(
+        "data_test\n"
+        "_cell_length_a 10\n"
+        "_cell_length_b 10\n"
+        "_cell_length_c 10\n"
+        "_cell_angle_alpha 90\n"
+        "_cell_angle_beta 90\n"
+        "_cell_angle_gamma 90\n"
+    )
+
+    payload = check_sfac_contract(model)
+
+    assert payload["status"] == "error"
+    assert payload["ok"] is False
+    assert "electron-scattering model" in payload["messages"][0]["message"]
+
+
+def test_sfac_check_audits_embedded_shelx_cif(tmp_path: Path):
+    model = tmp_path / "embedded.cif"
+    model.write_text(
+        """data_test
+_shelx_res_file
+;
+TITL embedded
+CELL 0.025079 10 10 10 90 90 90
+LATT -1
+SFAC C 1 0 1 0 1 0 1 0
+C1 1 0.1 0.2 0.3 11 0.05
+HKLF 4
+END
+;
+"""
+    )
+
+    payload = check_sfac_contract(model)
+
+    assert payload["ok"] is True
+    assert payload["cif_model_contract"] == "embedded_shelx"
+    assert payload["sfac_rows"][0]["kind"] == "numeric_coefficients"
+
+
 def test_sfac_check_accepts_numeric_rows_and_warns_on_placeholder_wavelength(tmp_path: Path):
     model = tmp_path / "ok.res"
     model.write_text("TITL ok\nCELL 1 5 6 7 90 90 90\nSFAC C 1 0 1 0 1 0 1 0\nHKLF 4\nEND\n")
@@ -1127,7 +1173,7 @@ def test_auto_parser_accepts_dials_input_pair():
     assert args.dials_refl == "integrated.refl"
     assert args.dials_expt == "integrated.expt"
     assert args.dials_intensity_mode == "sum_complete"
-    assert args.dials_sigma_mode == "auto"
+    assert args.dials_sigma_mode == "raw"
     assert args.dials_python == "/path/to/dials.python"
     assert args.dials_drop_dont_integrate is False
     assert args.dials_keep_dont_integrate is False
@@ -1687,13 +1733,13 @@ def test_import_dials_parser_exposes_bridge_options():
             "--intensity-mode",
             "sum_raw",
             "--dataset-name",
-            "370_dials",
+            "example_dials",
         ]
     )
     assert args.command == "import-dials"
     assert args.intensity_mode == "sum_raw"
-    assert args.sigma_mode == "auto"
-    assert args.dataset_name == "370_dials"
+    assert args.sigma_mode == "raw"
+    assert args.dataset_name == "example_dials"
     assert args.drop_dont_integrate is False
     assert args.keep_dont_integrate is False
 

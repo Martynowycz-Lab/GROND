@@ -7,7 +7,7 @@ GROND is a normal Python package. The recommended installation is a clean Python
 - Python 3.11, 3.12, or 3.13. Prefer 3.12 unless your local or server environment already standardizes on another supported version.
 - Git, if installing from GitHub.
 - A working XDS processing directory, or a DIALS `integrated.refl`/`integrated.expt` pair, for each dataset you want to regularize.
-- A solved starting structure, usually SHELX `model.res` or CIF.
+- A solved SHELX `model.res` or `model.ins` with explicit electron scattering coefficients. A CIF is suitable for `GROND run` only when it embeds the complete SHELX instruction block used for model updates.
 - A baseline solved-model HKL file when available. This is strongly recommended because GROND uses it to reduce transform ambiguity before running Bloch scouts.
 - Optional: SHELXL for corrected-HKL endpoint polishing/statistics.
 - Optional: `shelx2map` for map generation.
@@ -19,7 +19,7 @@ Native row-level Bloch calculations are Python-first. The full default endpoint 
 ## Fresh Install With venv
 
 ```bash
-git clone https://github.com/Martynowycz-Lab/GROND.git
+git clone git@github.com:Martynowycz-Lab/GROND.git
 cd GROND
 python3.12 -m venv .venv
 source .venv/bin/activate
@@ -36,6 +36,24 @@ The package installs both `GROND` and `grond` console commands. If a shell or ma
 python -m grond doctor --probe-bloch
 ```
 
+## Updating An Existing Checkout
+
+Use Git as the source of truth on every machine. Update only from a clean checkout, pull with fast-forward protection, reinstall the local package, and run the same environment check used after a fresh install:
+
+```bash
+cd /path/to/GROND
+git status --short
+git switch main
+git pull --ff-only origin main
+source .venv/bin/activate
+python -m pip install .
+python -m grond doctor --probe-bloch
+```
+
+For an editable developer installation, refresh the metadata and development dependencies with `python -m pip install -e ".[dev]"` after the pull. The source changes themselves are then visible immediately. If a machine must reproduce a released calculation rather than follow `main`, check out the recorded release tag or commit before installing.
+
+Do not copy an installed environment between macOS and Linux, and do not synchronize a live working tree with a file-copy tool. Clone or pull the repository on each machine and let that machine build its own environment.
+
 ## Updating A Stale Mac App Bundle
 
 Some lab Macs may have an older self-contained bundle at `/Applications/GROND`. If `GROND doctor` reports `install_status: stale_or_incomplete_install`, or if the `grond` block is missing from the doctor output, remove the old bundle before reinstalling. Installing over the top can leave old `site-packages` files behind.
@@ -44,7 +62,7 @@ Some lab Macs may have an older self-contained bundle at `/Applications/GROND`. 
 sudo rm -rf /Applications/GROND
 sudo mkdir -p /Applications/GROND
 sudo chown -R "$USER" /Applications/GROND
-git clone https://github.com/Martynowycz-Lab/GROND.git
+git clone git@github.com:Martynowycz-Lab/GROND.git
 cd GROND
 python3.12 -m venv /Applications/GROND/grond
 /Applications/GROND/grond/bin/python -m pip install --upgrade pip
@@ -52,7 +70,7 @@ python3.12 -m venv /Applications/GROND/grond
 /Applications/GROND/grond/bin/GROND doctor --probe-bloch
 ```
 
-The final doctor output should include `version: 0.2.1` or newer, a `grond.package` path under `/Applications/GROND/grond/lib/python.../site-packages/grond`, and `install_status: current_required_features_present`.
+The final doctor output should include `version: 0.2.2` or newer, a `grond.package` path under `/Applications/GROND/grond/lib/python.../site-packages/grond`, and `install_status: current_required_features_present`.
 
 ## Developer Install
 
@@ -160,7 +178,7 @@ The supported production endpoint for `GROND auto` is still SHELXL. The endpoint
 
 Most users should prepare two products from the same raw data:
 
-1. A conventional solved structure path used to obtain `model.res` or `model.cif`, usually from XDS profile-fitted integration, XSCALE, XDSCONV, SHELXT, and initial SHELXL regularization.
+1. A conventional solved structure path used to obtain `model.res` or a CIF with an embedded SHELX instruction block, usually from XDS profile-fitted integration, XSCALE, XDSCONV, SHELXT, and initial SHELXL regularization.
 2. A GROND input integration with no profile fitting, usually in a separate `noprf/` or `grond_input/` directory.
 
 For the GROND input integration, edit `XDS.INP` in the copied processing directory:
@@ -178,7 +196,7 @@ More detail is in [XDS_WORKFLOW.md](XDS_WORKFLOW.md).
 
 ## DIALS Input Preparation
 
-DIALS users should keep the row-preserving `integrated.refl` and matching `integrated.expt` from `dials.integrate`. GROND uses `intensity.sum.value` by default, so DIALS profile fitting does not need to be disabled, although `integration.profile.fitting=False` makes a cleaner summation-only table when that is what you want to test. Do not merge the data before GROND and do not rely on an exported HKL file when the `.refl` and `.expt` files are available. For electron-diffraction CBF data, check `dials_bridge_summary.json` after import: GROND records the empirical sigma calibration, how many DIALS quality-flagged rows were removed, and whether the scan-varying geometry reproduces near-zero predicted-row excitation errors.
+DIALS users should keep the row-preserving `integrated.refl` and matching `integrated.expt` from `dials.integrate`. GROND uses `intensity.sum.value` by default, so DIALS profile fitting does not need to be disabled, although `integration.profile.fitting=False` makes a cleaner summation-only table when that is what you want to test. Do not merge the data before GROND and do not rely on an exported HKL file when the `.refl` and `.expt` files are available. For electron-diffraction CBF data, check `dials_bridge_summary.json` after import: it records the unchanged raw sigma policy, any explicitly requested empirical or gain-based alternative, the DIALS quality flags that removed rows, and the excitation-error geometry check.
 
 If DIALS is installed in a separate environment, pass its Python executable with `--dials-python`:
 

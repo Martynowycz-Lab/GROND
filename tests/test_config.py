@@ -1,6 +1,8 @@
 from pathlib import Path
 
-from grond.io.config import parse_dataset_spec
+import pytest
+
+from grond.io.config import DatasetSpec, PrepConfig, parse_dataset_spec
 from grond.io.tool_config import (
     configured_tools,
     load_tool_config,
@@ -20,6 +22,54 @@ def test_parse_dataset_spec_directory(tmp_path: Path):
     assert ds.hkl_transform == "l,-k,h"
     assert ds.min_d_spacing == 0.8
     assert ds.geometry_percentile == 99.0
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("name", "../escape"),
+        ("hkl_transform", "h,h,l"),
+        ("hkl_transform", "h,k,q"),
+        ("target_mode", "unknown"),
+        ("min_d_spacing", 0.0),
+        ("min_peak", 101.0),
+        ("geometry_percentile", float("nan")),
+    ],
+)
+def test_dataset_spec_rejects_unsafe_or_unphysical_values(field, value):
+    values = {"name": "dataset", "hkl": "INTEGRATE.HKL"}
+    values[field] = value
+    with pytest.raises(ValueError):
+        DatasetSpec(**values)
+
+
+def test_prep_config_requires_unique_dataset_names():
+    datasets = [
+        DatasetSpec(name="same", hkl="one.HKL"),
+        DatasetSpec(name="same", hkl="two.HKL"),
+    ]
+    with pytest.raises(ValueError, match="must be unique"):
+        PrepConfig(structure="model.res", datasets=datasets)
+
+
+def test_prep_config_rejects_case_insensitive_dataset_collisions():
+    datasets = [
+        DatasetSpec(name="Crystal_A", hkl="one.HKL"),
+        DatasetSpec(name="crystal_a", hkl="two.HKL"),
+    ]
+    with pytest.raises(ValueError, match="must be unique"):
+        PrepConfig(structure="model.res", datasets=datasets)
+
+
+def test_parse_dataset_spec_rejects_unknown_option(tmp_path: Path):
+    with pytest.raises(ValueError, match="unknown dataset option.*min_peek"):
+        parse_dataset_spec(f"crystal={tmp_path},min_peek=80")
+
+
+@pytest.mark.parametrize("value", ["maybe", "truthy", "2", ""])
+def test_parse_dataset_spec_rejects_invalid_boolean(value: str, tmp_path: Path):
+    with pytest.raises(ValueError, match="include_nonpositive must be one of"):
+        parse_dataset_spec(f"crystal={tmp_path},include_nonpositive={value}")
 
 
 def test_tool_config_json_template_round_trip(tmp_path: Path):

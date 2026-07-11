@@ -21,7 +21,10 @@ import json
 import math
 import multiprocessing
 import os
+import re
+import tempfile
 import time
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -33,7 +36,7 @@ import numpy as np
 from numpy.polynomial.hermite import hermgauss
 from numpy.polynomial.legendre import leggauss
 from scipy.linalg import eig, eigh, expm
-from scipy.optimize import minimize
+from scipy.optimize import brentq
 from scipy.sparse.linalg import expm_multiply
 
 try:
@@ -87,7 +90,78 @@ COMPUTE_BACKENDS = [
     "jax_mps_real_expm_padded",
 ]
 COMPUTE_BACKEND_HELP = ", ".join(COMPUTE_BACKENDS)
-ROW_PLAN_CACHE_SCHEMA = 1
+ROW_PLAN_CACHE_SCHEMA = 2
+UG_CACHE_SCHEMA = 2
+ELECTRON_COMPTON_WAVELENGTH_A = 0.024263102
+DEFAULT_MAX_DENSE_UG_GIB = 2.0
+# The final complex128 cube is 16 bytes per voxel. Construction also holds
+# several real and complex vectorized work arrays at once; measured peaks are
+# about 170 bytes per voxel for the anisotropic path. These bounds leave
+# deliberate headroom for allocator and decompression overhead.
+DENSE_UG_BUILD_BYTES_PER_VOXEL = 256
+DENSE_UG_CACHE_LOAD_BYTES_PER_VOXEL = 64
+
+
+def dense_ug_memory_plan(h_lim: int, k_lim: int, l_lim: int) -> dict[str, int | list[int]]:
+    """Estimate dense U_g grid storage and peak working memory before allocation."""
+
+    limits = tuple(int(value) for value in (h_lim, k_lim, l_lim))
+    if any(value < 0 for value in limits):
+        raise ValueError(f"dense U_g limits must be nonnegative, got {limits}")
+    shape = tuple(2 * value + 1 for value in limits)
+    voxels = math.prod(shape)
+    return {
+        "shape": list(shape),
+        "voxels": int(voxels),
+        "cube_bytes": int(voxels * np.dtype(np.complex128).itemsize),
+        "estimated_cache_load_peak_bytes": int(voxels * DENSE_UG_CACHE_LOAD_BYTES_PER_VOXEL),
+        "estimated_build_peak_bytes": int(voxels * DENSE_UG_BUILD_BYTES_PER_VOXEL),
+    }
+
+
+def dense_ug_memory_limit_bytes() -> int:
+    """Return the dense U_g working-memory ceiling, with an explicit env override."""
+
+    raw = os.environ.get("GROND_MAX_DENSE_UG_GIB", str(DEFAULT_MAX_DENSE_UG_GIB)).strip()
+    try:
+        gib = float(raw)
+    except ValueError as exc:
+        raise ValueError("GROND_MAX_DENSE_UG_GIB must be a positive finite number") from exc
+    if not math.isfinite(gib) or gib <= 0.0:
+        raise ValueError("GROND_MAX_DENSE_UG_GIB must be a positive finite number")
+    return int(gib * (1024**3))
+
+
+def enforce_dense_ug_memory_limit(
+    plan: dict[str, int | list[int]], *, operation: str
+) -> dict[str, int | str | list[int]]:
+    """Fail before a dense U_g allocation whose estimated peak exceeds the limit."""
+
+    estimate_key = {
+        "build": "estimated_build_peak_bytes",
+        "cache load": "estimated_cache_load_peak_bytes",
+    }.get(operation)
+    if estimate_key is None:
+        raise ValueError(f"unknown dense U_g memory operation {operation!r}")
+    estimated = int(plan[estimate_key])
+    limit = dense_ug_memory_limit_bytes()
+    status: dict[str, int | str | list[int]] = {
+        **plan,
+        "operation": operation,
+        "estimated_peak_bytes": estimated,
+        "limit_bytes": limit,
+    }
+    if estimated > limit:
+        shape = " x ".join(str(value) for value in plan["shape"])
+        gib = 1024**3
+        raise MemoryError(
+            f"Dense U_g {operation} refused before allocation: grid {shape} "
+            f"({int(plan['voxels']):,} voxels, {int(plan['cube_bytes']) / gib:.2f} GiB stored) "
+            f"has an estimated {estimated / gib:.2f} GiB peak, above the {limit / gib:.2f} GiB "
+            "safety limit. Increase ug_d_min to reduce the reciprocal grid, or set "
+            "GROND_MAX_DENSE_UG_GIB to a larger value only after confirming available memory."
+        )
+    return status
 
 
 def _init_prediction_worker(port):
@@ -126,9 +200,9 @@ def _jax_matrix_bucket_size(cfg: Config | None, backend: str) -> int:
     """Return the matrix-dimension bucket for padded JAX backends.
 
     Exact-size JAX grouping is still the default for ordinary JAX backends.
-    The padded backends default to multiples of 8 because 370 benchmarks showed
-    this keeps compilation count low without paying too much extra eigensolver
-    work from full max-size padding.
+    The padded backends default to multiples of 8 because representative
+    large-support benchmarks showed that this keeps compilation count low
+    without paying too much extra eigensolver work from full max-size padding.
     """
 
     requested = int(getattr(cfg, "jax_matrix_bucket_size", 0) or 0) if cfg is not None else 0
@@ -323,7 +397,7 @@ def _jax_real_expm_propagate_batch(H_batch, thick, thick_w, backend: str, batch_
     out = np.zeros(int(H_batch.shape[0]), dtype=float)
     dtype_name = _jax_real_dtype_name(backend)
     order = _jax_real_expm_order()
-    for t, w in zip(np.asarray(thick, dtype=float), np.asarray(thick_w, dtype=float)):
+    for t, w in zip(np.asarray(thick, dtype=float), np.asarray(thick_w, dtype=float), strict=True):
         real_batch = _real_embedding_generator_batch(H_batch, float(t), dtype_name)
         scale_steps = _jax_real_expm_scale_steps(real_batch)
         vals = _jax_real_expm_column0_batch(real_batch, backend, scale_steps, order, batch_size)
@@ -492,8 +566,8 @@ def row_plan_cache_validation_errors(cache: dict, indices, expected_key: str, ex
         errors.append("cache key mismatch")
     if int(meta.get("cache_schema", -1)) != int(expected_meta.get("cache_schema", ROW_PLAN_CACHE_SCHEMA)):
         errors.append("cache schema mismatch")
-    for field in ("hkl_sha256", "hkl_transform", "indices_sha256", "n_basis", "n_points", "profile_quadrature", "profile_accumulation"):
-        if meta.get(field) != expected_meta.get(field):
+    for field, expected_value in expected_meta.items():
+        if meta.get(field) != expected_value:
             errors.append(f"metadata mismatch: {field}")
     if "indices" in cache and not np.array_equal(np.asarray(cache["indices"], dtype=np.int64), np.asarray(indices, dtype=np.int64)):
         errors.append("index order mismatch")
@@ -501,14 +575,157 @@ def row_plan_cache_validation_errors(cache: dict, indices, expected_key: str, ex
         offsets = np.asarray(cache["basis_offsets"], dtype=np.int64)
         if len(offsets) != len(indices) + 1:
             errors.append("basis offset count mismatch")
+        elif offsets.ndim != 1 or offsets[0] != 0 or np.any(offsets < 0):
+            errors.append("basis offsets must be a nonnegative vector starting at zero")
         elif np.any(np.diff(offsets) <= 1):
             errors.append("basis offsets do not contain direct and target beams for every row")
+        elif "basis_flat" in cache and offsets[-1] != len(cache["basis_flat"]):
+            errors.append("basis offsets do not span basis_flat")
+    if "basis_flat" in cache:
+        basis = np.asarray(cache["basis_flat"])
+        if (
+            basis.ndim != 2
+            or basis.shape[1:] != (3,)
+            or not np.all(np.isfinite(basis))
+            or not np.all(basis == np.rint(basis))
+        ):
+            errors.append("basis_flat must be a finite integer N by 3 array")
     if "profile_offsets" in cache:
         offsets = np.asarray(cache["profile_offsets"], dtype=np.int64)
         if len(offsets) != len(indices) + 1:
             errors.append("profile offset count mismatch")
+        elif offsets.ndim != 1 or offsets[0] != 0 or np.any(offsets < 0):
+            errors.append("profile offsets must be a nonnegative vector starting at zero")
         elif np.any(np.diff(offsets) <= 0):
             errors.append("profile offsets contain an empty row profile")
+        elif "profile_weights_flat" in cache and offsets[-1] != len(cache["profile_weights_flat"]):
+            errors.append("profile offsets do not span profile_weights_flat")
+    if "profile_weights_flat" in cache:
+        weights = np.asarray(cache["profile_weights_flat"], dtype=float)
+        if weights.ndim != 1 or not np.all(np.isfinite(weights)) or np.any(weights < 0.0):
+            errors.append("profile weights contain non-finite or negative values")
+        if "profile_offsets" in cache:
+            offsets = np.asarray(cache["profile_offsets"], dtype=np.int64)
+            if (
+                len(offsets) == len(indices) + 1
+                and offsets.ndim == 1
+                and offsets[0] == 0
+                and offsets[-1] == len(weights)
+                and any(float(np.sum(weights[offsets[i] : offsets[i + 1]])) <= 0.0 for i in range(len(indices)))
+            ):
+                errors.append("profile weights contain an all-zero row profile")
+    if "sg_offsets" in cache:
+        offsets = np.asarray(cache["sg_offsets"], dtype=np.int64)
+        if (
+            len(offsets) != len(indices) + 1
+            or offsets.ndim != 1
+            or offsets[0] != 0
+            or np.any(offsets < 0)
+            or np.any(np.diff(offsets) <= 0)
+        ):
+            errors.append("Sg offsets are incomplete")
+        elif "sg_basis_flat" in cache and offsets[-1] != len(cache["sg_basis_flat"]):
+            errors.append("Sg offsets do not span sg_basis_flat")
+    if "sg_basis_flat" in cache:
+        sg_basis = np.asarray(cache["sg_basis_flat"], dtype=float)
+        if sg_basis.ndim != 1 or not np.all(np.isfinite(sg_basis)):
+            errors.append("Sg basis contains non-finite values or has the wrong shape")
+    if "diff_offsets" in cache:
+        offsets = np.asarray(cache["diff_offsets"], dtype=np.int64)
+        if (
+            len(offsets) != len(indices) + 1
+            or offsets.ndim != 1
+            or offsets[0] != 0
+            or np.any(offsets < 0)
+            or np.any(np.diff(offsets) < 4)
+        ):
+            errors.append("difference offsets are incomplete")
+        elif "diff_idx_flat" in cache and offsets[-1] != len(cache["diff_idx_flat"]):
+            errors.append("difference offsets do not span diff_idx_flat")
+    if "unique_diffs" in cache:
+        diffs = np.asarray(cache["unique_diffs"])
+        if diffs.ndim != 2 or diffs.shape[1:] != (3,) or not np.all(np.isfinite(diffs)):
+            errors.append("unique_diffs must be a finite N by 3 array")
+        if "unique_inv_d2" in cache:
+            inv_d2 = np.asarray(cache["unique_inv_d2"], dtype=float)
+            if inv_d2.shape != (len(diffs),) or not np.all(np.isfinite(inv_d2)) or np.any(inv_d2 < 0.0):
+                errors.append("unique_inv_d2 is incomplete or invalid")
+        if "diff_idx_flat" in cache:
+            diff_indices = np.asarray(cache["diff_idx_flat"], dtype=np.int64)
+            if np.any(diff_indices < 0) or np.any(diff_indices >= len(diffs)):
+                errors.append("difference indices are out of range")
+    if all(name in cache for name in ("basis_offsets", "profile_offsets", "sg_offsets", "diff_offsets")):
+        basis_offsets = np.asarray(cache["basis_offsets"], dtype=np.int64)
+        profile_offsets = np.asarray(cache["profile_offsets"], dtype=np.int64)
+        sg_offsets = np.asarray(cache["sg_offsets"], dtype=np.int64)
+        diff_offsets = np.asarray(cache["diff_offsets"], dtype=np.int64)
+        if all(
+            offsets.ndim == 1
+            and len(offsets) == len(indices) + 1
+            and offsets[0] == 0
+            and np.all(offsets >= 0)
+            for offsets in (basis_offsets, profile_offsets, sg_offsets, diff_offsets)
+        ):
+            basis_counts = np.diff(basis_offsets)
+            profile_counts = np.diff(profile_offsets)
+            if not np.array_equal(np.diff(sg_offsets), basis_counts * profile_counts):
+                errors.append("Sg offsets do not contain one basis vector per profile point")
+            if not np.array_equal(np.diff(diff_offsets), basis_counts * basis_counts):
+                errors.append("difference offsets do not contain one index per basis-matrix entry")
+    finite_row_arrays = (
+        "center_sg",
+        "omega_center",
+        "omega_bragg",
+        "omega_delta",
+        "sg_window",
+        "sg_domega",
+        "sg_dframe",
+        "sg_window_raw",
+        "sg_window_half_frames",
+        "sg_window_clipped",
+        "sg_jitter_sigma",
+        "sg_jitter_d_inv",
+        "sg_jitter_frame_fraction",
+        "sg_jitter_kernel_points",
+        "sg_profile_points_total",
+        "sg_profile_weight_sum",
+        "sg_residual_max",
+        "dose_delta_b",
+    )
+    for name in finite_row_arrays:
+        if name not in cache:
+            continue
+        values = np.asarray(cache[name])
+        if values.shape != (len(indices),) or not np.all(np.isfinite(values)):
+            errors.append(f"{name} is incomplete or non-finite")
+    if "profile_offsets" in cache:
+        offsets = np.asarray(cache["profile_offsets"], dtype=np.int64)
+        if (
+            offsets.ndim == 1
+            and len(offsets) == len(indices) + 1
+            and offsets[0] == 0
+            and np.all(offsets >= 0)
+        ):
+            profile_counts = np.diff(offsets)
+            if "sg_profile_points_total" in cache and not np.array_equal(
+                np.asarray(cache["sg_profile_points_total"], dtype=np.int64),
+                profile_counts,
+            ):
+                errors.append("profile point totals do not match profile offsets")
+            if "profile_weights_flat" in cache and "sg_profile_weight_sum" in cache:
+                weights = np.asarray(cache["profile_weights_flat"], dtype=float)
+                if offsets[-1] == len(weights):
+                    sums = np.asarray(
+                        [np.sum(weights[offsets[i] : offsets[i + 1]]) for i in range(len(indices))],
+                        dtype=float,
+                    )
+                    if not np.allclose(
+                        sums,
+                        np.asarray(cache["sg_profile_weight_sum"], dtype=float),
+                        rtol=1e-10,
+                        atol=1e-12,
+                    ):
+                        errors.append("profile weight sums do not match cached row metadata")
     return errors
 
 
@@ -533,6 +750,15 @@ def rotation_matrix(axis: np.ndarray, angle_deg: float) -> np.ndarray:
         ]
     )
     return np.eye(3) + s * kx + (1.0 - c) * (kx @ kx)
+
+
+def relativistic_gamma_from_wavelength(wavelength_A: float) -> float:
+    """Return the electron Lorentz factor implied by its de Broglie wavelength."""
+
+    wavelength_A = float(wavelength_A)
+    if not math.isfinite(wavelength_A) or wavelength_A <= 0.0:
+        raise ValueError("electron wavelength must be finite and positive")
+    return math.sqrt(1.0 + (ELECTRON_COMPTON_WAVELENGTH_A / wavelength_A) ** 2)
 
 
 def parse_hkl_transform(spec: str | None) -> tuple[np.ndarray, str]:
@@ -612,8 +838,20 @@ def join_shelx_continuations(lines):
 
 
 def parse_sfac(tokens):
+    if len(tokens) < 10:
+        raise ValueError(
+            "SFAC records used for Bloch calculations must include an element and "
+            "at least four explicit scattering-factor coefficient pairs"
+        )
     element = tokens[1]
-    vals = [float(v) for v in tokens[2:]]
+    try:
+        vals = [float(v) for v in tokens[2:]]
+    except ValueError as exc:
+        raise ValueError(f"non-numeric SFAC coefficients for element {element}") from exc
+    if not all(math.isfinite(value) for value in vals):
+        raise ValueError(f"non-finite SFAC coefficients for element {element}")
+    if not any(value != 0.0 for value in vals):
+        raise ValueError(f"all-zero SFAC coefficients for element {element}")
     pairs = [(vals[0], vals[1]), (vals[2], vals[3]), (vals[4], vals[5]), (vals[6], vals[7])]
     c = vals[8] if len(vals) > 8 else 0.0
     return {"element": element, "pairs": pairs, "c": c, "raw": vals}
@@ -684,24 +922,179 @@ def cif_symmetry_records(block):
             break
     records = []
     for row in rows:
-        text = row.get("_space_group_symop_operation_xyz") or row.get("_symmetry_equiv_pos_as_xyz")
+        values_by_tag = {str(tag).lower(): value for tag, value in row.items()}
+        text = values_by_tag.get("_space_group_symop_operation_xyz") or values_by_tag.get(
+            "_symmetry_equiv_pos_as_xyz"
+        )
         if text:
             records.append(gemmi_op_record(str(text).strip().strip("'\"")))
     if records:
         return unique_symmetry_records(records)
+    if rows:
+        raise ValueError("CIF declares a symmetry-operation loop but contains no usable operations")
+
+    declared_groups = []
     number = block.find_value("_space_group_IT_number") or block.find_value("_symmetry_Int_Tables_number")
     if number:
-        sg = gemmi.find_spacegroup_by_number(int(cif_number(number)))
-        if sg is not None:
-            return unique_symmetry_records(gemmi_op_record(op.triplet()) for op in sg.operations())
+        parsed_number = cif_number(number)
+        if not math.isfinite(parsed_number) or parsed_number != round(parsed_number):
+            raise ValueError(f"CIF declares an invalid space-group number {number!r}")
+        sg = gemmi.find_spacegroup_by_number(int(parsed_number))
+        if sg is None:
+            raise ValueError(f"CIF declares unknown space-group number {number!r}")
+        declared_groups.append(("IT number", sg))
+
+    for tag in (
+        "_space_group_name_H-M_alt",
+        "_symmetry_space_group_name_H-M",
+        "_space_group_name_H-M_ref",
+    ):
+        raw = block.find_value(tag)
+        if not raw:
+            continue
+        name = str(raw).strip().strip("'\"")
+        sg = gemmi.find_spacegroup_by_name(name)
+        if sg is None:
+            raise ValueError(f"CIF declares an unrecognized space-group name {name!r} in {tag}")
+        declared_groups.append((tag, sg))
+
+    for tag in ("_space_group_name_Hall", "_symmetry_space_group_name_Hall"):
+        raw = block.find_value(tag)
+        if not raw:
+            continue
+        name = str(raw).strip().strip("'\"")
+        sg = next((candidate for candidate in gemmi.spacegroup_table() if candidate.hall == name), None)
+        if sg is None:
+            raise ValueError(f"CIF declares an unrecognized Hall space-group name {name!r} in {tag}")
+        declared_groups.append((tag, sg))
+
+    if declared_groups:
+        numbers = {int(group.number) for _source, group in declared_groups}
+        if len(numbers) != 1:
+            declarations = ", ".join(f"{source}={group.xhm()}" for source, group in declared_groups)
+            raise ValueError(f"CIF space-group declarations disagree: {declarations}")
+        sg = declared_groups[0][1]
+        return unique_symmetry_records(gemmi_op_record(op.triplet()) for op in sg.operations())
     return [gemmi_op_record("x,y,z")]
 
 
-def shelx_occupancy(value: float) -> float:
-    occ = float(value)
-    if abs(occ) >= 10.0:
-        occ = (-1.0 if occ < 0.0 else 1.0) * (abs(occ) - 10.0)
-    return occ
+SHELX_NON_ATOM_RECORDS = {
+    "ACTA",
+    "AFIX",
+    "ANIS",
+    "BASF",
+    "BIND",
+    "BLOC",
+    "BOND",
+    "BUMP",
+    "CELL",
+    "CGLS",
+    "CHIV",
+    "CONF",
+    "CONN",
+    "DAMP",
+    "DANG",
+    "DEFS",
+    "DELU",
+    "DFIX",
+    "DISP",
+    "EADP",
+    "END",
+    "EQIV",
+    "EXTI",
+    "EXYZ",
+    "FEND",
+    "FLAT",
+    "FMAP",
+    "FRAG",
+    "FREE",
+    "FVAR",
+    "GRID",
+    "HFIX",
+    "HKLF",
+    "HOPE",
+    "HTAB",
+    "ISOR",
+    "L.S.",
+    "LATT",
+    "LAUE",
+    "LIST",
+    "MERG",
+    "MOLE",
+    "MORE",
+    "MOVE",
+    "MPLA",
+    "NCSY",
+    "NEUT",
+    "OMIT",
+    "PART",
+    "PLAN",
+    "PRIG",
+    "REM",
+    "RESI",
+    "RIGU",
+    "RTAB",
+    "SADI",
+    "SAME",
+    "SFAC",
+    "SHEL",
+    "SIMU",
+    "SIZE",
+    "SPEC",
+    "SQUEEZE",
+    "STIR",
+    "SUMP",
+    "SWAT",
+    "SYMM",
+    "TEMP",
+    "TIME",
+    "TITL",
+    "TWIN",
+    "UNIT",
+    "WGHT",
+    "WPDB",
+    "ZERR",
+}
+
+
+def shelx_parameter(value: float, free_variables: list[float], *, field: str) -> float:
+    """Resolve SHELX's ``10*m+p`` parameter encoding.
+
+    The first FVAR value is the overall scale.  Parameter references therefore
+    start at ``m=2``.  A negative ``m`` denotes the complementary value.  Fixed
+    values use ``m=1`` and are returned without the added ten.
+    """
+
+    raw = float(value)
+    if not math.isfinite(raw):
+        raise ValueError(f"non-finite SHELX {field}: {raw!r}")
+    mode = math.trunc(raw / 10.0)
+    multiplier = raw - 10.0 * mode
+    if mode == 0 or abs(multiplier) >= 5.0:
+        return raw
+    if mode == 1:
+        return multiplier
+    if mode == -1:
+        raise ValueError(f"invalid SHELX {field} free-variable reference {raw:g}: FVAR 1 is the scale")
+
+    index = abs(mode) - 1
+    if index >= len(free_variables):
+        raise ValueError(
+            f"SHELX {field} value {raw:g} references FVAR {abs(mode)}, "
+            f"but only {len(free_variables)} FVAR values were supplied"
+        )
+    free_value = float(free_variables[index])
+    if not math.isfinite(free_value):
+        raise ValueError(f"SHELX FVAR {abs(mode)} is not finite")
+    if mode > 1:
+        return multiplier * free_value
+    return multiplier * (free_value - 1.0)
+
+
+def is_shelx_q_peak(label: str) -> bool:
+    """Return whether a SHELX atom-like label is a residual-density Q peak."""
+
+    return re.fullmatch(r"Q\d+[A-Z]?", str(label).strip(), flags=re.IGNORECASE) is not None
 
 
 def cif_number(value, default=float("nan")):
@@ -724,6 +1117,14 @@ def parse_res(path: Path):
     current_parent_ueq = None
     latt = 1
     symm_texts = []
+    free_variables = []
+    for line in lines:
+        tokens = line.strip().split()
+        if tokens and tokens[0].upper() == "FVAR":
+            try:
+                free_variables.extend(float(value) for value in tokens[1:])
+            except ValueError as exc:
+                raise ValueError(f"invalid FVAR instruction in {path}: {line.strip()}") from exc
     for line in lines:
         stripped = line.strip()
         if not stripped or stripped.upper().startswith("REM"):
@@ -731,7 +1132,15 @@ def parse_res(path: Path):
         tokens = stripped.split()
         key = tokens[0].upper()
         if key == "CELL":
+            if len(tokens) < 8:
+                raise ValueError(f"CELL instruction in {path} does not contain six cell parameters")
             cell = tuple(float(v) for v in tokens[2:8])
+            if (
+                not all(math.isfinite(value) for value in cell)
+                or any(value <= 0.0 for value in cell[:3])
+                or any(not 0.0 < value < 180.0 for value in cell[3:])
+            ):
+                raise ValueError(f"CELL instruction in {path} contains invalid cell parameters")
         elif key == "SFAC":
             sfac.append(parse_sfac(tokens))
         elif key == "LATT" and len(tokens) > 1:
@@ -741,46 +1150,42 @@ def parse_res(path: Path):
         elif key in {"END", "HKLF"}:
             if key == "HKLF":
                 break
-        elif key in {
-            "AFIX",
-            "RIGU",
-            "L.S.",
-            "PLAN",
-            "CONF",
-            "BOND",
-            "LIST",
-            "FMAP",
-            "MORE",
-            "ACTA",
-            "EXTI",
-            "BASF",
-            "TWIN",
-            "SWAT",
-            "SQUEEZE",
-            "OMIT",
-            "WGHT",
-            "FVAR",
-            "UNIT",
-            "ZERR",
-            "TITL",
-        }:
+        elif key in SHELX_NON_ATOM_RECORDS:
             continue
         elif len(tokens) >= 7 and tokens[1].lstrip("-").isdigit():
+            if is_shelx_q_peak(tokens[0]):
+                continue
             sfac_index = int(tokens[1]) - 1
-            vals = [float(v) for v in tokens[6:]]
+            if not 0 <= sfac_index < len(sfac):
+                raise ValueError(
+                    f"atom {tokens[0]} in {path} references SFAC {sfac_index + 1}, "
+                    f"but {len(sfac)} scattering-factor records were read"
+                )
+            vals = [shelx_parameter(float(v), free_variables, field=f"{tokens[0]} ADP") for v in tokens[6:]]
             atom = {
                 "name": tokens[0],
                 "sfac_index": sfac_index,
-                "element": sfac[sfac_index]["element"] if 0 <= sfac_index < len(sfac) else "",
-                "x": float(tokens[2]),
-                "y": float(tokens[3]),
-                "z": float(tokens[4]),
-                "occ": shelx_occupancy(float(tokens[5])),
+                "element": sfac[sfac_index]["element"],
+                "x": shelx_parameter(float(tokens[2]), free_variables, field=f"{tokens[0]} x"),
+                "y": shelx_parameter(float(tokens[3]), free_variables, field=f"{tokens[0]} y"),
+                "z": shelx_parameter(float(tokens[4]), free_variables, field=f"{tokens[0]} z"),
+                "occ": shelx_parameter(float(tokens[5]), free_variables, field=f"{tokens[0]} occupancy"),
                 "raw_adp": vals,
             }
+            numeric_atom_values = [
+                atom["x"],
+                atom["y"],
+                atom["z"],
+                atom["occ"],
+                *vals,
+            ]
+            if not all(math.isfinite(float(value)) for value in numeric_atom_values):
+                raise ValueError(f"atom {tokens[0]} in {path} contains non-finite parameters")
             if len(vals) >= 6:
                 atom.update({"adp_type": "anis", "u11": vals[0], "u22": vals[1], "u33": vals[2], "u23": vals[3], "u13": vals[4], "u12": vals[5]})
-                current_parent_ueq = (vals[0] + vals[1] + vals[2]) / 3.0
+                if cell is None:
+                    raise ValueError(f"CELL must precede anisotropic atom {tokens[0]} in {path}")
+                current_parent_ueq = float(np.trace(shelx_u_cart_matrix(atom, cell))) / 3.0
             else:
                 atom["adp_type"] = "iso"
                 uiso = vals[0] if vals else 0.05
@@ -794,6 +1199,10 @@ def parse_res(path: Path):
             atoms.append(atom)
     if cell is None:
         raise ValueError(f"No CELL line in {path}")
+    if not sfac:
+        raise ValueError(f"No explicit electron-scattering SFAC records in {path}")
+    if not atoms:
+        raise ValueError(f"No atoms found before HKLF in {path}")
     return {"cell": cell, "sfac": sfac, "atoms": atoms, "model_source": "shelx_res", "ignored_exti": None, "symmetry_ops": shelx_symmetry_records(latt, symm_texts), "shelx_latt": latt}
 
 
@@ -820,22 +1229,61 @@ def parse_cif(path: Path):
         cif_number(block.find_value("_cell_angle_beta")),
         cif_number(block.find_value("_cell_angle_gamma")),
     )
-    if not all(np.isfinite(cell)):
+    if (
+        not all(np.isfinite(cell))
+        or any(value <= 0.0 for value in cell[:3])
+        or any(not 0.0 < value < 180.0 for value in cell[3:])
+    ):
         raise ValueError(f"No usable cell constants in {path}")
 
-    _, sfac_rows = loop_rows(block, "_atom_type_symbol")
+    coefficient_kind = str(
+        block.find_value("_grond_scattering_factor_kind")
+        or block.find_value("_atom_type_scat_source")
+        or ""
+    ).strip().strip("'\"").lower()
+    if coefficient_kind not in {"electron", "electron_diffraction", "electron-diffraction"}:
+        raise ValueError(
+            f"CIF {path} does not identify its scattering coefficients as electron factors; "
+            "add '_grond_scattering_factor_kind electron' or use a SHELX RES/INS model "
+            "with explicit electron SFAC records"
+        )
+
+    sfac_tags, sfac_rows = loop_rows(block, "_atom_type_symbol")
+    coefficient_tags = {
+        *(f"_atom_type_scat_Cromer_Mann_a{i}" for i in range(1, 5)),
+        *(f"_atom_type_scat_Cromer_Mann_b{i}" for i in range(1, 5)),
+    }
+    if sfac_rows and not {tag.lower() for tag in coefficient_tags}.issubset(
+        {tag.lower() for tag in sfac_tags}
+    ):
+        raise ValueError(
+            f"CIF {path} does not contain explicit electron scattering-factor coefficients; "
+            "supply a CIF with coefficient columns or a SHELX RES/INS model with numeric SFAC records"
+        )
     sfac = []
     symbol_to_index = {}
     for row in sfac_rows:
-        symbol = str(row.get("_atom_type_symbol", "")).strip().strip("'\"")
+        values_by_tag = {str(tag).lower(): value for tag, value in row.items()}
+        symbol = str(values_by_tag.get("_atom_type_symbol", "")).strip().strip("'\"")
         if not symbol:
             continue
         pairs = []
         for i in range(1, 5):
-            a = cif_number(row.get(f"_atom_type_scat_Cromer_Mann_a{i}", 0.0), 0.0)
-            b = cif_number(row.get(f"_atom_type_scat_Cromer_Mann_b{i}", 0.0), 0.0)
+            a = cif_number(
+                values_by_tag.get(f"_atom_type_scat_cromer_mann_a{i}", 0.0),
+                0.0,
+            )
+            b = cif_number(
+                values_by_tag.get(f"_atom_type_scat_cromer_mann_b{i}", 0.0),
+                0.0,
+            )
             pairs.append((a, b))
-        c = cif_number(row.get("_atom_type_scat_Cromer_Mann_c", 0.0), 0.0)
+        c = cif_number(values_by_tag.get("_atom_type_scat_cromer_mann_c", 0.0), 0.0)
+        coefficients = [value for pair in pairs for value in pair] + [c]
+        if not all(math.isfinite(value) for value in coefficients) or not any(
+            value != 0.0 for value in coefficients
+        ):
+            raise ValueError(f"CIF {path} has invalid or all-zero scattering coefficients for {symbol}")
         symbol_to_index[symbol.upper()] = len(sfac)
         sfac.append({"element": symbol, "pairs": pairs, "c": c, "raw": [v for pair in pairs for v in pair] + [c]})
     if not sfac:
@@ -844,24 +1292,26 @@ def parse_cif(path: Path):
     _, aniso_rows = loop_rows(block, "_atom_site_aniso_label")
     aniso = {}
     for row in aniso_rows:
-        label = str(row.get("_atom_site_aniso_label", "")).strip().strip("'\"")
+        values_by_tag = {str(tag).lower(): value for tag, value in row.items()}
+        label = str(values_by_tag.get("_atom_site_aniso_label", "")).strip().strip("'\"")
         if not label:
             continue
         aniso[label] = {
             "adp_type": "anis",
-            "u11": cif_number(row.get("_atom_site_aniso_U_11", 0.0), 0.0),
-            "u22": cif_number(row.get("_atom_site_aniso_U_22", 0.0), 0.0),
-            "u33": cif_number(row.get("_atom_site_aniso_U_33", 0.0), 0.0),
-            "u12": cif_number(row.get("_atom_site_aniso_U_12", 0.0), 0.0),
-            "u13": cif_number(row.get("_atom_site_aniso_U_13", 0.0), 0.0),
-            "u23": cif_number(row.get("_atom_site_aniso_U_23", 0.0), 0.0),
+            "u11": cif_number(values_by_tag.get("_atom_site_aniso_u_11", 0.0), 0.0),
+            "u22": cif_number(values_by_tag.get("_atom_site_aniso_u_22", 0.0), 0.0),
+            "u33": cif_number(values_by_tag.get("_atom_site_aniso_u_33", 0.0), 0.0),
+            "u12": cif_number(values_by_tag.get("_atom_site_aniso_u_12", 0.0), 0.0),
+            "u13": cif_number(values_by_tag.get("_atom_site_aniso_u_13", 0.0), 0.0),
+            "u23": cif_number(values_by_tag.get("_atom_site_aniso_u_23", 0.0), 0.0),
         }
 
     _, atom_rows = loop_rows(block, "_atom_site_label")
     atoms = []
     for row in atom_rows:
-        label = str(row.get("_atom_site_label", "")).strip().strip("'\"")
-        element = str(row.get("_atom_site_type_symbol", "")).strip().strip("'\"")
+        values_by_tag = {str(tag).lower(): value for tag, value in row.items()}
+        label = str(values_by_tag.get("_atom_site_label", "")).strip().strip("'\"")
+        element = str(values_by_tag.get("_atom_site_type_symbol", "")).strip().strip("'\"")
         if not label or not element:
             continue
         sfac_index = symbol_to_index.get(element.upper())
@@ -871,16 +1321,23 @@ def parse_cif(path: Path):
             "name": label,
             "sfac_index": int(sfac_index),
             "element": element,
-            "x": cif_number(row.get("_atom_site_fract_x")),
-            "y": cif_number(row.get("_atom_site_fract_y")),
-            "z": cif_number(row.get("_atom_site_fract_z")),
-            "occ": cif_number(row.get("_atom_site_occupancy", 1.0), 1.0),
+            "x": cif_number(values_by_tag.get("_atom_site_fract_x")),
+            "y": cif_number(values_by_tag.get("_atom_site_fract_y")),
+            "z": cif_number(values_by_tag.get("_atom_site_fract_z")),
+            "occ": cif_number(values_by_tag.get("_atom_site_occupancy", 1.0), 1.0),
         }
-        if label in aniso and str(row.get("_atom_site_adp_type", "")).strip().lower() == "uani":
+        if label in aniso and str(values_by_tag.get("_atom_site_adp_type", "")).strip().lower() == "uani":
             atom.update(aniso[label])
         else:
             atom["adp_type"] = "iso"
-            atom["uiso"] = cif_number(row.get("_atom_site_U_iso_or_equiv", 0.05), 0.05)
+            atom["uiso"] = cif_number(values_by_tag.get("_atom_site_u_iso_or_equiv", 0.05), 0.05)
+        numeric_atom_values = [
+            value
+            for key, value in atom.items()
+            if key in {"x", "y", "z", "occ", "uiso", "u11", "u22", "u33", "u12", "u13", "u23"}
+        ]
+        if not all(math.isfinite(float(value)) for value in numeric_atom_values):
+            raise ValueError(f"atom {label} in CIF {path} contains non-finite parameters")
         atoms.append(atom)
     if not atoms:
         raise ValueError(f"No _atom_site loop found in {path}")
@@ -901,6 +1358,8 @@ def alternate_hand_model(model):
         atom["x"] = (-float(atom["x"])) % 1.0
         atom["y"] = (-float(atom["y"])) % 1.0
         atom["z"] = (-float(atom["z"])) % 1.0
+    for operation in out.get("symmetry_ops", []):
+        operation["trans"] = [(-float(value)) % 1.0 for value in operation.get("trans", (0.0, 0.0, 0.0))]
     return out
 
 
@@ -985,28 +1444,52 @@ def sfac_value_array(sfac, s2):
     return out
 
 
+def cell_orthogonalization_matrix(cell_tuple):
+    """Return the matrix that maps fractional coordinates to Cartesian Angstroms."""
+
+    uc = gemmi.UnitCell(*[float(v) for v in cell_tuple[:6]])
+    axes = (
+        uc.orthogonalize(gemmi.Fractional(1, 0, 0)),
+        uc.orthogonalize(gemmi.Fractional(0, 1, 0)),
+        uc.orthogonalize(gemmi.Fractional(0, 0, 1)),
+    )
+    return np.asarray([[axis.x, axis.y, axis.z] for axis in axes], dtype=float).T
+
+
+def shelx_u_matrix(atom):
+    """Return a SHELX/CIF crystallographic U tensor in symmetric matrix form."""
+
+    return np.asarray(
+        [
+            [float(atom["u11"]), float(atom["u12"]), float(atom["u13"])],
+            [float(atom["u12"]), float(atom["u22"]), float(atom["u23"])],
+            [float(atom["u13"]), float(atom["u23"]), float(atom["u33"])],
+        ],
+        dtype=float,
+    )
+
+
+def shelx_u_cart_matrix(atom, cell_tuple):
+    """Convert crystallographic Uij values to a Cartesian displacement tensor.
+
+    SHELX and coreCIF store Uij in the crystallographic convention used by the
+    structure-factor exponent: the reciprocal-vector components are
+    ``(h*a*, k*b*, l*c*)``.  Geometry restraints, by contrast, require a true
+    Cartesian tensor.  This conversion is identity only for orthogonal cells.
+    """
+
+    orth = cell_orthogonalization_matrix(cell_tuple)
+    reciprocal_scale = np.diag(reciprocal_lengths(cell_tuple))
+    transform = orth @ reciprocal_scale
+    return transform @ shelx_u_matrix(atom) @ transform.T
+
+
 def atom_dw(atom, hkl, cell_tuple):
     h, k, l = (float(v) for v in hkl)
     if atom.get("adp_type") == "anis":
-        uc = gemmi.UnitCell(*[float(v) for v in cell_tuple[:6]])
-        o1 = uc.orthogonalize(gemmi.Fractional(1, 0, 0))
-        o2 = uc.orthogonalize(gemmi.Fractional(0, 1, 0))
-        o3 = uc.orthogonalize(gemmi.Fractional(0, 0, 1))
-        O = np.array([
-            [o1.x, o2.x, o3.x],
-            [o1.y, o2.y, o3.y],
-            [o1.z, o2.z, o3.z]
-        ])
-        F = np.linalg.inv(O)
-        s_orth = F.T @ np.array([h, k, l])
-        u11, u22, u33 = float(atom["u11"]), float(atom["u22"]), float(atom["u33"])
-        u12, u13, u23 = float(atom["u12"]), float(atom["u13"]), float(atom["u23"])
-        U = np.array([
-            [u11, u12, u13],
-            [u12, u22, u23],
-            [u13, u23, u33]
-        ])
-        arg = s_orth.T @ U @ s_orth
+        ast, bst, cst = reciprocal_lengths(cell_tuple)
+        scaled_hkl = np.asarray([h * ast, k * bst, l * cst], dtype=float)
+        arg = float(scaled_hkl @ shelx_u_matrix(atom) @ scaled_hkl)
         return math.exp(-2.0 * math.pi * math.pi * arg)
     s2 = 0.25 * inv_d2_from_hkl_array(h, k, l, cell_tuple)
     return math.exp(-8.0 * math.pi * math.pi * float(atom.get("uiso", 0.05)) * s2)
@@ -1014,25 +1497,12 @@ def atom_dw(atom, hkl, cell_tuple):
 
 def atom_dw_array(atom, h, k, l, s2, cell_tuple):
     if atom.get("adp_type") == "anis":
-        uc = gemmi.UnitCell(*[float(v) for v in cell_tuple[:6]])
-        o1 = uc.orthogonalize(gemmi.Fractional(1, 0, 0))
-        o2 = uc.orthogonalize(gemmi.Fractional(0, 1, 0))
-        o3 = uc.orthogonalize(gemmi.Fractional(0, 0, 1))
-        O = np.array([
-            [o1.x, o2.x, o3.x],
-            [o1.y, o2.y, o3.y],
-            [o1.z, o2.z, o3.z]
-        ])
-        F = np.linalg.inv(O)
-        hb, kb, lb = np.broadcast_arrays(h, k, l)
-        shape = hb.shape
-        hkl_stack = np.stack([hb.ravel(), kb.ravel(), lb.ravel()], axis=0)
-        s_orth = (F.T @ hkl_stack).reshape((3,) + shape)
+        ast, bst, cst = reciprocal_lengths(cell_tuple)
         u11, u22, u33 = float(atom["u11"]), float(atom["u22"]), float(atom["u33"])
         u12, u13, u23 = float(atom["u12"]), float(atom["u13"]), float(atom["u23"])
-        sx = s_orth[0]
-        sy = s_orth[1]
-        sz = s_orth[2]
+        sx = np.asarray(h, dtype=float) * ast
+        sy = np.asarray(k, dtype=float) * bst
+        sz = np.asarray(l, dtype=float) * cst
         arg = (
             sx * sx * u11
             + sy * sy * u22
@@ -1045,16 +1515,29 @@ def atom_dw_array(atom, h, k, l, s2, cell_tuple):
     return np.exp(-8.0 * math.pi * math.pi * float(atom.get("uiso", 0.05)) * s2)
 
 
+def unique_symmetry_mates(atom, model):
+    """Yield unique symmetry-expanded sites, avoiding special-position copies."""
+
+    xyz = np.asarray([atom["x"], atom["y"], atom["z"]], dtype=float)
+    seen = set()
+    for rotation, translation in model_symmetry_ops(model):
+        position = np.mod(rotation @ xyz + translation, 1.0)
+        key = tuple(np.rint(position * 1e10).astype(np.int64) % 10_000_000_000)
+        if key in seen:
+            continue
+        seen.add(key)
+        yield position, rotation
+
+
 def fcalc_res(model, hkl):
     h, k, l = (int(v) for v in hkl)
     s2 = 0.25 * inv_d2_from_hkl_array(h, k, l, model["cell"])
     total = 0.0 + 0.0j
     for atom in model["atoms"]:
         sf = sfac_value(model["sfac"][atom["sfac_index"]], s2)
-        dw = atom_dw(atom, (h, k, l), model["cell"])
-        xyz = np.array([atom["x"], atom["y"], atom["z"]], dtype=float)
-        for rot, trans in model_symmetry_ops(model):
-            pos = rot @ xyz + trans
+        for pos, rot in unique_symmetry_mates(atom, model):
+            mate_hkl = np.asarray(rot, dtype=float).T @ np.asarray([h, k, l], dtype=float)
+            dw = atom_dw(atom, mate_hkl, model["cell"])
             phase = 2.0 * math.pi * (h * pos[0] + k * pos[1] + l * pos[2])
             total += atom["occ"] * sf * dw * complex(math.cos(phase), math.sin(phase))
     return total
@@ -1066,14 +1549,17 @@ def fcalc_res_grid(model, h, k, l):
     l = np.asarray(l, dtype=float)
     s2 = 0.25 * inv_d2_from_hkl_array(h, k, l, model["cell"])
     total = np.zeros(h.shape, dtype=np.complex128)
-    symops = model_symmetry_ops(model)
     for atom in model["atoms"]:
         sf = sfac_value_array(model["sfac"][atom["sfac_index"]], s2)
-        dw = atom_dw_array(atom, h, k, l, s2, model["cell"])
-        amp = float(atom["occ"]) * sf * dw
-        xyz = np.array([atom["x"], atom["y"], atom["z"]], dtype=float)
-        for rot, trans in symops:
-            pos = rot @ xyz + trans
+        for pos, rot in unique_symmetry_mates(atom, model):
+            mate_h = rot[0, 0] * h + rot[1, 0] * k + rot[2, 0] * l
+            mate_k = rot[0, 1] * h + rot[1, 1] * k + rot[2, 1] * l
+            mate_l = rot[0, 2] * h + rot[1, 2] * k + rot[2, 2] * l
+            mate_s2 = 0.25 * inv_d2_from_hkl_array(
+                mate_h, mate_k, mate_l, model["cell"]
+            )
+            dw = atom_dw_array(atom, mate_h, mate_k, mate_l, mate_s2, model["cell"])
+            amp = float(atom["occ"]) * sf * dw
             phase = 2.0 * math.pi * (h * pos[0] + k * pos[1] + l * pos[2])
             total += amp * np.exp(1j * phase)
     return total
@@ -1105,7 +1591,7 @@ class Config:
     thickness_grad_frac: float = 0.25
     thickness_sigma_frac: float = 0.0
     thickness_points: int = 7
-    gamma: float = 1.3914
+    gamma: float | None = None
     group_width_deg: float = 3.0
     free_fraction: float = 0.10
     split_seed: int = 42
@@ -1133,6 +1619,125 @@ class Config:
     matrix_convention: str = "j_minus_i"
     row_plan_cache: str = "off"
 
+    def __post_init__(self):
+        integer_minima = {
+            "n_basis": (self.n_basis, 2),
+            "n_points": (self.n_points, 1),
+            "sg_jitter_points": (self.sg_jitter_points, 1),
+            "thickness_points": (self.thickness_points, 1),
+            "jax_batch_size": (self.jax_batch_size, 0),
+            "jax_matrix_bucket_size": (self.jax_matrix_bucket_size, 0),
+            "bethe_strong_count": (self.bethe_strong_count, 2),
+        }
+        for name, (value, minimum) in integer_minima.items():
+            if isinstance(value, bool) or int(value) != value or int(value) < minimum:
+                raise ValueError(f"{name} must be an integer of at least {minimum}")
+
+        positive_fields = {
+            "sg_window": self.sg_window,
+            "sg_window_min": self.sg_window_min,
+            "sg_window_max": self.sg_window_max,
+            "sg_window_scale": self.sg_window_scale,
+            "sg_jitter_width_factor": self.sg_jitter_width_factor,
+            "topup_d_min": self.topup_d_min,
+            "max_support_sg": self.max_support_sg,
+            "thickness_A": self.thickness_A,
+            "group_width_deg": self.group_width_deg,
+            "ug_d_min": self.ug_d_min,
+            "bethe_denom_eps": self.bethe_denom_eps,
+        }
+        for name, value in positive_fields.items():
+            if not math.isfinite(float(value)) or float(value) <= 0.0:
+                raise ValueError(f"{name} must be finite and positive")
+        if self.gamma is not None and (
+            not math.isfinite(float(self.gamma)) or float(self.gamma) <= 1.0
+        ):
+            raise ValueError("gamma must be greater than 1 when explicitly supplied")
+
+        nonnegative_fields = {
+            "sg_window_frame_floor": self.sg_window_frame_floor,
+            "sg_jitter_sigma0": self.sg_jitter_sigma0,
+            "sg_jitter_sigma_d_inv": self.sg_jitter_sigma_d_inv,
+            "sg_jitter_sigma_frame": self.sg_jitter_sigma_frame,
+            "thickness_grad_frac": self.thickness_grad_frac,
+            "thickness_sigma_frac": self.thickness_sigma_frac,
+            "variance_a": self.variance_a,
+            "variance_b_corr": self.variance_b_corr,
+            "variance_c_peak": self.variance_c_peak,
+            "absorption_mu": self.absorption_mu,
+            "absorption_frac": self.absorption_frac,
+            "absorption_mu_g2": self.absorption_mu_g2,
+            "absorption_mu_theta2": self.absorption_mu_theta2,
+            "absorption_tds_b": self.absorption_tds_b,
+            "dose_b_per_frame": self.dose_b_per_frame,
+            "bethe_promote_denom": self.bethe_promote_denom,
+        }
+        for name, value in nonnegative_fields.items():
+            if not math.isfinite(float(value)) or float(value) < 0.0:
+                raise ValueError(f"{name} must be finite and nonnegative")
+
+        choices = {
+            "sg_window_mode": (
+                self.sg_window_mode,
+                {"fixed", "zobs_residual", "zobs_plus_floor", "rlp_peak", "dials_bbox"},
+            ),
+            "sg_jitter_mode": (self.sg_jitter_mode, {"none", "gaussian", "student_t"}),
+            "profile_quadrature": (
+                self.profile_quadrature,
+                {"uniform", "trapezoid", "gauss_legendre", "legendre"},
+            ),
+            "profile_accumulation": (self.profile_accumulation, {"sum", "mean"}),
+            "thickness_model": (
+                self.thickness_model,
+                {"single", "uniform_gradient", "gaussian", "gaussian_gradient"},
+            ),
+            "absorption_mode": (
+                self.absorption_mode,
+                {
+                    "none",
+                    "mean",
+                    "beam_dependent",
+                    "offdiag_fraction",
+                    "offdiag_tds",
+                    "midgley_like",
+                    "midgley",
+                },
+            ),
+            "dose_b_mode": (self.dose_b_mode, {"none", "linear_frame"}),
+            "compute_backend": (
+                self.compute_backend,
+                set(COMPUTE_BACKENDS) | {"bethe", "scipy_bethe_promoted"},
+            ),
+            "bethe_variant": (
+                self.bethe_variant,
+                {"truncate", "schur0", "schur_target", "schur_mean"},
+            ),
+            "matrix_convention": (self.matrix_convention, {"j_minus_i", "i_minus_j"}),
+            "row_plan_cache": (self.row_plan_cache, {"off", "readwrite", "rebuild"}),
+        }
+        for name, (value, allowed) in choices.items():
+            if str(value).lower() not in allowed:
+                raise ValueError(f"unsupported {name} {value!r}; expected one of {sorted(allowed)}")
+
+        if self.sg_window_min > self.sg_window_max:
+            raise ValueError("sg_window_min must not exceed sg_window_max")
+        fixed_width = float(self.sg_window) * float(self.sg_window_scale)
+        if self.sg_window_mode == "fixed" and not self.sg_window_min <= fixed_width <= self.sg_window_max:
+            raise ValueError(
+                "fixed sg_window*sg_window_scale lies outside sg_window_min/sg_window_max; "
+                "change the bounds explicitly instead of accepting silent clipping"
+            )
+        if self.thickness_grad_frac > 1.0:
+            raise ValueError("thickness_grad_frac must not exceed 1")
+        if not math.isfinite(float(self.sg_jitter_student_df)) or self.sg_jitter_student_df <= 1.0:
+            raise ValueError("sg_jitter_student_df must be greater than 1")
+        if not 0.0 < float(self.free_fraction) < 1.0:
+            raise ValueError("free_fraction must be between 0 and 1")
+        if not math.isfinite(float(self.frame_offset)):
+            raise ValueError("frame_offset must be finite")
+        if not (math.isnan(float(self.dose_b_ref_frame)) or math.isfinite(float(self.dose_b_ref_frame))):
+            raise ValueError("dose_b_ref_frame must be finite or NaN")
+
 
 def frozen_kernel_contract(cfg: Config | None = None):
     """Machine-readable record of the audited Bloch convention.
@@ -1147,12 +1752,13 @@ def frozen_kernel_contract(cfg: Config | None = None):
     return {
         "name": "audited_signed_row_simple_hermitian",
         "geometry": {
-            "g(alpha)": "R(alpha) @ UB @ h",
+            "g(alpha)": "S @ R(alpha) @ F @ A(alpha) @ h (S=F=identity for ordinary XDS)",
             "Sg": "(k^2 - |s0 + g(alpha)|^2) / (2*k)",
             "profile_mode": "target_sg_to_angle",
             "profile_quadrature": None if cfg is None else str(getattr(cfg, "profile_quadrature", "uniform")),
             "profile_accumulation": None if cfg is None else str(getattr(cfg, "profile_accumulation", "sum")),
             "profile_weight_mode": "rocking-profile samples are summed by default; legacy normalized averaging is available as profile_accumulation=mean",
+            "profile_coordinate_jacobian": "target-Sg quadrature weights include relative abs(domega/dSg) so exposure sampling is uniform in angle",
             "profile_width_mode": "fixed unless cfg.sg_window_mode explicitly requests an auditable XDS metadata-derived per-row width",
             "orientation_distribution": "optional target-Sg jitter convolution after the base uniform-Sg grid; disabled by default",
             "basis_sg_recompute": "all basis Sg recomputed at every solved target-Sg angle",
@@ -1270,6 +1876,23 @@ def promoted_bethe_effective_hamiltonian(H: np.ndarray, cfg: Config) -> np.ndarr
     return Hss + (Hsw * safe_complex_inverse(denom, eps)[None, :]) @ Hws
 
 
+def rotation_matrix_from_header(header: dict[str, str], key: str, path: Path) -> np.ndarray:
+    """Parse an optional proper 3x3 rotation matrix from an XDS-like header."""
+
+    text = str(header.get(key, "")).strip()
+    if not text:
+        return np.eye(3, dtype=float)
+    values = np.asarray([float(value) for value in text.split()], dtype=float)
+    if values.shape != (9,) or not np.all(np.isfinite(values)):
+        raise ValueError(f"{key} must contain nine finite values in {path}")
+    matrix = values.reshape(3, 3)
+    if not np.allclose(matrix.T @ matrix, np.eye(3), atol=1e-6, rtol=0.0):
+        raise ValueError(f"{key} is not an orthogonal rotation matrix in {path}")
+    if not math.isclose(float(np.linalg.det(matrix)), 1.0, abs_tol=1e-6):
+        raise ValueError(f"{key} is not a proper rotation matrix in {path}")
+    return matrix
+
+
 class XDSData:
     def __init__(self, hkl_path: Path, hkl_transform: str | None = None):
         self.path = Path(hkl_path)
@@ -1302,12 +1925,14 @@ class XDSData:
                     ]
                 elif len(row) < 21:
                     continue
-                row[0] = int(row[0])
-                row[1] = int(row[1])
-                row[2] = int(row[2])
-                row[4] = abs(row[4])
                 rows.append(tuple(row))
-        arr = np.array(rows, dtype=float)
+        if not rows:
+            raise ValueError(f"no numeric reflection rows found in {self.path}")
+        arr = np.asarray(rows, dtype=float)
+        if arr.ndim != 2 or arr.shape[1] != 21:
+            raise ValueError(f"unexpected reflection-table shape {arr.shape} in {self.path}")
+        if not np.all(arr[:, :3] == np.rint(arr[:, :3])):
+            raise ValueError(f"non-integer Miller indices found in {self.path}")
         self.hkl = arr[:, :3].astype(int)
         self.iobs = arr[:, 3].astype(float)
         self.sigma = arr[:, 4].astype(float)
@@ -1328,13 +1953,68 @@ class XDSData:
         self.psi = arr[:, 19].astype(float)
         self.iseg = arr[:, 20].astype(int)
 
-        self.wavelength = float(self.header.get("X-RAY_WAVELENGTH", self.header.get("WAVELENGTH", "0.025079")).split()[0])
+        required = {
+            "wavelength": ("X-RAY_WAVELENGTH", "WAVELENGTH"),
+            "starting frame": ("STARTING_FRAME",),
+            "starting angle": ("STARTING_ANGLE",),
+            "oscillation range": ("OSCILLATION_RANGE",),
+            "rotation axis": ("ROTATION_AXIS",),
+            "incident beam direction": ("INCIDENT_BEAM_DIRECTION",),
+            "unit-cell constants": ("UNIT_CELL_CONSTANTS",),
+            "unit-cell a axis": ("UNIT_CELL_A-AXIS",),
+            "unit-cell b axis": ("UNIT_CELL_B-AXIS",),
+            "unit-cell c axis": ("UNIT_CELL_C-AXIS",),
+        }
+        missing = [
+            label
+            for label, aliases in required.items()
+            if not any(str(self.header.get(alias, "")).strip() for alias in aliases)
+        ]
+        if missing:
+            raise ValueError(f"missing required XDS header fields in {self.path}: {', '.join(missing)}")
+
+        wavelength_text = self.header.get("X-RAY_WAVELENGTH") or self.header["WAVELENGTH"]
+        self.wavelength = float(wavelength_text.split()[0])
+        if not math.isfinite(self.wavelength) or self.wavelength <= 0.0:
+            raise ValueError(f"XDS wavelength must be finite and positive in {self.path}")
         self.k = 1.0 / self.wavelength
         self.starting_frame = float(self.header["STARTING_FRAME"].split()[0])
         self.starting_angle = float(self.header["STARTING_ANGLE"].split()[0])
         self.oscillation_range = float(self.header["OSCILLATION_RANGE"].split()[0])
-        self.axis = np.array([float(x) for x in self.header["ROTATION_AXIS"].split()[:3]], dtype=float)
-        self.axis = self.axis / max(float(np.linalg.norm(self.axis)), 1e-30)
+        if not all(math.isfinite(v) for v in (self.starting_frame, self.starting_angle, self.oscillation_range)):
+            raise ValueError(f"XDS scan metadata must be finite in {self.path}")
+        if self.oscillation_range == 0.0:
+            raise ValueError(f"XDS oscillation range must be nonzero in {self.path}")
+        axis_text = self.header.get(
+            "GROND_ROTATION_AXIS_DATUM",
+            self.header.get("DIALS_ROTATION_AXIS_DATUM", self.header["ROTATION_AXIS"]),
+        )
+        self.axis = np.array([float(x) for x in axis_text.split()[:3]], dtype=float)
+        axis_norm = float(np.linalg.norm(self.axis))
+        if self.axis.shape != (3,) or not np.all(np.isfinite(self.axis)) or axis_norm <= 0.0:
+            raise ValueError(f"XDS rotation axis must be a finite nonzero 3-vector in {self.path}")
+        self.axis = self.axis / axis_norm
+        rotation_axis_lab = np.array(
+            [float(x) for x in self.header["ROTATION_AXIS"].split()[:3]], dtype=float
+        )
+        rotation_axis_lab_norm = float(np.linalg.norm(rotation_axis_lab))
+        if (
+            rotation_axis_lab.shape != (3,)
+            or not np.all(np.isfinite(rotation_axis_lab))
+            or rotation_axis_lab_norm <= 0.0
+        ):
+            raise ValueError(f"XDS rotation axis must be a finite nonzero 3-vector in {self.path}")
+        self.rotation_axis_lab = rotation_axis_lab / rotation_axis_lab_norm
+        fixed_rotation_key = (
+            "GROND_FIXED_ROTATION" if self.header.get("GROND_FIXED_ROTATION") else "DIALS_FIXED_ROTATION"
+        )
+        setting_rotation_key = (
+            "GROND_SETTING_ROTATION"
+            if self.header.get("GROND_SETTING_ROTATION")
+            else "DIALS_SETTING_ROTATION"
+        )
+        self.fixed_rotation = rotation_matrix_from_header(self.header, fixed_rotation_key, self.path)
+        self.setting_rotation = rotation_matrix_from_header(self.header, setting_rotation_key, self.path)
         self.axis_cross = np.array(
             [
                 [0.0, -self.axis[2], self.axis[1]],
@@ -1346,28 +2026,54 @@ class XDSData:
         self.axis_cross2 = self.axis_cross @ self.axis_cross
         self.axis_eye = np.eye(3, dtype=float)
         beam_dir = np.array([float(x) for x in self.header["INCIDENT_BEAM_DIRECTION"].split()[:3]], dtype=float)
-        self.s0 = self.k * beam_dir / np.linalg.norm(beam_dir)
+        beam_norm = float(np.linalg.norm(beam_dir))
+        if beam_dir.shape != (3,) or not np.all(np.isfinite(beam_dir)) or beam_norm <= 0.0:
+            raise ValueError(f"XDS incident beam direction must be a finite nonzero 3-vector in {self.path}")
+        self.s0 = self.k * beam_dir / beam_norm
         cell_vals = [float(x) for x in self.header["UNIT_CELL_CONSTANTS"].split()[:6]]
         self.cell = gemmi.UnitCell(*cell_vals)
         va = np.array([float(x) for x in self.header["UNIT_CELL_A-AXIS"].split()[:3]], dtype=float)
         vb = np.array([float(x) for x in self.header["UNIT_CELL_B-AXIS"].split()[:3]], dtype=float)
         vc = np.array([float(x) for x in self.header["UNIT_CELL_C-AXIS"].split()[:3]], dtype=float)
         self.real_matrix = np.stack([va, vb, vc], axis=1)
-        self.A = np.linalg.inv(self.real_matrix).T
+        if not np.all(np.isfinite(self.real_matrix)):
+            raise ValueError(f"XDS unit-cell axes contain non-finite values in {self.path}")
+        try:
+            self.A = np.linalg.inv(self.real_matrix).T
+        except np.linalg.LinAlgError as exc:
+            raise ValueError(f"XDS unit-cell axes are singular in {self.path}") from exc
         self.A_at_scan_points = None
+        self.a_scan_points_path = None
         scan_a_file = self.header.get("DIALS_A_AT_SCAN_POINTS_FILE", "").split()
         if scan_a_file:
             p = Path(scan_a_file[0])
             if not p.exists() and not p.is_absolute():
                 p = self.path.parent / p
+            self.a_scan_points_path = p.resolve()
             mats = []
             with p.open() as f:
-                for line in f:
-                    vals = [float(x) for x in line.split()]
-                    if len(vals) == 9:
-                        mats.append(np.asarray(vals, dtype=float).reshape(3, 3))
-            if mats:
-                self.A_at_scan_points = np.asarray(mats, dtype=float)
+                for line_number, line in enumerate(f, start=1):
+                    if not line.strip():
+                        continue
+                    try:
+                        vals = [float(x) for x in line.split()]
+                    except ValueError as exc:
+                        raise ValueError(
+                            f"DIALS A scan-point line {line_number} in {p} contains nonnumeric values"
+                        ) from exc
+                    if len(vals) != 9:
+                        raise ValueError(
+                            f"DIALS A scan-point line {line_number} in {p} must contain exactly nine values"
+                        )
+                    matrix = np.asarray(vals, dtype=float).reshape(3, 3)
+                    if not np.all(np.isfinite(matrix)) or abs(float(np.linalg.det(matrix))) <= 1e-15:
+                        raise ValueError(
+                            f"DIALS A scan-point line {line_number} in {p} must be finite and nonsingular"
+                        )
+                    mats.append(matrix)
+            if not mats:
+                raise ValueError(f"declared DIALS A scan-point file {p} contains no matrices")
+            self.A_at_scan_points = np.asarray(mats, dtype=float)
         self.variance_model = tuple(float(v) for v in self.header.get("VARIANCE_MODEL", "1.0 0.0").split()[:2])
         self.apply_hkl_transform(hkl_transform)
 
@@ -1403,17 +2109,106 @@ class XDSData:
     def A_for_omega(self, omega):
         if self.A_at_scan_points is None:
             return self.A
-        z = self.z_from_omega(omega)
-        if z <= 0:
+        scan_index = self.z_from_omega(omega) - self.starting_frame
+        if scan_index <= 0:
             return self.A_at_scan_points[0]
-        if z >= len(self.A_at_scan_points) - 1:
+        if scan_index >= len(self.A_at_scan_points) - 1:
             return self.A_at_scan_points[-1]
-        lo = int(math.floor(z))
-        frac = float(z) - lo
+        lo = int(math.floor(scan_index))
+        frac = float(scan_index) - lo
         return (1.0 - frac) * self.A_at_scan_points[lo] + frac * self.A_at_scan_points[lo + 1]
 
     def recorded_proxy(self):
         return self.iobs * np.maximum(self.peak, 0.0) / 100.0 / np.maximum(self.rlp, 1e-12)
+
+
+def validate_ug_cube(cube: np.ndarray, expected_shape: tuple[int, int, int]) -> np.ndarray:
+    """Return a finite complex128 U_g cube of exactly the expected shape."""
+
+    cube = np.asarray(cube)
+    if cube.shape != expected_shape:
+        raise ValueError(f"U_g cache shape {cube.shape} does not match expected {expected_shape}")
+    if cube.dtype != np.dtype(np.complex128):
+        raise ValueError(f"U_g cache dtype {cube.dtype} is not complex128")
+    flat = cube.reshape(-1)
+    for start in range(0, len(flat), 1_000_000):
+        if not np.isfinite(flat[start : start + 1_000_000]).all():
+            raise ValueError("U_g cache contains non-finite values")
+    return cube
+
+
+def load_validated_ug_cache(
+    path: Path,
+    *,
+    expected_lims: tuple[int, int, int],
+    expected_meta: dict,
+) -> np.ndarray:
+    """Load one U_g cache only after its schema, shape, metadata, and values agree."""
+
+    expected_shape = tuple(2 * int(value) + 1 for value in expected_lims)
+    expected_bytes = math.prod(expected_shape) * np.dtype(np.complex128).itemsize
+    with zipfile.ZipFile(path) as archive:
+        cube_member = archive.getinfo("ug_cube.npy")
+        if not expected_bytes <= cube_member.file_size <= expected_bytes + 65536:
+            raise ValueError(
+                f"U_g cache member size {cube_member.file_size} does not match expected grid bytes {expected_bytes}"
+            )
+        for name, maximum in (("lims.npy", 65536), ("meta_json.npy", 1024 * 1024)):
+            member = archive.getinfo(name)
+            if member.file_size > maximum:
+                raise ValueError(f"U_g cache member {name} is unexpectedly large ({member.file_size} bytes)")
+
+    with np.load(path, allow_pickle=False) as loaded:
+        required = {"ug_cube", "lims", "meta_json"}
+        missing = sorted(required.difference(loaded.files))
+        if missing:
+            raise ValueError(f"U_g cache is missing arrays: {', '.join(missing)}")
+        lims = tuple(int(value) for value in np.asarray(loaded["lims"]).reshape(-1))
+        if lims != expected_lims:
+            raise ValueError(f"U_g cache limits {lims} do not match expected {expected_lims}")
+        meta_value = np.asarray(loaded["meta_json"])
+        if meta_value.ndim != 0:
+            raise ValueError("U_g cache metadata must be a scalar JSON value")
+        meta_text = meta_value.item()
+        if isinstance(meta_text, bytes):
+            meta_text = meta_text.decode("utf-8")
+        meta = json.loads(str(meta_text))
+        if meta != expected_meta:
+            raise ValueError("U_g cache metadata does not match the requested model/configuration")
+        cube = np.asarray(loaded["ug_cube"])
+
+    return validate_ug_cube(cube, expected_shape)
+
+
+def write_ug_cache_atomic(
+    path: Path,
+    *,
+    cube: np.ndarray,
+    lims: tuple[int, int, int],
+    meta: dict,
+) -> None:
+    """Write a U_g cache through a same-directory temporary file and atomic replace."""
+
+    expected_shape = tuple(2 * int(value) + 1 for value in lims)
+    cube = validate_ug_cube(cube, expected_shape)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp.npz",
+        delete=False,
+    ) as handle:
+        tmp = Path(handle.name)
+    try:
+        np.savez_compressed(
+            tmp,
+            ug_cube=cube,
+            lims=np.asarray(lims, dtype=np.int64),
+            meta_json=json.dumps(meta, sort_keys=True),
+        )
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 class XDSBlochPort:
@@ -1421,6 +2216,11 @@ class XDSBlochPort:
         self.data = data
         self.model = copy.deepcopy(res_model)
         self.cfg = cfg
+        self.gamma = (
+            relativistic_gamma_from_wavelength(data.wavelength)
+            if cfg.gamma is None
+            else float(cfg.gamma)
+        )
         self.res_hash = res_hash or "unknown"
         self.cache_dir = Path(cache_dir) if cache_dir else None
         self.model["cell"] = (data.cell.a, data.cell.b, data.cell.c, data.cell.alpha, data.cell.beta, data.cell.gamma)
@@ -1445,41 +2245,76 @@ class XDSBlochPort:
     def ug_cache_key(self):
         cell = self.model["cell"]
         payload = {
+            "cache_schema": UG_CACHE_SCHEMA,
             "res_sha256": self.res_hash,
             "model_content_sha256": model_content_hash(self.model),
             "cell": [round(float(v), 6) for v in cell],
             "lims": [int(self.h_lim), int(self.k_lim), int(self.l_lim)],
-            "gamma": float(self.cfg.gamma),
+            "gamma": float(self.gamma),
+            "gamma_source": "wavelength" if self.cfg.gamma is None else "explicit_config",
             "ug_d_min_A": float(self.cfg.ug_d_min),
-            "formula": "gamma*Fe/(pi*V); P212121 RES/SFAC parser",
+            "formula": "gamma*Fe/(pi*V); explicit electron SFAC; parsed model symmetry",
         }
         text = json.dumps(payload, sort_keys=True)
         return hashlib.sha256(text.encode()).hexdigest()[:16], payload
 
     def load_or_build_ug_cube(self):
         if self.cache_dir is None:
-            return self.build_ug_cube()
+            cube = self.build_ug_cube()
+            self.ug_cache_status = {
+                "status": "disabled",
+                "allocation": getattr(self, "ug_allocation_status", {}),
+            }
+            return cube
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         key, meta = self.ug_cache_key()
         path = self.cache_dir / f"ug_cube_{key}.npz"
+        lims = (int(self.h_lim), int(self.k_lim), int(self.l_lim))
+        plan = dense_ug_memory_plan(*lims)
+        cache_meta = {**meta, "key": key}
+        rebuild_reason = ""
         if path.exists():
-            loaded = np.load(path, allow_pickle=False)
-            cube = loaded["ug_cube"]
-            if tuple(int(v) for v in loaded["lims"]) == (self.h_lim, self.k_lim, self.l_lim):
-                self.ug_cache_status = {"status": "hit", "path": str(path), "key": key, "meta": meta}
+            self.ug_allocation_status = enforce_dense_ug_memory_limit(plan, operation="cache load")
+            try:
+                cube = load_validated_ug_cache(
+                    path,
+                    expected_lims=lims,
+                    expected_meta=cache_meta,
+                )
+            except Exception as exc:
+                rebuild_reason = f"{type(exc).__name__}: {str(exc)[:240]}"
+            else:
+                self.ug_cache_status = {
+                    "status": "hit",
+                    "path": str(path),
+                    "key": key,
+                    "meta": meta,
+                    "allocation": self.ug_allocation_status,
+                }
                 return cube
         cube = self.build_ug_cube()
-        np.savez_compressed(path, ug_cube=cube, lims=np.asarray([self.h_lim, self.k_lim, self.l_lim], dtype=int), meta=json.dumps(meta, sort_keys=True))
-        self.ug_cache_status = {"status": "built", "path": str(path), "key": key, "meta": meta}
+        write_ug_cache_atomic(path, cube=cube, lims=lims, meta=cache_meta)
+        self.ug_cache_status = {
+            "status": "rebuilt" if rebuild_reason else "built",
+            "path": str(path),
+            "key": key,
+            "meta": meta,
+            "allocation": getattr(self, "ug_allocation_status", {}),
+        }
+        if rebuild_reason:
+            self.ug_cache_status["rebuild_reason"] = rebuild_reason
         return cube
 
     def build_ug_cube(self):
+        plan = dense_ug_memory_plan(self.h_lim, self.k_lim, self.l_lim)
+        self.ug_allocation_status = enforce_dense_ug_memory_limit(plan, operation="build")
         h_vals = np.arange(-self.h_lim, self.h_lim + 1, dtype=float)
         k_vals = np.arange(-self.k_lim, self.k_lim + 1, dtype=float)
         l_vals = np.arange(-self.l_lim, self.l_lim + 1, dtype=float)
         hh, kk, ll = np.meshgrid(h_vals, k_vals, l_vals, indexing="ij")
-        factor = float(self.cfg.gamma) / (math.pi * self.data.cell.volume)
-        return factor * fcalc_res_grid(self.model, hh, kk, ll)
+        factor = float(self.gamma) / (math.pi * self.data.cell.volume)
+        cube = factor * fcalc_res_grid(self.model, hh, kk, ll)
+        return validate_ug_cube(cube, tuple(int(value) for value in plan["shape"]))
 
     def ug(self, hkl):
         h, k, l = (int(v) for v in hkl)
@@ -1550,16 +2385,26 @@ class XDSBlochPort:
 
     def build_pool(self):
         h_lim, k_lim, l_lim = self.data.cell.get_hkl_limits(float(self.cfg.topup_d_min))
-        hkls, uvals = [], []
+        k_grid, l_grid = np.meshgrid(
+            np.arange(-k_lim, k_lim + 1, dtype=int),
+            np.arange(-l_lim, l_lim + 1, dtype=int),
+            indexing="ij",
+        )
+        hkls = []
+        uvals = []
+        inv_d2_limit = 1.0 / (float(self.cfg.topup_d_min) ** 2)
         for h in range(-h_lim, h_lim + 1):
-            for k in range(-k_lim, k_lim + 1):
-                for l in range(-l_lim, l_lim + 1):
-                    if h == 0 and k == 0 and l == 0:
-                        continue
-                    if self.data.cell.calculate_d((h, k, l)) >= self.cfg.topup_d_min:
-                        hkls.append((h, k, l))
-                        uvals.append(self.ug((h, k, l)))
-        return np.asarray(hkls, dtype=int), np.asarray(uvals, dtype=np.complex128)
+            h_grid = np.full_like(k_grid, h)
+            inv_d2 = inv_d2_from_hkl_array(h_grid, k_grid, l_grid, self.model["cell"])
+            keep = (inv_d2 > 0.0) & (inv_d2 <= inv_d2_limit * (1.0 + 1e-12))
+            if not np.any(keep):
+                continue
+            block = np.column_stack((h_grid[keep], k_grid[keep], l_grid[keep])).astype(int)
+            hkls.append(block)
+            uvals.append(np.asarray(self.ug_array(block), dtype=np.complex128))
+        if not hkls:
+            return np.zeros((0, 3), dtype=int), np.zeros(0, dtype=np.complex128)
+        return np.concatenate(hkls, axis=0), np.concatenate(uvals)
 
     def thickness_grid(self):
         model = str(getattr(self.cfg, "thickness_model", "uniform_gradient") or "uniform_gradient").lower()
@@ -1612,26 +2457,58 @@ class XDSBlochPort:
         c = float(np.cos(theta))
         s = float(np.sin(theta))
         R = self.data.axis_eye + s * self.data.axis_cross + (1.0 - c) * self.data.axis_cross2
-        return (R @ A @ np.asarray(hkls, dtype=float).T).T
+        transform = self.data.setting_rotation @ R @ self.data.fixed_rotation @ A
+        return (transform @ np.asarray(hkls, dtype=float).T).T
 
     def sg_for_hkls(self, hkls, omega_deg):
         g = self.gvecs(hkls, omega_deg)
         return (self.data.k**2 - np.sum((self.data.s0 + g) ** 2, axis=1)) / (2.0 * self.data.k)
 
-    def solve_omega_for_sg(self, hkl, omega0, target_sg):
-        omega = float(omega0)
-        for _ in range(10):
-            sg = float(self.sg_for_hkls(np.asarray([hkl], dtype=int), omega)[0])
-            resid = sg - float(target_sg)
-            if abs(resid) < 1e-8:
-                break
-            step = 1e-4
-            sp = float(self.sg_for_hkls(np.asarray([hkl], dtype=int), omega + step)[0])
-            sm = float(self.sg_for_hkls(np.asarray([hkl], dtype=int), omega - step)[0])
-            deriv = (sp - sm) / (2.0 * step)
-            if abs(deriv) < 1e-12:
-                break
-            omega -= resid / deriv
+    def solve_omega_for_sg(self, hkl, omega0, target_sg, max_delta_deg=None):
+        """Solve one local Ewald crossing without jumping to another branch."""
+
+        hkl_array = np.asarray([hkl], dtype=int)
+        omega0 = float(omega0)
+        target_sg = float(target_sg)
+
+        def residual(omega):
+            return float(self.sg_for_hkls(hkl_array, float(omega))[0]) - target_sg
+
+        initial = residual(omega0)
+        if abs(initial) <= 1e-10:
+            return omega0
+        oscillation = abs(float(self.data.oscillation_range))
+        if max_delta_deg is None:
+            max_delta_deg = max(2.0 * oscillation, min(2.0, 10.0 * oscillation))
+        max_delta_deg = float(max_delta_deg)
+        if not math.isfinite(max_delta_deg) or max_delta_deg <= 0.0:
+            raise ValueError("local Sg root-search range must be finite and positive")
+        offsets = np.linspace(-max_delta_deg, max_delta_deg, 65)
+        values = np.asarray([residual(omega0 + offset) for offset in offsets], dtype=float)
+        close = np.where(np.abs(values) <= 1e-10)[0]
+        if len(close):
+            best = int(close[np.argmin(np.abs(offsets[close]))])
+            return omega0 + float(offsets[best])
+        brackets = []
+        for i in range(len(offsets) - 1):
+            if values[i] * values[i + 1] < 0.0:
+                midpoint = 0.5 * (offsets[i] + offsets[i + 1])
+                brackets.append((abs(midpoint), i))
+        if not brackets:
+            raise ValueError(
+                f"no local Sg={target_sg:.6g} crossing for HKL {tuple(int(v) for v in hkl)} "
+                f"within {max_delta_deg:.6g} degrees of omega={omega0:.6g}"
+            )
+        _, index = min(brackets)
+        lower = omega0 + float(offsets[index])
+        upper = omega0 + float(offsets[index + 1])
+        omega = float(brentq(residual, lower, upper, xtol=1e-12, rtol=1e-12, maxiter=100))
+        final_residual = residual(omega)
+        if abs(final_residual) > 1e-9 or abs(omega - omega0) > max_delta_deg + 1e-10:
+            raise ValueError(
+                f"local Sg solver failed for HKL {tuple(int(v) for v in hkl)}: "
+                f"residual={final_residual:.3g}, delta_omega={omega - omega0:.3g} degrees"
+            )
         return omega
 
     def sg_derivative_per_deg(self, hkl, omega_deg):
@@ -1825,9 +2702,16 @@ class XDSBlochPort:
         ok = np.abs(sg_pool) <= float(self.cfg.max_support_sg)
         basis = [(0, 0, 0), tuple(int(v) for v in target_hkl)]
         seen = set(basis)
-        for idx in np.argsort(score)[::-1]:
-            if not ok[idx]:
-                continue
+        candidates = np.flatnonzero(ok)
+        needed = max(0, int(self.cfg.n_basis) - len(basis))
+        if needed == 0:
+            return np.asarray(basis, dtype=int)
+        take = min(len(candidates), needed + 1)
+        if take < len(candidates):
+            local = np.argpartition(score[candidates], -take)[-take:]
+            candidates = candidates[local]
+        candidates = candidates[np.lexsort((candidates, -score[candidates]))]
+        for idx in candidates:
             h = tuple(int(v) for v in self.pool_hkl[idx])
             if h in seen:
                 continue
@@ -1945,6 +2829,49 @@ class XDSBlochPort:
         static_H = self.hamiltonian_static_part(basis, absorb=absorb, row_idx=row_idx)
         return self.hamiltonian_from_static(static_H, sg_basis)
 
+    @staticmethod
+    def _nonhermitian_spectral_target_coupling(H):
+        """Return a stable eigensystem coupling, or ``None`` when direct expm is safer."""
+
+        H = np.asarray(H, dtype=np.complex128)
+        try:
+            vals, vecs = eig(H)
+            condition = float(np.linalg.cond(vecs))
+            if not math.isfinite(condition) or condition > 1e10:
+                return None
+            inv_vecs = np.linalg.inv(vecs)
+            reconstruction = vecs @ np.diag(vals) @ inv_vecs
+            relative_error = float(
+                np.linalg.norm(reconstruction - H)
+                / max(np.linalg.norm(H), np.finfo(float).eps)
+            )
+            if not math.isfinite(relative_error) or relative_error > 1e-8:
+                return None
+        except np.linalg.LinAlgError:
+            return None
+        coupling = vecs[1, :] * inv_vecs[:, 0]
+        return np.asarray(vals, dtype=np.complex128), np.asarray(coupling, dtype=np.complex128)
+
+    @staticmethod
+    def _nonhermitian_target_intensities(H, thicknesses):
+        """Propagate a non-Hermitian matrix, falling back for defective eigensystems."""
+
+        H = np.asarray(H, dtype=np.complex128)
+        thicknesses = np.atleast_1d(np.asarray(thicknesses, dtype=float))
+        spectral = XDSBlochPort._nonhermitian_spectral_target_coupling(H)
+
+        if spectral is None:
+            psi0 = np.zeros(H.shape[0], dtype=np.complex128)
+            psi0[0] = 1.0 + 0.0j
+            return np.asarray(
+                [abs((expm((2j * np.pi * float(t)) * H) @ psi0)[1]) ** 2 for t in thicknesses],
+                dtype=float,
+            )
+
+        vals, coupling = spectral
+        phase = np.exp((2j * np.pi) * vals[:, None] * thicknesses[None, :])
+        return np.asarray(np.abs(np.sum(coupling[:, None] * phase, axis=0)) ** 2, dtype=float)
+
     def propagate_direct_to_target(self, H, thickness):
         backend = str(getattr(self.cfg, "compute_backend", "scipy") or "scipy").lower()
         if backend in BETHE_BACKENDS:
@@ -1952,12 +2879,7 @@ class XDSBlochPort:
             backend = "scipy"
         if backend in {"scipy", "numpy_scipy_cpu"}:
             if self.absorption_enabled():
-                vals, vecs = eig(H)
-                try:
-                    inv_vecs = np.linalg.inv(vecs)
-                except np.linalg.LinAlgError:
-                    inv_vecs = np.linalg.pinv(vecs)
-                coupling = vecs[1, :] * inv_vecs[:, 0]
+                return float(self._nonhermitian_target_intensities(H, [thickness])[0])
             else:
                 vals, vecs = eigh(H)
                 coupling = vecs[1, :] * np.conj(vecs[0, :])
@@ -2015,12 +2937,8 @@ class XDSBlochPort:
             backend = "scipy"
         if backend in {"scipy", "numpy_scipy_cpu"}:
             if self.absorption_enabled():
-                vals, vecs = eig(H)
-                try:
-                    inv_vecs = np.linalg.inv(vecs)
-                except np.linalg.LinAlgError:
-                    inv_vecs = np.linalg.pinv(vecs)
-                coupling = vecs[1, :] * inv_vecs[:, 0]
+                per_t = self._nonhermitian_target_intensities(H, self.thick)
+                return float(np.sum(self.thick_w * per_t))
             else:
                 vals, vecs = eigh(H)
                 coupling = vecs[1, :] * np.conj(vecs[0, :])
@@ -2060,32 +2978,48 @@ class XDSBlochPort:
         omega_center = self.omega_from_z(zcal)
         center_sg = float(self.sg_for_hkls(np.asarray([hkl], dtype=int), omega_center)[0])
         omega_bragg = self.solve_omega_for_sg(hkl, omega_center, 0.0)
-        basis = self.select_basis(hkl, omega_bragg, row_idx=row_idx)
+        basis = self.select_basis(hkl, omega_center, row_idx=row_idx)
         if not np.array_equal(basis[0], np.asarray([0, 0, 0], dtype=int)) or not np.array_equal(basis[1], np.asarray(hkl, dtype=int)):
             raise RuntimeError("Frozen kernel basis contract violated: basis must start with direct beam then exact signed target hkl.")
-        sg_window_i, sg_width_meta = self.row_sg_window(row_idx, hkl, omega_bragg)
+        sg_window_i, sg_width_meta = self.row_sg_window(row_idx, hkl, omega_center)
         requested, profile_weights, jitter_meta = self.row_profile_sg_points(row_idx, hkl, sg_window_i)
+        physical_targets = center_sg + np.asarray(requested, dtype=float)
         H_dyn_static = self.hamiltonian_static_part(basis, absorb=True, row_idx=row_idx)
         if self.absorption_enabled():
             H_born_static = self.hamiltonian_static_part(basis, absorb=False, row_idx=row_idx)
         else:
             H_born_static = H_dyn_static
         h10_born = H_born_static[1, 0]
-        dyn_matrices, born_vals, sg_resid = [], [], []
-        for target_sg in requested:
-            omega = self.solve_omega_for_sg(hkl, omega_bragg, target_sg)
+        dyn_matrices, born_vals, born_deltas, sg_resid, solved_omegas = [], [], [], [], []
+        for target_sg in physical_targets:
+            omega = self.solve_omega_for_sg(hkl, omega_center, target_sg)
+            solved_omegas.append(float(omega))
             sg_basis = self.sg_for_hkls(basis, omega)
             sg_resid.append(float(sg_basis[1] - target_sg))
             H = self.hamiltonian_from_static(H_dyn_static, sg_basis)
             dyn_matrices.append(H)
             delta = float(np.real(sg_basis[1] - sg_basis[0]))
+            born_deltas.append(delta)
             sinc = np.sinc(delta * self.thick)
             born_t = (2.0 * math.pi) ** 2 * (abs(h10_born) ** 2) * (self.thick**2) * (sinc**2)
             born_vals.append(float(np.sum(self.thick_w * born_t)))
+        profile_weights = np.asarray(profile_weights, dtype=float)
+        jacobian = 1.0 / np.maximum(
+            np.abs([self.sg_derivative_per_deg(hkl, omega) for omega in solved_omegas]),
+            1e-12,
+        )
+        original_weight_sum = float(np.sum(profile_weights))
+        profile_weights *= jacobian
+        profile_weights *= original_weight_sum / max(float(np.sum(profile_weights)), 1e-30)
+        jitter_meta["sg_profile_angle_jacobian"] = True
+        jitter_meta["sg_profile_jacobian_ratio"] = float(np.max(jacobian) / max(np.min(jacobian), 1e-30))
+        jitter_meta["sg_profile_weight_sum"] = float(np.sum(profile_weights))
         return {
             "_dyn_matrices": dyn_matrices,
             "_profile_weights": np.asarray(profile_weights, dtype=float),
             "_born_vals": np.asarray(born_vals, dtype=float),
+            "_born_h10_abs2": float(abs(h10_born) ** 2),
+            "_born_deltas": np.asarray(born_deltas, dtype=float),
             "_sg_resid": np.asarray(sg_resid, dtype=float),
             "basis_size": int(len(basis)),
             "support_hkls": [[int(v) for v in row] for row in basis.tolist()],
@@ -2166,6 +3100,7 @@ class XDSBlochPort:
             "profile_quadrature": str(self.cfg.profile_quadrature),
             "profile_accumulation": str(self.cfg.profile_accumulation),
             "topup_d_min": float(self.cfg.topup_d_min),
+            "ug_d_min": float(self.cfg.ug_d_min),
             "max_support_sg": float(self.cfg.max_support_sg),
             "frame_offset": float(self.cfg.frame_offset),
             "matrix_convention": str(self.cfg.matrix_convention),
@@ -2174,6 +3109,11 @@ class XDSBlochPort:
             "dose_b_ref_frame": float(self.dose_ref_frame),
             "cell": [float(v) for v in self.model["cell"]],
             "wavelength": float(self.data.wavelength),
+            "scan_matrix_sha256": (
+                sha256(self.data.a_scan_points_path)
+                if self.data.a_scan_points_path is not None and self.data.a_scan_points_path.exists()
+                else ""
+            ),
         }
         text = json.dumps(cfg_fields, sort_keys=True, allow_nan=True)
         return hashlib.sha256(text.encode()).hexdigest()[:20], cfg_fields
@@ -2237,18 +3177,30 @@ class XDSBlochPort:
             omega_c = self.omega_from_z(zcal)
             c_sg = float(self.sg_for_hkls(np.asarray([hkl], dtype=int), omega_c)[0])
             omega_b = self.solve_omega_for_sg(hkl, omega_c, 0.0)
-            basis = self.select_basis(hkl, omega_b, row_idx=row_idx)
+            basis = self.select_basis(hkl, omega_c, row_idx=row_idx)
             if not np.array_equal(basis[0], np.asarray([0, 0, 0], dtype=int)) or not np.array_equal(basis[1], np.asarray(hkl, dtype=int)):
                 raise RuntimeError("Frozen row-plan basis contract violated: basis must start with direct beam then exact signed target hkl.")
-            sg_window_i, sg_width_meta = self.row_sg_window(row_idx, hkl, omega_b)
+            sg_window_i, sg_width_meta = self.row_sg_window(row_idx, hkl, omega_c)
             requested, profile_weights, jitter_meta = self.row_profile_sg_points(row_idx, hkl, sg_window_i)
+            physical_targets = c_sg + np.asarray(requested, dtype=float)
             sg_basis_rows = []
             sg_resid = []
-            for target_sg in requested:
-                omega = self.solve_omega_for_sg(hkl, omega_b, target_sg)
+            solved_omegas = []
+            for target_sg in physical_targets:
+                omega = self.solve_omega_for_sg(hkl, omega_c, target_sg)
+                solved_omegas.append(float(omega))
                 sg_basis = self.sg_for_hkls(basis, omega)
                 sg_basis_rows.append(np.asarray(sg_basis, dtype=float))
                 sg_resid.append(float(sg_basis[1] - target_sg))
+            profile_weights = np.asarray(profile_weights, dtype=float)
+            jacobian = 1.0 / np.maximum(
+                np.abs([self.sg_derivative_per_deg(hkl, omega) for omega in solved_omegas]),
+                1e-12,
+            )
+            original_weight_sum = float(np.sum(profile_weights))
+            profile_weights *= jacobian
+            profile_weights *= original_weight_sum / max(float(np.sum(profile_weights)), 1e-30)
+            jitter_meta["sg_profile_weight_sum"] = float(np.sum(profile_weights))
 
             diffs = basis[None, :, :] - basis[:, None, :] if convention == "j_minus_i" else basis[:, None, :] - basis[None, :, :]
             row_diff_idx = []
@@ -2338,9 +3290,9 @@ class XDSBlochPort:
         os.replace(tmp, path)
 
     def load_row_plan_cache_file(self, path: Path) -> dict:
-        loaded = np.load(path, allow_pickle=False)
-        cache = {k: loaded[k] for k in loaded.files if k != "meta_json"}
-        cache["meta"] = json.loads(str(loaded["meta_json"]))
+        with np.load(path, allow_pickle=False) as loaded:
+            cache = {k: loaded[k] for k in loaded.files if k != "meta_json"}
+            cache["meta"] = json.loads(str(loaded["meta_json"]))
         return cache
 
     def load_or_build_row_plan_cache(self, indices):
@@ -2350,16 +3302,22 @@ class XDSBlochPort:
         key, meta = self.row_plan_cache_key(indices)
         path = self.row_plan_cache_path(key)
         if mode == "readwrite" and path.exists():
-            cache = self.load_row_plan_cache_file(path)
-            errors = row_plan_cache_validation_errors(cache, indices, key, meta)
-            if not errors:
-                cache["status"] = {"status": "hit", "path": str(path), "key": key}
-                return cache
-            print(
-                "Ignoring stale or incomplete row-plan cache "
-                f"{path}: {'; '.join(errors[:4])}{'; ...' if len(errors) > 4 else ''}",
-                flush=True,
-            )
+            try:
+                cache = self.load_row_plan_cache_file(path)
+                errors = row_plan_cache_validation_errors(cache, indices, key, meta)
+                if not errors:
+                    cache["status"] = {"status": "hit", "path": str(path), "key": key}
+                    return cache
+                print(
+                    "Ignoring stale or incomplete row-plan cache "
+                    f"{path}: {'; '.join(errors[:4])}{'; ...' if len(errors) > 4 else ''}",
+                    flush=True,
+                )
+            except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+                print(
+                    f"Ignoring unreadable row-plan cache {path}: {type(exc).__name__}: {exc}",
+                    flush=True,
+                )
         cache = self.build_row_plan_cache(indices)
         self.save_row_plan_cache(path, cache)
         cache["status"] = {"status": "built" if mode == "readwrite" else "rebuilt", "path": str(path), "key": key}
@@ -2384,7 +3342,7 @@ class XDSBlochPort:
             & (l <= self.l_lim)
         )
         if np.any(ok):
-            factor = float(self.cfg.gamma) / (math.pi * self.data.cell.volume)
+            factor = float(self.gamma) / (math.pi * self.data.cell.volume)
             out[ok] = factor * fcalc_res_grid(self.model, h[ok], k[ok], l[ok])
         return out
 
@@ -2490,12 +3448,12 @@ class XDSBlochPort:
     def predict_rows_jax_batched(self, indices, chunksize=8):
         """Predict rows by batching Bloch eigensolvers through JAX."""
 
+        t0_all = time.perf_counter()
         indices = np.asarray(indices, dtype=int)
         n_basis = int(getattr(self.cfg, "n_basis", 20))
         row_block_size = 256 if n_basis >= 128 else (384 if n_basis >= 80 else 512)
         if len(indices) > row_block_size:
             chunks = []
-            t0_all = time.perf_counter()
             for start in range(0, len(indices), row_block_size):
                 block = indices[start : start + row_block_size]
                 print(
@@ -2548,7 +3506,7 @@ class XDSBlochPort:
                     f"matrix_bucket={matrix_bucket} rate={rate:.2f}/s wall={elapsed:.2f}s",
                     flush=True,
                 )
-            for val, (row_pos, profile_pos, _H) in zip(vals, jobs):
+            for val, (row_pos, profile_pos, _H) in zip(vals, jobs, strict=True):
                 dyn_profile_vals[row_pos][profile_pos] = float(val)
         if total_matrices:
             print(
@@ -2558,7 +3516,9 @@ class XDSBlochPort:
                 flush=True,
             )
         results = [self.finish_row_prediction_plan(plan, dyn_profile_vals[pos]) for pos, plan in enumerate(plans)]
-        return self.pack_prediction_results(indices, results)
+        out = self.pack_prediction_results(indices, results)
+        out["seconds"] = time.perf_counter() - t0_all
+        return out
 
     def predict_rows_with_row_cache(self, indices, workers=1, chunksize=8):
         """Predict rows from an immutable row-geometry cache.
@@ -2703,7 +3663,6 @@ class XDSBlochPort:
         sg_jitter_kernel_points = np.ones(len(indices), dtype=int)
         sg_profile_points_total = np.zeros(len(indices), dtype=int)
         sg_profile_weight_sum = np.zeros(len(indices), dtype=float)
-        support_hkls = []
         support_hkls = [None] * len(indices)
         position = {int(idx): int(pos) for pos, idx in enumerate(indices)}
         completed = 0
@@ -2739,7 +3698,7 @@ class XDSBlochPort:
                 print(f"predicted {completed}/{len(indices)} rows | rate={rate:.2f}/s | ETA={eta/60:.1f}m", flush=True)
 
         t0 = time.perf_counter()
-        for idx, r in zip(indices, results):
+        for idx, r in zip(indices, results, strict=True):
             accept_result(int(idx), r)
 
         return {
@@ -2797,7 +3756,6 @@ class XDSBlochPort:
         sg_jitter_kernel_points = np.ones(len(indices), dtype=int)
         sg_profile_points_total = np.zeros(len(indices), dtype=int)
         sg_profile_weight_sum = np.zeros(len(indices), dtype=float)
-        support_hkls = []
         t0 = time.perf_counter()
         support_hkls = [None] * len(indices)
         position = {int(idx): int(pos) for pos, idx in enumerate(indices)}
@@ -2904,31 +3862,84 @@ class XDSBlochPort:
 def effective_sigma(data: XDSData, cfg: Config):
     corr_term = np.maximum(0.0, 1.0 - data.corr / 100.0)
     peak_term = np.maximum(0.0, 1.0 - data.peak / 100.0)
-    return np.sqrt(data.sigma**2 + (cfg.variance_a * data.iobs) ** 2 + (cfg.variance_b_corr * data.iobs * corr_term) ** 2 + (cfg.variance_c_peak * data.iobs * peak_term) ** 2)
+    out = np.full(len(data.sigma), np.nan, dtype=float)
+    valid = np.isfinite(data.sigma) & (np.asarray(data.sigma, dtype=float) > 0.0)
+    out[valid] = np.sqrt(
+        data.sigma[valid] ** 2
+        + (cfg.variance_a * data.iobs[valid]) ** 2
+        + (cfg.variance_b_corr * data.iobs[valid] * corr_term[valid]) ** 2
+        + (cfg.variance_c_peak * data.iobs[valid] * peak_term[valid]) ** 2
+    )
+    return out
 
 
-def split_masks(hkls, free_fraction=0.10, seed=42):
-    unique = sorted(set(tuple(int(v) for v in h) for h in hkls))
+def reflection_orbit_key(hkl, symmetry_ops=None, include_friedel: bool = True):
+    """Return a canonical reciprocal-space orbit key for held-out splitting."""
+
+    h = np.asarray(hkl, dtype=float)
+    rotations = [np.eye(3)]
+    for operation in symmetry_ops or []:
+        rotation = operation.get("rot") if isinstance(operation, dict) else operation[0]
+        rotations.append(np.asarray(rotation, dtype=float))
+    equivalents = []
+    for rotation in rotations:
+        transformed = np.linalg.inv(rotation).T @ h
+        rounded = np.rint(transformed).astype(int)
+        if not np.allclose(transformed, rounded, rtol=0.0, atol=1e-7):
+            raise ValueError("symmetry operation did not map a Miller index to integer values")
+        key = tuple(int(value) for value in rounded)
+        equivalents.append(key)
+        if include_friedel:
+            equivalents.append(tuple(-value for value in key))
+    return min(equivalents)
+
+
+def split_masks(hkls, free_fraction=0.10, seed=42, symmetry_ops=None, include_friedel: bool = True):
+    if not 0.0 < float(free_fraction) < 1.0:
+        raise ValueError("free_fraction must be between 0 and 1")
+    orbit_keys = [reflection_orbit_key(h, symmetry_ops, include_friedel) for h in hkls]
+    unique = sorted(set(orbit_keys))
+    if len(unique) < 2:
+        raise ValueError("held-out splitting requires at least two unique HKLs")
     rng = np.random.default_rng(int(seed))
     rng.shuffle(unique)
-    n_free = max(1, int(round(len(unique) * float(free_fraction))))
+    n_free = min(len(unique) - 1, max(1, int(round(len(unique) * float(free_fraction)))))
     free = set(unique[:n_free])
     masks = {"all": np.ones(len(hkls), dtype=bool), "work": np.zeros(len(hkls), dtype=bool), "free": np.zeros(len(hkls), dtype=bool)}
-    for i, h in enumerate(hkls):
-        masks["free"][i] = tuple(int(v) for v in h) in free
+    for i, key in enumerate(orbit_keys):
+        masks["free"][i] = key in free
     masks["work"] = ~masks["free"]
     return masks
 
 
 def scale_by_groups(obs, sig, pred, groups, fit_mask):
+    obs = np.asarray(obs, dtype=float)
+    sig = np.asarray(sig, dtype=float)
+    pred = np.asarray(pred, dtype=float)
+    groups = np.asarray(groups, dtype=int)
+    fit_mask = np.asarray(fit_mask, dtype=bool)
+    if not (len(obs) == len(sig) == len(pred) == len(groups) == len(fit_mask)):
+        raise ValueError("observation, sigma, prediction, group, and fit-mask lengths differ")
     scaled = np.full_like(pred, np.nan, dtype=float)
     scales = {}
-    weights = 1.0 / np.maximum(sig * sig, 1e-12)
+    valid_measurement = np.isfinite(obs) & np.isfinite(sig) & (sig > 0.0)
+    weights = np.zeros_like(sig, dtype=float)
+    weights[valid_measurement] = 1.0 / (sig[valid_measurement] * sig[valid_measurement])
+    global_fit = fit_mask & valid_measurement & np.isfinite(pred) & (pred > 0.0)
+    if np.count_nonzero(global_fit) < 2:
+        raise ValueError("at least two work rows with positive sigma and prediction are required to fit scales")
+    x_global, y_global, w_global = pred[global_fit], obs[global_fit], weights[global_fit]
+    global_scale = max(
+        float(np.sum(w_global * x_global * y_global) / max(np.sum(w_global * x_global * x_global), 1e-30)),
+        1e-30,
+    )
     for g in np.unique(groups):
-        fit = (groups == g) & fit_mask & np.isfinite(pred) & (pred > 0)
+        fit = (groups == g) & fit_mask & valid_measurement & np.isfinite(pred) & (pred > 0)
         apply = groups == g
-        if not np.any(fit):
-            scales[int(g)] = 0.0
+        if np.count_nonzero(fit) < 2:
+            scales[int(g)] = global_scale
+            finite_apply = apply & np.isfinite(pred)
+            scaled[finite_apply] = pred[finite_apply] * global_scale
             continue
         x, y, w = pred[fit], obs[fit], weights[fit]
         scale = float(np.sum(w * x * y) / max(np.sum(w * x * x), 1e-30))
@@ -2940,7 +3951,13 @@ def scale_by_groups(obs, sig, pred, groups, fit_mask):
 
 
 def metrics(obs, sig, pred, mask):
-    mask = np.asarray(mask, dtype=bool) & np.isfinite(obs) & np.isfinite(sig) & np.isfinite(pred)
+    mask = (
+        np.asarray(mask, dtype=bool)
+        & np.isfinite(obs)
+        & np.isfinite(sig)
+        & (np.asarray(sig, dtype=float) > 0.0)
+        & np.isfinite(pred)
+    )
     obs_m, sig_m, pred_m = obs[mask], sig[mask], pred[mask]
     gt = obs_m > 2.0 * sig_m
     fobs = np.sqrt(np.maximum(obs_m, 0.0))
@@ -2957,9 +3974,10 @@ def metrics(obs, sig, pred, mask):
     return {"n": int(np.count_nonzero(mask)), "n_gt": int(np.count_nonzero(gt)), "R1_all": r1(np.ones_like(gt, dtype=bool)), "R1_gt": r1(gt), "wR2_all": wr2, "CC": cc}
 
 
-def evaluate_predictions(data, cfg, pred, fit_scales_on="work"):
+def evaluate_predictions(data, cfg, pred, fit_scales_on="work", model=None):
     sig = effective_sigma(data, cfg)
-    masks = split_masks(data.hkl, cfg.free_fraction, cfg.split_seed)
+    symmetry_ops = model.get("symmetry_ops") if model else None
+    masks = split_masks(data.hkl, cfg.free_fraction, cfg.split_seed, symmetry_ops=symmetry_ops)
     group_indices = pred["groups"]
     fit_mask = masks[fit_scales_on]
     dyn_scaled, dyn_scales = scale_by_groups(data.iobs, sig, pred["dyn"], group_indices, fit_mask)
@@ -3128,7 +4146,7 @@ def main():
         indices = np.asarray(sorted(set(row_indices)), dtype=int)
         indices = indices[(indices >= 0) & (indices < len(data_all.iobs))]
     else:
-        mask = np.ones(len(data_all.iobs), dtype=bool)
+        mask = np.isfinite(data_all.sigma) & (data_all.sigma > 0.0) & np.isfinite(data_all.zcal)
         if args.positive_only:
             mask &= data_all.iobs > 0.0
         if args.min_peak > 0:
@@ -3192,17 +4210,26 @@ def main():
     full_sg_jitter_kernel_points[pred_subset["indices"]] = pred_subset["sg_jitter_kernel_points"]
     full_sg_profile_points_total[pred_subset["indices"]] = pred_subset["sg_profile_points_total"]
     full_sg_profile_weight_sum[pred_subset["indices"]] = pred_subset["sg_profile_weight_sum"]
-    support_by_idx = {int(idx): basis for idx, basis in zip(pred_subset["indices"], pred_subset["support_hkls"])}
+    support_by_idx = {
+        int(idx): basis
+        for idx, basis in zip(pred_subset["indices"], pred_subset["support_hkls"], strict=True)
+    }
     pred = {"dyn": full_dyn, "born": full_born, "groups": port.group_indices}
     valid = np.isfinite(full_dyn) & np.isfinite(full_born)
     eval_data = data_all
-    eval_out = evaluate_predictions(eval_data, cfg, pred, fit_scales_on="work")
+    eval_out = evaluate_predictions(eval_data, cfg, pred, fit_scales_on="work", model=model)
     row_table_path = ""
     if args.save_row_table:
         row_table_path = str(Path(args.save_row_table).resolve())
         sig_eff = effective_sigma(data_all, cfg)
-        dyn_scaled, dyn_scales = scale_by_groups(data_all.iobs, sig_eff, full_dyn, port.group_indices, split_masks(data_all.hkl, cfg.free_fraction, cfg.split_seed)["work"])
-        born_scaled, born_scales = scale_by_groups(data_all.iobs, sig_eff, full_born, port.group_indices, split_masks(data_all.hkl, cfg.free_fraction, cfg.split_seed)["work"])
+        work_mask = split_masks(
+            data_all.hkl,
+            cfg.free_fraction,
+            cfg.split_seed,
+            symmetry_ops=model.get("symmetry_ops"),
+        )["work"]
+        dyn_scaled, dyn_scales = scale_by_groups(data_all.iobs, sig_eff, full_dyn, port.group_indices, work_mask)
+        born_scaled, born_scales = scale_by_groups(data_all.iobs, sig_eff, full_born, port.group_indices, work_mask)
         dvals = np.asarray([data_all.cell.calculate_d(tuple(int(v) for v in h)) for h in data_all.hkl])
         Path(args.save_row_table).parent.mkdir(parents=True, exist_ok=True)
         with open(args.save_row_table, "w", newline="") as f:

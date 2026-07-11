@@ -28,6 +28,13 @@ dependencies = [
   "scipy>=1.11,<1.18",
 ]
 
+[project.urls]
+Homepage = "https://github.com/Martynowycz-Lab/GROND"
+Documentation = "https://github.com/Martynowycz-Lab/GROND/tree/main/docs"
+Repository = "https://github.com/Martynowycz-Lab/GROND"
+Issues = "https://github.com/Martynowycz-Lab/GROND/issues"
+Changelog = "https://github.com/Martynowycz-Lab/GROND/blob/main/CHANGELOG.md"
+
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.8", "build>=1.2"]
 config = ["PyYAML>=6"]
@@ -51,8 +58,27 @@ pythonpath = ["src"]
 [tool.ruff]
 line-length = 120
 target-version = "py311"
-exclude = ["src/grond/legacy/engine"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "SIM"]
 ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# h, k, l and I are conventional crystallographic symbols in the numerical engine.
+# E402 keeps BLAS thread limits ahead of NumPy/SciPy imports. Optimizer callbacks
+# covered by B023 are consumed synchronously before their enclosing loop advances.
+"src/grond/legacy/engine/bloch_engine.py" = ["E402", "E741"]
+"src/grond/legacy/engine/build_dynrows_xds.py" = ["E741"]
+"src/grond/legacy/engine/dynrow_contract.py" = ["E741"]
+"src/grond/legacy/engine/native_multi_structure_update.py" = ["B023", "E402"]
+"src/grond/legacy/engine/native_observation_polish_endpoint.py" = ["E741"]
+"src/grond/legacy/engine/native_row_regularize.py" = ["E402", "E741"]
+"src/grond/legacy/engine/native_sigma_replicate_audit.py" = ["E741"]
+"src/grond/legacy/engine/native_structure_update.py" = ["B023", "E402", "E741"]
+"src/grond/legacy/engine/native_two_part_observation_correction.py" = ["E741"]
+"src/grond/legacy/engine/post_bloch_sigma.py" = ["E741"]
+"src/grond/legacy/engine/premerge_rfactor_audit.py" = ["E741"]
+"src/grond/legacy/engine/row_mr_report.py" = ["E741"]
+"src/grond/legacy/engine/scale_contract_replay.py" = ["E741"]
+"src/grond/legacy/engine/support_basis_scan.py" = ["E402"]
+"src/grond/legacy/engine/xds_raw_profile_integrator.py" = ["E741"]

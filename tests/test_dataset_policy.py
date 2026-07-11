@@ -49,7 +49,7 @@ def test_dataset_policy_downweights_marginal_and_keeps_unique_endpoint_only():
     assert by_name["weak_unique"]["include_in_endpoint"] is True
 
 
-def test_weighted_run_copy_inflates_sigma_and_marks_role(tmp_path: Path):
+def test_weighted_run_copy_preserves_sigma_and_marks_deferred_policy(tmp_path: Path):
     run = tmp_path / "run"
     run.mkdir()
     (run / "native_dyn_calc.csv").write_text(
@@ -73,7 +73,9 @@ def test_weighted_run_copy_inflates_sigma_and_marks_role(tmp_path: Path):
 
     assert "dataset_role" in text
     assert "downweight" in text
-    assert ",4," in text or ",4.0," in text
+    assert "sigma_eff_original" in text
+    assert "policy_sigma_weight_applied" in text
+    assert ",2," in text or ",2.0," in text
 
 
 def test_combiner_uses_endpoint_only_rows_for_endpoint_not_native_metrics(tmp_path: Path):

@@ -14,7 +14,7 @@ SHELXT
 SHELXL initial regularization
 ```
 
-The output from this path should include a starting `model.res` or `model.cif`. It is fine, and usually preferred, if this model was solved against profile-fitted intensities with the best conventional XDS statistics. If you have a solved-model HKL file from XDSCONV/SHELX, keep it even when it came from that profile-fitted path. GROND uses that file as `--baseline-hkl` to compare signed HKLs and intensity overlap before it spends time on expensive Bloch transform scouts.
+The output from this path should include a starting `model.res` or `model.ins` with explicit electron scattering coefficients. A CIF is also suitable for `GROND run` when it embeds the complete SHELX instruction block. It is fine, and usually preferred, if this model was solved against profile-fitted intensities with the best conventional XDS statistics. If you have a solved-model HKL file from XDSCONV/SHELX, keep it even when it came from that profile-fitted path. GROND uses that file as `--baseline-hkl` to compare signed HKLs and intensity overlap before it spends time on expensive Bloch transform scouts.
 
 ## 2. Make A Separate GROND Integration Directory
 

@@ -18,7 +18,6 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
-
 KEY_COLUMNS = ("row_index", "h", "k", "l")
 REQUIRED_COLUMNS = (*KEY_COLUMNS, "dyn_residual_over_sigma")
 

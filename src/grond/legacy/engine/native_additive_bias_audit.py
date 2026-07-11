@@ -16,23 +16,35 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-import math
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 
-from native_row_regularize import (
-    DEFAULT_HKL,
-    DEFAULT_RES,
-    fit_frame_detector_scales,
-    fit_group_scales,
-    native_metrics,
-    parse_float_grid,
-    parse_wght,
-    shelx_weights,
-)
-from bloch_engine import XDSData, sha256
+if __package__:
+    from .bloch_engine import XDSData, sha256
+    from .native_row_regularize import (
+        DEFAULT_HKL,
+        DEFAULT_RES,
+        fit_frame_detector_scales,
+        fit_group_scales,
+        native_metrics,
+        parse_float_grid,
+        parse_wght,
+        shelx_weights,
+    )
+else:  # pragma: no cover - direct script execution
+    from bloch_engine import XDSData, sha256
+    from native_row_regularize import (
+        DEFAULT_HKL,
+        DEFAULT_RES,
+        fit_frame_detector_scales,
+        fit_group_scales,
+        native_metrics,
+        parse_float_grid,
+        parse_wght,
+        shelx_weights,
+    )
 
 
 def read_rows(path: Path) -> list[dict[str, str]]:
@@ -185,7 +197,7 @@ def build_features(rows: list[dict[str, str]], hkl_path: Path, train_mask: np.nd
         raw[:, j] = (raw[:, j] - means[j]) / stds[j]
 
     keep[0] = True
-    return FeatureMatrix(raw[:, keep], [n for n, k in zip(names, keep) if k], np.asarray([p for p, k in zip(penalties, keep) if k], dtype=float), means[keep], stds[keep])
+    return FeatureMatrix(raw[:, keep], [n for n, k in zip(names, keep, strict=False) if k], np.asarray([p for p, k in zip(penalties, keep, strict=False) if k], dtype=float), means[keep], stds[keep])
 
 
 def fit_weighted_ridge(X: np.ndarray, y: np.ndarray, weights: np.ndarray, fit_mask: np.ndarray, penalties: np.ndarray, alpha_factor: float) -> tuple[np.ndarray, float]:
@@ -383,7 +395,7 @@ def main() -> None:
 
     corrected_rows = []
     bias = best_rows - pred
-    for r, p, b, c in zip(rows, pred, bias, best_rows):
+    for r, p, b, c in zip(rows, pred, bias, best_rows, strict=False):
         rr = dict(r)
         rr["bias_additive"] = f"{float(b):.10g}"
         rr["pred_before_bias"] = f"{float(p):.10g}"
@@ -394,7 +406,7 @@ def main() -> None:
 
     coef_rows = [
         {"feature": name, "coefficient": float(coef), "penalty": float(penalty)}
-        for name, coef, penalty in zip(Xinfo.names, best_beta, Xinfo.penalties)
+        for name, coef, penalty in zip(Xinfo.names, best_beta, Xinfo.penalties, strict=False)
     ]
     write_csv(out / "bias_coefficients.csv", coef_rows)
 

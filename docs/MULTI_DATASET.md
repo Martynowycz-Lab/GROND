@@ -8,13 +8,13 @@ The command-line entry point is still `GROND auto`. Put one row-preserving datas
 GROND prep \
   --structure model.res \
   --baseline-hkl model.hkl \
-  --dataset crystal_370=/data/370/no_prf \
-  --dataset crystal_366=/data/366/no_prf \
-  --out prep_366_370.json
+  --dataset crystal_a=/data/project/crystal_a/no_prf \
+  --dataset crystal_b=/data/project/crystal_b/no_prf \
+  --out prep_multi.json
 
 GROND auto \
-  --prep prep_366_370.json \
-  --out-dir grond_366_370
+  --prep prep_multi.json \
+  --out-dir grond_multi
 ```
 
 That is the current gold-standard path. For XDS, give the directory that contains `INTEGRATE.HKL` plus `XPARM.XDS` or `GXPARM.XDS`; do not copy `INTEGRATE.HKL` away from its geometry sidecars. A direct `INTEGRATE.HKL` path is accepted only as shorthand when the XDS metadata files remain in the same parent directory. Do not concatenate `INTEGRATE.HKL` files, merge DIALS tables, or make one artificial HKL before GROND. The row-level Bloch prediction needs the signed row identity and the scan geometry from each dataset. The combined endpoint is made only after every accepted dataset has its own final `native_dyn_calc.csv`.
@@ -25,7 +25,7 @@ After the per-dataset passes, `dataset_policy/structure_update/` decides which d
 
 The production shared-model update for multi-dataset jobs is the same lagged LS1 idea used for one dataset. GROND recomputes Bloch rows for every dataset from the current shared model, applies the dataset-policy row weights, merges the corrected rows into one endpoint HKL, runs one shared SHELXL least-squares update, then sends that updated model back through every dataset. The nuisance terms remain per dataset; only the atomic model is shared. The native finite-difference updater in `native_multi_structure_update.py` remains available with `--structure-update native_gradient`, but it is a slower diagnostic path rather than the default production route.
 
-The final combination happens only after each dataset has its own corrected row table. GROND first applies per-dataset endpoint sigma calibration when requested. In the automatic multi-dataset path this defaults to `uniform_z_rms`, with a held-out floor so a dataset is not made overconfident just because its work rows fit well. It then estimates one overlap scale per dataset from common corrected reflections using the model symmetry plus Friedel pairing. This scale is applied after the Bloch/Born correction, so arbitrary raw integration scale differences are not mistaken for structure or thickness differences.
+The final combination happens only after each dataset has its own corrected row table. GROND first applies per-dataset endpoint sigma calibration when requested. In the automatic multi-dataset path this defaults to `uniform_z_rms`, with a held-out floor so a dataset is not made overconfident just because its work rows fit well. It then estimates one overlap scale per dataset from common corrected reflections using model symmetry. Friedel opposites remain separate by default in acentric groups; the diagnostic `model_symmetry_friedel` mode pairs them. This scale is applied after the Bloch/Born correction, so arbitrary raw integration scale differences are not mistaken for structure or thickness differences.
 
 Corrected rows are then merged into a single endpoint HKL before the shared LS1 model update. The default endpoint merge key is `model_symmetry`, which means symmetry-equivalent corrected observations are inverse-variance merged by GROND while Friedel opposites remain separate in acentric space groups. The diagnostic `model_symmetry_friedel` mode also merges Friedel mates, and `exact_signed_hkl` reproduces the older signed-row-only endpoint merge. The default merge-sigma policy is `chisq_overdispersion`: if several corrected endpoint rows contribute to the same written reflection and they disagree more than their propagated sigmas predict, the merged sigma is inflated. This is the second sigma layer. The first layer makes each dataset internally self-consistent; the merge layer prevents a bad inter-dataset disagreement from entering SHELXL or another endpoint program with overconfident weights. The combined endpoint report states both the overlap-scale key and the endpoint merge key so this step is auditable.
 

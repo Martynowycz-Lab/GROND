@@ -54,8 +54,37 @@ def read_rows(run_dir: Path, name: str) -> list[dict]:
             r.setdefault("dataset_role", "primary")
             r.setdefault("raw_row_weight", "1.0")
             r.setdefault("endpoint_weight", r.get("raw_row_weight", "1.0"))
+            r.setdefault("sigma_eff_original", r.get("sigma_eff", ""))
+            original_sigma = safe_float(r.get("sigma_eff_original"))
+            if math.isfinite(original_sigma) and original_sigma > 0.0:
+                r["sigma_eff"] = f"{original_sigma:.17g}"
             rows.append(r)
     return rows
+
+
+def selected_native_wght(summary: dict) -> tuple[float, float]:
+    """Read the native row weights written by native_row_regularize."""
+
+    block = summary.get("shelx_weight") or {}
+    a = safe_float(
+        block.get("selected_native_a", block.get("source_a", block.get("a"))),
+        0.126534,
+    )
+    b = safe_float(
+        block.get("selected_native_b", block.get("source_b", block.get("b"))),
+        0.0,
+    )
+    return a, b
+
+
+def apply_native_row_weight(row: dict, weight: float) -> dict:
+    """Apply one dataset-policy raw-row weight to an unmodified sigma."""
+
+    out = dict(row)
+    sigma = safe_float(out.get("sigma_eff"))
+    if math.isfinite(sigma) and sigma > 0.0 and weight > 0.0 and abs(weight - 1.0) > 1e-12:
+        out["sigma_eff"] = f"{sigma / math.sqrt(weight):.17g}"
+    return out
 
 
 def canonical_p222_friedel(h, k, ell):
@@ -112,19 +141,26 @@ def endpoint_key_function(mode: str, symmetry_ops: list[dict]):
     raise ValueError(f"unknown endpoint merge key {mode!r}")
 
 
-def shelx_weights(obs, sig, pred, a: float, b: float):
+def shelx_weights(obs, sig, pred, a, b):
     p = (np.maximum(obs, 0.0) + 2.0 * np.maximum(pred, 0.0)) / 3.0
-    return 1.0 / np.maximum(sig * sig + (float(a) * p) ** 2 + float(b) * p, 1e-30)
+    return 1.0 / np.maximum(
+        sig * sig + (np.asarray(a, dtype=float) * p) ** 2 + np.asarray(b, dtype=float) * p,
+        1e-30,
+    )
 
 
 def metrics(rows: list[dict], pred_col: str, wght_a: float, wght_b: float):
     obs = np.asarray([safe_float(r["target_I"]) for r in rows], dtype=float)
     sig = np.asarray([safe_float(r["sigma_eff"]) for r in rows], dtype=float)
     pred = np.asarray([safe_float(r[pred_col]) for r in rows], dtype=float)
+    a = np.asarray([safe_float(r.get("native_wght_a"), wght_a) for r in rows], dtype=float)
+    b = np.asarray([safe_float(r.get("native_wght_b"), wght_b) for r in rows], dtype=float)
     m = np.isfinite(obs) & np.isfinite(sig) & np.isfinite(pred) & (sig > 0)
     obs = obs[m]
     sig = sig[m]
     pred = pred[m]
+    a = a[m]
+    b = b[m]
     if len(obs) == 0:
         return {"n": 0, "n_gt": 0, "R1_all": float("nan"), "R1_gt": float("nan"), "wR2_all": float("nan"), "CC": float("nan"), "mw_abs": float("nan")}
     gt = obs > 2.0 * sig
@@ -136,7 +172,7 @@ def metrics(rows: list[dict], pred_col: str, wght_a: float, wght_b: float):
             return float("nan")
         return float(np.sum(np.abs(fobs[mask] - fcalc[mask])) / max(np.sum(fobs[mask]), 1e-30))
 
-    w = shelx_weights(obs, sig, pred, wght_a, wght_b)
+    w = shelx_weights(obs, sig, pred, a, b)
     res = obs - pred
     wr2 = float(np.sqrt(np.sum(w * res * res) / max(np.sum(w * obs * obs), 1e-30)))
     cc = float(np.corrcoef(obs, pred)[0, 1]) if len(obs) > 2 and np.std(obs) > 0 and np.std(pred) > 0 else float("nan")
@@ -225,7 +261,9 @@ def endpoint_rows_from_native(rows: list[dict], lambda_q: float):
 
 
 def apply_hkl_weight(rows, weight: float):
-    if weight <= 0.0 or abs(weight - 1.0) < 1e-12:
+    if weight <= 0.0:
+        return []
+    if abs(weight - 1.0) < 1e-12:
         return rows
     factor = 1.0 / math.sqrt(max(weight, 1e-12))
     return [(h, k, ell, intensity, sig * factor) for h, k, ell, intensity, sig in rows]
@@ -267,45 +305,154 @@ def apply_sigma_holdout_floor(meta: dict) -> dict:
     return out
 
 
+def calibrate_dataset_endpoint_rows(
+    rows,
+    model,
+    *,
+    policy: str,
+    holdout_fraction: float,
+    min_scale: float,
+    max_scale: float,
+    holdout_floor: bool,
+):
+    """Calibrate original endpoint sigmas before applying dataset policy weight."""
+
+    if policy != "uniform_z_rms":
+        return rows, {"policy": policy, "status": "not_requested"}
+    try:
+        meta = fit_uniform_z_rms_sigma_scale(
+            rows,
+            model,
+            holdout_fraction=float(holdout_fraction),
+            min_scale=float(min_scale),
+            max_scale=float(max_scale),
+        )
+        if holdout_floor:
+            meta = apply_sigma_holdout_floor(meta)
+        calibrated = rows
+        if str(meta.get("status", "")).startswith("ok"):
+            calibrated = scale_row_sigmas(rows, float(meta["sigma_scale"]))
+        return calibrated, meta
+    except Exception as exc:
+        return rows, {
+            "policy": "uniform_z_rms",
+            "status": "failed",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+
 def estimate_overlap_scales(rows_by_dataset: dict[str, list[tuple]], iterations: int = 6, canonicalizer=None) -> dict:
-    """Estimate per-dataset endpoint scales from overlapping corrected HKLs."""
+    """Estimate dataset scales from HKLs observed by distinct datasets.
+
+    Replicates are first merged within each dataset.  Every scale update uses a
+    leave-one-dataset-out reference, so a dataset can neither manufacture its
+    own overlap nor pull its reference toward itself.
+    """
 
     key_for = canonicalizer or canonical_p222_friedel
-    scales = {name: 1.0 for name in rows_by_dataset}
-    overlap_counts = {name: 0 for name in rows_by_dataset}
-    if len(rows_by_dataset) <= 1:
+    names = list(rows_by_dataset)
+    scales = {name: 1.0 for name in names}
+    overlap_counts = {name: 0 for name in names}
+    if len(names) <= 1:
         return {"iterations": 0, "overlap_counts": overlap_counts, "scales": scales}
-    for _ in range(max(1, int(iterations))):
+
+    merged: dict[str, dict[tuple[int, int, int], tuple[float, float]]] = {}
+    contributors: dict[tuple[int, int, int], set[str]] = {}
+    for name, rows in rows_by_dataset.items():
         bins: dict[tuple[int, int, int], dict[str, float]] = {}
-        for name, rows in rows_by_dataset.items():
-            scale = scales.get(name, 1.0)
-            for h, k, ell, intensity, sigma in rows:
-                value = float(intensity) * scale
-                sigma_s = max(abs(float(sigma) * scale), 1e-6)
-                if not (math.isfinite(value) and value > 0.0 and math.isfinite(sigma_s)):
-                    continue
-                key = key_for(int(h), int(k), int(ell))
-                weight = 1.0 / (sigma_s * sigma_s)
-                bucket = bins.setdefault(key, {"w": 0.0, "wI": 0.0, "n": 0})
-                bucket["w"] += weight
-                bucket["wI"] += weight * value
-                bucket["n"] += 1
-        reference = {key: bucket["wI"] / max(bucket["w"], 1e-30) for key, bucket in bins.items() if bucket["n"] >= 2 and bucket["w"] > 0.0}
-        updated = {}
-        for name, rows in rows_by_dataset.items():
-            ratios = []
-            scale = scales.get(name, 1.0)
-            for h, k, ell, intensity, _sigma in rows:
-                ref = reference.get(key_for(int(h), int(k), int(ell)))
-                value = float(intensity) * scale
-                if ref is not None and ref > 0.0 and value > 0.0 and math.isfinite(value):
-                    ratios.append(ref / value)
-            overlap_counts[name] = len(ratios)
-            updated[name] = scale * (float(np.median(ratios)) if ratios else 1.0)
-        anchor = float(np.median(list(updated.values()))) if updated else 1.0
-        scales = {name: value / max(anchor, 1e-30) for name, value in updated.items()}
+        for h, k, ell, intensity, sigma in rows:
+            value = float(intensity)
+            sigma_value = abs(float(sigma))
+            if not (math.isfinite(value) and value > 0.0 and math.isfinite(sigma_value) and sigma_value > 0.0):
+                continue
+            key = key_for(int(h), int(k), int(ell))
+            weight = 1.0 / (sigma_value * sigma_value)
+            bucket = bins.setdefault(key, {"w": 0.0, "wI": 0.0})
+            bucket["w"] += weight
+            bucket["wI"] += weight * value
+        merged[name] = {
+            key: (bucket["wI"] / bucket["w"], math.sqrt(1.0 / bucket["w"]))
+            for key, bucket in bins.items()
+            if bucket["w"] > 0.0
+        }
+        for key in merged[name]:
+            contributors.setdefault(key, set()).add(name)
+
+    shared_keys = {key for key, datasets in contributors.items() if len(datasets) >= 2}
+    adjacency = {name: set() for name in names}
+    for key in shared_keys:
+        datasets = contributors[key]
+        for name in datasets:
+            adjacency[name].update(datasets - {name})
+    components: list[set[str]] = []
+    unseen = set(names)
+    while unseen:
+        seed = unseen.pop()
+        component = {seed}
+        frontier = [seed]
+        while frontier:
+            current = frontier.pop()
+            new = adjacency[current] & unseen
+            unseen -= new
+            component |= new
+            frontier.extend(new)
+        components.append(component)
+
+    overlap_counts = {
+        name: int(sum(key in shared_keys for key in merged[name]))
+        for name in names
+    }
+    if not shared_keys:
+        return {"iterations": 0, "overlap_counts": overlap_counts, "scales": scales}
+
+    n_iterations = max(1, int(iterations))
+    for component in components:
+        component_names = sorted(component)
+        if len(component_names) <= 1 or not any(adjacency[name] for name in component_names):
+            continue
+        local_index = {name: i for i, name in enumerate(component_names)}
+        equations = []
+        rhs = []
+        base_weights = []
+        for key in shared_keys:
+            present = sorted(contributors[key] & component)
+            for i, left in enumerate(present):
+                left_i, left_sigma = merged[left][key]
+                for right in present[i + 1 :]:
+                    right_i, right_sigma = merged[right][key]
+                    row = np.zeros(len(component_names), dtype=float)
+                    row[local_index[left]] = 1.0
+                    row[local_index[right]] = -1.0
+                    equations.append(row)
+                    rhs.append(math.log(right_i) - math.log(left_i))
+                    relative_variance = (left_sigma / left_i) ** 2 + (right_sigma / right_i) ** 2
+                    base_weights.append(1.0 / max(relative_variance, 1e-12))
+        if not equations:
+            continue
+        design = np.asarray(equations, dtype=float)
+        target = np.asarray(rhs, dtype=float)
+        weights = np.asarray(base_weights, dtype=float)
+        robust = np.ones_like(weights)
+        solution = np.zeros(len(component_names), dtype=float)
+        for _ in range(n_iterations):
+            sqrt_w = np.sqrt(weights * robust)
+            weighted_design = design * sqrt_w[:, None]
+            weighted_target = target * sqrt_w
+            gauge_weight = math.sqrt(float(np.median(weights)) * max(1, len(component_names)))
+            weighted_design = np.vstack([weighted_design, np.ones(len(component_names)) * gauge_weight])
+            weighted_target = np.append(weighted_target, 0.0)
+            solution = np.linalg.lstsq(weighted_design, weighted_target, rcond=None)[0]
+            residual = design @ solution - target
+            mad = float(np.median(np.abs(residual - np.median(residual))))
+            if mad <= 1e-12:
+                break
+            cutoff = 1.345 * 1.4826 * mad
+            robust = np.minimum(1.0, cutoff / np.maximum(np.abs(residual), 1e-30))
+        solution -= float(np.mean(solution))
+        for name, value in zip(component_names, solution, strict=False):
+            scales[name] = float(math.exp(value))
     return {
-        "iterations": int(iterations),
+        "iterations": n_iterations,
         "overlap_counts": {name: int(count) for name, count in overlap_counts.items()},
         "scales": {name: float(value) for name, value in scales.items()},
     }
@@ -481,25 +628,31 @@ def run_shelxl(
     for i in range(n_iter):
         if freeze_zero:
             write_active_wght(work / f"{stem}.ins", 0.0, 0.0)
+        res = work / f"{stem}.res"
+        lst = work / f"{stem}.lst"
+        res.unlink(missing_ok=True)
+        lst.unlink(missing_ok=True)
         proc = subprocess.run([exe, stem], cwd=str(work), text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         last_stdout = proc.stdout
         (work / f"shelxl_iter_{i + 1}.log").write_text(proc.stdout)
-        lst = work / f"{stem}.lst"
         stats = {"iteration": i + 1, "returncode": proc.returncode, **parse_lst(lst)}
         recommended = parse_recommended_wght(lst)
         if recommended is not None:
             stats["recommended_wght_a"] = recommended[0]
             stats["recommended_wght_b"] = recommended[1]
-        health = shelx_res_health(work / f"{stem}.res", lst)
+        health = shelx_res_health(res, lst)
         stats["res_health"] = health
-        if not health["ok"]:
+        if proc.returncode != 0:
+            stats["status"] = "shelxl_failed"
+            stats["invalid_res_reason"] = f"SHELXL returned {proc.returncode}"
+        elif not health["ok"]:
             stats["status"] = "invalid_res_output"
             stats["invalid_res_reason"] = health["reason"]
         elif health.get("safe_for_feedback") is False:
             stats["status"] = "adp_pathology"
             stats["invalid_res_reason"] = "adp_pathology"
         history.append(stats)
-        if stats.get("status") in {"invalid_res_output", "adp_pathology"}:
+        if stats.get("status") in {"shelxl_failed", "invalid_res_output", "adp_pathology"}:
             break
         if i + 1 < n_iter and (work / f"{stem}.res").exists():
             active = (0.0, 0.0) if freeze_zero else _active_wght_from_stats(stats)
@@ -520,7 +673,10 @@ def run_shelxl(
     (work / "shelxl_stdout.log").write_text(last_stdout)
     final = dict(history[-1]) if history else {"status": "not_run"}
     final.setdefault("res_health", shelx_res_health(work / f"{stem}.res", work / f"{stem}.lst"))
-    if final["res_health"].get("ok"):
+    if final.get("returncode") not in {None, 0}:
+        final["status"] = "shelxl_failed"
+        final["invalid_res_reason"] = f"SHELXL returned {final['returncode']}"
+    elif final["res_health"].get("ok"):
         active = (0.0, 0.0) if freeze_zero else _active_wght_from_stats(final)
         write_endpoint_ins(
             work / f"{stem}.res",
@@ -665,31 +821,43 @@ def main():
     all_rows = []
     dataset_summaries = []
     endpoint_rows_by_dataset: dict[str, list[tuple]] = {}
+    endpoint_weight_by_name: dict[str, float] = {}
     dataset_sigma_by_name: dict[str, dict] = {}
-    wght_a = args.wght_a
-    wght_b = args.wght_b
+    per_dataset_wght: dict[str, dict[str, float]] = {}
     for item in args.run:
         if "=" not in item:
             raise ValueError("--run must be name=/path")
         name, path_text = item.split("=", 1)
         run = Path(path_text)
         summary = read_json(run / "summary.json")
-        if wght_a is None:
-            wght_a = safe_float((summary.get("shelx_weight") or {}).get("a"), 0.126534)
-        if wght_b is None:
-            wght_b = safe_float((summary.get("shelx_weight") or {}).get("b"), 0.0)
+        source_wght_a, source_wght_b = selected_native_wght(summary)
+        dataset_wght_a = float(args.wght_a) if args.wght_a is not None else source_wght_a
+        dataset_wght_b = float(args.wght_b) if args.wght_b is not None else source_wght_b
+        per_dataset_wght[name] = {"a": dataset_wght_a, "b": dataset_wght_b}
         rows = read_rows(run, name)
-        native_rows = [r for r in rows if str(r.get("dataset_role", "primary")) not in {"completeness_only", "exclude"}]
-        endpoint_input_rows = [r for r in rows if str(r.get("dataset_role", "primary")) != "exclude" and safe_float(r.get("endpoint_weight"), 1.0) > 0.0]
+        role = str(rows[0].get("dataset_role", "primary")) if rows else "missing"
+        raw_weight = safe_float(rows[0].get("raw_row_weight"), 1.0) if rows else float("nan")
+        endpoint_weight = safe_float(rows[0].get("endpoint_weight"), raw_weight) if rows else float("nan")
+        native_rows = []
+        if role not in {"completeness_only", "exclude"} and raw_weight > 0.0:
+            for row in rows:
+                weighted = apply_native_row_weight(row, raw_weight)
+                weighted["native_wght_a"] = f"{dataset_wght_a:.17g}"
+                weighted["native_wght_b"] = f"{dataset_wght_b:.17g}"
+                native_rows.append(weighted)
+        endpoint_input_rows = [
+            r
+            for r in rows
+            if str(r.get("dataset_role", "primary")) != "exclude"
+            and endpoint_weight > 0.0
+        ]
         all_rows.extend(native_rows)
         exact = {tuple(int(r[x]) for x in ("h", "k", "l")) for r in rows}
         canon = {canonical_model_friedel(*hkl, symmetry_ops) for hkl in exact}
         q = np.asarray([safe_float(r["q_dyn_over_born"]) for r in endpoint_input_rows], dtype=float)
         basis = np.asarray([safe_float(r.get("basis_size")) for r in endpoint_input_rows], dtype=float)
         basis = basis[np.isfinite(basis)]
-        role = str(rows[0].get("dataset_role", "primary")) if rows else "missing"
-        raw_weight = safe_float(rows[0].get("raw_row_weight"), 1.0) if rows else float("nan")
-        endpoint_weight = safe_float(rows[0].get("endpoint_weight"), raw_weight) if rows else float("nan")
+        endpoint_weight_by_name[name] = endpoint_weight
         dataset_summaries.append(
             {
                 "name": name,
@@ -700,6 +868,8 @@ def main():
                 "dataset_role": role,
                 "raw_row_weight": raw_weight,
                 "endpoint_weight": endpoint_weight,
+                "native_wght_a": dataset_wght_a,
+                "native_wght_b": dataset_wght_b,
                 "unique_signed_hkl": len(exact),
                 "unique_symmetry_friedel": len(canon),
                 "unique_p222_friedel": len(canon),
@@ -722,35 +892,33 @@ def main():
             source_run = Path(source_run_text) if source_run_text else None
             if not hkl_rows and source_run and source_run.exists():
                 hkl_rows = read_hkl(endpoint_hkl_path(source_run, args.endpoint_lambda))
-            endpoint_rows_by_dataset[name] = apply_hkl_weight(hkl_rows, endpoint_weight)
+            endpoint_rows_by_dataset[name] = hkl_rows
         else:
             endpoint_rows_by_dataset[name] = endpoint_rows_from_native(endpoint_input_rows, float(args.endpoint_lambda))
         dataset_sigma_by_name[name] = {"policy": args.dataset_sigma_policy, "status": "not_requested"}
 
     if args.dataset_sigma_policy == "uniform_z_rms":
         for name, rows_for_dataset in list(endpoint_rows_by_dataset.items()):
-            try:
-                sigma_meta = fit_uniform_z_rms_sigma_scale(
-                    rows_for_dataset,
-                    model,
-                    holdout_fraction=float(args.dataset_sigma_holdout_fraction),
-                    min_scale=float(args.dataset_sigma_min_scale),
-                    max_scale=float(args.dataset_sigma_max_scale),
-                )
-                if args.dataset_sigma_holdout_floor:
-                    sigma_meta = apply_sigma_holdout_floor(sigma_meta)
-                if str(sigma_meta.get("status", "")).startswith("ok"):
-                    endpoint_rows_by_dataset[name] = scale_row_sigmas(rows_for_dataset, float(sigma_meta["sigma_scale"]))
-                dataset_sigma_by_name[name] = sigma_meta
-            except Exception as exc:
-                dataset_sigma_by_name[name] = {
-                    "policy": "uniform_z_rms",
-                    "status": "failed",
-                    "error": f"{type(exc).__name__}: {exc}",
-                }
+            calibrated, sigma_meta = calibrate_dataset_endpoint_rows(
+                rows_for_dataset,
+                model,
+                policy=args.dataset_sigma_policy,
+                holdout_fraction=args.dataset_sigma_holdout_fraction,
+                min_scale=args.dataset_sigma_min_scale,
+                max_scale=args.dataset_sigma_max_scale,
+                holdout_floor=bool(args.dataset_sigma_holdout_floor),
+            )
+            endpoint_rows_by_dataset[name] = calibrated
+            dataset_sigma_by_name[name] = sigma_meta
 
-    wght_a = 0.126534 if wght_a is None else float(wght_a)
-    wght_b = 0.0 if wght_b is None else float(wght_b)
+    for name, rows_for_dataset in list(endpoint_rows_by_dataset.items()):
+        endpoint_rows_by_dataset[name] = apply_hkl_weight(
+            rows_for_dataset,
+            endpoint_weight_by_name.get(name, 1.0),
+        )
+
+    wght_a = 0.126534 if args.wght_a is None else float(args.wght_a)
+    wght_b = 0.0 if args.wght_b is None else float(args.wght_b)
     endpoint_key_for = endpoint_key_function(args.endpoint_merge_key, symmetry_ops)
     if args.interdataset_scale == "overlap":
         interdataset_scale = estimate_overlap_scales(endpoint_rows_by_dataset, canonicalizer=endpoint_key_for)
@@ -836,7 +1004,12 @@ def main():
 
     result = {
         "runs": dataset_summaries,
-        "wght": {"a": wght_a, "b": wght_b},
+        "wght": {
+            "a": wght_a,
+            "b": wght_b,
+            "mode": "explicit_override" if args.wght_a is not None or args.wght_b is not None else "per_dataset_native",
+            "per_dataset": per_dataset_wght,
+        },
         "native_joint": native,
         "coverage": {
             "rows_total": len(all_rows),

@@ -1117,13 +1117,73 @@ def check_sfac_contract(structure: str | Path) -> dict[str, object]:
     }
     suffix = path.suffix.lower()
     if suffix == ".cif":
+        try:
+            embedded_shelx = _extract_cif_shelx_block(path)
+        except Exception as exc:
+            report.update(
+                status="error",
+                ok=False,
+                messages=[
+                    {
+                        "severity": "error",
+                        "message": f"could not read CIF model: {exc}",
+                    }
+                ],
+            )
+            return report
+        if embedded_shelx:
+            with tempfile.TemporaryDirectory(prefix="grond_sfac_check_") as tmp:
+                embedded_path = Path(tmp) / "embedded.res"
+                embedded_path.write_text(embedded_shelx)
+                embedded_report = check_sfac_contract(embedded_path)
+            embedded_report["structure"] = str(path)
+            embedded_report["cif_model_contract"] = "embedded_shelx"
+            embedded_report.setdefault("messages", []).insert(
+                0,
+                {
+                    "severity": "info",
+                    "message": "Checked the complete SHELX instruction block embedded in the CIF.",
+                },
+            )
+            return embedded_report
+        try:
+            from .legacy.engine.bloch_engine import parse_cif
+
+            model = parse_cif(path)
+        except (OSError, RuntimeError, ValueError) as exc:
+            report.update(
+                status="error",
+                ok=False,
+                messages=[
+                    {
+                        "severity": "error",
+                        "message": f"CIF is not a usable electron-scattering model: {exc}",
+                    }
+                ],
+            )
+            return report
         report.update(
             status="warning",
             ok=True,
+            cif_model_contract="explicit_electron_coefficients",
+            sfac_rows=[
+                {
+                    "element": str(row["element"]),
+                    "kind": "numeric_coefficients",
+                    "coefficient_count": len(row.get("raw", [])),
+                }
+                for row in model["sfac"]
+            ],
+            cell={
+                "status": "warning",
+                "wavelength_A": None,
+                "endpoint_wavelength_A": DEFAULT_ELECTRON_WAVELENGTH_A,
+                "message": "CIF has no SHELX CELL wavelength; generated endpoint files use the GROND electron default.",
+            },
             messages=[
                 {
                     "severity": "warning",
-                    "message": "CIF scattering-factor loops are not exhaustively audited by sfac-check; embedded SHELX blocks are checked after preparation.",
+                    "message": "The CIF has explicit electron coefficients and is usable by the lower-level Bloch parser, but GROND run needs a complete embedded SHELX instruction block for model-update and endpoint files. Provide that block or use a RES/INS model.",
                 }
             ],
         )
@@ -4583,6 +4643,8 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
                 args.structure_early_stop_metric,
                 "--restraints",
                 args.restraints,
+                "--scale-fit-split",
+                "work",
                 "--workers",
                 str(args.workers),
                 "--chunksize",
@@ -9739,7 +9801,7 @@ def add_common_run_args(ap: argparse.ArgumentParser, *, expose_lambda_controls: 
     ap.add_argument("--dials-expt", default="", help="DIALS integrated.expt/scaled.expt file matching --dials-refl.")
     ap.add_argument("--dials-python", default="", help="Python executable that can import dials and dxtbx. Leave blank when the active Python already can.")
     ap.add_argument("--dials-intensity-mode", choices=["sum_complete", "sum_raw", "scale"], default="sum_complete", help="DIALS intensity mapping for the GROND row contract.")
-    ap.add_argument("--dials-sigma-mode", choices=["auto", "raw", "detector_gain"], default="auto", help="DIALS sigma bridge policy. auto fits an empirical duplicate-scatter variance model when possible; detector_gain forces sqrt(gain) scaling.")
+    ap.add_argument("--dials-sigma-mode", choices=["auto", "raw", "detector_gain"], default="raw", help="DIALS sigma bridge policy. raw keeps the detector-model variance; auto empirical calibration and detector_gain scaling are explicit diagnostics.")
     ap.add_argument("--dials-sigma-scale", type=float, default=None, help="Explicit DIALS sigma multiplier. Overrides --dials-sigma-mode when positive.")
     ap.add_argument("--dials-min-partiality-write", type=float, default=1e-6, help="Minimum DIALS partiality written into the converted row file. GROND's --min-peak still controls production row selection.")
     ap.add_argument("--dials-drop-dont-integrate", action="store_true", help="Deprecated alias for the default production behavior. Rows flagged dont_integrate are dropped unless --dials-keep-dont-integrate is used.")
@@ -9821,8 +9883,18 @@ def add_common_run_args(ap: argparse.ArgumentParser, *, expose_lambda_controls: 
     ap.add_argument("--no-hand-control", dest="hand_control", action="store_false", help="Skip the alternate-hand diagnostic.")
     ap.add_argument("--hand-n-basis", dest="hand_n_basis", metavar="N", type=int, default=24, help="Basis size for default hand-diagnostic runs; keep cheap unless the call is ambiguous.")
     ap.add_argument("--hand-n-points", dest="hand_n_points", metavar="Q", type=int, default=10, help="Quadrature points for default hand-diagnostic runs.")
-    ap.add_argument("--production-scales", action="store_true", default=True)
-    ap.add_argument("--validation-scales", dest="production_scales", action="store_false")
+    ap.add_argument(
+        "--production-scales",
+        action="store_true",
+        default=False,
+        help="Fit nuisance scales on all rows for a final diagnostic; validation and automatic selection use work-only scales by default.",
+    )
+    ap.add_argument(
+        "--validation-scales",
+        dest="production_scales",
+        action="store_false",
+        help="Fit nuisance scales on work rows only (the default).",
+    )
     ap.add_argument("--screen-n-basis", type=int, default=24, help="Basis size for initial nuisance/geometry screening.")
     ap.add_argument("--screen-n-points", type=int, default=10, help="Quadrature points for initial nuisance/geometry screening.")
     ap.add_argument("--n-basis", type=int, default=0, help="Basis size for pinned final polish runs. Default 0 scans Sg support and uses max support plus margin.")
@@ -9863,7 +9935,12 @@ def add_common_run_args(ap: argparse.ArgumentParser, *, expose_lambda_controls: 
     ap.add_argument("--profile-accumulation", choices=["sum", "mean"], default="sum", help="Accumulate rocking-profile samples as summed detector sub-exposures; mean is the legacy normalized diagnostic.")
     ap.add_argument("--free-fraction", type=float, default=0.10)
     ap.add_argument("--split-seed", type=int, default=42)
-    ap.add_argument("--selection-metric", choices=["work_wR2", "free_wR2", "all_wR2", "all_R1"], default="all_wR2")
+    ap.add_argument(
+        "--selection-metric",
+        choices=["work_wR2", "free_wR2", "all_wR2", "all_R1"],
+        default="work_wR2",
+        help="Metric used to choose nuisance trials. Work-row wR2 keeps free rows held out; all/free choices are diagnostics.",
+    )
     if expose_lambda_controls:
         ap.add_argument(
             "--lambda-grid",
@@ -9989,7 +10066,12 @@ def add_common_run_args(ap: argparse.ArgumentParser, *, expose_lambda_controls: 
     ap.add_argument("--thickness-model-grid", default="uniform_gradient")
     ap.add_argument("--thickness-grad-grid", default="0.4,1.0")
     ap.add_argument("--continuous-thickness-polish", choices=["auto", "on", "off"], default="auto", help="After the coarse thickness grid, polish continuous thickness/gradient by reusing cached Bloch eigensystems. Auto is on for GROND auto except --fast.")
-    ap.add_argument("--continuous-thickness-metric", choices=["all_wR2", "free_wR2", "all_R1", "all_R1gt"], default="all_wR2", help="Objective used by the continuous thickness polish.")
+    ap.add_argument(
+        "--continuous-thickness-metric",
+        choices=["work_wR2", "all_wR2", "free_wR2", "all_R1", "all_R1gt"],
+        default="work_wR2",
+        help="Objective used by continuous thickness polish. Work-row wR2 keeps free rows held out.",
+    )
     ap.add_argument("--continuous-thickness-strong-rows", type=int, default=0, help="Rows used by continuous thickness polish; 0 uses all selected rows. Strong-row-only scouts are diagnostic and are not the default.")
     ap.add_argument("--continuous-thickness-max-rows", type=int, default=0, help="Hard row limit for continuous thickness polish; 0 uses all rows selected by the data filters.")
     ap.add_argument("--continuous-thickness-bracket-frac", type=float, default=0.35, help="Local fractional thickness bracket around the coarse-grid winner.")
@@ -10127,7 +10209,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_dials.add_argument("--out-dir", required=True)
     p_dials.add_argument("--dials-python", default="", help="Python executable that can import dials and dxtbx.")
     p_dials.add_argument("--intensity-mode", choices=["sum_complete", "sum_raw", "scale"], default="sum_complete")
-    p_dials.add_argument("--sigma-mode", choices=["auto", "raw", "detector_gain"], default="auto")
+    p_dials.add_argument("--sigma-mode", choices=["auto", "raw", "detector_gain"], default="raw")
     p_dials.add_argument("--sigma-scale", type=float, default=None)
     p_dials.add_argument("--min-partiality-write", type=float, default=1e-6)
     p_dials.add_argument("--drop-dont-integrate", action="store_true", help="Deprecated alias for the default production behavior. Rows flagged dont_integrate are dropped unless --keep-dont-integrate is used.")

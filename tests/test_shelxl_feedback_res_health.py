@@ -61,6 +61,27 @@ def test_native_run_shelxl_marks_empty_res_invalid(tmp_path: Path, monkeypatch):
     assert len(result["iteration_history"]) == 1
 
 
+def test_native_run_shelxl_does_not_accept_stale_outputs_after_failure(tmp_path: Path, monkeypatch):
+    work = tmp_path / "work"
+    work.mkdir()
+    stem = "dyn_nuisance_corrected"
+    (work / f"{stem}.ins").write_text(valid_res_text())
+    (work / f"{stem}.res").write_text(valid_res_text())
+    (work / f"{stem}.lst").write_text("wR2 = 0.1\n")
+    failing = tmp_path / "failing_shelxl"
+    failing.write_text("#!/bin/sh\nexit 7\n")
+    failing.chmod(0o755)
+    monkeypatch.setattr(nr, "SHELXL", str(failing))
+
+    result = nr.run_shelxl(work, stem, iterations=1)
+
+    assert result["status"] == "shelxl_failed"
+    assert result["returncode"] == 7
+    assert result.get("res_normalized_for_reopen") is not True
+    assert not (work / f"{stem}.res").exists()
+    assert not (work / f"{stem}.lst").exists()
+
+
 def test_native_run_shelxl_marks_npd_res_pathological(tmp_path: Path, monkeypatch):
     fake_shelxl = tmp_path / "fake_shelxl.py"
     fake_shelxl.write_text(

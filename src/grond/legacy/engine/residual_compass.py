@@ -18,8 +18,12 @@ from pathlib import Path
 
 import numpy as np
 
-from native_row_regularize import DEFAULT_HKL, DEFAULT_RES, native_metrics, parse_wght, shelx_weights
-from bloch_engine import XDSData
+if __package__:
+    from .bloch_engine import XDSData
+    from .native_row_regularize import DEFAULT_HKL, DEFAULT_RES, native_metrics, parse_wght, shelx_weights
+else:  # pragma: no cover - direct script execution
+    from bloch_engine import XDSData
+    from native_row_regularize import DEFAULT_HKL, DEFAULT_RES, native_metrics, parse_wght, shelx_weights
 
 
 def read_rows(path: Path) -> list[dict[str, str]]:
@@ -93,7 +97,7 @@ def quantile_bins(values: np.ndarray, n_bins: int) -> list[np.ndarray]:
 def fixed_bins(values: np.ndarray, edges: list[float]) -> list[np.ndarray]:
     values = np.asarray(values, dtype=float)
     bins = []
-    for lo, hi in zip(edges[:-1], edges[1:]):
+    for lo, hi in zip(edges[:-1], edges[1:], strict=False):
         if hi == edges[-1]:
             m = np.where(np.isfinite(values) & (values >= lo) & (values <= hi))[0]
         else:

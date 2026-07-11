@@ -132,6 +132,7 @@ def main():
         "i_scale": float_col(table, "intensity.scale.value"),
         "var_scale": float_col(table, "intensity.scale.variance"),
         "lp": float_col(table, "lp", 1.0),
+        "qe": float_col(table, "qe", 1.0) if "qe" in table else float_col(table, "dqe", 1.0),
         "partiality": float_col(table, "partiality", 1.0),
         "zeta": float_col(table, "zeta"),
         "d": float_col(table, "d"),
@@ -176,6 +177,29 @@ def main():
     if not a_scan_points:
         a_scan_points = [a_static.tolist()]
 
+    identity = np.eye(3, dtype=float)
+    if goniometer is None:
+        rotation_axis = [1.0, 0.0, 0.0]
+        rotation_axis_datum = rotation_axis
+        fixed_rotation = identity
+        setting_rotation = identity
+        setting_scan_points = 0
+    else:
+        rotation_axis = [float(v) for v in goniometer.get_rotation_axis()]
+        if hasattr(goniometer, "get_rotation_axis_datum"):
+            rotation_axis_datum = [float(v) for v in goniometer.get_rotation_axis_datum()]
+        else:
+            rotation_axis_datum = rotation_axis
+        fixed_rotation = np.asarray(goniometer.get_fixed_rotation(), dtype=float).reshape(3, 3)
+        setting_rotation = np.asarray(goniometer.get_setting_rotation(), dtype=float).reshape(3, 3)
+        setting_scan_points = int(goniometer.get_num_scan_points()) if hasattr(goniometer, "get_num_scan_points") else 0
+    if setting_scan_points:
+        raise SystemExit(
+            "GROND import-dials does not yet support scan-varying goniometer setting rotations; "
+            f"the experiment contains {setting_scan_points} setting-rotation scan points. "
+            "Export a static setting rotation or split the experiment before conversion."
+        )
+
     meta = {
         "source_refl": str(refl_path),
         "source_expt": str(expt_path),
@@ -192,7 +216,11 @@ def main():
             "sample_to_source_direction": [float(v) for v in beam.get_sample_to_source_direction()],
         },
         "goniometer": {
-            "rotation_axis": [float(v) for v in goniometer.get_rotation_axis()] if goniometer is not None else [1.0, 0.0, 0.0],
+            "rotation_axis": rotation_axis,
+            "rotation_axis_datum": rotation_axis_datum,
+            "fixed_rotation": fixed_rotation.tolist(),
+            "setting_rotation": setting_rotation.tolist(),
+            "setting_rotation_scan_points": setting_scan_points,
         },
         "scan": {
             "image_range": image_range,
@@ -284,7 +312,13 @@ def dials_sg_statistics(arrays: dict[str, np.ndarray], metadata: dict[str, Any],
     hkl = np.asarray(arrays["hkl"], dtype=float)
     xyzcal = np.asarray(arrays["xyzcal"], dtype=float)
     a_scan = np.asarray(metadata["A_scan_points"], dtype=float)
-    axis = np.asarray(metadata["goniometer"]["rotation_axis"], dtype=float)
+    goniometer = metadata.get("goniometer") or {}
+    axis = np.asarray(
+        goniometer.get("rotation_axis_datum", goniometer.get("rotation_axis", [1.0, 0.0, 0.0])),
+        dtype=float,
+    )
+    fixed = np.asarray(goniometer.get("fixed_rotation", np.eye(3)), dtype=float).reshape(3, 3)
+    setting = np.asarray(goniometer.get("setting_rotation", np.eye(3)), dtype=float).reshape(3, 3)
     s0 = np.asarray(metadata["beam"]["s0"], dtype=float)
     k = float(np.linalg.norm(s0))
     start_angle, osc_width = [float(v) for v in metadata["scan"]["oscillation"]]
@@ -294,7 +328,7 @@ def dials_sg_statistics(arrays: dict[str, np.ndarray], metadata: dict[str, Any],
         z = float(xyzcal[i, 2])
         omega = start_angle + z * osc_width
         a_mat = _interp_scan_a(a_scan, z)
-        g = _rotation_matrix(axis, omega) @ a_mat @ hkl[i]
+        g = setting @ _rotation_matrix(axis, omega) @ fixed @ a_mat @ hkl[i]
         value = (k * k - float(np.sum((s0 + g) ** 2))) / (2.0 * k)
         sg.append(value)
     sg_arr = np.asarray(sg, dtype=float)
@@ -327,13 +361,19 @@ def _choose_intensity(
 
     partiality = np.asarray(arrays["partiality"], dtype=float)
     lp = np.asarray(arrays["lp"], dtype=float)
+    qe = np.asarray(arrays.get("qe", np.ones_like(lp)), dtype=float)
+    if qe.shape != lp.shape:
+        raise ValueError("DIALS qe column must have the same shape as lp")
+    correction = np.full_like(lp, np.nan, dtype=float)
+    valid_correction = np.isfinite(lp) & (lp > 0.0) & np.isfinite(qe) & (qe > 0.0)
+    correction[valid_correction] = lp[valid_correction] / qe[valid_correction]
     peak = np.clip(partiality * 100.0, 0.0, 999.0)
     if mode == "sum_complete":
-        factor = lp / np.maximum(partiality, eps)
+        factor = correction / np.maximum(partiality, eps)
         iobs = np.asarray(arrays["i_sum"], dtype=float) * factor
         sigma = np.sqrt(np.maximum(np.asarray(arrays["var_sum"], dtype=float), 0.0)) * np.abs(factor)
-        note = "intensity.sum.value multiplied by lp/partiality; PEAK=100*partiality and RLP=lp"
-        return iobs, sigma, lp, peak, note
+        note = "intensity.sum.value multiplied by (lp/qe)/partiality; PEAK=100*partiality and RLP=lp/qe"
+        return iobs, sigma, correction, peak, note
     if mode == "sum_raw":
         iobs = np.asarray(arrays["i_sum"], dtype=float)
         sigma = np.sqrt(np.maximum(np.asarray(arrays["var_sum"], dtype=float), 0.0))
@@ -576,17 +616,11 @@ def _dials_sigma_multiplier(
         if requested == "detector_gain":
             mult = math.sqrt(gain)
             source = "detector_gain"
-        elif (empirical := _fit_empirical_sigma_model(arrays, metadata, iobs, sigma, mode=mode)):
+        elif empirical := _fit_empirical_sigma_model(arrays, metadata, iobs, sigma, mode=mode):
             sigma_eff, empirical_summary = empirical
             mult = float(empirical_summary["equivalent_global_multiplier"])
             source = str(empirical_summary["source"])
-        elif (
-            gain > 1.01
-            and median_ios is not None
-            and p95_ios is not None
-            and median_ios > 50.0
-            and p95_ios > 250.0
-        ):
+        elif gain > 1.01 and median_ios is not None and p95_ios is not None and median_ios > 50.0 and p95_ios > 250.0:
             mult = math.sqrt(gain)
             source = "auto_detector_gain_gross_overprecision"
         else:
@@ -627,7 +661,7 @@ def convert_dials_to_grond(
     out_dir: str | Path,
     *,
     intensity_mode: str = "sum_complete",
-    sigma_mode: str = "auto",
+    sigma_mode: str = "raw",
     sigma_scale: float | None = None,
     dials_python: str = "",
     min_partiality_write: float = 1e-6,
@@ -641,12 +675,12 @@ def convert_dials_to_grond(
     """Write a GROND-ready XDS-like directory from DIALS `.refl` and `.expt` files.
 
     The default intensity mode uses DIALS summation intensities completed by
-    `lp/partiality`, while retaining partiality as the GROND `PEAK` quality
+    `(lp/qe)/partiality`, while retaining partiality as the GROND `PEAK` quality
     field.  With GROND's default `--min-peak 90`, this keeps fully recorded rows
     for production but leaves lower-partiality rows available for diagnostics.
-    Production conversion drops severe DIALS bad-row flags by default and uses
-    an auditable sigma policy so detector-gain metadata can be applied to
-    over-precise electron-diffraction summation variances.
+    Production conversion drops severe DIALS bad-row flags by default and keeps
+    the detector-model summation variance unchanged. Empirical or gain-based
+    sigma inflation remains available as an explicit diagnostic policy.
     """
 
     refl_path = Path(refl).expanduser().resolve()
@@ -656,7 +690,9 @@ def convert_dials_to_grond(
 
     arrays, metadata = _run_dials_helper(refl_path, expt_path, dials_python=dials_python)
     mode = str(intensity_mode or "sum_complete").strip().lower()
-    iobs, sigma, rlp, peak, intensity_note = _choose_intensity(arrays, mode, eps=max(float(min_partiality_write), 1e-12))
+    iobs, sigma, rlp, peak, intensity_note = _choose_intensity(
+        arrays, mode, eps=max(float(min_partiality_write), 1e-12)
+    )
     sigma_multiplier, sigma_summary = _dials_sigma_multiplier(
         arrays,
         metadata,
@@ -751,6 +787,15 @@ def convert_dials_to_grond(
         f.write("!DIALS_PARTIALITY_AS_PEAK= TRUE\n")
         f.write("!DIALS_BBOX_Z_RANGE_AS_ALF0_BET0= TRUE\n")
         f.write(f"!DIALS_A_AT_SCAN_POINTS_FILE= {scan_points_path.name}\n")
+        f.write(f"!DIALS_ROTATION_AXIS_DATUM= {_format_header_vector(metadata['goniometer']['rotation_axis_datum'])}\n")
+        f.write(
+            "!DIALS_FIXED_ROTATION= "
+            f"{_format_header_vector(np.asarray(metadata['goniometer']['fixed_rotation']).reshape(-1))}\n"
+        )
+        f.write(
+            "!DIALS_SETTING_ROTATION= "
+            f"{_format_header_vector(np.asarray(metadata['goniometer']['setting_rotation']).reshape(-1))}\n"
+        )
         f.write(f"!X-RAY_WAVELENGTH= {float(metadata['beam']['wavelength_A']):.12g}\n")
         f.write("!STARTING_FRAME= 0\n")
         f.write(f"!STARTING_ANGLE= {float(scan_osc[0]):.12g}\n")
@@ -761,8 +806,12 @@ def convert_dials_to_grond(
         f.write(f"!UNIT_CELL_A-AXIS= {_format_header_vector(real[:, 0])}\n")
         f.write(f"!UNIT_CELL_B-AXIS= {_format_header_vector(real[:, 1])}\n")
         f.write(f"!UNIT_CELL_C-AXIS= {_format_header_vector(real[:, 2])}\n")
-        f.write(f"!NX= {int(image_size[0])} NY= {int(image_size[1])} QX= {float(pixel_size[0]):.12g} QY= {float(pixel_size[1]):.12g}\n")
-        f.write("!COLUMN_CONTRACT= H K L IOBS SIGMA XCAL YCAL ZCAL RLP PEAK CORR MAXC XOBS YOBS ZOBS ALF0 BET0 ALF1 BET1 PSI ISEG\n")
+        f.write(
+            f"!NX= {int(image_size[0])} NY= {int(image_size[1])} QX= {float(pixel_size[0]):.12g} QY= {float(pixel_size[1]):.12g}\n"
+        )
+        f.write(
+            "!COLUMN_CONTRACT= H K L IOBS SIGMA XCAL YCAL ZCAL RLP PEAK CORR MAXC XOBS YOBS ZOBS ALF0 BET0 ALF1 BET1 PSI ISEG\n"
+        )
         f.write("!END_OF_HEADER\n")
         for i in np.where(finite)[0]:
             row = [
@@ -824,11 +873,17 @@ def convert_dials_to_grond(
             "bad_for_scaling": int(np.count_nonzero(np.asarray(arrays["bad_for_scaling"], dtype=bool))),
             "outlier_in_scaling": int(np.count_nonzero(np.asarray(arrays["outlier_in_scaling"], dtype=bool))),
             "scaled": int(np.count_nonzero(np.asarray(arrays["scaled"], dtype=bool))),
-            "background_includes_bad_pixels": int(np.count_nonzero(np.asarray(arrays["background_includes_bad_pixels"], dtype=bool))),
-            "foreground_includes_bad_pixels": int(np.count_nonzero(np.asarray(arrays["foreground_includes_bad_pixels"], dtype=bool))),
+            "background_includes_bad_pixels": int(
+                np.count_nonzero(np.asarray(arrays["background_includes_bad_pixels"], dtype=bool))
+            ),
+            "foreground_includes_bad_pixels": int(
+                np.count_nonzero(np.asarray(arrays["foreground_includes_bad_pixels"], dtype=bool))
+            ),
             "includes_bad_pixels": int(np.count_nonzero(np.asarray(arrays["includes_bad_pixels"], dtype=bool))),
             "bad_shoebox": int(np.count_nonzero(np.asarray(arrays["bad_shoebox"], dtype=bool))),
-            "failed_during_background_modelling": int(np.count_nonzero(np.asarray(arrays["failed_during_background_modelling"], dtype=bool))),
+            "failed_during_background_modelling": int(
+                np.count_nonzero(np.asarray(arrays["failed_during_background_modelling"], dtype=bool))
+            ),
             "failed_during_summation": int(np.count_nonzero(np.asarray(arrays["failed_during_summation"], dtype=bool))),
             "bad_flags_dropped_by_default": int(np.count_nonzero(bad_flags)),
         },
@@ -853,6 +908,10 @@ def convert_dials_to_grond(
             "scan_points": int(len(a_scan)),
             "scan_oscillation": scan_osc,
             "scan_image_range": metadata.get("scan", {}).get("image_range", []),
+            "rotation_axis_lab": metadata.get("goniometer", {}).get("rotation_axis", []),
+            "rotation_axis_datum": metadata.get("goniometer", {}).get("rotation_axis_datum", []),
+            "fixed_rotation": metadata.get("goniometer", {}).get("fixed_rotation", []),
+            "setting_rotation": metadata.get("goniometer", {}).get("setting_rotation", []),
         },
         "sg_validation": dials_sg_statistics(arrays, metadata, finite),
         "recommended_grond_args": {
@@ -877,7 +936,7 @@ def convert_dials_to_grond(
         "- `PEAK` is `100 * DIALS partiality`, so GROND's ordinary `--min-peak 90` means partiality >= 0.90.\n"
         "- `ALF0` and `BET0` store the DIALS reflection-table `bbox` z-range. GROND can use this as an auditable rocking-width estimate with `--sg-window-mode dials_bbox`.\n"
         "- Rows flagged `dont_integrate` or with severe DIALS bad-pixel/integration flags are dropped by default. Use the keep flags only for diagnostics.\n"
-        "- `DIALS_A_AT_SCAN_POINTS.txt` carries scan-varying reciprocal A matrices. GROND interpolates these and then applies the goniometer rotation for Sg calculations.\n\n"
+        "- `DIALS_A_AT_SCAN_POINTS.txt` carries scan-varying reciprocal A matrices. GROND interpolates these and applies the full DIALS `S R F A` goniometer geometry for Sg calculations.\n\n"
         "Run GROND with `--xds-dir` pointed at this generated directory, or use `GROND auto --dials-refl ... --dials-expt ...` to create it automatically under the run output directory.\n"
     )
 
@@ -903,4 +962,6 @@ def convert_dials_to_grond(
         )
         write_prep(prep_path, prep)
 
-    return DialsBridgeOutput(out_dir=out, hkl=hkl_path, scan_points=scan_points_path, summary=summary_path, prep=prep_path)
+    return DialsBridgeOutput(
+        out_dir=out, hkl=hkl_path, scan_points=scan_points_path, summary=summary_path, prep=prep_path
+    )

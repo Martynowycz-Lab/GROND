@@ -11,7 +11,6 @@ from __future__ import annotations
 from collections import Counter
 from typing import Any
 
-
 DYNROW_SCHEMA_VERSION = "row_contract_signed_dynrow_v1.0"
 FROZEN_ENGINE_CONTRACT_VERSION = "audited_signed_row_simple_cycles_v1.0"
 

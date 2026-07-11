@@ -34,37 +34,73 @@ for _name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "VEC
 import numpy as np
 from scipy.optimize import least_squares
 
-from bloch_engine import Config, XDSData, parse_model, sha256, split_masks
-from native_row_regularize import (
-    Nuisance,
-    TARGET_MODES,
-    native_metrics,
-    parse_wght,
-    row_selection,
-    sigma_eff,
-    target_arrays,
-)
-from native_structure_update import (
-    adp_similarity_residuals,
-    bond_restraint_residuals,
-    build_start_restraints,
-    CctbxRiguEvaluator,
-    apply_row_resolution_to_prediction,
-    fit_scale_contract,
-    inspect_cctbx_bridge,
-    model_from_vector,
-    parameter_bounds,
-    parameter_layout,
-    parameter_prior,
-    prediction_for_model,
-    residual_vector,
-    scaled_prediction,
-    update_res_coordinates,
-    validation_score,
-    write_model_delta_csv,
-    write_parameter_csv,
-    write_restraints_csv,
-)
+if __package__:
+    from ...io.config import DATASET_NAME_RE
+    from .bloch_engine import Config, XDSData, parse_model, sha256, split_masks
+    from .native_row_regularize import (
+        TARGET_MODES,
+        Nuisance,
+        native_metrics,
+        parse_wght,
+        row_selection,
+        sigma_eff,
+        target_arrays,
+    )
+    from .native_structure_update import (
+        CctbxRiguEvaluator,
+        adp_similarity_residuals,
+        apply_row_resolution_to_prediction,
+        bond_restraint_residuals,
+        build_start_restraints,
+        fit_scale_contract,
+        inspect_cctbx_bridge,
+        model_from_vector,
+        parameter_bounds,
+        parameter_layout,
+        parameter_prior,
+        prediction_for_model,
+        residual_vector,
+        scaled_prediction,
+        update_res_coordinates,
+        write_model_delta_csv,
+        write_parameter_csv,
+        write_restraints_csv,
+    )
+else:  # pragma: no cover - direct script execution
+    try:
+        from grond.io.config import DATASET_NAME_RE
+    except ImportError:
+        DATASET_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
+    from bloch_engine import Config, XDSData, parse_model, sha256, split_masks
+    from native_row_regularize import (
+        TARGET_MODES,
+        Nuisance,
+        native_metrics,
+        parse_wght,
+        row_selection,
+        sigma_eff,
+        target_arrays,
+    )
+    from native_structure_update import (
+        CctbxRiguEvaluator,
+        adp_similarity_residuals,
+        apply_row_resolution_to_prediction,
+        bond_restraint_residuals,
+        build_start_restraints,
+        fit_scale_contract,
+        inspect_cctbx_bridge,
+        model_from_vector,
+        parameter_bounds,
+        parameter_layout,
+        parameter_prior,
+        prediction_for_model,
+        residual_vector,
+        scaled_prediction,
+        update_res_coordinates,
+        write_model_delta_csv,
+        write_parameter_csv,
+        write_restraints_csv,
+    )
 
 
 @dataclass
@@ -203,6 +239,15 @@ def read_datasets_csv(path: Path) -> list[dict]:
     rows = [r for r in rows if parse_bool(r.get("include"), True)]
     if not rows:
         raise ValueError(f"No included datasets in {path}")
+    names = [str(row.get("name") or row.get("dataset") or "").strip() for row in rows]
+    for name in names:
+        if not DATASET_NAME_RE.fullmatch(name):
+            raise ValueError(
+                f"dataset name {name!r} must contain only letters, numbers, dots, underscores, or hyphens"
+            )
+    folded = [name.casefold() for name in names]
+    if len(set(folded)) != len(folded):
+        raise ValueError("dataset names in the CSV must be unique without regard to letter case")
     return rows
 
 
@@ -213,8 +258,10 @@ def stable_name_seed(name: str) -> int:
     return total
 
 
-def build_dataset_state(row: dict, args, wght_a: float, wght_b: float) -> DatasetState:
+def build_dataset_state(row: dict, args, wght_a: float, wght_b: float, symmetry_ops=None) -> DatasetState:
     name = row.get("name") or row.get("dataset") or Path(row["hkl"]).parent.parent.name
+    if not DATASET_NAME_RE.fullmatch(str(name)):
+        raise ValueError(f"unsafe dataset name {name!r}")
     hkl = Path(row["hkl"])
     hkl_transform = row.get("hkl_transform") or args.hkl_transform
     data = XDSData(hkl, hkl_transform=hkl_transform)
@@ -226,7 +273,12 @@ def build_dataset_state(row: dict, args, wght_a: float, wght_b: float) -> Datase
     geometry_percentile = parse_float(row, "geometry_percentile", args.geometry_percentile)
     include_nonpositive = parse_bool(row.get("include_nonpositive"), args.include_nonpositive)
     target_indices = row_selection(data, target, not include_nonpositive, min_d, min_peak, 0, geometry_percentile)
-    masks = split_masks(data.hkl, args.free_fraction, args.split_seed)
+    masks = split_masks(
+        data.hkl,
+        args.free_fraction,
+        args.split_seed,
+        symmetry_ops=symmetry_ops,
+    )
     selected_mask = np.zeros(len(target), dtype=bool)
     selected_mask[target_indices] = True
     masks = {k: v & selected_mask for k, v in masks.items()}
@@ -429,15 +481,28 @@ def evaluate_all(states: list[DatasetState], model, cache_root: Path, tag: str, 
     joint = {"datasets": per_dataset, "splits": {}}
     for split in ("all", "work", "free"):
         obs_parts, sig_parts, calc_parts = [], [], []
-        for state, ev in zip(states, per_dataset):
+        wght_a_parts, wght_b_parts = [], []
+        for state, ev in zip(states, per_dataset, strict=True):
             mask = state.masks[split] & ev["valid"]
             obs_parts.append(state.target[mask])
             sig_parts.append(state.sig[mask])
             calc_parts.append(ev["scaled"][mask])
+            wght_a_parts.append(np.full(np.count_nonzero(mask), state.wght_a, dtype=float))
+            wght_b_parts.append(np.full(np.count_nonzero(mask), state.wght_b, dtype=float))
         obs = np.concatenate(obs_parts) if obs_parts else np.asarray([])
         sig = np.concatenate(sig_parts) if sig_parts else np.asarray([])
         calc = np.concatenate(calc_parts) if calc_parts else np.asarray([])
-        joint["splits"][split] = native_metrics(obs, sig, calc, np.ones_like(obs, dtype=bool), states[0].wght_a, states[0].wght_b, n_params=sum(ev["scale_count"] for ev in per_dataset))
+        wght_a = np.concatenate(wght_a_parts) if wght_a_parts else np.asarray([])
+        wght_b = np.concatenate(wght_b_parts) if wght_b_parts else np.asarray([])
+        joint["splits"][split] = native_metrics(
+            obs,
+            sig,
+            calc,
+            np.ones_like(obs, dtype=bool),
+            wght_a,
+            wght_b,
+            n_params=sum(ev["scale_count"] for ev in per_dataset),
+        )
     return joint
 
 
@@ -575,7 +640,7 @@ def main():
     ap.add_argument("--objective-bins", type=int, default=10)
     ap.add_argument("--objective-group-width-deg", type=float, default=3.0)
     ap.add_argument("--objective-scale-mode", choices=["frozen_block", "refit_each_eval"], default="frozen_block")
-    ap.add_argument("--scale-fit-split", choices=["work", "all"], default="all")
+    ap.add_argument("--scale-fit-split", choices=["work", "all"], default="work")
     ap.add_argument("--block-schedule", default="adp_ueq,xyz")
     ap.add_argument("--atom-selection", choices=["nonh", "all", "labels"], default="nonh")
     ap.add_argument("--atom-labels", default="")
@@ -631,7 +696,7 @@ def main():
     ap.add_argument("--row-resolution-b", type=float, default=0.0, help="Raw-row dynamical resolution-envelope B from per-dataset nuisance regularization.")
     ap.add_argument("--native-wght-a", type=float, default=float("nan"))
     ap.add_argument("--native-wght-b", type=float, default=float("nan"))
-    ap.add_argument("--ug-d-min", type=float, default=0.55)
+    ap.add_argument("--ug-d-min", type=float, default=0.30)
     ap.add_argument("--free-fraction", type=float, default=0.10)
     ap.add_argument("--split-seed", type=int, default=42)
     ap.add_argument("--acceptance-metric", choices=["all_wR2", "work_wR2", "free_wR2", "all_R1"], default="all_wR2")
@@ -654,7 +719,10 @@ def main():
     base_model = parse_model(res_path)
     wght_a, wght_b = parse_wght(res_path)
     rows = read_datasets_csv(Path(args.datasets_csv))
-    states = [build_dataset_state(row, args, wght_a, wght_b) for row in rows]
+    states = [
+        build_dataset_state(row, args, wght_a, wght_b, symmetry_ops=base_model.get("symmetry_ops"))
+        for row in rows
+    ]
     write_dataset_rows(out, states)
 
     block_schedule = [x.strip() for x in re.split(r"[,\s]+", args.block_schedule) if x.strip()]

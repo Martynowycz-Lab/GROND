@@ -136,7 +136,7 @@ def fit_uniform_z_rms_sigma_scale(
     fc2_v = fc2[valid]
     fractions = np.asarray([
         _deterministic_fraction(int(hh), int(kk), int(ll), int(seed))
-        for hh, kk, ll in zip(hv, kv, lv)
+        for hh, kk, ll in zip(hv, kv, lv, strict=False)
     ])
     holdout_fraction = float(np.clip(holdout_fraction, 0.0, 0.8))
     test_mask = fractions < holdout_fraction

@@ -467,6 +467,7 @@ def _write_dynamic_cif(
         "_audit_creation_method 'GROND native row-level dynamical Fourier export'",
         "_diffrn_radiation_probe electron",
         f"_diffrn_radiation_wavelength {wavelength_A:.8g}",
+        "_grond_scattering_factor_kind electron",
         f"_cell_length_a {cell[0]:.8g}",
         f"_cell_length_b {cell[1]:.8g}",
         f"_cell_length_c {cell[2]:.8g}",

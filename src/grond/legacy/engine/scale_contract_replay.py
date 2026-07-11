@@ -11,7 +11,6 @@ the Bloch basis.
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import math
 import re
@@ -37,7 +36,6 @@ try:
         adaptive_segment_groups,
         baseline_scale_log_by_fit,
         baseline_scale_log_by_row,
-        candidate_row,
         coarsen_detector,
         coarsen_groups,
         col,
@@ -54,7 +52,6 @@ try:
         read_json,
         read_rows,
         row_mr_metrics,
-        safe_float,
         split_masks,
         write_rows,
     )
@@ -74,7 +71,6 @@ except ImportError:  # pragma: no cover - direct script execution
         adaptive_segment_groups,
         baseline_scale_log_by_fit,
         baseline_scale_log_by_row,
-        candidate_row,
         coarsen_detector,
         coarsen_groups,
         col,
@@ -91,7 +87,6 @@ except ImportError:  # pragma: no cover - direct script execution
         read_json,
         read_rows,
         row_mr_metrics,
-        safe_float,
         split_masks,
         write_rows,
     )
@@ -499,11 +494,10 @@ def choose_publication_endpoint(
             reasons.append(f"not preferred weight mode {prefer!r}")
         if goof < float(goof_min) or goof > float(goof_max):
             reasons.append(f"GooF {goof:.3g} outside {goof_min:.3g}-{goof_max:.3g}")
-        if not allow_npd:
-            if npd_count > 0 or bool(row.get("shelxl_has_npd")):
-                atoms = str(row.get("shelxl_npd_atoms", "") or "")
-                atom_text = f" ({atoms})" if atoms else ""
-                reasons.append(f"NPD {npd_count}{atom_text}; publication endpoints require NPD == 0")
+        if not allow_npd and (npd_count > 0 or bool(row.get("shelxl_has_npd"))):
+            atoms = str(row.get("shelxl_npd_atoms", "") or "")
+            atom_text = f" ({atoms})" if atoms else ""
+            reasons.append(f"NPD {npd_count}{atom_text}; publication endpoints require NPD == 0")
         if policy == "bic" and not math.isfinite(ic_value):
             reasons.append(f"missing finite information criterion {ic_name!r}")
         if policy == "gated-smallest":
@@ -766,7 +760,7 @@ def main() -> None:
     summary_path = Path(args.summary).expanduser().resolve() if args.summary else row_table.parent / "summary.json"
     summary = read_json(summary_path)
     res_path = Path(args.res).expanduser().resolve() if args.res else Path(
-        ((summary.get("inputs") or {}).get("res") or (summary.get("config") or {}).get("res") or "")
+        (summary.get("inputs") or {}).get("res") or (summary.get("config") or {}).get("res") or ""
     ).expanduser().resolve()
     if not res_path.exists():
         raise SystemExit(f"Could not resolve source RES for endpoint replay: {res_path}")

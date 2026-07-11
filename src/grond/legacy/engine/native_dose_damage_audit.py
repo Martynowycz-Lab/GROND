@@ -21,13 +21,16 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-import math
 from pathlib import Path
 
 import numpy as np
 
-from native_row_regularize import DEFAULT_HKL, DEFAULT_RES
-from bloch_engine import XDSData, sha256
+if __package__:
+    from .bloch_engine import XDSData, sha256
+    from .native_row_regularize import DEFAULT_HKL, DEFAULT_RES
+else:  # pragma: no cover - direct script execution
+    from bloch_engine import XDSData, sha256
+    from native_row_regularize import DEFAULT_HKL, DEFAULT_RES
 
 
 def read_rows(path: Path) -> list[dict[str, str]]:

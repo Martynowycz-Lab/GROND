@@ -72,7 +72,7 @@ def summary_value(summary: dict, key: str, default=None):
 def nuisance(summary: dict) -> dict:
     """Return the selected nuisance dictionary from a native summary."""
 
-    out = dict(((summary.get("best_native") or {}).get("nuisance") or {}))
+    out = dict((summary.get("best_native") or {}).get("nuisance") or {})
     if not out:
         raise SystemExit("source summary does not contain best_native.nuisance")
     return out

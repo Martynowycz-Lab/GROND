@@ -1,17 +1,118 @@
 from pathlib import Path
 
+from grond.legacy.engine import combine_native_nuisance_runs as combine
 from grond.legacy.engine.combine_native_nuisance_runs import (
+    apply_hkl_weight,
     canonical_model_friedel,
     canonical_model_symmetry,
     endpoint_hkl_path,
     endpoint_key_function,
+    endpoint_rows_from_native,
     estimate_overlap_scales,
     merge_hkl_rows,
+    metrics,
     run_shelxl,
     safe_fixed_width_factor,
     scale_hkl_rows,
+    selected_native_wght,
     write_no_exti_ins,
 )
+
+
+def test_zero_endpoint_weight_excludes_hkl_source_rows():
+    rows = [(1, 0, 0, 100.0, 5.0)]
+
+    assert apply_hkl_weight(rows, 0.0) == []
+    assert apply_hkl_weight(rows, -1.0) == []
+    assert apply_hkl_weight(rows, 1.0) == rows
+    assert apply_hkl_weight(rows, 0.25) == [(1, 0, 0, 100.0, 10.0)]
+
+
+def test_selected_native_weights_use_current_summary_fields():
+    summary = {
+        "shelx_weight": {
+            "source_a": 0.1,
+            "source_b": 0.2,
+            "selected_native_a": 0.3,
+            "selected_native_b": 0.4,
+        }
+    }
+
+    assert selected_native_wght(summary) == (0.3, 0.4)
+
+
+def test_joint_metrics_are_order_invariant_with_per_dataset_native_weights():
+    rows = [
+        {
+            "target_I": "100",
+            "sigma_eff": "5",
+            "dyn_scaled": "90",
+            "native_wght_a": "0",
+            "native_wght_b": "0",
+        },
+        {
+            "target_I": "50",
+            "sigma_eff": "2",
+            "dyn_scaled": "40",
+            "native_wght_a": "0.3",
+            "native_wght_b": "0.1",
+        },
+    ]
+
+    forward = metrics(rows, "dyn_scaled", 0.126534, 0.0)
+    reverse = metrics(list(reversed(rows)), "dyn_scaled", 0.126534, 0.0)
+
+    assert forward["wR2_all"] == reverse["wR2_all"]
+    assert forward["mw_abs"] == reverse["mw_abs"]
+
+
+def test_native_endpoint_weight_is_applied_once_after_row_conversion():
+    native = [
+        {
+            "h": "1",
+            "k": "0",
+            "l": "0",
+            "target_I": "100",
+            "sigma_eff": "2",
+            "dyn_raw": "50",
+            "dyn_scaled": "100",
+            "q_dyn_over_born": "1.0",
+        }
+    ]
+
+    unweighted = endpoint_rows_from_native(native, 1.0)
+    weighted = apply_hkl_weight(unweighted, 0.25)
+
+    assert unweighted == [(1, 0, 0, 100.0, 2.0)]
+    assert weighted == [(1, 0, 0, 100.0, 4.0)]
+
+
+def test_dataset_sigma_calibration_precedes_policy_weight(monkeypatch):
+    rows = [(1, 0, 0, 100.0, 4.0)]
+    monkeypatch.setattr(
+        combine,
+        "fit_uniform_z_rms_sigma_scale",
+        lambda *_args, **_kwargs: {
+            "policy": "uniform_z_rms",
+            "status": "ok",
+            "sigma_scale": 0.5,
+        },
+    )
+
+    calibrated, meta = combine.calibrate_dataset_endpoint_rows(
+        rows,
+        model={},
+        policy="uniform_z_rms",
+        holdout_fraction=0.2,
+        min_scale=0.1,
+        max_scale=4.0,
+        holdout_floor=False,
+    )
+    weighted = apply_hkl_weight(calibrated, 0.25)
+
+    assert meta["sigma_scale"] == 0.5
+    assert calibrated == [(1, 0, 0, 100.0, 2.0)]
+    assert weighted == [(1, 0, 0, 100.0, 4.0)]
 
 
 def test_overlap_scales_put_datasets_on_common_intensity_scale():
@@ -47,6 +148,19 @@ def test_overlap_scales_can_use_model_symmetry_key():
     assert default["overlap_counts"]["d1"] == 0
     assert symmetry_aware["overlap_counts"]["d1"] == 1
     assert symmetry_aware["overlap_counts"]["d2"] == 1
+
+
+def test_within_dataset_replicates_do_not_count_as_overlap():
+    rows_by_dataset = {
+        "d1": [(1, 0, 0, 100.0, 5.0), (1, 0, 0, 102.0, 5.0)],
+        "d2": [(0, 1, 0, 200.0, 5.0), (0, 1, 0, 198.0, 5.0)],
+    }
+
+    result = estimate_overlap_scales(rows_by_dataset, iterations=4, canonicalizer=lambda h, k, ell: (h, k, ell))
+
+    assert result["iterations"] == 0
+    assert result["overlap_counts"] == {"d1": 0, "d2": 0}
+    assert result["scales"] == {"d1": 1.0, "d2": 1.0}
 
 
 def test_endpoint_hkl_path_finds_b_zero_noexti_directory(tmp_path: Path):
@@ -205,3 +319,24 @@ Path(stem + ".res").write_text("\\n".join([
     assert "WGHT 0.3210" not in text
     assert "L.S. 1" in text
     assert "L.S. 10" not in text
+
+
+def test_combined_run_shelxl_rejects_stale_outputs_after_failure(tmp_path: Path):
+    work = tmp_path / "work_failed"
+    work.mkdir()
+    stem = "multi_dyn_corrected"
+    stale = "TITL stale\nCELL 0.025079 5 6 7 90 90 90\nSFAC C\nEND\n"
+    (work / f"{stem}.ins").write_text(stale)
+    (work / f"{stem}.res").write_text(stale)
+    (work / f"{stem}.lst").write_text("wR2 = 0.1\n")
+    failing = tmp_path / "failing_shelxl"
+    failing.write_text("#!/bin/sh\nexit 9\n")
+    failing.chmod(0o755)
+
+    result = run_shelxl(work, stem, str(failing), iterations=1)
+
+    assert result["status"] == "shelxl_failed"
+    assert result["returncode"] == 9
+    assert result.get("res_normalized_for_reopen") is not True
+    assert not (work / f"{stem}.res").exists()
+    assert not (work / f"{stem}.lst").exists()

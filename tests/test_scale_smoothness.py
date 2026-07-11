@@ -53,3 +53,39 @@ def test_fit_group_scales_smoothness():
     spread_0 = max(scales_0.values()) - min(scales_0.values())
     spread_100000 = max(scales_100000.values()) - min(scales_100000.values())
     assert spread_100000 < spread_0 * 0.01
+
+
+def test_fit_group_scales_iterates_each_group_independently():
+    pred = np.tile([1.0, 2.0], 3)
+    obs = pred * np.repeat([1.0, 2.0, 4.0], 2)
+    sig = np.ones_like(obs)
+    groups = np.repeat([0, 1, 2], 2)
+    fit_mask = np.ones_like(obs, dtype=bool)
+    smoothness = 0.5
+
+    scaled, scales = fit_group_scales(
+        obs,
+        sig,
+        pred,
+        groups,
+        fit_mask,
+        0.0,
+        0.0,
+        n_iter=3,
+        scale_smoothness=smoothness,
+    )
+    expected = solve_regularized_scales(
+        [5.0, 5.0, 5.0],
+        [5.0, 10.0, 20.0],
+        [0, 1, 2],
+        smoothness,
+    )
+
+    np.testing.assert_allclose(
+        [scales[group] for group in (0, 1, 2)],
+        [expected[group] for group in (0, 1, 2)],
+    )
+    np.testing.assert_allclose(
+        scaled,
+        pred * np.asarray([scales[int(group)] for group in groups]),
+    )

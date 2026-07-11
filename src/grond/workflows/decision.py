@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 import numpy as np
@@ -131,7 +131,7 @@ def preflight_dataset(ds: DatasetSpec, *, requested_min_peak: float, requested_g
             warnings=["no numeric reflection rows found"],
         )
     iobs = rows[:, 3]
-    sig = np.abs(rows[:, 4])
+    sig = rows[:, 4]
     peak = rows[:, 9]
     corr = rows[:, 10]
     xcal, ycal, zcal = rows[:, 5], rows[:, 6], rows[:, 7]
@@ -146,7 +146,9 @@ def preflight_dataset(ds: DatasetSpec, *, requested_min_peak: float, requested_g
     dz = zobs - zcal
 
     usable = np.isfinite(iobs) & np.isfinite(sig) & (sig > 0)
-    if np.count_nonzero(usable) < max(100, 0.05 * n):
+    minimum_usable = max(100, math.ceil(0.05 * n))
+    usable_count = int(np.count_nonzero(usable))
+    if usable_count < minimum_usable:
         warnings.append("few rows have finite intensity and positive sigma")
     if positive_fraction < 0.5:
         warnings.append("less than half of rows have positive target intensity")
@@ -160,10 +162,10 @@ def preflight_dataset(ds: DatasetSpec, *, requested_min_peak: float, requested_g
     if np.isfinite(dvals).any() and ds.min_d_spacing > 0:
         base_d &= dvals >= float(ds.min_d_spacing)
     positive = iobs > 0
-    min_needed = max(250, min(2000, int(0.25 * np.count_nonzero(base_d & positive))))
+    min_needed = max(250, min(2000, int(0.25 * np.count_nonzero(base_d & positive & usable))))
     recommended_min_peak = requested_min_peak
     for candidate in [requested_min_peak, 90.0, 75.0, 60.0, 50.0, 25.0, 0.0]:
-        pass_rows = int(np.count_nonzero(base_d & positive & (peak >= candidate)))
+        pass_rows = int(np.count_nonzero(base_d & positive & usable & (peak >= candidate)))
         if pass_rows >= min_needed:
             recommended_min_peak = float(candidate)
             break
@@ -181,9 +183,12 @@ def preflight_dataset(ds: DatasetSpec, *, requested_min_peak: float, requested_g
             warnings.append("large detector-position tail detected; using stricter geometry percentile")
 
     row_budget = requested_scout_rows if requested_scout_rows > 0 else 1000
-    scout_max_rows = max(100, min(int(row_budget), int(np.count_nonzero(base_d & positive & (peak >= recommended_min_peak)))))
+    surviving_rows = int(np.count_nonzero(base_d & positive & usable & (peak >= recommended_min_peak)))
+    scout_max_rows = min(int(row_budget), surviving_rows)
     status = "ok"
-    if scout_max_rows < 250:
+    if usable_count < minimum_usable:
+        status = "fatal"
+    elif scout_max_rows < 250:
         status = "bad"
         warnings.append("too few rows survive basic filters for reliable automatic decisions")
 
@@ -211,15 +216,9 @@ def preflight_dataset(ds: DatasetSpec, *, requested_min_peak: float, requested_g
 def apply_preflight(ds: DatasetSpec, decision: PreflightDecision) -> DatasetSpec:
     """Return a dataset copy with the preflight-recommended filters applied."""
 
-    return DatasetSpec(
-        name=ds.name,
-        hkl=ds.hkl,
-        xds_dir=ds.xds_dir,
-        hkl_transform=ds.hkl_transform,
-        min_d_spacing=ds.min_d_spacing,
+    return replace(
+        ds,
         min_peak=decision.recommended_min_peak,
-        target_mode=ds.target_mode,
-        include_nonpositive=ds.include_nonpositive,
         geometry_percentile=decision.recommended_geometry_percentile,
     )
 

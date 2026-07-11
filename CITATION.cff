@@ -3,6 +3,8 @@ title: "GROND: Global Regularization Of Non-kinematical Diffraction"
 type: software
 authors:
   - name: Martynowycz Lab
-version: 0.2.0
+version: 0.2.2
 license: MIT
 message: "If GROND helps your work, please cite the software and the relevant dynamical-diffraction literature."
+repository-code: "https://github.com/Martynowycz-Lab/GROND"
+url: "https://github.com/Martynowycz-Lab/GROND"
