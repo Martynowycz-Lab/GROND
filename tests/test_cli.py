@@ -704,6 +704,117 @@ def test_auto_parser_hides_lambda_controls(capsys):
     assert args.post_bloch_sigma_max_scale == 4.0
 
 
+def test_fresh_baseline_no_harm_gate_rejects_worse_endpoint():
+    summary = {
+        "baseline_exti": {
+            "status": "ok",
+            "R1_all": 0.1377,
+            "npd_count": 0,
+            "split_count": 0,
+            "lst": "fresh.lst",
+            "res_health": {"safe_for_feedback": True, "path": "fresh.res"},
+        }
+    }
+
+    rejected = cli._endpoint_baseline_no_harm_gate(
+        summary,
+        {"shelxl_R1all": 0.1404},
+    )
+    accepted = cli._endpoint_baseline_no_harm_gate(
+        summary,
+        {"shelxl_R1all": 0.1330},
+    )
+
+    assert rejected["status"] == "failed"
+    assert rejected["delta_R1all"] == pytest.approx(0.0027)
+    assert rejected["baseline_res"] == "fresh.res"
+    assert accepted["status"] == "passed"
+
+
+def test_quick_baseline_prefers_fresh_final_run_summary(tmp_path: Path):
+    structure = tmp_path / "model.res"
+    structure.write_text("TITL stale\n")
+    structure.with_suffix(".log").write_text(
+        "R1 = 0.1000 for 1 Fo > 4sig(Fo) and 0.1537 for all 2 data\n"
+    )
+    baseline_hkl = tmp_path / "baseline.hkl"
+    baseline_hkl.write_text("")
+    prep = PrepConfig(
+        structure=str(structure),
+        datasets=[
+            DatasetSpec(
+                name="d",
+                hkl=str(tmp_path / "INTEGRATE.HKL"),
+                baseline_hkl=str(baseline_hkl),
+            )
+        ],
+    )
+    summary = {
+        "baseline_exti": {
+            "status": "ok",
+            "R1_gt": 0.1051,
+            "R1_all": 0.1377,
+            "wR2_all": 0.2684,
+            "GooF": 1.166,
+            "npd_count": 0,
+            "split_count": 0,
+            "lst": str(tmp_path / "fresh.lst"),
+            "res_health": {
+                "safe_for_feedback": True,
+                "path": str(tmp_path / "fresh.res"),
+            },
+        }
+    }
+
+    details = cli._quick_baseline_shelxl(prep, summary)
+
+    assert details["R1_all"] == pytest.approx(0.1377)
+    assert details["fresh_rerun"] is True
+    assert details["baseline_source"] == "final_run_summary.baseline_exti"
+    assert details["res"] == str(tmp_path / "fresh.res")
+
+
+def test_finish_endpoint_resolution_fails_closed_against_fresh_baseline(tmp_path: Path):
+    run = tmp_path / "run"
+    run.mkdir()
+    (run / "summary.json").write_text(
+        json.dumps(
+            {
+                "baseline_exti": {
+                    "status": "ok",
+                    "R1_all": 0.1377,
+                    "npd_count": 0,
+                    "split_count": 0,
+                    "res_health": {"safe_for_feedback": True, "path": "fresh.res"},
+                }
+            }
+        )
+    )
+    result = {
+        "primary_run": str(run),
+        "endpoint_calibration": {
+            "publication_selection": {
+                "publication_endpoint": {
+                    "shelxl_R1all": 0.1404,
+                    "shelxl_wR2all": 0.1786,
+                    "shelxl_GooF": 1.036,
+                    "endpoint_res": "corrected.res",
+                }
+            }
+        },
+    }
+
+    assert cli._publication_endpoint_from_result(result) == {}
+
+
+def test_effective_thickness_text_reports_mean_and_support():
+    text = cli._quick_thickness_text(
+        {"thickness_A": 1200.0, "thickness_model": "uniform_gradient", "thickness_grad_frac": 1.0}
+    )
+
+    assert text == "120.00 nm mean (1200.0 A); uniform-gradient support 0.00-240.00 nm"
+
+
 def test_post_feedback_hand_diagnostic_gate_requires_signed_support():
     args = argparse.Namespace(hand_min_z_all=2.0, hand_min_z_free=0.5)
     ok, reasons = cli.hand_diagnostic_supports_other(

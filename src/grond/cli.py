@@ -3086,6 +3086,84 @@ def _endpoint_calibration_lambda(summary: Mapping[str, object], args: argparse.N
     return value if value > 0.0 else 1.0
 
 
+def _fresh_baseline_shelxl(summary: Mapping[str, object]) -> dict[str, object]:
+    """Return a healthy conventional baseline rerun from a native summary."""
+
+    baseline = summary.get("baseline_exti") if isinstance(summary, Mapping) else None
+    if not isinstance(baseline, Mapping) or not baseline:
+        return {}
+    health = baseline.get("res_health")
+    health = health if isinstance(health, Mapping) else {}
+    r1_all = safe_float(baseline.get("R1_all"), float("nan"))
+    status = str(baseline.get("status") or "")
+    npd_count = int(safe_float(baseline.get("npd_count", health.get("npd_count", 0)), 0.0))
+    split_count = int(safe_float(baseline.get("split_count", health.get("split_count", 0)), 0.0))
+    safe_for_feedback = health.get("safe_for_feedback")
+    healthy = bool(
+        math.isfinite(r1_all)
+        and status in {"", "ok"}
+        and npd_count == 0
+        and split_count == 0
+        and safe_for_feedback is not False
+    )
+    if not healthy:
+        return {}
+    out = dict(baseline)
+    out["R1_all"] = r1_all
+    out["npd_count"] = npd_count
+    out["split_count"] = split_count
+    out["baseline_source"] = "final_run_summary.baseline_exti"
+    if health.get("path"):
+        out["res"] = str(health["path"])
+    return out
+
+
+def _endpoint_baseline_no_harm_gate(
+    summary: Mapping[str, object],
+    endpoint: Mapping[str, object],
+    *,
+    r1_tolerance: float = 0.0,
+) -> dict[str, object]:
+    """Reject a corrected endpoint whose R1all is worse than a fresh baseline."""
+
+    baseline = _fresh_baseline_shelxl(summary)
+    if not baseline:
+        return {
+            "status": "not_applicable",
+            "passed": True,
+            "reason": "fresh healthy baseline_exti is unavailable",
+        }
+    baseline_r1 = safe_float(baseline.get("R1_all"), float("nan"))
+    endpoint_r1 = safe_float(
+        endpoint.get("shelxl_R1all", endpoint.get("R1_all")),
+        float("nan"),
+    )
+    tolerance = max(0.0, float(r1_tolerance))
+    passed = bool(math.isfinite(endpoint_r1) and endpoint_r1 <= baseline_r1 + tolerance)
+    delta = endpoint_r1 - baseline_r1 if math.isfinite(endpoint_r1) else float("nan")
+    reasons = []
+    if not math.isfinite(endpoint_r1):
+        reasons.append("corrected endpoint R1all is unavailable")
+    elif not passed:
+        reasons.append(
+            f"corrected endpoint R1all {endpoint_r1:.6g} is worse than fresh conventional "
+            f"baseline {baseline_r1:.6g} by {delta:.6g}"
+        )
+    return {
+        "status": "passed" if passed else "failed",
+        "passed": passed,
+        "baseline_source": baseline.get("baseline_source"),
+        "baseline_R1all": baseline_r1,
+        "endpoint_R1all": endpoint_r1,
+        "delta_R1all": delta,
+        "r1_tolerance": tolerance,
+        "baseline_res": baseline.get("res", ""),
+        "baseline_hkl": baseline.get("hkl", ""),
+        "baseline_lst": baseline.get("lst", ""),
+        "reasons": reasons,
+    }
+
+
 def run_endpoint_calibration(prep: PrepConfig, result: dict, args: argparse.Namespace, python: str, logs: Path) -> dict:
     """Replay the final frozen row table through the endpoint-calibration chooser."""
 
@@ -3169,6 +3247,21 @@ def run_endpoint_calibration(prep: PrepConfig, result: dict, args: argparse.Name
             raise
         return {"status": "failed", "returncode": exc.returncode, "command": exc.cmd, "out_dir": str(out_dir)}
     replay_summary = try_read_json(out_dir / "summary.json")
+    selection = replay_summary.get("publication_selection", {})
+    selection = dict(selection) if isinstance(selection, Mapping) else {}
+    endpoint = selection.get("publication_endpoint")
+    endpoint = endpoint if isinstance(endpoint, Mapping) else {}
+    if endpoint:
+        no_harm_gate = _endpoint_baseline_no_harm_gate(summary, endpoint)
+        selection["baseline_no_harm_gate"] = no_harm_gate
+        if bool(no_harm_gate.get("passed", False)):
+            checked_endpoint = dict(endpoint)
+            checked_endpoint["baseline_no_harm_gate"] = no_harm_gate
+            selection["publication_endpoint"] = checked_endpoint
+        else:
+            selection["status"] = "failed_baseline_no_harm_gate"
+            selection["baseline_rejected_endpoint"] = dict(endpoint)
+            selection.pop("publication_endpoint", None)
     return {
         "status": "ok",
         "label": label,
@@ -3177,7 +3270,7 @@ def run_endpoint_calibration(prep: PrepConfig, result: dict, args: argparse.Name
         "out_dir": str(out_dir),
         "report": str((out_dir / "REPORT.md").resolve()),
         "endpoint_csv": str((out_dir / "scale_contract_endpoint_replay.csv").resolve()),
-        "publication_selection": replay_summary.get("publication_selection", {}),
+        "publication_selection": selection,
     }
 
 
@@ -5864,8 +5957,11 @@ def _quick_shelxl_details(source: Mapping[str, object] | None = None, lst_path: 
     return out
 
 
-def _quick_baseline_shelxl(prep: PrepConfig) -> dict[str, object]:
-    """Return the conventional starting SHELXL stats next to the supplied RES/HKL."""
+def _quick_baseline_shelxl(
+    prep: PrepConfig,
+    final_summary: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    """Prefer the final run's fresh conventional rerun over sibling log files."""
 
     structure = Path(prep.structure).expanduser() if prep.structure else None
     hkl = ""
@@ -5876,6 +5972,16 @@ def _quick_baseline_shelxl(prep: PrepConfig) -> dict[str, object]:
             hkl = prep.baseline_hkl
     elif prep.baseline_hkl:
         hkl = prep.baseline_hkl
+    fresh = _fresh_baseline_shelxl(final_summary or {})
+    if fresh:
+        lst_text = str(fresh.get("lst") or "")
+        details = _quick_shelxl_details(fresh, Path(lst_text) if lst_text else None)
+        details["res"] = str(fresh.get("res") or structure or "")
+        details["hkl"] = str(hkl or fresh.get("hkl") or "")
+        details["baseline_source"] = "final_run_summary.baseline_exti"
+        details["fresh_rerun"] = True
+        return details
+
     lst = structure.with_suffix(".lst") if structure is not None else None
     if lst is not None and not lst.exists():
         log = structure.with_suffix(".log") if structure is not None else None
@@ -5884,6 +5990,8 @@ def _quick_baseline_shelxl(prep: PrepConfig) -> dict[str, object]:
     details = _quick_shelxl_details({}, lst)
     details["res"] = str(structure or "")
     details["hkl"] = str(hkl or "")
+    details["baseline_source"] = "source_sibling_lst_or_log"
+    details["fresh_rerun"] = False
     return details
 
 
@@ -6529,6 +6637,49 @@ def _quick_row_weight_definition(nuisance: Mapping[str, object]) -> str:
     )
 
 
+def _quick_thickness_text(
+    nuisance: Mapping[str, object],
+    metadata: Mapping[str, object] | None = None,
+) -> str:
+    """Describe effective thickness as a mean plus its distribution contract."""
+
+    meta = metadata if isinstance(metadata, Mapping) else {}
+    thickness_a = safe_float(
+        meta.get("thickness_A_mean", nuisance.get("thickness_A")),
+        float("nan"),
+    )
+    if not math.isfinite(thickness_a):
+        return "n/a"
+    thickness_nm = thickness_a / 10.0
+    model = str(meta.get("thickness_model") or nuisance.get("thickness_model") or "single")
+    if model == "uniform_gradient":
+        grad = max(
+            0.0,
+            safe_float(
+                meta.get("thickness_grad_frac", nuisance.get("thickness_grad_frac")),
+                0.0,
+            ),
+        )
+        low_nm = max(0.0, thickness_a * (1.0 - grad)) / 10.0
+        high_nm = max(0.0, thickness_a * (1.0 + grad)) / 10.0
+        return (
+            f"{thickness_nm:.2f} nm mean ({thickness_a:.1f} A); "
+            f"uniform-gradient support {low_nm:.2f}-{high_nm:.2f} nm"
+        )
+    if model in {"gaussian", "gaussian_gradient"}:
+        sigma_frac = abs(
+            safe_float(
+                meta.get("thickness_sigma_frac", nuisance.get("thickness_sigma_frac")),
+                0.0,
+            )
+        )
+        return (
+            f"{thickness_nm:.2f} nm mean ({thickness_a:.1f} A); "
+            f"{model} sigma {sigma_frac * thickness_nm:.2f} nm"
+        )
+    return f"{thickness_nm:.2f} nm ({thickness_a:.1f} A); {model}"
+
+
 def _format_terminal_finish_summary(payload: Mapping[str, object]) -> str:
     """Return the short human-facing completion report printed by auto/run/finish."""
 
@@ -6569,7 +6720,14 @@ def _format_terminal_finish_summary(payload: Mapping[str, object]) -> str:
     headline = f"GROND finished successfully in {elapsed}." if status == "ok" else f"GROND finished with status {status} after {elapsed}."
     publication_is_direct_ls1 = bool(files.get("publication_res") and files.get("publication_res") == files.get("final_feedback_res"))
     endpoint_lines = ["SHELXL endpoint" if publication_is_direct_ls1 else "SHELXL endpoints"]
-    if publication_is_direct_ls1:
+    if not endpoint:
+        endpoint_lines.extend(
+            [
+                "  No corrected endpoint passed the fresh conventional-baseline no-harm gate.",
+                f"  Retain conventional baseline: R1(F)all {_quick_percent(input_shelxl.get('R1all'))}; RES {files.get('baseline_res', '')}; HKL {files.get('baseline_hkl', '')}",
+            ]
+        )
+    elif publication_is_direct_ls1:
         endpoint_lines.append(
             f"  Publication endpoint (direct LS1 corrected-HKL): R1(F)gt {_quick_percent(endpoint.get('R1gt'))}, R1(F)all {_quick_percent(endpoint.get('R1all'))}, wR2(F^2)all {_quick_percent(endpoint.get('wR2all'))}, GooF {_quick_number(endpoint.get('GooF'), 3)}; {_quick_shelxl_issue_text(endpoint)}"
         )
@@ -6586,12 +6744,13 @@ def _format_terminal_finish_summary(payload: Mapping[str, object]) -> str:
         endpoint_lines.append(
             f"  Diagnostic endpoint not promoted: {diagnostic.get('source_kind', 'n/a')} R1(F)all {_quick_percent(diagnostic.get('R1all'))}, wR2(F^2)all {_quick_percent(diagnostic.get('wR2all'))}, GooF {_quick_number(diagnostic.get('GooF'), 3)}; reason: {first_reason}"
         )
-    endpoint_lines.extend(
-        [
-            f"  Endpoint source/scales: {_quick_endpoint_scale_text(endpoint)}, WGHT {endpoint.get('wght_mode', 'n/a')}",
-            f"  Scale selector: {endpoint.get('selection_policy', 'n/a')} / {endpoint.get('information_criterion', 'n/a')} = {_quick_number(endpoint.get('information_value'), 3)}",
-        ]
-    )
+    if endpoint:
+        endpoint_lines.extend(
+            [
+                f"  Endpoint source/scales: {_quick_endpoint_scale_text(endpoint)}, WGHT {endpoint.get('wght_mode', 'n/a')}",
+                f"  Scale selector: {endpoint.get('selection_policy', 'n/a')} / {endpoint.get('information_criterion', 'n/a')} = {_quick_number(endpoint.get('information_value'), 3)}",
+            ]
+        )
     if endpoint_warning:
         endpoint_lines.append(f"  Warning: {endpoint_warning}")
     lines = [
@@ -6647,6 +6806,13 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
     final_run = _quick_final_run(result)
     final_model = Path(str(result.get("model"))) if result.get("model") else None
     final_summary = _quick_load_run_summary(final_run)
+    if not publication_endpoint:
+        rejected_endpoint = _chooser_publication_endpoint(result) or _endpoint_calibration_publication_endpoint(result)
+        rejected_gate = _endpoint_baseline_no_harm_gate(final_summary, rejected_endpoint)
+        if rejected_endpoint and str(rejected_gate.get("status")) == "failed":
+            diagnostic_endpoint = dict(rejected_endpoint)
+            diagnostic_endpoint["baseline_no_harm_gate"] = rejected_gate
+            diagnostic_endpoint["rejection_reasons"] = list(rejected_gate.get("reasons") or [])
     best_native = _quick_best_native(final_summary)
     best_endpoint = _quick_best_endpoint(final_summary)
     native_metrics = best_native.get("metrics") if isinstance(best_native.get("metrics"), Mapping) else {}
@@ -6684,7 +6850,10 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
     file_block = _quick_endpoint_file_block(publication_endpoint, final_model)
     bloch_diagnostics_path = _write_bloch_diagnostics_report(out_dir, final_run, final_summary, row_metrics, file_block)
     file_block["bloch_diagnostics"] = str(bloch_diagnostics_path)
-    input_shelxl = _quick_baseline_shelxl(prep)
+    input_shelxl = _quick_baseline_shelxl(prep, final_summary)
+    file_block["baseline_res"] = str(input_shelxl.get("res") or "")
+    file_block["baseline_hkl"] = str(input_shelxl.get("hkl") or "")
+    file_block["baseline_lst"] = str(input_shelxl.get("lst") or "")
     source_structure = Path(prep.structure).expanduser() if prep.structure else None
     source_controls = _quick_source_shelx_controls(source_structure)
     best_endpoint_shelxl = best_endpoint.get("shelxl") if isinstance(best_endpoint.get("shelxl"), Mapping) else {}
@@ -6734,6 +6903,11 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
         endpoints = raw_endpoints if isinstance(raw_endpoints, list) else []
     row_count_text = str(metadata.get("row_count", "n/a"))
     source_control_text = _quick_source_shelx_control_text(source_controls)
+    endpoint_status_text = (
+        "corrected endpoint accepted"
+        if publication_endpoint
+        else "no corrected endpoint passed the fresh conventional-baseline no-harm gate"
+    )
 
     lines = [
         "# GROND Quick Stats",
@@ -6748,9 +6922,10 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
         f"- Publication endpoint model: `{publication_endpoint.get('endpoint_res', '')}`",
         f"- Publication corrected HKL: `{publication_endpoint.get('endpoint_hkl', '')}`",
         f"- Publication endpoint source: `{publication_endpoint.get('selection_source', 'n/a')}` / `{publication_endpoint.get('source_kind', 'n/a')}`",
+        f"- Endpoint decision: `{endpoint_status_text}`",
         f"- Rows in final row table: `{metadata.get('row_count', 'n/a')}`",
         f"- Final N/Q: `{metadata.get('n_basis', 'n/a')}/{metadata.get('n_points', 'n/a')}`",
-        f"- Thickness mean: `{_quick_number(metadata.get('thickness_A_mean'), 1)} A`",
+        f"- Effective thickness: `{_quick_thickness_text(nuisance, metadata)}`",
         f"- Sg window: `{metadata.get('sg_window', 'n/a')}`; absorption: `{metadata.get('absorption_mode', 'n/a')}`; Sg jitter: `{metadata.get('sg_jitter_mode', 'n/a')}`",
         "",
     ]
@@ -6793,7 +6968,7 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
         [
             "## Starting SHELXL Reference",
             "",
-            "These are the conventional SHELXL values parsed from the supplied starting model's sibling `.lst` file, with `.log` accepted as a front-end fallback. GROND does not rerun this baseline here; if neither file is present, the conventional starting endpoint is reported as unavailable.",
+            "GROND reports the fresh conventional `baseline_exti` rerun from the final native stage when it is healthy. A supplied model's sibling `.lst` or `.log` is used only as a fallback when that rerun is unavailable.",
             "",
             "| RES | HKL | stats file found | R1(F)gt | R1(F)all | wR2(F^2)all | GooF | parameters | restraints | pathology | WGHT |",
             "|---|---|---:|---:|---:|---:|---:|---:|---:|---|---|",
@@ -7221,6 +7396,9 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
             "",
             "## Files To Open Next",
             "",
+            f"- Fresh conventional baseline RES to retain when no corrected endpoint passes: `{file_block['baseline_res']}`",
+            f"- Fresh conventional baseline HKL: `{file_block['baseline_hkl']}`",
+            f"- Fresh conventional baseline SHELXL LST: `{file_block['baseline_lst']}`",
             f"- Final LS1 feedback endpoint RES: `{file_block['final_feedback_res']}`",
             f"- Final LS1 feedback corrected HKL: `{file_block['final_feedback_hkl']}`",
             f"- Final LS1 feedback SHELXL LST: `{file_block['final_feedback_lst']}`",
@@ -7356,7 +7534,7 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
         f"| final hand Z, all/free | `{_quick_number(console['final_hand_z_all'], 3)}` / `{_quick_number(console['final_hand_z_free'], 3)}`; positive favors the selected hand |",
         f"| selected HKL transform | `{console['selected_transform']}` |",
         f"| final N/Q | `{metadata.get('n_basis', 'n/a')}/{metadata.get('n_points', 'n/a')}` |",
-        f"| effective thickness model | `{_quick_number(metadata.get('thickness_A_mean'), 1)} A`; Sg window `{metadata.get('sg_window', 'n/a')}` |",
+        f"| effective thickness model | `{_quick_thickness_text(nuisance, metadata)}`; Sg window `{metadata.get('sg_window', 'n/a')}` |",
         f"| publication endpoint source | `{console['publication_endpoint'].get('source') or 'none'}` / `{console['publication_endpoint'].get('source_kind') or 'no_physical_endpoint'}` |",
         "",
         "## Statistics",
@@ -7425,17 +7603,28 @@ def _finish_run_dir(args: argparse.Namespace) -> Path:
 def _publication_endpoint_from_result(result: Mapping[str, object]) -> Mapping[str, object]:
     """Return the selected publication endpoint block from a run result."""
 
+    def no_harm_checked(endpoint: Mapping[str, object]) -> Mapping[str, object]:
+        if not endpoint:
+            return {}
+        final_summary = _quick_load_run_summary(_quick_final_run(result))
+        gate = _endpoint_baseline_no_harm_gate(final_summary, endpoint)
+        if not bool(gate.get("passed", False)):
+            return {}
+        checked = dict(endpoint)
+        checked["baseline_no_harm_gate"] = gate
+        return checked
+
     chooser_endpoint = _chooser_publication_endpoint(result)
     if chooser_endpoint:
         goof = chooser_endpoint.get("shelxl_GooF", chooser_endpoint.get("GooF"))
         if _quick_goof_warning(goof):
-            return _endpoint_calibration_publication_endpoint(result)
-        return chooser_endpoint
+            return no_harm_checked(_endpoint_calibration_publication_endpoint(result))
+        return no_harm_checked(chooser_endpoint)
     chooser = result.get("publication_endpoint_chooser") if isinstance(result.get("publication_endpoint_chooser"), Mapping) else {}
     chooser_status = str(chooser.get("status", "") if isinstance(chooser, Mapping) else "")
     if chooser and chooser_status not in {"", "disabled", "dry_run", "no_endpoint_runs"}:
         return {}
-    return _endpoint_calibration_publication_endpoint(result)
+    return no_harm_checked(_endpoint_calibration_publication_endpoint(result))
 
 
 def _shelx2map_executable(args: argparse.Namespace) -> str:

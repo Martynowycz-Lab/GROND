@@ -4,6 +4,8 @@ This file records user-visible changes to the installable package. Version `0.2.
 
 ## 0.2.2 (unreleased)
 
+`grond auto` and `grond finish` now compare a corrected publication endpoint with the fresh conventional baseline rerun from the same final native stage. A corrected endpoint with worse `R1all` is retained as a diagnostic but is no longer promoted, and the reports point directly to the conventional RES/HKL/LST that should be kept. Thickness reporting now states both the mean in nanometres and the support implied by the selected thickness-distribution model.
+
 GROND now supports the combined multi-dataset Bloch/LS1 feedback path, model-symmetry endpoint merging, resumable endpoint continuation, native final maps, and explicit endpoint-selection reports. Publication endpoints reject non-positive-definite model updates and use the declared post-Bloch uncertainty model with fixed `WGHT 0 0`; inherited or promoted SHELXL weights remain diagnostic choices. Automatic DAMP retries were added experimentally and then removed after they proved unsuitable as a silent repair policy.
 
 The command-line workflow now exposes diagnostic SHELXL cycle control, clearer stale-install checks, portable XDS and DIALS input preparation, expanded row and endpoint reports, and guarded experimental acceleration backends. The public package continues to use dense SciPy as its numerical reference.
