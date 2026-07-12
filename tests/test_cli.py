@@ -194,6 +194,132 @@ def test_finish_parser_defaults_to_existing_run_dir():
     assert args.map_mode == "native"
 
 
+def test_publication_endpoint_chooser_includes_calibrated_replay(tmp_path: Path):
+    run = tmp_path / "grond"
+    native_run = run / "runs" / "dataset" / "final"
+    endpoint = run / "endpoint_calibration" / "dataset" / "adaptive_80_det_8" / "endpoint_freeze-zero"
+    native_run.mkdir(parents=True)
+    endpoint.mkdir(parents=True)
+    endpoint_res = endpoint / "dyn_scale_replay.res"
+    endpoint_hkl = endpoint / "dyn_scale_replay.hkl"
+    endpoint_lst = endpoint / "dyn_scale_replay.lst"
+    endpoint_res.write_text("TITL calibrated\nEND\n")
+    endpoint_hkl.write_text("   0   0   0    0.00    0.00\n")
+    endpoint_lst.write_text("R1 = 0.05 for 1 Fo > 4sig(Fo) and 0.11 for all 2 data\n")
+    result = {
+        "primary_run": str(native_run),
+        "endpoint_calibration": {
+            "lambda_q": 1.0,
+            "publication_selection": {
+                "status": "passed",
+                "publication_endpoint": {
+                    "spec": "adaptive_80_det_8",
+                    "wght_mode": "freeze-zero",
+                    "scale_params": 144,
+                    "shelxl_R1gt": 0.061,
+                    "shelxl_R1all": 0.118,
+                    "shelxl_wR2all": 0.127,
+                    "shelxl_GooF": 0.91,
+                    "shelxl_npd_count": 0,
+                    "shelxl_split_count": 0,
+                    "hkl_safe_factor": 1.0,
+                    "endpoint_dir": str(endpoint),
+                    "endpoint_res": str(endpoint_res),
+                    "endpoint_hkl": str(endpoint_hkl),
+                    "endpoint_lst": str(endpoint_lst),
+                }
+            },
+        },
+    }
+    args = argparse.Namespace(
+        out_dir=str(run),
+        dry_run=False,
+        publication_endpoint_chooser=True,
+        publication_endpoint_min_hkl_safe_factor=0.25,
+        publication_endpoint_max_modulation_p95=20.0,
+        endpoint_calibration_goof_min=0.85,
+        endpoint_calibration_goof_max=1.15,
+        publication_allow_npd=False,
+    )
+    prep = PrepConfig(structure=str(tmp_path / "model.res"), datasets=[DatasetSpec(name="dataset", hkl="input.hkl")])
+
+    choice = cli.run_publication_endpoint_chooser(prep, result, args)
+
+    assert choice["status"] == "ok"
+    assert choice["best_physical_endpoint"]["source_kind"] == "endpoint_calibration"
+    assert choice["best_physical_endpoint"]["R1_all"] == pytest.approx(0.118)
+    assert choice["best_physical_endpoint"]["res"] == str(endpoint_res)
+
+
+def test_publication_endpoint_chooser_treats_combined_calibration_as_combined(tmp_path: Path):
+    run = tmp_path / "grond"
+    combined_run = run / "runs" / "combined"
+    endpoint = run / "endpoint_calibration" / "combined" / "adaptive_80_det_8" / "endpoint_freeze-zero"
+    combined_run.mkdir(parents=True)
+    endpoint.mkdir(parents=True)
+    result = {
+        "combined": str(combined_run),
+        "publication_runs": {},
+        "endpoint_calibration": {
+            "label": "combined",
+            "lambda_q": 1.0,
+            "publication_selection": {
+                "status": "passed",
+                "publication_endpoint": {
+                    "spec": "adaptive_80_det_8",
+                    "shelxl_R1gt": 0.06,
+                    "shelxl_R1all": 0.11,
+                    "shelxl_wR2all": 0.12,
+                    "shelxl_GooF": 0.95,
+                    "hkl_safe_factor": 1.0,
+                    "endpoint_dir": str(endpoint),
+                },
+            },
+        },
+    }
+    args = argparse.Namespace(
+        out_dir=str(run),
+        dry_run=False,
+        publication_endpoint_chooser=True,
+        publication_endpoint_min_hkl_safe_factor=0.25,
+        publication_endpoint_max_modulation_p95=20.0,
+        endpoint_calibration_goof_min=0.85,
+        endpoint_calibration_goof_max=1.15,
+        publication_allow_npd=False,
+    )
+    prep = PrepConfig(
+        structure=str(tmp_path / "model.res"),
+        datasets=[DatasetSpec(name="a", hkl="a.hkl"), DatasetSpec(name="b", hkl="b.hkl")],
+    )
+
+    choice = cli.run_publication_endpoint_chooser(prep, result, args)
+
+    assert choice["status"] == "ok"
+    assert choice["best_physical_endpoint"]["source_kind"] == "combined_endpoint_calibration"
+    assert choice["best_single_dataset_physical_endpoint"] == {}
+
+
+def test_publication_endpoint_chooser_rejects_unpassed_or_unsafe_calibration(tmp_path: Path):
+    endpoint = {
+        "spec": "adaptive_80_det_8",
+        "shelxl_R1gt": 0.06,
+        "shelxl_R1all": 0.11,
+        "shelxl_wR2all": 0.12,
+        "shelxl_GooF": 0.95,
+    }
+    failed = {
+        "endpoint_calibration": {
+            "publication_selection": {"status": "no_candidate_passed_all_gates", "publication_endpoint": endpoint}
+        }
+    }
+    passed_without_safety = {
+        "endpoint_calibration": {"publication_selection": {"status": "passed", "publication_endpoint": endpoint}}
+    }
+
+    assert cli._endpoint_calibration_chooser_candidate(failed) == {}
+    assert cli._endpoint_calibration_chooser_candidate(passed_without_safety)["hkl_safe_factor"] == 0.0
+
+
 def test_finish_native_maps_use_publication_runs_for_combined_endpoint(tmp_path: Path):
     run_a = tmp_path / "weighted_runs" / "a"
     run_b = tmp_path / "weighted_runs" / "b"
@@ -702,6 +828,7 @@ def test_auto_parser_hides_lambda_controls(capsys):
     assert args.post_bloch_sigma_holdout_fraction == 0.20
     assert args.post_bloch_sigma_min_scale == 0.25
     assert args.post_bloch_sigma_max_scale == 4.0
+    assert args.frame_offset_grid == "auto"
 
 
 def test_fresh_baseline_no_harm_gate_rejects_worse_endpoint():

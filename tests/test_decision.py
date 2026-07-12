@@ -9,6 +9,7 @@ from grond.workflows.decision import (
     expand_transform_candidates,
     preflight_dataset,
     score_native_summary,
+    thickness_polish_nuisance,
 )
 from grond.workflows.transform_metadata import metadata_prefilter_transforms
 
@@ -59,6 +60,16 @@ def test_expand_transform_candidates_deduplicates_current():
 def test_score_native_summary_tolerates_missing_values():
     score = score_native_summary({"best_native": {"metrics": {"all": {"dyn": {"wR2_all": None}}}}})
     assert math.isinf(score["score"])
+
+
+def test_thickness_polish_never_proposes_negative_support():
+    polished = thickness_polish_nuisance(
+        {"thickness_A": 1400.0, "thickness_grad_frac": 1.0, "frame_offset": 1.4},
+        frame_offset_candidates=[1.0, 1.4, 1.8],
+    )
+
+    assert polished["thickness_grad_frac"] == "0.8,1"
+    assert polished["frame_offset"] == "1,1.3,1.4,1.5,1.8"
 
 
 def test_preflight_keeps_healthy_minimal_xds(tmp_path: Path):

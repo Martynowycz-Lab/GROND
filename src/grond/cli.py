@@ -443,6 +443,23 @@ def best_nuisance(run_dir: Path) -> dict:
     return ((summary.get("best_native") or {}).get("nuisance") or {})
 
 
+def resolved_frame_offset_candidates(run_dir: Path) -> list[float]:
+    """Return the geometry-resolved frame probes recorded by a native stage."""
+
+    summary = read_json(run_dir / "summary.json")
+    grids = summary.get("resolved_grids") if isinstance(summary.get("resolved_grids"), Mapping) else {}
+    raw = grids.get("frame_offset_frames", []) if isinstance(grids, Mapping) else []
+    values: list[float] = []
+    for item in raw if isinstance(raw, (list, tuple)) else []:
+        try:
+            value = float(item)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(value) and not any(abs(value - existing) <= 1e-12 for existing in values):
+            values.append(value)
+    return values
+
+
 def shelx_model_is_usable(path: Path | str) -> bool:
     """Return whether a SHELX model path can be reused as a GROND structure."""
 
@@ -3004,6 +3021,9 @@ def run_publication_endpoint_chooser(prep: PrepConfig, result: dict, args: argpa
     if not runs and not combined_run:
         return {"status": "no_endpoint_runs"}
     extra_candidates = []
+    calibration_candidate = _endpoint_calibration_chooser_candidate(result)
+    if calibration_candidate:
+        extra_candidates.append(calibration_candidate)
     model_candidate = _publication_model_endpoint_candidate(result)
     if model_candidate:
         extra_candidates.append(model_candidate)
@@ -3019,6 +3039,91 @@ def run_publication_endpoint_chooser(prep: PrepConfig, result: dict, args: argpa
         publication_goof_max=args.endpoint_calibration_goof_max,
         allow_npd=bool(getattr(args, "publication_allow_npd", False)),
     )
+
+
+def _endpoint_calibration_chooser_candidate(result: Mapping[str, object]) -> dict[str, object]:
+    """Expose the calibrated publication replay to the final endpoint chooser."""
+
+    calibration = result.get("endpoint_calibration")
+    if not isinstance(calibration, Mapping):
+        return {}
+    selection = calibration.get("publication_selection")
+    if not isinstance(selection, Mapping):
+        return {}
+    if str(selection.get("status", "")) != "passed":
+        return {}
+    endpoint = selection.get("publication_endpoint")
+    if not isinstance(endpoint, Mapping) or not endpoint:
+        return {}
+
+    npd_count = int(endpoint.get("shelxl_npd_count", 0) or 0)
+    raw_npd_atoms = endpoint.get("shelxl_npd_atoms", [])
+    if isinstance(raw_npd_atoms, str):
+        npd_atoms = [atom.strip() for atom in raw_npd_atoms.split(",") if atom.strip()]
+    elif isinstance(raw_npd_atoms, (list, tuple)):
+        npd_atoms = [str(atom) for atom in raw_npd_atoms]
+    else:
+        npd_atoms = []
+
+    lst = str(endpoint.get("endpoint_lst", "") or "")
+    manifest_path = str(endpoint.get("endpoint_manifest", "") or "")
+    manifest = try_read_json(Path(manifest_path)) if manifest_path else {}
+    hkl_safe_factor = endpoint.get("hkl_safe_factor", manifest.get("hkl_safe_factor"))
+    try:
+        hkl_safe_factor = float(hkl_safe_factor)
+    except (TypeError, ValueError):
+        hkl_safe_factor = 0.0
+    if not math.isfinite(hkl_safe_factor):
+        hkl_safe_factor = 0.0
+    shelxl = {
+        "R1_gt": endpoint.get("shelxl_R1gt"),
+        "R1_all": endpoint.get("shelxl_R1all"),
+        "wR2_all": endpoint.get("shelxl_wR2all"),
+        "GooF": endpoint.get("shelxl_GooF"),
+        "N_gt": endpoint.get("shelxl_Ngt"),
+        "N_all": endpoint.get("shelxl_Nall"),
+        "Rint": endpoint.get("shelxl_Rint"),
+        "Rsigma": endpoint.get("shelxl_Rsigma"),
+        "npd_count": npd_count,
+        "split_count": int(endpoint.get("shelxl_split_count", 0) or 0),
+        "npd_atoms": npd_atoms,
+        "has_npd": bool(endpoint.get("shelxl_has_npd", npd_count > 0)),
+        "has_split_warnings": bool(endpoint.get("shelxl_has_split_warnings", False)),
+        "lst": lst,
+    }
+    spec = str(endpoint.get("spec", "calibrated"))
+    combined = str(calibration.get("label", "")) == "combined" or bool(result.get("combined"))
+    return {
+        "id": f"endpoint_calibration:{spec}",
+        "label": f"endpoint_calibration:{spec}",
+        "source_kind": "combined_endpoint_calibration" if combined else "endpoint_calibration",
+        "run_dir": str(endpoint.get("endpoint_dir", calibration.get("out_dir", "")) or ""),
+        "lambda_q": calibration.get("lambda_q", 1.0),
+        "endpoint_b": 0.0,
+        "keep_exti": False,
+        "hkl_safe_factor": hkl_safe_factor,
+        "modulation_p95": 1.0,
+        "R1_gt": shelxl["R1_gt"],
+        "R1_all": shelxl["R1_all"],
+        "wR2_all": shelxl["wR2_all"],
+        "GooF": shelxl["GooF"],
+        "N_gt": shelxl["N_gt"],
+        "N_all": shelxl["N_all"],
+        "npd_count": npd_count,
+        "split_count": shelxl["split_count"],
+        "npd_atoms": npd_atoms,
+        "has_npd": shelxl["has_npd"],
+        "has_split_warnings": shelxl["has_split_warnings"],
+        "hkl": str(endpoint.get("endpoint_hkl", "") or ""),
+        "lst": lst,
+        "res": str(endpoint.get("endpoint_res", "") or ""),
+        "shelxl": shelxl,
+        "scale_spec": spec,
+        "scale_params": endpoint.get("scale_params"),
+        "wght_mode": endpoint.get("wght_mode"),
+        "endpoint_manifest": endpoint.get("endpoint_manifest", ""),
+        "endpoint_row_table": endpoint.get("endpoint_row_table", ""),
+    }
 
 
 def _publication_model_endpoint_candidate(result: Mapping[str, object]) -> dict[str, object]:
@@ -3953,6 +4058,7 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
         dry_run=args.dry_run,
     )
     screen_summary = read_json(screen / "summary.json")
+    screen_frame_offsets = resolved_frame_offset_candidates(screen)
     stop, reasons = should_stop_for_bad_data(screen_summary, max_wR2=args.stop_if_wR2_above, min_improvement=args.min_bloch_wR2_gain)
     if stop and args.stop_on_bad_fit:
         write_json(root / "decisions" / ds.name / "stop_decision.json", {"stop": True, "reasons": reasons, "screen": str(screen)})
@@ -3985,7 +4091,7 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
                 n_basis=args.screen_n_basis,
                 n_points=args.screen_n_points,
                 stage="adaptive_thickness_polish",
-                pinned=thickness_polish_nuisance(active_nui),
+                pinned=thickness_polish_nuisance(active_nui, screen_frame_offsets),
                 make_maps=False,
                 endpoint=False,
             ),
@@ -4593,6 +4699,7 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
         )
         active_run = run_dir
         active_nui = best_nuisance(run_dir)
+        screen_frame_offsets = resolved_frame_offset_candidates(run_dir)
         if not args.fast:
             thick = root / "runs" / ds.name / "multi_thickness_polish"
             run_logged(
@@ -4606,7 +4713,7 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
                     n_basis=args.screen_n_basis,
                     n_points=args.screen_n_points,
                     stage="multi_thickness_polish",
-                    pinned=thickness_polish_nuisance(active_nui),
+                    pinned=thickness_polish_nuisance(active_nui, screen_frame_offsets),
                     make_maps=False,
                     endpoint=False,
                 ),
@@ -10270,7 +10377,14 @@ def add_common_run_args(ap: argparse.ArgumentParser, *, expose_lambda_controls: 
     ap.add_argument("--continuous-thickness-min-gain", type=float, default=5e-5, help="Minimum objective gain required to promote a non-grid continuous thickness.")
     ap.add_argument("--continuous-thickness-max-free-wr2-loss", type=float, default=0.002, help="Maximum tolerated held-out/free wR2 loss for promoted continuous thickness.")
     ap.add_argument("--continuous-thickness-max-all-r1-loss", type=float, default=0.001, help="Maximum tolerated all-row R1 loss for promoted continuous thickness.")
-    ap.add_argument("--frame-offset-grid", default="0.0,0.2")
+    ap.add_argument(
+        "--frame-offset-grid",
+        default="auto",
+        help=(
+            "Profile-center offsets in XDS frames, or 'auto'. Auto reconciles the global XDS header "
+            "orientation with row ZCAL positions before work-row nuisance selection."
+        ),
+    )
     ap.add_argument(
         "--group-width-grid",
         default="auto",
@@ -10470,7 +10584,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_raw.add_argument("--min-peak", type=float, default=90.0)
     p_raw.add_argument("--thickness-grid", default="1000,1200,1400")
     p_raw.add_argument("--thickness-grad-grid", default="0.4,1.0")
-    p_raw.add_argument("--frame-offset-grid", default="0.0,0.2")
+    p_raw.add_argument(
+        "--frame-offset-grid",
+        default="auto",
+        help=(
+            "Profile-center offsets in XDS frames, or 'auto'. Auto reconciles the global XDS header "
+            "orientation with row ZCAL positions before work-row nuisance selection."
+        ),
+    )
     p_raw.add_argument("--group-width-grid", default="auto")
     p_raw.add_argument("--detector-scale-bins", type=int, default=8)
     p_raw.add_argument("--thickness-points", type=int, default=5)

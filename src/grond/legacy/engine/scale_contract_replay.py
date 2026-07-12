@@ -860,6 +860,7 @@ def main() -> None:
                 "shelxl_has_split_warnings": sh.get("has_split_warnings", False),
                 "sigma_scale": sig.get("sigma_scale", ""),
                 "heldout_rms_z_after": sig.get("heldout_rms_z_after", ""),
+                "hkl_safe_factor": manifest.get("hkl_safe_factor", ""),
                 "endpoint_dir": str(endpoint_dir),
                 "endpoint_res": str(endpoint_dir / "dyn_scale_replay.res"),
                 "endpoint_ins": str(endpoint_dir / "dyn_scale_replay.ins"),

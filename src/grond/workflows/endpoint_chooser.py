@@ -55,6 +55,12 @@ def _metric_key(candidate: Mapping) -> tuple[float, float, float, str]:
     )
 
 
+def _is_combined_candidate(candidate: Mapping) -> bool:
+    """Return whether an endpoint came from a merged multi-dataset row table."""
+
+    return str(candidate.get("source_kind", "")).startswith("combined_")
+
+
 def _candidate_id(label: str, endpoint: Mapping, index: int) -> str:
     """Build a stable human-readable endpoint candidate identifier."""
 
@@ -250,10 +256,10 @@ def choose_publication_endpoints(
         classified.append({**candidate, **decision})
 
     physical = sorted([c for c in classified if c.get("promotable")], key=_metric_key)
-    combined_physical = [c for c in physical if c.get("source_kind") == "combined_corrected_hkl"]
+    combined_physical = [c for c in physical if _is_combined_candidate(c)]
     best_physical = (combined_physical[0] if combined_physical and prefer_combined else (physical[0] if physical else {}))
     best_physical_id = best_physical.get("id")
-    single_physical = [c for c in physical if c.get("source_kind") != "combined_corrected_hkl"]
+    single_physical = [c for c in physical if not _is_combined_candidate(c)]
     best_single_physical = single_physical[0] if single_physical else {}
     rejected: list[dict] = []
     for candidate in classified:
@@ -262,7 +268,7 @@ def choose_publication_endpoints(
         if candidate.get("promotable"):
             candidate = dict(candidate)
             candidate["publication_class"] = "physical_not_selected"
-            if prefer_combined and candidate.get("source_kind") != "combined_corrected_hkl" and best_physical:
+            if prefer_combined and not _is_combined_candidate(candidate) and best_physical:
                 candidate["rejection_reasons"] = ["single-dataset endpoint is physically promotable but is reported as a diagnostic because the multi-dataset endpoint is the publication endpoint"]
             else:
                 candidate["rejection_reasons"] = ["physically promotable, but worse than the selected physical endpoint by the endpoint ranking metric"]

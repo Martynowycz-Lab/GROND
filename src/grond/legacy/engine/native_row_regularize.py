@@ -34,6 +34,7 @@ for _name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "VEC
     os.environ[_name] = "1"
 
 import numpy as np
+from scipy.optimize import brentq
 
 try:
     from grond.paths import runtime_cache_dir
@@ -124,6 +125,16 @@ class Nuisance:
     scale_smoothness: float = 0.0
 
 
+def kernel_variance_terms(nuisance: dict) -> dict[str, float]:
+    """Translate fitted nuisance sigma names to the Bloch ``Config`` names."""
+
+    return {
+        "variance_a": float(nuisance["sigma_a"]),
+        "variance_b_corr": float(nuisance["sigma_b_corr"]),
+        "variance_c_peak": float(nuisance["sigma_c_peak"]),
+    }
+
+
 def parse_float_grid(text: str) -> list[float]:
     return [float(x) for x in str(text).replace(",", " ").split() if x.strip()]
 
@@ -151,6 +162,140 @@ def nominal_frame_width_deg(data: XDSData) -> float:
                 if np.isfinite(width) and width > 0.0:
                     return width
     return 1.0
+
+
+def automatic_frame_offset_grid(datum_offset_frames: float) -> list[float]:
+    """Return a compact profile-center grid around the XDS/GROND scan datum.
+
+    The XDS header contains one global orientation while ``ZCAL`` may reflect
+    locally refined integration geometry.  Center the grid on the nearest
+    0.2-frame datum and retain symmetric residual probes instead of assuming
+    that zero in the global header is also the row-profile center.
+    """
+
+    if not np.isfinite(datum_offset_frames):
+        return [0.0, 0.2]
+    center = round(float(datum_offset_frames) / 0.2) * 0.2
+    return [round(center + residual, 10) for residual in (-0.4, 0.0, 0.4)]
+
+
+def _xds_header_sg(data: XDSData, hkl: np.ndarray, omega_deg: float) -> float:
+    """Evaluate target-beam Sg using only the geometry recorded by XDS."""
+
+    A = data.A_for_omega(float(omega_deg))
+    theta = np.radians(float(omega_deg))
+    rotation = data.axis_eye + np.sin(theta) * data.axis_cross + (1.0 - np.cos(theta)) * data.axis_cross2
+    transform = data.setting_rotation @ rotation @ data.fixed_rotation @ A
+    g = transform @ np.asarray(hkl, dtype=float)
+    return float((data.k**2 - np.sum((data.s0 + g) ** 2)) / (2.0 * data.k))
+
+
+def _xds_header_bragg_omega(data: XDSData, hkl: np.ndarray, omega0: float) -> float:
+    """Find the nearest Sg=0 crossing for a row without using intensities."""
+
+    oscillation = abs(float(data.oscillation_range))
+    max_delta = max(2.0 * oscillation, min(2.0, 10.0 * oscillation))
+    offsets = np.linspace(-max_delta, max_delta, 65)
+    values = np.asarray([_xds_header_sg(data, hkl, omega0 + offset) for offset in offsets])
+    close = np.flatnonzero(np.abs(values) <= 1e-10)
+    if len(close):
+        best = int(close[np.argmin(np.abs(offsets[close]))])
+        return float(omega0 + offsets[best])
+    brackets = []
+    for i in range(len(offsets) - 1):
+        if values[i] * values[i + 1] < 0.0:
+            brackets.append((abs(0.5 * (offsets[i] + offsets[i + 1])), i))
+    if not brackets:
+        raise ValueError("no local Sg=0 crossing near XDS ZCAL")
+    _, index = min(brackets)
+    return float(
+        brentq(
+            lambda omega: _xds_header_sg(data, hkl, omega),
+            omega0 + float(offsets[index]),
+            omega0 + float(offsets[index + 1]),
+            xtol=1e-12,
+            rtol=1e-12,
+            maxiter=100,
+        )
+    )
+
+
+def xds_frame_datum_summary(data: XDSData, indices: np.ndarray, max_samples: int = 512) -> dict:
+    """Measure the global-header versus row-ZCAL angular datum in frames."""
+
+    selected = np.asarray(indices, dtype=int)
+    if len(selected) > max_samples:
+        positions = np.linspace(0, len(selected) - 1, max_samples).round().astype(int)
+        selected = selected[np.unique(positions)]
+    offsets = []
+    failures = 0
+    for row_idx in selected:
+        omega_center = float(data.omega_from_z(data.zcal[int(row_idx)]))
+        try:
+            omega_bragg = _xds_header_bragg_omega(data, data.hkl[int(row_idx)], omega_center)
+        except ValueError:
+            failures += 1
+            continue
+        offsets.append((omega_bragg - omega_center) / float(data.oscillation_range))
+    values = np.asarray(offsets, dtype=float)
+    values = values[np.isfinite(values)]
+    sampled_rows = int(len(selected))
+    successful_rows = int(len(values))
+    if not successful_rows:
+        return {
+            "status": "unavailable",
+            "sampled_rows": sampled_rows,
+            "successful_rows": 0,
+            "failed_rows": int(failures),
+        }
+    median = float(np.median(values))
+    p05 = float(np.quantile(values, 0.05))
+    p95 = float(np.quantile(values, 0.95))
+    success_fraction = successful_rows / max(1, sampled_rows)
+    reliability_reasons = []
+    if successful_rows < 16:
+        reliability_reasons.append(f"only {successful_rows} successful geometry roots; at least 16 are required")
+    if success_fraction < 0.75:
+        reliability_reasons.append(f"geometry-root success fraction {success_fraction:.3f} is below 0.750")
+    if p95 - p05 > 2.0:
+        reliability_reasons.append(f"central offset span {p95 - p05:.3f} frames exceeds 2.000")
+    if abs(median) > 5.0:
+        reliability_reasons.append(f"median offset magnitude {abs(median):.3f} frames exceeds 5.000")
+    return {
+        "status": "unreliable" if reliability_reasons else "ok",
+        "definition": "(nearest global-header Sg=0 omega - XDS ZCAL omega) / OSCILLATION_RANGE",
+        "sampled_rows": sampled_rows,
+        "successful_rows": successful_rows,
+        "failed_rows": int(failures),
+        "success_fraction": success_fraction,
+        "median_offset_frames": median,
+        "p05_offset_frames": p05,
+        "p95_offset_frames": p95,
+        "median_abs_deviation_frames": float(np.median(np.abs(values - median))),
+        "reliability_reasons": reliability_reasons,
+    }
+
+
+def resolve_frame_offset_grid(text: str, data: XDSData, indices: np.ndarray) -> tuple[list[float], dict]:
+    """Resolve explicit offsets or an XDS-geometry-informed automatic grid."""
+
+    tokens = [token for token in str(text or "").replace(",", " ").split() if token]
+    wants_auto = any(token.lower() == "auto" for token in tokens)
+    explicit = [float(token) for token in tokens if token.lower() != "auto"]
+    datum = xds_frame_datum_summary(data, indices) if wants_auto else {"status": "not_requested"}
+    automatic = []
+    if wants_auto:
+        reliable_median = datum.get("median_offset_frames") if datum.get("status") == "ok" else float("nan")
+        automatic = automatic_frame_offset_grid(float(reliable_median))
+    values = []
+    for value in [*automatic, *explicit]:
+        if np.isfinite(value) and not any(abs(value - existing) <= 1e-12 for existing in values):
+            values.append(float(value))
+    if not values:
+        values = [0.0, 0.2]
+    datum["requested"] = str(text)
+    datum["resolved_grid_frames"] = values
+    return values, datum
 
 
 def parse_group_width_grid(text: str, data: XDSData) -> list[float]:
@@ -1845,7 +1990,14 @@ def main():
     ap.add_argument("--thickness-model-grid", default="uniform_gradient", help="Comma grid: single, uniform_gradient, gaussian, gaussian_gradient.")
     ap.add_argument("--thickness-grad-grid", default="0.0,0.2,0.4,0.6")
     ap.add_argument("--thickness-sigma-frac-grid", default="0.0", help="Gaussian thickness sigma/t0 grid. Used only by thickness_model=gaussian.")
-    ap.add_argument("--frame-offset-grid", default="-0.5,0.0,0.5")
+    ap.add_argument(
+        "--frame-offset-grid",
+        default="auto",
+        help=(
+            "Comma grid in XDS frames, or 'auto'. Auto measures the global-header/ZCAL "
+            "scan-datum mismatch without using intensities and tests a compact symmetric residual grid."
+        ),
+    )
     ap.add_argument("--absorption-mode-grid", default="none", help="Comma grid: none, mean, beam_dependent, offdiag_fraction, offdiag_tds, midgley_like.")
     ap.add_argument("--absorption-mu-grid", default="0.0", help="Uniform imaginary diagonal damping grid in inverse Angstrom.")
     ap.add_argument("--absorption-frac-grid", default="0.0", help="Imaginary absorptive off-diagonal fraction grid.")
@@ -1949,6 +2101,15 @@ def main():
         dvals_for_geom = np.asarray([data.cell.calculate_d(tuple(int(v) for v in h)) for h in data.hkl], dtype=float)
         base_pre_geom &= dvals_for_geom >= args.min_d_spacing
     _geom_keep, geometry_summary = geometry_tail_mask(data, base_pre_geom, args.geometry_percentile)
+    datum_indices = row_selection(
+        data,
+        target,
+        args.positive_only,
+        args.min_d_spacing,
+        args.min_peak,
+        0,
+        args.geometry_percentile,
+    )
     indices = row_selection(data, target, args.positive_only, args.min_d_spacing, args.min_peak, args.max_rows, args.geometry_percentile)
     model = parse_model(Path(args.res))
     masks = split_masks(
@@ -1978,6 +2139,14 @@ def main():
     sg_jitter_modes = [m.strip() for m in str(args.sg_jitter_mode_grid).replace(",", " ").split() if m.strip()]
     group_width_values = parse_group_width_grid(args.group_width_grid, data)
     detector_scale_bins_values = parse_int_grid(args.detector_scale_bins)
+    frame_offset_values, frame_datum = resolve_frame_offset_grid(args.frame_offset_grid, data, datum_indices)
+    if str(frame_datum.get("status")) == "ok":
+        print(
+            "XDS frame datum: median="
+            f"{float(frame_datum['median_offset_frames']):.4f} frames; "
+            f"resolved grid={frame_offset_values}",
+            flush=True,
+        )
     for thickness in parse_float_grid(args.thickness_grid):
         for thickness_model in thickness_models:
             if thickness_model not in {"single", "uniform_gradient", "gaussian", "gaussian_gradient"}:
@@ -1986,7 +2155,7 @@ def main():
             sigma_values = parse_float_grid(args.thickness_sigma_frac_grid) if thickness_model in {"gaussian", "gaussian_gradient"} else [0.0]
             for grad in grad_values:
                 for thickness_sigma_frac in sigma_values:
-                    for frame_offset in parse_float_grid(args.frame_offset_grid):
+                    for frame_offset in frame_offset_values:
                         for sg_jitter_mode in sg_jitter_modes:
                             if sg_jitter_mode not in {"none", "gaussian", "student_t"}:
                                 raise ValueError(f"unknown sg_jitter_mode {sg_jitter_mode!r}")
@@ -2300,6 +2469,7 @@ def main():
             "promote_endpoint_resolution_scale": False,
             "recommendation": "use the neutral B=0 no-EXTI endpoint as final; nonzero endpoint-B branches are diagnostic only because they can improve R factors while distorting ADPs and maps" if neutral_sh else "nonzero endpoint-B was explicitly requested without a neutral B=0 endpoint; treat this output as diagnostic unless independently justified",
         }
+    kernel_variance = kernel_variance_terms(best["nuisance"])
     summary = {
         "inputs": {
             "hkl": str(Path(args.hkl).resolve()),
@@ -2330,6 +2500,8 @@ def main():
         "resolved_grids": {
             "nominal_frame_width_deg": nominal_frame_width_deg(data),
             "group_width_deg": group_width_values,
+            "frame_offset_frames": frame_offset_values,
+            "xds_frame_datum": frame_datum,
         },
         "selection_metric": str(args.selection_metric),
         "shelx_weight": {
@@ -2368,9 +2540,9 @@ def main():
                 group_width_deg=best["nuisance"]["group_width_deg"],
                 free_fraction=args.free_fraction,
                 split_seed=args.split_seed,
-                variance_a=best["nuisance"]["variance_a"],
-                variance_b_corr=best["nuisance"]["variance_b_corr"],
-                variance_c_peak=best["nuisance"]["variance_c_peak"],
+                variance_a=kernel_variance["variance_a"],
+                variance_b_corr=kernel_variance["variance_b_corr"],
+                variance_c_peak=kernel_variance["variance_c_peak"],
                 frame_offset=best["nuisance"]["frame_offset"],
                 absorption_mode=best["nuisance"]["absorption_mode"],
                 absorption_mu=best["nuisance"]["absorption_mu"],
