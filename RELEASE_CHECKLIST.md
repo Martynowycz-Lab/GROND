@@ -11,7 +11,7 @@ python -m pip install -e ".[dev]"
 python -m ruff check src/grond tests scripts --no-cache
 python -m pytest
 python -m grond validate
-python -m grond doctor --probe-bloch
+python -m grond doctor --probe-bloch --strict
 ```
 
 Build from a clean archive so editable-install metadata and local caches cannot leak into the artifacts:

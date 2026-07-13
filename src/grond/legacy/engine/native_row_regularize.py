@@ -28,12 +28,15 @@ import shutil
 import subprocess
 import time
 from dataclasses import asdict, dataclass
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as distribution_version
 from pathlib import Path
 
 for _name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
     os.environ[_name] = "1"
 
 import numpy as np
+import scipy
 from scipy.optimize import brentq
 
 try:
@@ -87,7 +90,38 @@ TARGET_MODE_LABELS = {
     "recorded_proxy": "IOBS*PEAK/(100*RLP)",
 }
 DEFAULT_ELECTRON_WAVELENGTH_A = 0.025079
-PREDICTION_CACHE_SCHEMA = 3
+PREDICTION_CACHE_SCHEMA = 4
+
+
+def _prediction_engine_source_fingerprint() -> str:
+    """Fingerprint the source files that define cached row predictions."""
+
+    digest = hashlib.sha256()
+    for path in (Path(__file__).resolve(), Path(__file__).with_name("bloch_engine.py").resolve()):
+        digest.update(path.name.encode())
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _installed_version(distribution: str) -> str:
+    try:
+        return distribution_version(distribution)
+    except PackageNotFoundError:
+        return "not-installed"
+
+
+# These are intentionally computed once per process. A source or numerical
+# runtime change produces a new content-addressed prediction cache key.
+PREDICTION_ENGINE_SOURCE_SHA256 = _prediction_engine_source_fingerprint()
+NUMERICAL_RUNTIME_VERSIONS = {
+    "numpy": str(np.__version__),
+    "scipy": str(scipy.__version__),
+    "gemmi": _installed_version("gemmi"),
+    "jax": _installed_version("jax"),
+    "jaxlib": _installed_version("jaxlib"),
+}
 
 
 @dataclass(frozen=True)
@@ -944,6 +978,8 @@ def prediction_cache_key(data: XDSData, hkl: Path, res: Path, cfg: Config, indic
             scan_matrix_sha256 = sha256(scan_matrix_path)
     payload = {
         "cache_schema": PREDICTION_CACHE_SCHEMA,
+        "prediction_engine_source_sha256": PREDICTION_ENGINE_SOURCE_SHA256,
+        "numerical_runtime_versions": NUMERICAL_RUNTIME_VERSIONS,
         "hkl_sha256": sha256(hkl),
         "scan_matrix_sha256": scan_matrix_sha256,
         "res_sha256": sha256(res),
@@ -952,8 +988,21 @@ def prediction_cache_key(data: XDSData, hkl: Path, res: Path, cfg: Config, indic
         "indices_sha256": hashlib.sha256(np.asarray(indices, dtype=np.int64).tobytes()).hexdigest(),
         "cfg": asdict(cfg),
     }
-    text = json.dumps(payload, sort_keys=True)
+    text = canonical_prediction_cache_payload(payload)
     return hashlib.sha256(text.encode()).hexdigest()[:20], payload
+
+
+def canonical_prediction_cache_payload(payload: dict) -> str:
+    """Return a deterministic representation that preserves NaN sentinels.
+
+    ``Config.dose_b_ref_frame`` uses NaN to mean that no reference frame was
+    supplied. JSON round-trips that sentinel correctly for our local NPZ
+    metadata, but Python dictionary equality does not because NaN is unequal
+    to itself. Comparing this canonical representation makes a valid cache
+    round-trip stable without weakening any content checks.
+    """
+
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=True)
 
 
 def write_prediction_cache(path: Path, save: dict, payload: dict, compression: str) -> None:
@@ -1023,7 +1072,7 @@ def prediction_cache_validation_errors(pred: dict, payload: dict, indices) -> li
 
     errors = []
     meta = pred.get("prediction_cache_meta")
-    if meta != payload:
+    if not isinstance(meta, dict) or canonical_prediction_cache_payload(meta) != canonical_prediction_cache_payload(payload):
         errors.append("metadata does not match the requested prediction contract")
     expected_indices = np.asarray(indices, dtype=np.int64)
     cached_indices = np.asarray(pred.get("indices", []), dtype=np.int64)

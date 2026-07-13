@@ -47,7 +47,7 @@ python3.12 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install .
-GROND doctor --probe-bloch
+GROND doctor --probe-bloch --strict
 ```
 
 Native Bloch calculations use Python, NumPy, SciPy, Pandas, and Gemmi. The full small-molecule endpoint needs a separately installed SHELXL executable; map generation needs `shelx2map`. GROND does not bundle either program. Configure external tools with `GROND init-config` and confirm the resolved paths with `GROND doctor`.
@@ -116,7 +116,7 @@ python -m pip install -e ".[dev]"
 python -m ruff check src/grond tests scripts --no-cache
 python -m pytest
 python -m grond validate
-python -m grond doctor --probe-bloch
+python -m grond doctor --probe-bloch --strict
 ```
 
 Release checks, contribution rules, security reporting, and the repository data policy are documented in [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md), [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), and [DATA_POLICY.md](DATA_POLICY.md).

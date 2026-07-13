@@ -10,6 +10,6 @@ Name the tests, numerical controls, and representative commands you ran. If a re
 
 - [ ] The change is limited to the intended package scope.
 - [ ] New or changed numerical behavior has a regression test or control.
-- [ ] Ruff, pytest, `grond validate`, and `grond doctor --probe-bloch` pass.
+- [ ] Ruff, pytest, `grond validate`, and `grond doctor --probe-bloch --strict` pass.
 - [ ] Public documentation and release metadata are accurate.
 - [ ] No private data, local paths, generated outputs, or credentials are included.

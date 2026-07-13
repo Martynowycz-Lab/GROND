@@ -82,7 +82,9 @@ def smoke_install_wheel(dist_dir: Path) -> None:
         run_checked([python, "-m", "pip", "check"], cwd=tmp_dir)
         run_checked([python, "-m", "grond", "--help"], cwd=tmp_dir)
         run_checked([python, "-m", "grond", "validate"], cwd=tmp_dir)
-        assert_current_install(run_json_checked([python, "-m", "grond", "doctor", "--probe-bloch"], cwd=tmp_dir))
+        assert_current_install(
+            run_json_checked([python, "-m", "grond", "doctor", "--probe-bloch", "--strict"], cwd=tmp_dir)
+        )
         run_checked([venv_script(venv_dir, "grond"), "--help"], cwd=tmp_dir)
         run_checked([venv_script(venv_dir, "GROND"), "--help"], cwd=tmp_dir)
 

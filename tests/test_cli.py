@@ -54,6 +54,48 @@ EXPECTED_CLI_COMMANDS = {
 }
 
 
+def test_run_logged_writes_concise_failure_artifact(tmp_path: Path, monkeypatch, capsys):
+    logs = tmp_path / "logs"
+    monkeypatch.setattr(cli, "_PROGRESS", None)
+    command = [cli.sys.executable, "-c", "print('decisive failure'); raise SystemExit(7)"]
+
+    with pytest.raises(cli.subprocess.CalledProcessError):
+        cli.run_logged(command, logs, "broken_stage", cwd=tmp_path)
+
+    failure = json.loads((logs / "failure.json").read_text())
+    assert failure["label"] == "broken_stage"
+    assert failure["returncode"] == 7
+    assert any("decisive failure" in line for line in failure["log_tail"])
+    output = capsys.readouterr().out
+    assert "FAILED broken_stage" in output
+    assert str(logs / "broken_stage.log") in output
+    assert "rerun the same GROND command" in output
+
+
+def test_run_logged_preserves_subprocess_error_when_failure_artifact_write_fails(
+    tmp_path: Path, monkeypatch, capsys
+):
+    logs = tmp_path / "logs"
+    monkeypatch.setattr(cli, "_PROGRESS", None)
+    command = [cli.sys.executable, "-c", "raise SystemExit(9)"]
+    original_write_text = cli.Path.write_text
+
+    def write_text(self, *args, **kwargs):
+        if self.name.endswith("failure.json"):
+            raise OSError("simulated full disk")
+        return original_write_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(cli.Path, "write_text", write_text)
+
+    with pytest.raises(cli.subprocess.CalledProcessError) as caught:
+        cli.run_logged(command, logs, "broken_artifact_stage", cwd=tmp_path)
+
+    assert caught.value.returncode == 9
+    output = capsys.readouterr().out
+    assert "could not write failure artifact" in output
+    assert "FAILED broken_artifact_stage" in output
+
+
 def cli_command_names(parser):
     for action in parser._actions:
         choices = getattr(action, "choices", None)
@@ -1314,6 +1356,81 @@ def test_doctor_reports_current_install_feature_flags(capsys):
         "corrected_endpoint_hklf4_contract": True,
         "absolute_structure_no_pandas": True,
     }
+    assert payload["ready"] is True
+    assert payload["failures"] == []
+
+
+def test_doctor_strict_checks_exact_requested_python(monkeypatch, capsys):
+    requested = "/usr/bin/python-without-grond-deps"
+    seen = []
+
+    def fake_probe(python):
+        seen.append(python)
+        return {
+            "python": python,
+            "returncode": 0,
+            "packages": {
+                "numpy": {"available": True},
+                "scipy": {"available": True},
+                "gemmi": {"available": False, "error": "ModuleNotFoundError: gemmi"},
+            },
+        }
+
+    monkeypatch.setattr(cli, "probe_accelerators", fake_probe)
+    args = build_parser().parse_args(["doctor", "--python", requested, "--strict"])
+
+    assert args.func(args) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert seen == [requested]
+    assert payload["ready"] is False
+    assert any("required package gemmi is unavailable" in failure for failure in payload["failures"])
+
+
+def test_doctor_non_strict_remains_report_only(monkeypatch, capsys):
+    monkeypatch.setattr(
+        cli,
+        "probe_accelerators",
+        lambda python: {
+            "python": python,
+            "probe_error": "FileNotFoundError: requested interpreter",
+        },
+    )
+    args = build_parser().parse_args(["doctor", "--python", "/missing/python"])
+
+    assert args.func(args) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ready"] is False
+    assert any("dependency probe failed" in failure for failure in payload["failures"])
+
+
+def test_doctor_strict_fails_requested_bloch_operation(monkeypatch, capsys):
+    monkeypatch.setattr(
+        cli,
+        "probe_accelerators",
+        lambda python: {
+            "python": python,
+            "returncode": 0,
+            "packages": {name: {"available": True} for name in ("numpy", "scipy", "gemmi")},
+        },
+    )
+    monkeypatch.setattr(
+        cli,
+        "probe_bloch_ops",
+        lambda python: {
+            "python": python,
+            "returncode": 0,
+            "scipy_cpu": {
+                "eig": {"ok": False, "error": "LAPACK failure"},
+                "eigh": {"ok": True},
+            },
+        },
+    )
+    args = build_parser().parse_args(["doctor", "--probe-bloch", "--strict"])
+
+    assert args.func(args) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ready"] is False
+    assert any("SciPy eig Bloch operation failed" in failure for failure in payload["failures"])
 
 
 def test_auto_parser_is_simple_run_alias():

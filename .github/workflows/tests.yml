@@ -37,7 +37,7 @@ jobs:
       - name: Validate package metadata
         run: python -m grond validate
       - name: Doctor
-        run: python -m grond doctor --probe-bloch
+        run: python -m grond doctor --probe-bloch --strict
       - name: Build and inspect release artifacts
         if: matrix.python-version == '3.12'
         run: |
@@ -60,4 +60,4 @@ jobs:
           python -m pip check
           python -m ruff check src/grond tests scripts --no-cache
           python -m pytest
-          python -m grond doctor --probe-bloch
+          python -m grond doctor --probe-bloch --strict

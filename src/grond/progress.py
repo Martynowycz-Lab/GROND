@@ -6,6 +6,7 @@ import json
 import math
 import os
 import time
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -323,9 +324,31 @@ class ProgressState:
         if not self.state_path.exists():
             return {"completed": {}, "events": []}
         try:
-            return json.loads(self.state_path.read_text())
-        except Exception:
-            return {"completed": {}, "events": [], "warning": "previous progress file could not be parsed"}
+            payload = json.loads(self.state_path.read_text())
+            if not isinstance(payload, dict):
+                raise ValueError("progress record must be a JSON object")
+            if "completed" in payload and not isinstance(payload["completed"], dict):
+                raise ValueError("progress record completed field must be a JSON object")
+            if "events" in payload and not isinstance(payload["events"], list):
+                raise ValueError("progress record events field must be a JSON array")
+            return payload
+        except Exception as exc:
+            stamp = f"{time.strftime('%Y%m%dT%H%M%S')}-{time.time_ns()}"
+            quarantine = self.root / f"grond_progress.corrupt-{stamp}.json"
+            try:
+                self.state_path.replace(quarantine)
+                detail = f"; preserved as {quarantine}"
+            except OSError:
+                quarantine = None
+                detail = "; the unreadable file could not be quarantined"
+            message = f"Previous GROND progress file could not be parsed or validated ({type(exc).__name__}){detail}. Starting a fresh progress record."
+            warnings.warn(message, RuntimeWarning, stacklevel=2)
+            return {
+                "completed": {},
+                "events": [],
+                "warning": message,
+                "quarantined_path": str(quarantine) if quarantine is not None else "",
+            }
 
     def save(self, payload: dict[str, Any]) -> None:
         """Write the progress record atomically enough for normal CLI use."""

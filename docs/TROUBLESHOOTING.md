@@ -1,6 +1,6 @@
 # Troubleshooting
 
-If `GROND doctor --probe-bloch` fails, the Python environment is not ready. Reinstall the package in a clean Python 3.11 to 3.13 environment and check that NumPy, SciPy, and Gemmi import correctly. Python 3.12 remains the easiest default on most laptops and shared servers.
+If `GROND doctor --probe-bloch --strict` fails, the Python environment is not ready. Reinstall the package in a clean Python 3.11 to 3.13 environment and check that NumPy, SciPy, and Gemmi import correctly. Python 3.12 remains the easiest default on most laptops and shared servers. Plain `GROND doctor` remains a report-only command for scripts that need to inspect an incomplete environment without a nonzero exit.
 
 If the run stops during preflight, inspect `decisions/<dataset>/preflight.json`. Common causes are missing numeric reflection rows, too few positive intensities, non-positive sigmas, or geometry columns that are absent or badly tailed.
 

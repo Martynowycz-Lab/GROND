@@ -25,7 +25,7 @@ python3.12 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install .
-GROND doctor --probe-bloch
+GROND doctor --probe-bloch --strict
 ```
 
 If `python3.12` is not available but `python3.11` or `python3.13` is, use that executable for the `venv` command.
@@ -33,7 +33,7 @@ If `python3.12` is not available but `python3.11` or `python3.13` is, use that e
 The package installs both `GROND` and `grond` console commands. If a shell or managed server environment does not find console scripts reliably, use the module form instead:
 
 ```bash
-python -m grond doctor --probe-bloch
+python -m grond doctor --probe-bloch --strict
 ```
 
 ## Updating An Existing Checkout
@@ -47,7 +47,7 @@ git switch main
 git pull --ff-only origin main
 source .venv/bin/activate
 python -m pip install .
-python -m grond doctor --probe-bloch
+python -m grond doctor --probe-bloch --strict
 ```
 
 For an editable developer installation, refresh the metadata and development dependencies with `python -m pip install -e ".[dev]"` after the pull. The source changes themselves are then visible immediately. If a machine must reproduce a released calculation rather than follow `main`, check out the recorded release tag or commit before installing.
@@ -67,7 +67,7 @@ cd GROND
 python3.12 -m venv /Applications/GROND/grond
 /Applications/GROND/grond/bin/python -m pip install --upgrade pip
 /Applications/GROND/grond/bin/python -m pip install .
-/Applications/GROND/grond/bin/GROND doctor --probe-bloch
+/Applications/GROND/grond/bin/GROND doctor --probe-bloch --strict
 ```
 
 The final doctor output should include `version: 0.2.2` or newer, a `grond.package` path under `/Applications/GROND/grond/lib/python.../site-packages/grond`, and `install_status: current_required_features_present`.
@@ -95,7 +95,7 @@ A conda or mamba environment is useful on shared servers:
 mamba env create -f environment.yml
 mamba activate grond
 python -m pip install -e ".[dev]"
-GROND doctor --probe-bloch
+GROND doctor --probe-bloch --strict
 ```
 
 The package also works in a plain `venv`, which is usually simpler on a laptop.

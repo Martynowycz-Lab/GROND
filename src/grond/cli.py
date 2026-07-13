@@ -386,6 +386,38 @@ def run_logged(cmd: list[str], log_dir: Path, label: str, *, dry_run: bool = Fal
         print("DONE", label, "returncode", proc.returncode, "elapsed", format_seconds(done["elapsed_seconds"]), flush=True)
     _print_stage_metrics(cmd)
     if proc.returncode != 0:
+        try:
+            tail_lines = log_file.read_text(errors="replace").splitlines()[-12:]
+        except OSError:
+            tail_lines = []
+        failure = {
+            "status": "failed",
+            "label": label,
+            "returncode": int(proc.returncode),
+            "log": str(log_file.resolve()),
+            "cwd": str(Path(cwd).resolve()),
+            "command": cmd,
+            "log_tail": tail_lines,
+            "resume_hint": "Fix the reported cause, then rerun the same GROND command; completed fingerprint-matching stages will resume.",
+        }
+        failure_text = json.dumps(failure, indent=2) + "\n"
+        for failure_path in (
+            log_dir / f"{safe_label(label)}.failure.json",
+            log_dir / "failure.json",
+        ):
+            try:
+                failure_path.write_text(failure_text)
+            except OSError as exc:
+                print(
+                    f"WARNING: could not write failure artifact {failure_path}: {type(exc).__name__}: {exc}",
+                    flush=True,
+                )
+        print(f"FAILED {label} (return code {proc.returncode}). Log: {log_file.resolve()}", flush=True)
+        if tail_lines:
+            print("Last log lines:", flush=True)
+            for line in tail_lines:
+                print(f"  {line}", flush=True)
+        print(failure["resume_hint"], flush=True)
         raise subprocess.CalledProcessError(proc.returncode, cmd)
 
 
@@ -8818,10 +8850,59 @@ def cmd_push_endpoint(args: argparse.Namespace) -> int:
     return 0
 
 
+def _doctor_readiness_failures(payload: Mapping[str, object], *, require_bloch: bool) -> list[str]:
+    """Return actionable failures for the portable production runtime."""
+
+    failures: list[str] = []
+    if payload.get("probe_error"):
+        failures.append(f"dependency probe failed: {payload['probe_error']}")
+    elif payload.get("returncode") not in {None, 0}:
+        failures.append(f"dependency probe exited with return code {payload['returncode']}")
+
+    packages = payload.get("packages")
+    if isinstance(packages, Mapping):
+        for name in ("numpy", "scipy", "gemmi"):
+            status = packages.get(name)
+            if not isinstance(status, Mapping) or not status.get("available"):
+                detail = status.get("error") if isinstance(status, Mapping) else "status missing"
+                failures.append(f"required package {name} is unavailable: {detail}")
+    elif not payload.get("probe_error"):
+        failures.append("dependency probe did not report required package status")
+
+    grond = payload.get("grond")
+    if not isinstance(grond, Mapping) or grond.get("install_status") != "current_required_features_present":
+        status = grond.get("install_status") if isinstance(grond, Mapping) else "missing"
+        failures.append(f"GROND install is stale or incomplete: {status}")
+
+    if require_bloch:
+        bloch_ops = payload.get("bloch_ops")
+        if not isinstance(bloch_ops, Mapping):
+            failures.append("Bloch operation probe did not return a status block")
+        elif bloch_ops.get("probe_error"):
+            failures.append(f"Bloch operation probe failed: {bloch_ops['probe_error']}")
+        elif bloch_ops.get("returncode") not in {None, 0}:
+            failures.append(f"Bloch operation probe exited with return code {bloch_ops['returncode']}")
+        else:
+            scipy_cpu = bloch_ops.get("scipy_cpu")
+            if not isinstance(scipy_cpu, Mapping):
+                failures.append("Bloch operation probe did not report SciPy CPU status")
+            elif scipy_cpu.get("import_error"):
+                failures.append(f"SciPy Bloch kernel import failed: {scipy_cpu['import_error']}")
+            else:
+                for operation in ("eig", "eigh"):
+                    status = scipy_cpu.get(operation)
+                    if not isinstance(status, Mapping) or not status.get("ok"):
+                        detail = status.get("error") if isinstance(status, Mapping) else "status missing"
+                        failures.append(f"SciPy {operation} Bloch operation failed: {detail}")
+    return failures
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     """CLI entrypoint that reports dependency and Bloch-kernel readiness."""
 
-    python = choose_python(args.python)
+    # An explicitly requested or configured interpreter is itself the subject
+    # of this diagnostic. Do not silently substitute another healthy Python.
+    python = str(getattr(args, "python", "") or "").strip() or choose_python("")
     payload = probe_accelerators(python)
     package_init = Path(__file__).resolve().parent / "__init__.py"
     absolute_structure_script = engine_script("absolute_structure_diagnostic.py")
@@ -8867,8 +8948,11 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     }
     if args.probe_bloch:
         payload["bloch_ops"] = probe_bloch_ops(python)
+    failures = _doctor_readiness_failures(payload, require_bloch=bool(args.probe_bloch))
+    payload["ready"] = not failures
+    payload["failures"] = failures
     print(json.dumps(payload, indent=2))
-    return 0
+    return 1 if bool(getattr(args, "strict", False)) and failures else 0
 
 
 def cmd_compile(args: argparse.Namespace) -> int:
@@ -10975,6 +11059,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_doc.add_argument("--python", default="")
     add_tool_config_args(p_doc)
     p_doc.add_argument("--probe-bloch", action="store_true", help="Also test complex eig/eigh support needed by the Bloch wave kernel.")
+    p_doc.add_argument("--strict", action="store_true", help="Exit nonzero when required packages, installed features, or requested Bloch operations are not ready.")
     p_doc.set_defaults(func=cmd_doctor)
 
     p_compile = sub.add_parser("compile", help="Compile-check GROND and vendored engine modules without writing bytecode into the source tree.")

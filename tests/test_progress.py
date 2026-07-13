@@ -1,5 +1,65 @@
+import pytest
+
 import grond.progress as progress
 from grond.progress import ProgressState
+
+
+def test_progress_quarantines_malformed_state_before_restarting(tmp_path):
+    bad = tmp_path / "grond_progress.json"
+    bad.write_text("{not valid json\n")
+    state = ProgressState(root=tmp_path, resume=True, total=1)
+
+    with pytest.warns(RuntimeWarning, match="could not be parsed"):
+        payload = state.load()
+
+    quarantined = list(tmp_path.glob("grond_progress.corrupt-*.json"))
+    assert payload["completed"] == {}
+    assert len(quarantined) == 1
+    assert quarantined[0].read_text() == "{not valid json\n"
+    assert not bad.exists()
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "[]\n",
+        "null\n",
+        '{"completed": [], "events": []}\n',
+        '{"completed": {}, "events": {}}\n',
+    ],
+)
+def test_progress_quarantines_structurally_invalid_json(tmp_path, text):
+    bad = tmp_path / "grond_progress.json"
+    bad.write_text(text)
+    state = ProgressState(root=tmp_path, resume=True, total=1)
+
+    with pytest.warns(RuntimeWarning, match="could not be parsed or validated"):
+        payload = state.load()
+
+    quarantined = list(tmp_path.glob("grond_progress.corrupt-*.json"))
+    assert payload["completed"] == {}
+    assert payload["events"] == []
+    assert len(quarantined) == 1
+    assert quarantined[0].read_text() == text
+    assert not bad.exists()
+
+
+def test_progress_quarantine_names_do_not_collide_within_one_second(tmp_path, monkeypatch):
+    bad = tmp_path / "grond_progress.json"
+    state = ProgressState(root=tmp_path, resume=True, total=1)
+    monkeypatch.setattr(progress.time, "strftime", lambda *args, **kwargs: "20260713T120000")
+    times = iter((1001, 1002))
+    monkeypatch.setattr(progress.time, "time_ns", lambda: next(times))
+
+    with pytest.warns(RuntimeWarning):
+        bad.write_text("first invalid record")
+        state.load()
+    with pytest.warns(RuntimeWarning):
+        bad.write_text("second invalid record")
+        state.load()
+
+    quarantined = sorted(tmp_path.glob("grond_progress.corrupt-*.json"))
+    assert [path.read_text() for path in quarantined] == ["first invalid record", "second invalid record"]
 
 
 def test_progress_resume_requires_matching_command(tmp_path):

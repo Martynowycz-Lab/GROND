@@ -178,6 +178,12 @@ def append_arg(cmd: list[str], name: str, value) -> None:
     cmd.extend([name, str(value)])
 
 
+def feedback_prediction_cache_dir(run_dir: Path) -> Path:
+    """Return the hash-validated cache shared by all cycles in one feedback run."""
+
+    return run_dir.parent / "cache" / "shared"
+
+
 def native_command(
     args: argparse.Namespace,
     source_summary: dict,
@@ -332,7 +338,11 @@ def native_command(
         "--chunksize",
         str(int(args.chunksize)),
         "--prediction-cache-dir",
-        str(run_dir.parent / "cache" / run_dir.name),
+        # The prediction filename and embedded metadata already hash the model,
+        # row contract, and full effective Bloch configuration.  Sharing this
+        # directory lets a rejected/pathological output model reuse the exact
+        # preceding input-model prediction during the final row recompute.
+        str(feedback_prediction_cache_dir(run_dir)),
         "--cache-compression",
         str(args.cache_compression),
         "--compute-backend",

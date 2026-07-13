@@ -11,6 +11,14 @@ def valid_res_text() -> str:
     return "TITL ok\nCELL 0.02508 5.0 6.0 7.0 90 90 90\nSFAC C\nEND\n"
 
 
+def test_feedback_cycles_share_hash_validated_prediction_cache(tmp_path: Path):
+    cycle = tmp_path / "feedback" / "cycle_03_N107Q20"
+    recompute = tmp_path / "feedback" / "final_row_recompute_N107Q20"
+
+    assert fb.feedback_prediction_cache_dir(cycle) == fb.feedback_prediction_cache_dir(recompute)
+    assert fb.feedback_prediction_cache_dir(cycle) == tmp_path / "feedback" / "cache" / "shared"
+
+
 def test_feedback_endpoint_res_rejects_empty_direct_endpoint(tmp_path: Path):
     run = tmp_path / "cycle"
     direct = run / "endpoint_lam_1p0_B_0p0_noexti" / "dyn_nuisance_corrected.res"

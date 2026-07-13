@@ -7,7 +7,7 @@ python -m pip install -e ".[dev]"
 python -m ruff check src/grond tests scripts --no-cache
 python -m pytest
 python -m grond validate
-python -m grond doctor --probe-bloch
+python -m grond doctor --probe-bloch --strict
 ```
 
 Keep public modules in the domain folders. Standalone experiments, hardware-result dumps, dataset workspaces, and article-drafting material do not belong in this repository. Promote a result only after it has become callable package behavior, a focused dataset-neutral regression test, or portable documentation.

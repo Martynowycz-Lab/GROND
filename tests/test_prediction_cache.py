@@ -4,9 +4,11 @@ from types import SimpleNamespace
 
 import numpy as np
 
+import grond.legacy.engine.native_row_regularize as native_row_regularize
 from grond.legacy.engine.bloch_engine import Config
 from grond.legacy.engine.native_row_regularize import (
     cacheable_prediction_arrays,
+    predict_with_cache,
     prediction_cache_key,
     prediction_cache_validation_errors,
     read_prediction_cache,
@@ -88,3 +90,74 @@ def test_prediction_cache_key_tracks_scan_matrix_sidecar_content(tmp_path):
     second, _ = prediction_cache_key(data, hkl, model, Config(), np.asarray([0, 1]))
 
     assert first != second
+
+
+def test_prediction_cache_round_trip_hits_with_default_nan_config(tmp_path, monkeypatch):
+    hkl = tmp_path / "INTEGRATE.HKL"
+    res = tmp_path / "model.res"
+    hkl.write_text("rows\n")
+    res.write_text("model\n")
+    data = SimpleNamespace(hkl_transform_spec="identity", a_scan_points_path=None)
+    indices = np.asarray([1, 2, 3], dtype=np.int64)
+    calls = []
+
+    class FakePort:
+        def predict_rows(self, requested, workers, chunksize):
+            calls.append((requested.copy(), workers, chunksize))
+            return {
+                "indices": requested.copy(),
+                "dyn": np.asarray([1.0, 2.0, 3.0]),
+                "born": np.asarray([0.9, 1.8, 2.7]),
+            }
+
+    monkeypatch.setattr(
+        native_row_regularize,
+        "XDSBlochPort",
+        lambda *args, **kwargs: FakePort(),
+    )
+    cache = tmp_path / "cache"
+
+    first = predict_with_cache(
+        data, object(), "model-hash", hkl, res, Config(), indices, cache, 2, 4, cache_compression="none"
+    )
+    second = predict_with_cache(
+        data, object(), "model-hash", hkl, res, Config(), indices, cache, 2, 4, cache_compression="none"
+    )
+
+    assert first["cache_status"] == "built"
+    assert second["cache_status"] == "hit"
+    assert first["cache_path"] == second["cache_path"]
+    assert len(calls) == 1
+    np.testing.assert_array_equal(second["indices"], indices)
+    np.testing.assert_array_equal(second["dyn"], first["dyn"])
+    np.testing.assert_array_equal(second["born"], first["born"])
+
+
+def test_prediction_cache_rejects_source_res_and_config_mismatches(tmp_path, monkeypatch):
+    hkl = tmp_path / "INTEGRATE.HKL"
+    res = tmp_path / "model.res"
+    hkl.write_text("rows\n")
+    res.write_text("model one\n")
+    data = SimpleNamespace(hkl_transform_spec="identity", a_scan_points_path=None)
+    indices = np.asarray([1, 2], dtype=np.int64)
+    base_key, base_payload = prediction_cache_key(data, hkl, res, Config(), indices)
+    cached = {
+        "prediction_cache_meta": base_payload,
+        "indices": indices,
+        "dyn": np.asarray([1.0, 2.0]),
+        "born": np.asarray([0.9, 1.8]),
+    }
+
+    res.write_text("model two\n")
+    res_key, res_payload = prediction_cache_key(data, hkl, res, Config(), indices)
+    assert res_key != base_key
+    assert any("metadata" in error for error in prediction_cache_validation_errors(cached, res_payload, indices))
+
+    config_key, config_payload = prediction_cache_key(data, hkl, res, Config(n_basis=21), indices)
+    assert config_key != res_key
+    assert any("metadata" in error for error in prediction_cache_validation_errors(cached, config_payload, indices))
+
+    monkeypatch.setattr(native_row_regularize, "PREDICTION_ENGINE_SOURCE_SHA256", "changed-source")
+    source_key, source_payload = prediction_cache_key(data, hkl, res, Config(), indices)
+    assert source_key not in {base_key, res_key, config_key}
+    assert any("metadata" in error for error in prediction_cache_validation_errors(cached, source_payload, indices))
