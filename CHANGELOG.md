@@ -4,6 +4,8 @@ This file records user-visible changes to the installable package. Version `0.2.
 
 ## 0.2.2 (unreleased)
 
+The DIALS bridge now preserves cropped-scan frame origins by exporting DIALS' zero-based array-range start as `STARTING_FRAME` and applying the same origin when validating omega and scan-point A matrices. Imports whose predicted rows remain grossly off the Ewald sphere fail before writing a new reflection bridge, with an auditable diagnostic summary instead of a misleading `status: ok`.
+
 Repeated Bloch/LS1 feedback cycles now share their content-addressed row-prediction cache, so a final recomputation of an unchanged model reuses the exact preceding prediction instead of repeating the matrix propagation. Prediction-cache metadata now compares NaN sentinels canonically and fingerprints the prediction-engine source plus numerical runtime, preventing both false misses and unsafe reuse after a code or library change.
 
 `GROND doctor --python PATH` now tests the requested interpreter instead of silently substituting another Python. The new `--strict` mode returns a failing exit status when required packages, installed GROND features, or requested SciPy Bloch operations are not ready, and reports machine-readable `ready` and `failures` fields. Failed workflow stages write a concise recovery artifact and log tail without masking the original subprocess error, while malformed or structurally invalid resume records are warned about and quarantined before a fresh record is started.

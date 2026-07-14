@@ -28,6 +28,8 @@ from typing import Any
 import numpy as np
 from scipy.optimize import nnls
 
+DIALS_SG_P95_ABS_LIMIT_INV_A = 5.0e-3
+
 DIALS_HELPER_CODE = r"""
 from __future__ import annotations
 
@@ -163,9 +165,14 @@ def main():
     wavelength = float(beam.get_wavelength())
     if scan is not None:
         image_range = [int(v) for v in scan.get_image_range()]
+        if hasattr(scan, "get_array_range"):
+            array_range = [int(v) for v in scan.get_array_range()]
+        else:
+            array_range = [int(image_range[0]) - 1, int(image_range[1])]
         oscillation = [float(v) for v in scan.get_oscillation()]
     else:
         image_range = [1, int(len(table))]
+        array_range = [0, int(len(table))]
         oscillation = [0.0, 1.0]
 
     a_static = np.asarray(crystal.get_A(), dtype=float).reshape(3, 3)
@@ -224,6 +231,7 @@ def main():
         },
         "scan": {
             "image_range": image_range,
+            "array_range": array_range,
             "oscillation": oscillation,
         },
         "detector": first_panel_metadata(detector),
@@ -304,11 +312,40 @@ def _interp_scan_a(a_scan: np.ndarray, z: float) -> np.ndarray:
     return (1.0 - frac) * a_scan[lo] + frac * a_scan[lo + 1]
 
 
+def _scan_array_range(metadata: dict[str, Any]) -> tuple[int, int]:
+    """Return DIALS' zero-based, half-open scan array range."""
+
+    scan = metadata.get("scan") or {}
+    image_range = scan.get("image_range") or []
+    array_range = scan.get("array_range") or []
+    if array_range:
+        if len(array_range) != 2:
+            raise ValueError("DIALS scan array_range must contain exactly two integers")
+        start, stop = (int(array_range[0]), int(array_range[1]))
+    elif image_range:
+        if len(image_range) != 2:
+            raise ValueError("DIALS scan image_range must contain exactly two integers")
+        start, stop = int(image_range[0]) - 1, int(image_range[1])
+    else:
+        start, stop = 0, 0
+    if stop < start:
+        raise ValueError(f"DIALS scan array_range is reversed: [{start}, {stop}]")
+    if image_range:
+        expected = (int(image_range[0]) - 1, int(image_range[1]))
+        if (start, stop) != expected:
+            raise ValueError(
+                "DIALS scan image_range and array_range disagree: "
+                f"image_range={list(image_range)} implies {list(expected)}, "
+                f"array_range={[start, stop]}"
+            )
+    return start, stop
+
+
 def dials_sg_statistics(arrays: dict[str, np.ndarray], metadata: dict[str, Any], keep: np.ndarray) -> dict[str, Any]:
     """Compute excitation-error diagnostics from the generated GROND geometry."""
 
     if not np.any(keep):
-        return {"status": "no_rows"}
+        return {"status": "error", "message": "no reflection rows survived DIALS bridge filtering", "rows": 0}
     hkl = np.asarray(arrays["hkl"], dtype=float)
     xyzcal = np.asarray(arrays["xyzcal"], dtype=float)
     a_scan = np.asarray(metadata["A_scan_points"], dtype=float)
@@ -322,24 +359,57 @@ def dials_sg_statistics(arrays: dict[str, np.ndarray], metadata: dict[str, Any],
     s0 = np.asarray(metadata["beam"]["s0"], dtype=float)
     k = float(np.linalg.norm(s0))
     start_angle, osc_width = [float(v) for v in metadata["scan"]["oscillation"]]
+    starting_frame, _ = _scan_array_range(metadata)
 
     sg = []
     for i in np.where(keep)[0]:
-        z = float(xyzcal[i, 2])
-        omega = start_angle + z * osc_width
-        a_mat = _interp_scan_a(a_scan, z)
+        scan_z = float(xyzcal[i, 2]) - float(starting_frame)
+        omega = start_angle + scan_z * osc_width
+        a_mat = _interp_scan_a(a_scan, scan_z)
         g = setting @ _rotation_matrix(axis, omega) @ fixed @ a_mat @ hkl[i]
         value = (k * k - float(np.sum((s0 + g) ** 2))) / (2.0 * k)
         sg.append(value)
     sg_arr = np.asarray(sg, dtype=float)
+    finite_sg = sg_arr[np.isfinite(sg_arr)]
+    median_sg = float(np.median(finite_sg)) if len(finite_sg) else None
+    median_abs_sg = float(np.median(np.abs(finite_sg))) if len(finite_sg) else None
+    p95_abs_sg = float(np.percentile(np.abs(finite_sg), 95)) if len(finite_sg) else None
+    max_abs_sg = float(np.max(np.abs(finite_sg))) if len(finite_sg) else None
+    violations = []
+    if len(finite_sg) != len(sg_arr):
+        violations.append(f"{len(sg_arr) - len(finite_sg)} rows produced nonfinite Sg")
+    if p95_abs_sg is None:
+        violations.append("no rows produced a finite Sg")
+    elif p95_abs_sg > DIALS_SG_P95_ABS_LIMIT_INV_A:
+        violations.append(
+            f"p95 |Sg| {p95_abs_sg:.6g} exceeds {DIALS_SG_P95_ABS_LIMIT_INV_A:.6g} A^-1"
+        )
     return {
-        "status": "ok",
+        "status": "error" if violations else "ok",
+        "message": "; ".join(violations),
         "rows": int(len(sg_arr)),
-        "median_sg_inv_A": float(np.nanmedian(sg_arr)),
-        "median_abs_sg_inv_A": float(np.nanmedian(np.abs(sg_arr))),
-        "p95_abs_sg_inv_A": float(np.nanpercentile(np.abs(sg_arr), 95)),
-        "max_abs_sg_inv_A": float(np.nanmax(np.abs(sg_arr))),
+        "finite_rows": int(len(finite_sg)),
+        "starting_frame": int(starting_frame),
+        "median_sg_inv_A": median_sg,
+        "median_abs_sg_inv_A": median_abs_sg,
+        "p95_abs_sg_inv_A": p95_abs_sg,
+        "max_abs_sg_inv_A": max_abs_sg,
+        "limits_inv_A": {
+            "p95_abs_sg": DIALS_SG_P95_ABS_LIMIT_INV_A,
+        },
     }
+
+
+def _require_valid_dials_geometry(stats: dict[str, Any]) -> None:
+    """Refuse a bridge whose predicted rows are grossly off the Ewald sphere."""
+
+    if stats.get("status") == "ok":
+        return
+    raise ValueError(
+        "DIALS geometry validation failed after applying the scan frame origin: "
+        f"{stats.get('message')}. Refusing to write GROND rows. Confirm that the .refl and .expt "
+        "belong together and that the scan, goniometer, and scan-varying crystal model are supported."
+    )
 
 
 def _real_space_axes_from_a(a_static: np.ndarray) -> np.ndarray:
@@ -747,6 +817,29 @@ def convert_dials_to_grond(
     if drop_bad_flags:
         finite &= ~bad_flags
 
+    scan_array_range = _scan_array_range(metadata)
+    starting_frame = int(scan_array_range[0])
+    sg_validation = dials_sg_statistics(arrays, metadata, finite)
+    summary_path = out / "dials_bridge_summary.json"
+    if sg_validation.get("status") == "error":
+        failure_summary = {
+            "status": "failed",
+            "source": "DIALS",
+            "source_refl": str(refl_path),
+            "source_expt": str(expt_path),
+            "out_dir": str(out),
+            "rows_read": int(len(hkl)),
+            "rows_selected": int(np.count_nonzero(finite)),
+            "geometry": {
+                "scan_image_range": metadata.get("scan", {}).get("image_range", []),
+                "scan_array_range": list(scan_array_range),
+                "starting_frame": starting_frame,
+            },
+            "sg_validation": sg_validation,
+        }
+        summary_path.write_text(json.dumps(failure_summary, indent=2, allow_nan=False) + "\n")
+    _require_valid_dials_geometry(sg_validation)
+
     a_scan = np.asarray(metadata["A_scan_points"], dtype=float)
     scan_points_path = out / "DIALS_A_AT_SCAN_POINTS.txt"
     with scan_points_path.open("w") as f:
@@ -796,8 +889,12 @@ def convert_dials_to_grond(
             "!DIALS_SETTING_ROTATION= "
             f"{_format_header_vector(np.asarray(metadata['goniometer']['setting_rotation']).reshape(-1))}\n"
         )
+        image_range = metadata.get("scan", {}).get("image_range", [])
+        if len(image_range) == 2:
+            f.write(f"!DIALS_IMAGE_RANGE= {int(image_range[0])} {int(image_range[1])}\n")
+        f.write(f"!DIALS_ARRAY_RANGE= {scan_array_range[0]} {scan_array_range[1]}\n")
         f.write(f"!X-RAY_WAVELENGTH= {float(metadata['beam']['wavelength_A']):.12g}\n")
-        f.write("!STARTING_FRAME= 0\n")
+        f.write(f"!STARTING_FRAME= {starting_frame}\n")
         f.write(f"!STARTING_ANGLE= {float(scan_osc[0]):.12g}\n")
         f.write(f"!OSCILLATION_RANGE= {float(scan_osc[1]):.12g}\n")
         f.write(f"!ROTATION_AXIS= {_format_header_vector(metadata['goniometer']['rotation_axis'])}\n")
@@ -908,12 +1005,14 @@ def convert_dials_to_grond(
             "scan_points": int(len(a_scan)),
             "scan_oscillation": scan_osc,
             "scan_image_range": metadata.get("scan", {}).get("image_range", []),
+            "scan_array_range": list(scan_array_range),
+            "starting_frame": starting_frame,
             "rotation_axis_lab": metadata.get("goniometer", {}).get("rotation_axis", []),
             "rotation_axis_datum": metadata.get("goniometer", {}).get("rotation_axis_datum", []),
             "fixed_rotation": metadata.get("goniometer", {}).get("fixed_rotation", []),
             "setting_rotation": metadata.get("goniometer", {}).get("setting_rotation", []),
         },
-        "sg_validation": dials_sg_statistics(arrays, metadata, finite),
+        "sg_validation": sg_validation,
         "recommended_grond_args": {
             "xds_dir": str(out),
             "hkl": str(hkl_path),
@@ -921,7 +1020,6 @@ def convert_dials_to_grond(
             "min_peak": 90.0,
         },
     }
-    summary_path = out / "dials_bridge_summary.json"
     summary_path.write_text(json.dumps(summary, indent=2, allow_nan=True) + "\n")
 
     readme = out / "DIALS_BRIDGE_README.md"
@@ -933,6 +1031,7 @@ def convert_dials_to_grond(
         f"- Source experiment list: `{expt_path}`\n"
         f"- Intensity mode: `{mode}` ({intensity_note})\n"
         f"- Sigma mode: `{sigma_summary['mode']}`; multiplier `{sigma_summary['sigma_multiplier']:.6g}` ({sigma_summary['source']}).\n"
+        f"- DIALS scan array range: `{list(scan_array_range)}`; GROND `STARTING_FRAME={starting_frame}`. Raw DIALS z coordinates are preserved.\n"
         "- `PEAK` is `100 * DIALS partiality`, so GROND's ordinary `--min-peak 90` means partiality >= 0.90.\n"
         "- `ALF0` and `BET0` store the DIALS reflection-table `bbox` z-range. GROND can use this as an auditable rocking-width estimate with `--sg-window-mode dials_bbox`.\n"
         "- Rows flagged `dont_integrate` or with severe DIALS bad-pixel/integration flags are dropped by default. Use the keep flags only for diagnostics.\n"

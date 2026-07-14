@@ -6,6 +6,7 @@ import pytest
 from grond.io.dials_bridge import (
     _choose_intensity,
     _dials_sigma_multiplier,
+    _require_valid_dials_geometry,
     _rotation_matrix,
     convert_dials_to_grond,
     dials_sg_statistics,
@@ -81,7 +82,9 @@ def test_bridge_writes_qe_correction_full_geometry_and_raw_sigma_default(tmp_pat
             "fixed_rotation": fixed.tolist(),
             "setting_rotation": setting.tolist(),
         },
-        "scan": {"image_range": [1, 1], "oscillation": [0.0, 1.0]},
+        # Place the synthetic calculated centroid on the Ewald crossing for
+        # the fixed/setting rotations above so the bridge geometry gate is real.
+        "scan": {"image_range": [1, 1], "oscillation": [-35.36177806085131, 1.0]},
         "detector": {"image_size_px": [10, 10], "pixel_size_mm": [0.01, 0.01], "gain": 2.0},
     }
     monkeypatch.setattr(
@@ -101,6 +104,93 @@ def test_bridge_writes_qe_correction_full_geometry_and_raw_sigma_default(tmp_pat
     assert data.setting_rotation == pytest.approx(setting)
     assert summary["sigma_model"]["mode"] == "raw"
     assert summary["sigma_model"]["source"] == "raw"
+
+
+def test_bridge_preserves_cropped_dials_scan_origin(tmp_path, monkeypatch):
+    n = 1
+    first = np.diag([0.10, 0.11, 0.12])
+    second = np.diag([0.20, 0.21, 0.22])
+    reciprocal_length_at_centroid = 0.5 * (first[1, 1] + second[1, 1])
+    bragg_angle = np.degrees(np.arcsin(reciprocal_length_at_centroid / (2.0 * 40.0)))
+    oscillation_width = 0.888
+    arrays = {
+        "hkl": np.array([[0, 1, 0]], dtype=int),
+        "i_sum": np.array([10.0]),
+        "var_sum": np.array([4.0]),
+        "i_scale": np.array([np.nan]),
+        "var_scale": np.array([np.nan]),
+        "lp": np.array([1.0]),
+        "qe": np.array([1.0]),
+        "partiality": np.array([1.0]),
+        "xyzcal": np.array([[1.0, 2.0, 5.5]]),
+        "xyzobs": np.array([[1.1, 2.1, 5.6]]),
+        "bbox": np.array([[0, 1, 0, 1, 5, 7]], dtype=int),
+        "panel": np.zeros(n, dtype=int),
+        "integrated_sum": np.ones(n, dtype=bool),
+        "integrated_prf": np.zeros(n, dtype=bool),
+        "dont_integrate": np.zeros(n, dtype=bool),
+        "scaled": np.zeros(n, dtype=bool),
+    }
+    for flag in (
+        "overloaded",
+        "in_powder_ring",
+        "excluded_for_scaling",
+        "bad_for_scaling",
+        "outlier_in_scaling",
+        "background_includes_bad_pixels",
+        "foreground_includes_bad_pixels",
+        "includes_bad_pixels",
+        "bad_shoebox",
+        "failed_during_background_modelling",
+        "failed_during_summation",
+    ):
+        arrays[flag] = np.zeros(n, dtype=bool)
+    metadata = {
+        "space_group": "P 1",
+        "unit_cell": [10.0, 10.0, 10.0, 90.0, 90.0, 90.0],
+        "A_static": first.tolist(),
+        "A_scan_points": [first.tolist(), second.tolist()],
+        "beam": {"wavelength_A": 0.025, "s0": [0.0, 0.0, -40.0]},
+        "goniometer": {
+            "rotation_axis": [1.0, 0.0, 0.0],
+            "rotation_axis_datum": [1.0, 0.0, 0.0],
+            "fixed_rotation": np.eye(3).tolist(),
+            "setting_rotation": np.eye(3).tolist(),
+        },
+        "scan": {
+            "image_range": [6, 136],
+            "array_range": [5, 136],
+            "oscillation": [bragg_angle - 0.5 * oscillation_width, oscillation_width],
+        },
+        "detector": {"image_size_px": [10, 10], "pixel_size_mm": [0.01, 0.01], "gain": 2.0},
+    }
+    monkeypatch.setattr(
+        "grond.io.dials_bridge._run_dials_helper",
+        lambda *_args, **_kwargs: (arrays, metadata),
+    )
+
+    output = convert_dials_to_grond("input.refl", "input.expt", tmp_path / "bridge")
+    data = XDSData(output.hkl)
+    summary = json.loads(output.summary.read_text())
+
+    assert data.starting_frame == pytest.approx(5.0)
+    assert data.zcal[0] == pytest.approx(5.5)
+    assert data.omega_from_z(5.5) == pytest.approx(bragg_angle)
+    np.testing.assert_allclose(data.A_for_omega(data.omega_from_z(5.5)), 0.5 * (first + second))
+    assert summary["geometry"]["scan_image_range"] == [6, 136]
+    assert summary["geometry"]["scan_array_range"] == [5, 136]
+    assert summary["geometry"]["starting_frame"] == 5
+    assert summary["sg_validation"]["starting_frame"] == 5
+    assert summary["sg_validation"]["status"] == "ok"
+
+    metadata["scan"]["oscillation"] = [-55.56, oscillation_width]
+    failed_dir = tmp_path / "failed_bridge"
+    with pytest.raises(ValueError, match="Refusing to write GROND rows"):
+        convert_dials_to_grond("input.refl", "input.expt", failed_dir)
+    failed_summary = json.loads((failed_dir / "dials_bridge_summary.json").read_text())
+    assert failed_summary["status"] == "failed"
+    assert failed_summary["sg_validation"]["status"] == "error"
+    assert not (failed_dir / "INTEGRATE.HKL").exists()
 
 
 def test_dials_sg_statistics_uses_scan_point_geometry():
@@ -123,6 +213,51 @@ def test_dials_sg_statistics_uses_scan_point_geometry():
     assert stats["status"] == "ok"
     assert stats["rows"] == 2
     assert stats["max_abs_sg_inv_A"] > 0.0
+
+
+def test_dials_sg_statistics_normalizes_cropped_scan_z_and_fails_closed_without_it():
+    reciprocal_length = 0.1
+    beam_length = 40.0
+    bragg_angle = np.degrees(np.arcsin(reciprocal_length / (2.0 * beam_length)))
+    oscillation_width = 0.888
+    metadata = {
+        "A_scan_points": [np.diag([reciprocal_length] * 3).tolist()],
+        "goniometer": {
+            "rotation_axis": [1.0, 0.0, 0.0],
+            "rotation_axis_datum": [1.0, 0.0, 0.0],
+            "fixed_rotation": np.eye(3).tolist(),
+            "setting_rotation": np.eye(3).tolist(),
+        },
+        "beam": {"s0": [0.0, 0.0, -beam_length]},
+        "scan": {
+            "image_range": [6, 136],
+            "array_range": [5, 136],
+            "oscillation": [bragg_angle - 0.5 * oscillation_width, oscillation_width],
+        },
+    }
+    arrays = {
+        "hkl": np.array([[0, 1, 0]], dtype=int),
+        "xyzcal": np.array([[0.0, 0.0, 5.5]], dtype=float),
+    }
+
+    corrected = dials_sg_statistics(arrays, metadata, np.array([True]))
+
+    assert corrected["status"] == "ok"
+    assert corrected["starting_frame"] == 5
+    assert corrected["median_abs_sg_inv_A"] == pytest.approx(0.0, abs=1e-12)
+
+    broken_metadata = dict(metadata)
+    broken_metadata["scan"] = {
+        "image_range": [1, 136],
+        "array_range": [0, 136],
+        "oscillation": metadata["scan"]["oscillation"],
+    }
+    broken = dials_sg_statistics(arrays, broken_metadata, np.array([True]))
+
+    assert broken["status"] == "error"
+    assert broken["p95_abs_sg_inv_A"] > broken["limits_inv_A"]["p95_abs_sg"]
+    with pytest.raises(ValueError, match="Refusing to write GROND rows"):
+        _require_valid_dials_geometry(broken)
 
 
 def test_dials_sg_statistics_uses_full_setting_rotation_fixed_rotation_geometry():
