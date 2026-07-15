@@ -1508,6 +1508,17 @@ def test_numeric_nuisance_contract_handles_nan_only_as_matching_na(
     assert cli.numeric_nuisance_contract_matches(expected, actual) is matches
 
 
+def test_discrete_thickness_baseline_fails_closed_but_has_dry_run_plan_seed():
+    with pytest.raises(RuntimeError, match="no starting nuisance"):
+        cli.discrete_thickness_baseline_nuisance(argparse.Namespace(dry_run=False), {})
+
+    assert cli.discrete_thickness_baseline_nuisance(argparse.Namespace(dry_run=True), {}) == {
+        "thickness_A": 1200.0,
+        "thickness_grad_frac": 0.0,
+        "frame_offset": 0.0,
+    }
+
+
 def test_continuous_full_row_gate_restores_coarse_baseline_on_regression(tmp_path: Path, monkeypatch):
     baseline = tmp_path / "coarse"
     continuous = tmp_path / "continuous"
@@ -3484,6 +3495,57 @@ def test_native_stage_cmd_forwards_explicit_non_path_shelxl(
     assert command.count("--shelxl") == 1
     assert command[command.index("--shelxl") + 1] == str(explicit_shelxl)
     assert ("--skip-endpoint-refinement" in command) is expected_skip
+
+
+def test_native_stage_cmd_forwards_discrete_thickness_promotion_contract(tmp_path: Path):
+    model = tmp_path / "model.res"
+    model.write_text(valid_shelx_res_text())
+    args = build_parser().parse_args(
+        [
+            "auto",
+            "--out-dir",
+            str(tmp_path / "out"),
+            "--xds-dir",
+            str(tmp_path / "xds"),
+            "--structure",
+            str(model),
+        ]
+    )
+    dataset = DatasetSpec(name="sample", hkl=str(tmp_path / "rows.hkl"))
+    args.selection_metric = "free_wR2"
+    args.production_scales = True
+    baseline = {
+        "thickness_A": 1204.5805095106,
+        "thickness_grad_frac": 0.8,
+        "dose_b_ref_frame": float("nan"),
+    }
+
+    command = cli.native_stage_cmd(
+        "python",
+        dataset,
+        str(model),
+        "",
+        tmp_path / "thickness",
+        args,
+        n_basis=24,
+        n_points=10,
+        stage="multi_thickness_polish",
+        pinned=baseline,
+        promotion_baseline=baseline,
+        scale_fit_split_override="work",
+        selection_metric_override="work_wR2",
+        endpoint=False,
+    )
+
+    forwarded = json.loads(command[command.index("--promotion-baseline-json") + 1])
+    assert forwarded["thickness_A"] == baseline["thickness_A"]
+    assert forwarded["thickness_grad_frac"] == baseline["thickness_grad_frac"]
+    assert cli.math.isnan(forwarded["dose_b_ref_frame"])
+    assert float(command[command.index("--promotion-min-gain") + 1]) == args.continuous_thickness_min_gain
+    assert float(command[command.index("--promotion-max-free-wr2-loss") + 1]) == args.continuous_thickness_max_free_wr2_loss
+    assert float(command[command.index("--promotion-max-all-r1-loss") + 1]) == args.continuous_thickness_max_all_r1_loss
+    assert command[command.index("--scale-fit-split") + 1] == "work"
+    assert command[command.index("--selection-metric") + 1] == "work_wR2"
 
 
 def test_observation_polish_cmd_forwards_explicit_non_path_shelxl(tmp_path: Path):

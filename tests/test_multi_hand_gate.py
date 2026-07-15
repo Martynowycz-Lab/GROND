@@ -443,6 +443,11 @@ def _stub_multi_tail(monkeypatch, observed: dict[str, object]) -> None:
     monkeypatch.setattr(cli, "best_nuisance", lambda _run: {"thickness_A": 1000.0})
     monkeypatch.setattr(cli, "resolved_frame_offset_candidates", lambda _run: [])
     monkeypatch.setattr(cli, "continuous_thickness_enabled", lambda _args: False)
+    monkeypatch.setattr(
+        cli,
+        "discrete_thickness_promotion_record",
+        lambda run, **_kwargs: {"family": "discrete_thickness_polish", "status": "accepted", "run": str(run)},
+    )
     monkeypatch.setattr(cli, "run_dataset_policy_gate", lambda *args, **kwargs: {"status": "disabled"})
     monkeypatch.setattr(cli, "write_datasets_csv", lambda *args, **kwargs: None)
     monkeypatch.setattr(cli, "run_scale_window_polish", lambda *args, **kwargs: {})
@@ -471,10 +476,18 @@ def test_multi_selected_shared_hand_reaches_all_nonfast_model_stages(tmp_path: P
     )
     args = _auto_args(tmp_path, model, hkl)
     args.auto_decide = False
-    observed: dict[str, object] = {"native": [], "features": [], "feedback": [], "materializations": []}
+    observed: dict[str, object] = {
+        "native": [],
+        "features": [],
+        "feedback": [],
+        "materializations": [],
+        "thickness_contracts": [],
+    }
 
-    def fake_native(_python, ds, structure, _baseline, _out, _args, *, stage, **_kwargs):
+    def fake_native(_python, ds, structure, _baseline, _out, _args, *, stage, **kwargs):
         observed["native"].append((ds.name, stage, structure))
+        if stage == "multi_thickness_polish":
+            observed["thickness_contracts"].append(kwargs)
         return ["native", stage]
 
     def fake_shared(*_args, **_kwargs):
@@ -515,6 +528,10 @@ def test_multi_selected_shared_hand_reaches_all_nonfast_model_stages(tmp_path: P
     assert observed["feedback"] == [str(alternate)]
     assert observed["materializations"] == [str(model)]
     assert observed["combine_models"] == [str(alternate)]
+    assert observed["thickness_contracts"]
+    assert all(contract["scale_fit_split_override"] == "work" for contract in observed["thickness_contracts"])
+    assert all(contract["selection_metric_override"] == "work_wR2" for contract in observed["thickness_contracts"])
+    assert all(contract["promotion_baseline"]["thickness_A"] == 1000.0 for contract in observed["thickness_contracts"])
     assert result["selected_hand"] == "alternate"
     assert result["model"] == str(alternate)
 
@@ -598,6 +615,7 @@ def _final_hand_summary(
             "scale_fit_split": "work",
             "sg_window": 0.004,
             "sg_window_mode": "fixed",
+            "sg_jitter_mode_grid": "none",
             "sg_window_min": 0.003,
             "sg_window_max": 0.012,
             "sg_window_scale": 1.0,
@@ -632,6 +650,7 @@ def _final_hand_summary(
                 "frame_offset": 0.125,
                 "group_width_deg": 1.0,
                 "detector_scale_bins": 4,
+                "sg_jitter_mode": "none",
                 "sg_jitter_student_df": 5.5,
                 "sg_jitter_width_factor": 2.5,
                 "dose_b_ref_frame": 17.0,
@@ -1022,6 +1041,105 @@ def test_model_and_row_pair_contracts_reject_hidden_inversion_split_drift_and_du
     assert row_contract["nonfinite_counts"]["xds_sigma"] == 1
 
 
+def test_row_pair_contract_accepts_matching_optional_geometry_nan_sentinels(tmp_path: Path):
+    selected_rows = tmp_path / "selected.csv"
+    opposite_rows = tmp_path / "opposite.csv"
+    nullable = {
+        "sg_window_half_frames",
+        "sg_jitter_d_inv_A",
+        "sg_jitter_frame_fraction",
+    }
+    for path in (selected_rows, opposite_rows):
+        _write_final_hand_rows(path)
+        with path.open(newline="") as handle:
+            reader = csv.DictReader(handle)
+            fields = list(reader.fieldnames or [])
+            rows = list(reader)
+        for row in rows:
+            for field in nullable:
+                row[field] = "nan"
+        with path.open("w", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fields)
+            writer.writeheader()
+            writer.writerows(rows)
+
+    row_contract = cli._paired_row_split_contract(
+        selected_rows,
+        opposite_rows,
+        nullable_numeric_fields=nullable,
+    )
+
+    assert row_contract["passed"] is True
+    assert set(row_contract["nullable_numeric_columns"]) == nullable
+    assert all(row_contract["nonfinite_counts"][field] == 0 for field in nullable)
+    assert all(row_contract["matched_nullable_nan_counts"][field] == 4 for field in nullable)
+
+
+@pytest.mark.parametrize("bad_token", ["", "not-a-number", "inf", "-inf"])
+def test_row_pair_contract_never_treats_corrupt_tokens_as_nullable_nan(
+    tmp_path: Path,
+    bad_token: str,
+):
+    selected_rows = tmp_path / "selected.csv"
+    opposite_rows = tmp_path / "opposite.csv"
+    for path in (selected_rows, opposite_rows):
+        _write_final_hand_rows(path)
+        with path.open(newline="") as handle:
+            reader = csv.DictReader(handle)
+            fields = list(reader.fieldnames or [])
+            rows = list(reader)
+        rows[0]["sg_window_half_frames"] = bad_token
+        with path.open("w", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fields)
+            writer.writeheader()
+            writer.writerows(rows)
+
+    row_contract = cli._paired_row_split_contract(
+        selected_rows,
+        opposite_rows,
+        nullable_numeric_fields={"sg_window_half_frames"},
+    )
+
+    assert row_contract["passed"] is False
+    assert row_contract["nonfinite_counts"]["sg_window_half_frames"] == 1
+
+
+def test_row_pair_contract_requires_physics_mode_to_allow_nan(tmp_path: Path):
+    selected_rows = tmp_path / "selected.csv"
+    opposite_rows = tmp_path / "opposite.csv"
+    for path in (selected_rows, opposite_rows):
+        _write_final_hand_rows(path)
+        with path.open(newline="") as handle:
+            reader = csv.DictReader(handle)
+            fields = list(reader.fieldnames or [])
+            rows = list(reader)
+        rows[0]["sg_window_half_frames"] = "nan"
+        with path.open("w", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fields)
+            writer.writeheader()
+            writer.writerows(rows)
+
+    row_contract = cli._paired_row_split_contract(selected_rows, opposite_rows)
+
+    assert row_contract["passed"] is False
+    assert row_contract["nonfinite_counts"]["sg_window_half_frames"] == 1
+
+
+def test_row_contract_nullable_fields_follow_recorded_physics_modes():
+    assert cli._row_contract_nullable_numeric_fields(
+        {"sg_window_mode": "fixed"},
+        {"sg_jitter_mode": "none"},
+    ) == {
+        "sg_window_half_frames",
+        "sg_jitter_d_inv_A",
+        "sg_jitter_frame_fraction",
+    }
+    assert cli._row_contract_nullable_numeric_fields(
+        {"sg_window_mode": "zobs_residual"},
+        {"sg_jitter_mode": "gaussian"},
+    ) == set()
+
+
 def test_native_row_artifact_hkl_and_source_hash_bindings_reject_stale_bytes(tmp_path: Path):
     from grond.legacy.engine.native_row_regularize import native_row_table_artifact
 
@@ -1109,8 +1227,10 @@ def test_native_physics_config_contract_rejects_hand_branch_drift(tmp_path: Path
     assert cli._native_physics_config_contract(selected, opposite)["passed"] is True
 
     opposite["config"]["profile_quadrature"] = "uniform"
+    opposite["config"]["sg_jitter_mode_grid"] = "gaussian"
     opposite["config"]["sg_window"] = 0.005
     drift = cli._native_physics_config_contract(selected, opposite)
     assert drift["passed"] is False
     assert "profile_quadrature" in drift["exact_mismatches"]
+    assert "sg_jitter_mode_grid" in drift["exact_mismatches"]
     assert "sg_window" in drift["numeric_mismatches"]

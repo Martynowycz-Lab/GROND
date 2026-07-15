@@ -310,20 +310,20 @@ def thickness_polish_nuisance(nui: dict, frame_offset_candidates: Sequence[float
     t = safe_float(nui.get("thickness_A"), 1200.0)
     delta = max(100.0, min(400.0, 0.18 * t))
     vals = sorted({max(100.0, t - delta), t, t + delta})
-    out["thickness_A"] = ",".join(f"{v:.6g}" for v in vals)
+    out["thickness_A"] = ",".join(f"{v:.15g}" for v in vals)
     g = safe_float(nui.get("thickness_grad_frac"), 0.0)
     # A uniform-gradient distribution spans t0 * (1 +/- g). Keep g <= 1 so
     # the lower edge cannot cross into nonphysical negative thickness.
     g = min(1.0, max(0.0, g))
     gvals = sorted({max(0.0, g - 0.2), g, min(1.0, g + 0.2)})
-    out["thickness_grad_frac"] = ",".join(f"{v:.6g}" for v in gvals)
+    out["thickness_grad_frac"] = ",".join(f"{v:.15g}" for v in gvals)
     f = safe_float(nui.get("frame_offset"), 0.0)
     fvals = {f - 0.1, f, f + 0.1}
     for candidate in frame_offset_candidates or ():
         value = safe_float(candidate, float("nan"))
         if math.isfinite(value):
             fvals.add(value)
-    out["frame_offset"] = ",".join(f"{v:.6g}" for v in sorted(fvals))
+    out["frame_offset"] = ",".join(f"{v:.15g}" for v in sorted(fvals))
     return out
 
 

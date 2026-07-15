@@ -1799,7 +1799,7 @@ def grid_from_nuisance(nui: dict, key: str, fallback: str) -> str:
 
     value = nui.get(key, fallback)
     try:
-        return f"{float(value):.10g}"
+        return f"{float(value):.15g}"
     except (TypeError, ValueError):
         return str(value or fallback)
 
@@ -2116,7 +2116,9 @@ def native_stage_cmd(
     sg_window_override: float | None = None,
     sg_window_mode_override: str | None = None,
     scale_fit_split_override: str | None = None,
+    selection_metric_override: str | None = None,
     strict_pinned_contract: bool = False,
+    promotion_baseline: Mapping[str, object] | None = None,
 ) -> list[str]:
     """Build one native nuisance-regularization command for the vendored engine."""
 
@@ -2241,7 +2243,7 @@ def native_stage_cmd(
         "--scale-fit-split",
         scale_fit_split,
         "--selection-metric",
-        args.selection_metric,
+        selection_metric_override or args.selection_metric,
         "--lambda-grid",
         lambda_grid,
         "--scale-smoothness",
@@ -2306,6 +2308,19 @@ def native_stage_cmd(
                 grid_from_nuisance(pinned, "native_wght_a", "") if "native_wght_a" in pinned else "",
                 "--wght-b-grid",
                 grid_from_nuisance(pinned, "native_wght_b", "") if "native_wght_b" in pinned else "",
+            ]
+        )
+    if promotion_baseline:
+        cmd.extend(
+            [
+                "--promotion-baseline-json",
+                json.dumps(dict(promotion_baseline), sort_keys=True, allow_nan=True),
+                "--promotion-min-gain",
+                str(float(args.continuous_thickness_min_gain)),
+                "--promotion-max-free-wr2-loss",
+                str(float(args.continuous_thickness_max_free_wr2_loss)),
+                "--promotion-max-all-r1-loss",
+                str(float(args.continuous_thickness_max_all_r1_loss)),
             ]
         )
     if ds.include_nonpositive:
@@ -2504,6 +2519,50 @@ def numeric_nuisance_contract_matches(expected_value: object, actual_value: obje
         return False
     tolerance = 1e-8 * max(1.0, abs(expected))
     return abs(actual - expected) <= tolerance
+
+
+def discrete_thickness_promotion_record(run: Path, *, dry_run: bool) -> dict:
+    """Return the engine's auditable post-ranking thickness decision."""
+
+    run = Path(run)
+    artifact = run / "discrete_thickness_promotion.json"
+    if dry_run:
+        return {
+            "family": "discrete_thickness_polish",
+            "status": "planned",
+            "run": str(run),
+            "artifact": str(artifact),
+        }
+    summary_path = run / "summary.json"
+    summary = try_read_json(summary_path)
+    decision = summary.get("promotion_decision")
+    if not isinstance(decision, Mapping) or str(decision.get("status", "")) == "not_requested":
+        raise RuntimeError(
+            "discrete thickness stage did not record the required held-out promotion decision: "
+            f"{summary_path}"
+        )
+    return {
+        **dict(decision),
+        "run": str(run),
+        "artifact": str(artifact),
+    }
+
+
+def discrete_thickness_baseline_nuisance(args: argparse.Namespace, nuisance: Mapping[str, object] | None) -> dict:
+    """Require a real starting nuisance, with a planning-only dry-run seed."""
+
+    if nuisance:
+        return dict(nuisance)
+    if bool(getattr(args, "dry_run", False)):
+        return {
+            "thickness_A": 1200.0,
+            "thickness_grad_frac": 0.0,
+            "frame_offset": 0.0,
+        }
+    raise RuntimeError(
+        "discrete thickness polishing has no starting nuisance from the preceding stage; "
+        "refusing to run an unguarded work-only search"
+    )
 
 
 def materialize_continuous_nuisance_run(
@@ -5714,6 +5773,7 @@ def _native_physics_config_contract(
         "n_points",
         "thickness_points",
         "sg_window_mode",
+        "sg_jitter_mode_grid",
         "profile_quadrature",
         "profile_accumulation",
         "split_seed",
@@ -5799,7 +5859,30 @@ def _native_physics_config_contract(
     }
 
 
-def _paired_row_split_contract(best_path: Path, other_path: Path) -> dict[str, object]:
+def _row_contract_nullable_numeric_fields(
+    config: Mapping[str, object],
+    nuisance: Mapping[str, object],
+) -> set[str]:
+    """Return row fields that are physically not applicable for this run."""
+
+    nullable: set[str] = set()
+    sg_window_mode = str(config.get("sg_window_mode", "") or "").strip().lower()
+    if sg_window_mode in {"fixed", "rlp_peak"}:
+        nullable.add("sg_window_half_frames")
+    sg_jitter_mode = str(
+        nuisance.get("sg_jitter_mode", config.get("sg_jitter_mode", "")) or ""
+    ).strip().lower()
+    if sg_jitter_mode == "none":
+        nullable.update({"sg_jitter_d_inv_A", "sg_jitter_frame_fraction"})
+    return nullable
+
+
+def _paired_row_split_contract(
+    best_path: Path,
+    other_path: Path,
+    *,
+    nullable_numeric_fields: set[str] | None = None,
+) -> dict[str, object]:
     """Verify identical selected/opposite observation and row-selection contracts."""
 
     key_fields = ("row_index", "h", "k", "l")
@@ -5835,6 +5918,12 @@ def _paired_row_split_contract(best_path: Path, other_path: Path) -> dict[str, o
         "sg_profile_weight_sum",
         "max_sg_solve_residual",
     )
+    nullable_numeric_fields = set(nullable_numeric_fields or ())
+    unknown_nullable_fields = nullable_numeric_fields - set(numeric_fields)
+    if unknown_nullable_fields:
+        raise ValueError(
+            "unknown nullable row-contract fields: " + ", ".join(sorted(unknown_nullable_fields))
+        )
     relative_tolerance = 1e-12
     absolute_tolerance = 1e-12
 
@@ -5869,7 +5958,19 @@ def _paired_row_split_contract(best_path: Path, other_path: Path) -> dict[str, o
     exact_mismatch_counts = {field: 0 for field in exact_fields}
     numeric_mismatch_counts = {field: 0 for field in numeric_fields}
     nonfinite_counts = {field: 0 for field in numeric_fields}
+    matched_nullable_nan_counts = {field: 0 for field in nullable_numeric_fields}
     mismatch_examples: list[dict[str, object]] = []
+
+    def parsed_numeric_token(raw: str) -> tuple[str, float]:
+        token = str(raw).strip()
+        if token.lower() == "nan":
+            return "nan", float("nan")
+        try:
+            value = float(token)
+        except (TypeError, ValueError):
+            return "invalid", float("nan")
+        return ("finite", value) if math.isfinite(value) else ("invalid", value)
+
     for key in sorted(joined):
         for field in exact_fields:
             if best[key][field] != other[key][field]:
@@ -5884,9 +5985,16 @@ def _paired_row_split_contract(best_path: Path, other_path: Path) -> dict[str, o
                         }
                     )
         for field in numeric_fields:
-            selected_value = safe_float(best[key][field], float("nan"))
-            opposite_value = safe_float(other[key][field], float("nan"))
-            if not math.isfinite(selected_value) or not math.isfinite(opposite_value):
+            selected_kind, selected_value = parsed_numeric_token(best[key][field])
+            opposite_kind, opposite_value = parsed_numeric_token(other[key][field])
+            if selected_kind != "finite" or opposite_kind != "finite":
+                if (
+                    field in nullable_numeric_fields
+                    and selected_kind == "nan"
+                    and opposite_kind == "nan"
+                ):
+                    matched_nullable_nan_counts[field] += 1
+                    continue
                 nonfinite_counts[field] += 1
                 if len(mismatch_examples) < 20:
                     mismatch_examples.append(
@@ -5895,7 +6003,11 @@ def _paired_row_split_contract(best_path: Path, other_path: Path) -> dict[str, o
                             "column": field,
                             "selected": best[key][field],
                             "opposite": other[key][field],
-                            "reason": "nonfinite",
+                            "reason": (
+                                "nan_not_allowed"
+                                if selected_kind == "nan" and opposite_kind == "nan"
+                                else "invalid_or_nonfinite_numeric_token"
+                            ),
                         }
                     )
             elif not math.isclose(
@@ -5947,6 +6059,8 @@ def _paired_row_split_contract(best_path: Path, other_path: Path) -> dict[str, o
         "duplicate_keys_opposite": duplicates_other,
         "exact_columns_checked": list(exact_fields),
         "numeric_columns_checked": list(numeric_fields),
+        "nullable_numeric_columns": sorted(nullable_numeric_fields),
+        "matched_nullable_nan_counts": matched_nullable_nan_counts,
         "ignored_policy_columns": ["raw_row_weight", "endpoint_weight", "sigma_eff_original"],
         "ignored_policy_reason": (
             "policy annotation columns are not consumed by absolute_structure_diagnostic; sigma_eff itself must "
@@ -6266,6 +6380,10 @@ def run_multi_post_feedback_hand_diagnostic(
             row_pair_contract = _paired_row_split_contract(
                 Path(context["selected_table"]),
                 opposite_run / "native_dyn_calc.csv",
+                nullable_numeric_fields=_row_contract_nullable_numeric_fields(
+                    context["config"],
+                    context["nuisance"],
+                ),
             )
             row_join = stats.get("row_join") if isinstance(stats.get("row_join"), Mapping) else {}
             row_counts = {
@@ -6635,6 +6753,7 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
     feature_records: list[dict] = []
     if not args.fast:
         thickness_run = root / "runs" / ds.name / "adaptive_thickness_polish"
+        thickness_baseline = discrete_thickness_baseline_nuisance(args, active_nui)
         run_logged(
             native_stage_cmd(
                 python,
@@ -6646,7 +6765,10 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
                 n_basis=args.screen_n_basis,
                 n_points=args.screen_n_points,
                 stage="adaptive_thickness_polish",
-                pinned=thickness_polish_nuisance(active_nui, screen_frame_offsets),
+                pinned=thickness_polish_nuisance(thickness_baseline, screen_frame_offsets),
+                promotion_baseline=thickness_baseline,
+                scale_fit_split_override="work",
+                selection_metric_override="work_wR2",
                 make_maps=False,
                 endpoint=False,
             ),
@@ -6656,6 +6778,7 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
         )
         regularized_nui = best_nuisance(thickness_run) or active_nui
         feature_source = thickness_run
+        feature_records.append(discrete_thickness_promotion_record(thickness_run, dry_run=bool(args.dry_run)))
         continuous_seed = continuous_thickness_seed_nuisance(args, regularized_nui, active_nui)
         if continuous_thickness_enabled(args) and continuous_seed:
             continuous_baseline_run = feature_source
@@ -7333,6 +7456,7 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
         screen_frame_offsets = resolved_frame_offset_candidates(screen_runs[ds.name])
         if not args.fast:
             thick = root / "runs" / ds.name / "multi_thickness_polish"
+            thickness_baseline = discrete_thickness_baseline_nuisance(args, active_nui)
             run_logged(
                 native_stage_cmd(
                     python,
@@ -7344,7 +7468,10 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
                     n_basis=args.screen_n_basis,
                     n_points=args.screen_n_points,
                     stage="multi_thickness_polish",
-                    pinned=thickness_polish_nuisance(active_nui, screen_frame_offsets),
+                    pinned=thickness_polish_nuisance(thickness_baseline, screen_frame_offsets),
+                    promotion_baseline=thickness_baseline,
+                    scale_fit_split_override="work",
+                    selection_metric_override="work_wR2",
                     make_maps=False,
                     endpoint=False,
                 ),
@@ -7354,6 +7481,9 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
             )
             active_run = thick
             active_nui = best_nuisance(thick) or active_nui
+            feature_records: list[dict] = [
+                discrete_thickness_promotion_record(thick, dry_run=bool(args.dry_run))
+            ]
             continuous_seed = continuous_thickness_seed_nuisance(args, active_nui)
             if continuous_thickness_enabled(args) and continuous_seed:
                 continuous_baseline_run = active_run
@@ -7391,7 +7521,6 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
                 )
             else:
                 materialization_record = None
-            feature_records: list[dict] = []
             if materialization_record is not None:
                 feature_records.append(materialization_record)
             for family in ["row_resolution", "absorption", "sg_jitter", "sigma_error", "dose"]:
