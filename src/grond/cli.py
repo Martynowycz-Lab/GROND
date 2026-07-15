@@ -8003,6 +8003,21 @@ def cmd_import_dials(args: argparse.Namespace) -> int:
     return 0
 
 
+def _finalize_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argparse.Namespace) -> dict:
+    """Write real-run statistics, or describe an intentionally unmaterialized dry run."""
+
+    if bool(getattr(args, "dry_run", False)):
+        return {
+            "status": "dry_run",
+            "out_dir": str(Path(args.out_dir).expanduser().resolve()),
+            "note": (
+                "Command planning completed without executing scientific stages. "
+                "No endpoint or row-level statistics were materialized."
+            ),
+        }
+    return write_quick_stats(prep, result, args)
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     """CLI entrypoint for the configurable `GROND run` workflow."""
 
@@ -8180,7 +8195,9 @@ def cmd_run(args: argparse.Namespace) -> int:
     result["publication_endpoint_chooser"] = run_publication_endpoint_chooser(prep, result, args)
     result["publication_tables"] = run_publication_report(python, prep, result, args, logs)
     result["continue_checkpoint"] = write_continue_checkpoint(prep, result, args)
-    result["quick_stats"] = write_quick_stats(prep, result, args)
+    if bool(getattr(args, "dry_run", False)):
+        result["status"] = "dry_run"
+    result["quick_stats"] = _finalize_quick_stats(prep, result, args)
     (Path(args.out_dir) / "grond_summary.json").write_text(json.dumps(result, indent=2) + "\n")
     finished = _PROGRESS.mark_finished(str(result.get("status", "ok"))) if _PROGRESS else _quick_progress_finish_info(Path(args.out_dir))
     quick = result.get("quick_stats") if isinstance(result.get("quick_stats"), Mapping) else {}
@@ -10085,6 +10102,15 @@ def _format_terminal_finish_summary(payload: Mapping[str, object]) -> str:
 
     status = str(payload.get("status", "ok"))
     out_dir = str(payload.get("out_dir", ""))
+    if status == "dry_run":
+        return "\n".join(
+            [
+                "",
+                "GROND dry run completed successfully.",
+                f"Output directory: {out_dir}",
+                "Commands were planned, but no scientific stages ran and no endpoint statistics were generated.",
+            ]
+        )
     final_hand = str(payload.get("final_hand", "n/a"))
     transform = str(payload.get("selected_transform", "n/a"))
     t_all = payload.get("final_hand_t_style_all", payload.get("final_hand_z_all"))

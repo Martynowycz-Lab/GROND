@@ -1028,6 +1028,29 @@ def test_terminal_finish_summary_is_human_readable():
     assert "Publication endpoint: R1(F)gt 14.46%, R1(F)all 17.85%, wR2(F^2)all 25.72%, GooF 1.036" in text
 
 
+def test_dry_run_finalization_does_not_require_materialized_row_statistics(tmp_path: Path, monkeypatch):
+    prep = PrepConfig(
+        structure=str(tmp_path / "model.res"),
+        datasets=[DatasetSpec(name="dataset", hkl=str(tmp_path / "INTEGRATE.HKL"))],
+    )
+    args = argparse.Namespace(out_dir=str(tmp_path / "dry_run"), dry_run=True)
+
+    def unexpected_quick_stats(*_args, **_kwargs):
+        raise AssertionError("dry-run finalization must not inspect materialized row tables")
+
+    monkeypatch.setattr(cli, "write_quick_stats", unexpected_quick_stats)
+
+    quick = cli._finalize_quick_stats(prep, {}, args)
+    text = cli._format_terminal_finish_summary(
+        {"status": "dry_run", "out_dir": str(tmp_path / "dry_run"), "quick_stats": quick}
+    )
+
+    assert quick["status"] == "dry_run"
+    assert "No endpoint or row-level statistics were materialized" in quick["note"]
+    assert "GROND dry run completed successfully" in text
+    assert "no scientific stages ran" in text
+
+
 def test_q_field_stability_compares_shared_signed_rows(tmp_path: Path):
     reference = tmp_path / "ref.csv"
     candidate = tmp_path / "cand.csv"
