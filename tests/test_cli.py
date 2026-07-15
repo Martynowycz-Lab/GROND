@@ -24,6 +24,7 @@ from grond.cli import (
     transform_scout_job_count,
 )
 from grond.io.config import DatasetSpec, PrepConfig, write_prep
+from grond.progress import ProgressState
 
 EXPECTED_CLI_COMMANDS = {
     "auto",
@@ -738,12 +739,32 @@ def test_finish_regenerates_compact_package(tmp_path: Path, capsys):
             }
         )
     )
+    (run / "grond_progress.json").write_text(
+        json.dumps(
+            {
+                "completed": {},
+                "finished": {
+                    "status": "ok",
+                    "snapshot_kind": "completed_invocation",
+                    "invocation_elapsed_seconds": 300.0,
+                    "completed_stages": 0,
+                    "failed_stages": 0,
+                    "estimated_stages": 0,
+                    "cumulative_stage_elapsed_seconds": 0.0,
+                    "stage_elapsed_seconds": 0.0,
+                },
+            }
+        )
+        + "\n"
+    )
 
     args = build_parser().parse_args(["finish", "--run-dir", str(run), "--no-make-maps", "--json"])
     cli.cmd_finish(args)
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["status"] == "ok"
+    assert payload["timing_context"]["kind"] == "finish_replay"
+    assert payload["finished"]["invocation_elapsed_seconds"] == 300.0
     assert payload["publication_endpoint"]["R1all"] == pytest.approx(0.1105)
     assert (run / "FINAL_SUMMARY.md").exists()
     assert (run / "QUICK_STATS.md").exists()
@@ -958,7 +979,15 @@ def test_terminal_finish_summary_is_human_readable():
         "final_summary": "/tmp/grond/FINAL_SUMMARY.md",
         "quick_stats": "/tmp/grond/QUICK_STATS.md",
         "full_json": "/tmp/grond/grond_summary.json",
-        "finished": {"completed_stages": 25, "estimated_stages": 30, "stage_elapsed_seconds": 822},
+        "finished": {
+            "completed_stages": 25,
+            "completed_this_invocation": 20,
+            "reused_completed_stages": 5,
+            "estimated_stages": 30,
+            "invocation_elapsed_seconds": 300,
+            "cumulative_stage_elapsed_seconds": 822,
+            "stage_elapsed_seconds": 822,
+        },
         "final_hand": "alternate",
         "final_hand_t_style_all": 1.505,
         "final_hand_t_style_all_n": 40,
@@ -1012,8 +1041,15 @@ def test_terminal_finish_summary_is_human_readable():
 
     text = cli._format_terminal_finish_summary(payload)
 
-    assert "GROND finished successfully in 13m42s." in text
-    assert "Progress: 25 stages completed; initial estimate was 30." in text
+    assert "GROND finished successfully in 5m00s wall time for this invocation." in text
+    assert "successfully in 13m42s" not in text
+    assert (
+        "Progress: 25 stages completed; initial estimate was 30; 20 ran in this invocation; "
+        "5 reused from prior invocations." in text
+    )
+    assert "Timing: cumulative completed-stage runtime 13m42s." in text
+    assert "concurrent stages overlap" in text
+    assert "not workflow wall time" in text
     assert "Hand: alternate (paired t-style all/free = t 1.505 (n 40, df 39) / t 0.876 (n 10, df 9)" in text
     assert "not a calibrated normal Z score" in text
     assert "normal-equivalent confidence" not in text
@@ -1026,6 +1062,89 @@ def test_terminal_finish_summary_is_human_readable():
     assert "Change: R(I)all -0.83 pp, wR(I)all -10.31 pp" in text
     assert "Direct LS1 corrected-HKL candidate: R1(F)gt 11.00%, R1(F)all 16.00%, wR2(F^2)all 22.00%, GooF 0.950" in text
     assert "Publication endpoint: R1(F)gt 14.46%, R1(F)all 17.85%, wR2(F^2)all 25.72%, GooF 1.036" in text
+
+
+def test_terminal_finish_summary_does_not_treat_legacy_stage_sum_as_wall_time():
+    text = cli._format_terminal_finish_summary(
+        {
+            "status": "ok",
+            "out_dir": "/tmp/legacy",
+            "finished": {
+                "completed_stages": 4,
+                "estimated_stages": 4,
+                "stage_elapsed_seconds": 600,
+            },
+        }
+    )
+
+    assert "GROND finished successfully." in text
+    assert "GROND finished successfully in 10m00s" not in text
+    assert "Timing: cumulative completed-stage runtime 10m00s." in text
+    assert "not workflow wall time" in text
+
+
+def test_terminal_finish_summary_labels_recorded_workflow_timing_for_finish():
+    text = cli._format_terminal_finish_summary(
+        {
+            "status": "ok",
+            "out_dir": "/tmp/grond",
+            "finished": {
+                "completed_stages": 25,
+                "estimated_stages": 25,
+                "invocation_elapsed_seconds": 300,
+                "cumulative_stage_elapsed_seconds": 822,
+            },
+            "timing_context": {
+                "kind": "finish_replay",
+                "finish_invocation_elapsed_seconds": 2,
+            },
+        }
+    )
+
+    assert "GROND finish completed successfully in 0m02s wall time." in text
+    assert "recorded workflow wall time 5m00s" in text
+    assert "wall time for this invocation" not in text
+    assert "cumulative completed-stage runtime 13m42s" in text
+
+
+def test_quick_progress_info_keeps_saved_metadata_but_recomputes_counts_and_stage_sum(tmp_path: Path):
+    (tmp_path / "grond_progress.json").write_text(
+        json.dumps(
+            {
+                "completed": {
+                    "old": {"returncode": 0, "elapsed_seconds": 40.0},
+                    "new": {"returncode": 0, "elapsed_seconds": 30.0},
+                    "failed": {"returncode": 1, "elapsed_seconds": 99.0},
+                },
+                "finished": {
+                    "status": "ok",
+                    "snapshot_kind": "completed_invocation",
+                    "invocation_elapsed_seconds": 20.0,
+                    "completed_stages": 1,
+                    "completed_this_invocation": 1,
+                    "reused_completed_stages": 0,
+                    "failed_stages": 0,
+                    "cumulative_stage_elapsed_seconds": 40.0,
+                    "stage_elapsed_seconds": 40.0,
+                },
+            }
+        )
+        + "\n"
+    )
+
+    info = cli._quick_progress_finish_info(tmp_path)
+
+    assert info["status"] == "ok"
+    assert info["snapshot_kind"] == "completed_invocation"
+    assert info["invocation_elapsed_seconds"] == 20.0
+    assert info["completed_stages"] == 2
+    assert info["completed_this_invocation"] == 1
+    assert info["reused_completed_stages"] == 1
+    assert info["failed_stages"] == 1
+    assert info["cumulative_stage_elapsed_seconds"] == 70.0
+    assert info["stage_elapsed_seconds"] == 70.0
+    assert info["cumulative_stage_elapsed"] == "1m10s"
+    assert info["stage_elapsed"] == "1m10s"
 
 
 def test_dry_run_finalization_does_not_require_materialized_row_statistics(tmp_path: Path, monkeypatch):
@@ -1049,6 +1168,86 @@ def test_dry_run_finalization_does_not_require_materialized_row_statistics(tmp_p
     assert "No endpoint or row-level statistics were materialized" in quick["note"]
     assert "GROND dry run completed successfully" in text
     assert "no scientific stages ran" in text
+
+
+def test_run_completion_report_failure_does_not_persist_finished(tmp_path: Path, monkeypatch):
+    out_dir = tmp_path / "run"
+    state = ProgressState(root=out_dir, resume=True, total=0)
+    state.begin_invocation()
+    prep = PrepConfig(
+        structure=str(tmp_path / "model.res"),
+        datasets=[DatasetSpec(name="dataset", hkl=str(tmp_path / "INTEGRATE.HKL"))],
+    )
+    args = argparse.Namespace(out_dir=str(out_dir), dry_run=False)
+
+    def fail_quick_stats(*_args, **_kwargs):
+        raise RuntimeError("quick stats failed")
+
+    monkeypatch.setattr(cli, "_finalize_quick_stats", fail_quick_stats)
+
+    with pytest.raises(RuntimeError, match="quick stats failed"):
+        cli._write_run_completion_artifacts(prep, {}, args)
+
+    assert "finished" not in state.load()
+    assert not (out_dir / "grond_summary.json").exists()
+
+
+def test_run_completion_summary_write_failure_does_not_persist_finished(tmp_path: Path, monkeypatch):
+    out_dir = tmp_path / "run"
+    out_dir.mkdir()
+    (out_dir / "grond_summary.json").mkdir()
+    state = ProgressState(root=out_dir, resume=True, total=0)
+    state.begin_invocation()
+    prep = PrepConfig(
+        structure=str(tmp_path / "model.res"),
+        datasets=[DatasetSpec(name="dataset", hkl=str(tmp_path / "INTEGRATE.HKL"))],
+    )
+    args = argparse.Namespace(out_dir=str(out_dir), dry_run=False)
+    monkeypatch.setattr(cli, "_finalize_quick_stats", lambda *_args, **_kwargs: {"status": "ok"})
+
+    with pytest.raises(IsADirectoryError):
+        cli._write_run_completion_artifacts(prep, {}, args)
+
+    assert "finished" not in state.load()
+    assert state.load()["invocation"]["status"] == "running"
+
+
+def test_configured_run_invocation_clears_finished_before_fully_skipped_resume(
+    tmp_path: Path,
+    monkeypatch,
+):
+    out_dir = tmp_path / "run"
+    prior = ProgressState(root=out_dir, resume=True, total=0)
+    prior.mark_finished("ok")
+    assert prior.load()["finished"]["status"] == "ok"
+    monkeypatch.setattr(cli, "_PROGRESS", None)
+
+    cli.configure_progress(
+        out_dir / "logs",
+        resume=True,
+        total=0,
+        begin_invocation=True,
+    )
+
+    assert cli._PROGRESS is not None
+    payload = cli._PROGRESS.load()
+    assert "finished" not in payload
+    assert payload["invocation"]["status"] == "running"
+
+
+def test_generic_progress_configuration_preserves_finished_without_run_lifecycle(
+    tmp_path: Path,
+    monkeypatch,
+):
+    out_dir = tmp_path / "standalone"
+    prior = ProgressState(root=out_dir, resume=True, total=0)
+    prior.mark_finished("ok")
+    monkeypatch.setattr(cli, "_PROGRESS", None)
+
+    cli.configure_progress(out_dir / "logs", resume=True, total=1)
+
+    assert cli._PROGRESS is not None
+    assert cli._PROGRESS.load()["finished"]["status"] == "ok"
 
 
 def test_q_field_stability_compares_shared_signed_rows(tmp_path: Path):
@@ -2783,7 +2982,22 @@ def test_write_quick_stats_summarizes_row_and_endpoint_tables(tmp_path):
                             "/new/GROND/src/grond/legacy/engine/native_row_regularize.py",
                         ],
                     },
-                }
+                    "failed": {
+                        "returncode": 1,
+                        "elapsed_seconds": 99.0,
+                        "log": str(out_dir / "logs" / "failed.log"),
+                        "command": ["false"],
+                    },
+                },
+                "finished": {
+                    "status": "ok",
+                    "invocation_elapsed_seconds": 1.25,
+                    "cumulative_stage_elapsed_seconds": 3.0,
+                    "stage_elapsed_seconds": 3.0,
+                    "completed_stages": 2,
+                    "failed_stages": 1,
+                    "estimated_stages": 2,
+                },
             }
         )
         + "\n"
@@ -2831,7 +3045,10 @@ def test_write_quick_stats_summarizes_row_and_endpoint_tables(tmp_path):
     assert "Resume Warning" in text
     assert "mixed-code resume" in text
     assert "Stage Timings" in text
-    assert "Total completed stage wall time: `0m03s`" in text
+    assert "Recorded workflow wall time: `0m01s`" in text
+    assert "Cumulative completed-stage runtime: `0m03s`" in text
+    assert "Total completed stage wall time" not in text
+    assert "not workflow wall time" in text
     assert "Input Contract, Hand, And Paired T-Style Diagnostics" in text
     assert "SFAC / endpoint wavelength check | status `ok`; endpoint wavelength `0.025079` A" in text
     assert "selected HKL transform | `identity`" in text

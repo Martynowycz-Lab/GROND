@@ -106,8 +106,15 @@ def test_progress_resume_hashes_explicit_shelxl_executable(tmp_path):
     assert not state.should_skip("native", command)
 
 
-def test_progress_records_finished_workflow(tmp_path):
-    state = ProgressState(root=tmp_path, resume=True, total=3)
+def test_progress_records_finished_workflow(tmp_path, monkeypatch):
+    state = ProgressState(
+        root=tmp_path,
+        resume=True,
+        total=3,
+        started_at=1_700_000_000.0,
+        invocation_started_monotonic=100.0,
+    )
+    monkeypatch.setattr(progress.time, "perf_counter", lambda: 112.5)
     (tmp_path / "a.log").write_text("done\n")
     (tmp_path / "b.log").write_text("done\n")
     state.mark_completed("stage_a", ["python", "a.py"], 2.0, 0, tmp_path / "a.log")
@@ -116,10 +123,73 @@ def test_progress_records_finished_workflow(tmp_path):
     finished = state.mark_finished("ok")
 
     assert finished["status"] == "ok"
+    assert finished["snapshot_kind"] == "completed_invocation"
     assert finished["completed_stages"] == 2
+    assert finished["completed_this_invocation"] == 2
+    assert finished["reused_completed_stages"] == 0
     assert finished["estimated_stages"] == 3
+    assert finished["invocation_elapsed_seconds"] == 12.5
+    assert finished["cumulative_stage_elapsed_seconds"] == 5.0
     assert finished["stage_elapsed_seconds"] == 5.0
     assert state.load()["finished"]["completed_stages"] == 2
+
+
+def test_progress_separates_resumed_stage_runtime_from_current_wall_time(tmp_path, monkeypatch):
+    (tmp_path / "a.log").write_text("done\n")
+    (tmp_path / "b.log").write_text("done\n")
+    prior = ProgressState(root=tmp_path, resume=True, total=2)
+    prior.mark_completed("stage_a", ["python", "a.py"], 40.0, 0, tmp_path / "a.log")
+
+    resumed = ProgressState(
+        root=tmp_path,
+        resume=True,
+        total=2,
+        invocation_started_monotonic=200.0,
+    )
+    resumed.mark_completed("stage_b", ["python", "b.py"], 30.0, 0, tmp_path / "b.log")
+    monkeypatch.setattr(progress.time, "perf_counter", lambda: 220.0)
+
+    finished = resumed.mark_finished("ok")
+
+    assert finished["invocation_elapsed_seconds"] == 20.0
+    assert finished["cumulative_stage_elapsed_seconds"] == 70.0
+    assert finished["stage_elapsed_seconds"] == 70.0
+    assert finished["completed_this_invocation"] == 1
+    assert finished["reused_completed_stages"] == 1
+
+
+def test_started_resume_clears_stale_finished_status(tmp_path):
+    log = tmp_path / "stage.log"
+    log.write_text("done\n")
+    prior = ProgressState(root=tmp_path, resume=True, total=1)
+    prior.mark_completed("stage", ["python", "stage.py"], 5.0, 0, log)
+    prior.mark_finished("ok")
+    assert prior.load()["finished"]["status"] == "ok"
+
+    resumed = ProgressState(root=tmp_path, resume=True, total=1)
+    resumed.mark_started("stage", ["python", "changed_stage.py"])
+
+    payload = resumed.load()
+    assert "finished" not in payload
+    assert payload["current"]["label"] == "stage"
+
+
+def test_begin_invocation_clears_finished_before_fully_skipped_resume(tmp_path):
+    log = tmp_path / "stage.log"
+    log.write_text("done\n")
+    prior = ProgressState(root=tmp_path, resume=True, total=1)
+    prior.mark_completed("stage", ["python", "stage.py"], 5.0, 0, log)
+    prior.mark_finished("ok")
+
+    resumed = ProgressState(root=tmp_path, resume=True, total=1)
+    resumed.begin_invocation()
+    preview = resumed.finish_info("ok")
+
+    payload = resumed.load()
+    assert "finished" not in payload
+    assert payload["invocation"]["status"] == "running"
+    assert preview["snapshot_kind"] == "pre_packaging_preview"
+    assert "finished" not in resumed.load()
 
 
 def test_progress_invalidates_repeated_named_run_directory_inputs(tmp_path):

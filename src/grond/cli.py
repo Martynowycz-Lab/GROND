@@ -102,11 +102,29 @@ XDS_TARGET_MODE_LABELS = {
 }
 
 
-def configure_progress(log_dir: Path, *, resume: bool, total: int) -> None:
+def configure_progress(
+    log_dir: Path,
+    *,
+    resume: bool,
+    total: int,
+    invocation_started_monotonic: float | None = None,
+    invocation_started_at: float | None = None,
+    begin_invocation: bool = False,
+) -> None:
     """Attach CLI progress and resume tracking to the current run."""
 
     global _PROGRESS
-    _PROGRESS = ProgressState(root=log_dir.parent, resume=resume, total=total)
+    _PROGRESS = ProgressState(
+        root=log_dir.parent,
+        resume=resume,
+        total=total,
+        started_at=time.time() if invocation_started_at is None else invocation_started_at,
+        invocation_started_monotonic=(
+            time.perf_counter() if invocation_started_monotonic is None else invocation_started_monotonic
+        ),
+    )
+    if begin_invocation:
+        _PROGRESS.begin_invocation()
 
 
 def _stage_output_dir(cmd: list[str]) -> Path | None:
@@ -8147,9 +8165,26 @@ def _finalize_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: 
     return write_quick_stats(prep, result, args)
 
 
+def _write_run_completion_artifacts(
+    prep: PrepConfig,
+    result: dict[str, object],
+    args: argparse.Namespace,
+) -> dict[str, object]:
+    """Write reports and the run summary before completion is persisted."""
+
+    result.pop("finished", None)
+    result.pop("finish_preview", None)
+    quick = _finalize_quick_stats(prep, result, args)
+    result["quick_stats"] = quick
+    (Path(args.out_dir) / "grond_summary.json").write_text(json.dumps(result, indent=2) + "\n")
+    return quick
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     """CLI entrypoint for the configurable `GROND run` workflow."""
 
+    invocation_started_monotonic = time.perf_counter()
+    invocation_started_at = time.time()
     args.out_dir = str(Path(args.out_dir).expanduser().resolve())
     Path(args.out_dir).mkdir(parents=True, exist_ok=True)
     logs = Path(args.out_dir) / "logs"
@@ -8177,7 +8212,14 @@ def cmd_run(args: argparse.Namespace) -> int:
             + f" Report: {sfac_check_path}"
         )
     raise_for_missing_external_tools(args, structure=prep.structure, multi_dataset=len(prep.datasets) > 1)
-    configure_progress(logs, resume=bool(args.resume), total=estimate_run_steps(prep, args))
+    configure_progress(
+        logs,
+        resume=bool(args.resume),
+        total=estimate_run_steps(prep, args),
+        invocation_started_monotonic=invocation_started_monotonic,
+        invocation_started_at=invocation_started_at,
+        begin_invocation=True,
+    )
     prep.metadata = dict(prep.metadata or {})
     if structure_prep.get("prepared"):
         prep.metadata["original_structure"] = original_structure
@@ -8326,10 +8368,12 @@ def cmd_run(args: argparse.Namespace) -> int:
     result["continue_checkpoint"] = write_continue_checkpoint(prep, result, args)
     if bool(getattr(args, "dry_run", False)):
         result["status"] = "dry_run"
-    result["quick_stats"] = _finalize_quick_stats(prep, result, args)
-    (Path(args.out_dir) / "grond_summary.json").write_text(json.dumps(result, indent=2) + "\n")
-    finished = _PROGRESS.mark_finished(str(result.get("status", "ok"))) if _PROGRESS else _quick_progress_finish_info(Path(args.out_dir))
-    quick = result.get("quick_stats") if isinstance(result.get("quick_stats"), Mapping) else {}
+    quick = _write_run_completion_artifacts(prep, result, args)
+    finished = (
+        _PROGRESS.mark_finished(str(result.get("status", "ok")))
+        if _PROGRESS
+        else _quick_progress_finish_info(Path(args.out_dir))
+    )
     console = quick.get("console") if isinstance(quick.get("console"), Mapping) else {}
     payload = (
         {"status": result.get("status", "ok"), "finished": finished, **console}
@@ -8598,15 +8642,27 @@ def _quick_progress_finish_info(out_dir: Path) -> dict[str, object]:
         for v in completed.values()
         if isinstance(v, Mapping) and v.get("returncode") == 0
     )
-    out = {
-        "completed_stages": completed_ok,
-        "failed_stages": failed,
-        "stage_elapsed_seconds": total_elapsed,
-        "stage_elapsed": format_seconds(total_elapsed),
-    }
+    out = dict(finished)
+    out.update(
+        {
+            "completed_stages": completed_ok,
+            "failed_stages": failed,
+            "cumulative_stage_elapsed_seconds": total_elapsed,
+            "stage_elapsed_seconds": total_elapsed,
+            "cumulative_stage_elapsed": format_seconds(total_elapsed),
+            "stage_elapsed": format_seconds(total_elapsed),
+        }
+    )
     if finished:
-        out.update(finished)
-        out["stage_elapsed"] = format_seconds(out.get("stage_elapsed_seconds", total_elapsed))
+        if out.get("completed_this_invocation") is not None:
+            try:
+                completed_here = max(0, min(completed_ok, int(out["completed_this_invocation"])))
+            except (TypeError, ValueError):
+                completed_here = 0
+            out["completed_this_invocation"] = completed_here
+            out["reused_completed_stages"] = max(0, completed_ok - completed_here)
+        if out.get("invocation_elapsed_seconds") is not None:
+            out["invocation_elapsed"] = format_seconds(out.get("invocation_elapsed_seconds"))
     return out
 
 
@@ -10262,7 +10318,29 @@ def _format_terminal_finish_summary(payload: Mapping[str, object]) -> str:
     endpoint_warning = _quick_goof_warning(endpoint.get("GooF"))
     files = payload.get("files") if isinstance(payload.get("files"), Mapping) else {}
     finished = payload.get("finished") if isinstance(payload.get("finished"), Mapping) else {}
-    elapsed = str(finished.get("stage_elapsed") or format_seconds(finished.get("stage_elapsed_seconds", 0.0)))
+    timing_context = payload.get("timing_context")
+    timing_context = timing_context if isinstance(timing_context, Mapping) else {}
+    timing_kind = str(timing_context.get("kind", "workflow_invocation"))
+    finish_elapsed = (
+        format_seconds(timing_context.get("finish_invocation_elapsed_seconds"))
+        if timing_context.get("finish_invocation_elapsed_seconds") is not None
+        else ""
+    )
+    invocation_elapsed = (
+        str(finished.get("invocation_elapsed") or format_seconds(finished.get("invocation_elapsed_seconds")))
+        if finished.get("invocation_elapsed_seconds") is not None
+        else ""
+    )
+    cumulative_elapsed = str(
+        finished.get("cumulative_stage_elapsed")
+        or finished.get("stage_elapsed")
+        or format_seconds(
+            finished.get(
+                "cumulative_stage_elapsed_seconds",
+                finished.get("stage_elapsed_seconds", 0.0),
+            )
+        )
+    )
     completed = finished.get("completed_stages", "n/a")
     estimated = finished.get("estimated_stages")
     stage_note = f"{completed} stages"
@@ -10278,8 +10356,55 @@ def _format_terminal_finish_summary(payload: Mapping[str, object]) -> str:
         stage_note += " completed"
     if finished.get("failed_stages", 0):
         stage_note += f"; {finished.get('failed_stages')} failed stage records in progress file"
+    if finished.get("completed_this_invocation") is not None:
+        invocation_label = "recorded workflow invocation" if timing_kind == "finish_replay" else "this invocation"
+        stage_note += f"; {finished.get('completed_this_invocation')} ran in {invocation_label}"
+        if finished.get("reused_completed_stages", 0):
+            prior_label = "prior workflow invocations" if timing_kind == "finish_replay" else "prior invocations"
+            stage_note += f"; {finished.get('reused_completed_stages')} reused from {prior_label}"
 
-    headline = f"GROND finished successfully in {elapsed}." if status == "ok" else f"GROND finished with status {status} after {elapsed}."
+    if timing_kind == "finish_replay":
+        if status == "ok":
+            headline = (
+                f"GROND finish completed successfully in {finish_elapsed} wall time."
+                if finish_elapsed
+                else "GROND finish completed successfully."
+            )
+        else:
+            headline = (
+                f"GROND finish completed with status {status} after {finish_elapsed} wall time."
+                if finish_elapsed
+                else f"GROND finish completed with status {status}."
+            )
+    elif status == "ok":
+        headline = (
+            f"GROND finished successfully in {invocation_elapsed} wall time for this invocation."
+            if invocation_elapsed
+            else "GROND finished successfully."
+        )
+    else:
+        headline = (
+            f"GROND finished with status {status} after {invocation_elapsed} wall time for this invocation."
+            if invocation_elapsed
+            else f"GROND finished with status {status}."
+        )
+    if timing_kind == "finish_replay":
+        recorded_wall = (
+            f"recorded workflow wall time {invocation_elapsed}"
+            if invocation_elapsed
+            else "recorded workflow wall time unavailable"
+        )
+        timing_line = (
+            f"Timing: {recorded_wall}; cumulative completed-stage runtime {cumulative_elapsed}. "
+            "The cumulative value sums saved stage runtimes; concurrent stages overlap and resumed "
+            "stages may be from earlier invocations, so it is not workflow wall time."
+        )
+    else:
+        timing_line = (
+            f"Timing: cumulative completed-stage runtime {cumulative_elapsed}. "
+            "This sums saved stage runtimes; concurrent stages overlap and resumed stages may be from "
+            "earlier invocations, so it is not workflow wall time."
+        )
     publication_is_direct_ls1 = bool(files.get("publication_res") and files.get("publication_res") == files.get("final_feedback_res"))
     endpoint_lines = ["SHELXL endpoint" if publication_is_direct_ls1 else "SHELXL endpoints"]
     if not endpoint:
@@ -10340,6 +10465,7 @@ def _format_terminal_finish_summary(payload: Mapping[str, object]) -> str:
         headline,
         f"Output directory: {out_dir}",
         f"Progress: {stage_note}. Optional gates can make the final stage count smaller than the starting ETA denominator.",
+        timing_line,
         "",
         "Decision summary",
         hand_line,
@@ -10384,6 +10510,7 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
     metadata = row_metrics.get("metadata", {}) if isinstance(row_metrics.get("metadata"), Mapping) else {}
     source_roots = _quick_progress_source_roots(out_dir)
     timing_rows = _quick_progress_timings(out_dir)
+    finish_info = _quick_progress_finish_info(out_dir)
     sfac_check = try_read_json(out_dir / "sfac_check.json")
     final_run = _quick_final_run(result)
     final_model = Path(str(result.get("model"))) if result.get("model") else None
@@ -10631,12 +10758,23 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
         lines.extend(["## Source", "", f"- Completed stages were produced from `{root}` ({count} stages).", ""])
 
     if timing_rows:
-        total_elapsed = sum(float(row.get("elapsed_seconds", 0.0)) for row in timing_rows)
+        total_elapsed = sum(float(row.get("elapsed_seconds", 0.0)) for row in timing_rows if row.get("returncode") == 0)
+        timing_summary_lines = []
+        if finish_info.get("invocation_elapsed_seconds") is not None:
+            timing_summary_lines.append(
+                f"- Recorded workflow wall time: `{format_seconds(finish_info.get('invocation_elapsed_seconds'))}`"
+            )
+        timing_summary_lines.extend(
+            [
+                f"- Cumulative completed-stage runtime: `{format_seconds(total_elapsed)}`",
+                "- The cumulative value sums saved stage runtimes. Concurrent stages overlap, and resumed stages may come from earlier invocations, so this is not workflow wall time.",
+            ]
+        )
         lines.extend(
             [
                 "## Stage Timings",
                 "",
-                f"- Total completed stage wall time: `{format_seconds(total_elapsed)}`",
+                *timing_summary_lines,
                 "",
                 "| stage | returncode | elapsed | log |",
                 "|---|---:|---:|---|",
@@ -11648,6 +11786,7 @@ def run_finish_maps(run_dir: Path, result: Mapping[str, object], args: argparse.
 def cmd_finish(args: argparse.Namespace) -> int:
     """Regenerate the compact user-facing package for a completed GROND run."""
 
+    finish_started_monotonic = time.perf_counter()
     run_dir = _finish_run_dir(args)
     result_path = run_dir / "grond_summary.json"
     prep_path = run_dir / "run_prep.json"
@@ -11709,10 +11848,15 @@ def cmd_finish(args: argparse.Namespace) -> int:
     manifest_path = run_dir / "finish_manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2, allow_nan=True) + "\n")
     console = quick.get("console") if isinstance(quick.get("console"), Mapping) else {}
+    finish_elapsed_seconds = max(0.0, time.perf_counter() - finish_started_monotonic)
     payload = {
         "status": "ok",
         **console,
         "finished": _quick_progress_finish_info(run_dir),
+        "timing_context": {
+            "kind": "finish_replay",
+            "finish_invocation_elapsed_seconds": finish_elapsed_seconds,
+        },
         "finish_manifest": str(manifest_path),
         "maps": maps,
         "cif": manifest["cif"],

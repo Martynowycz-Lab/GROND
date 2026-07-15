@@ -115,7 +115,9 @@ def block(label: str, rows: list[tuple[dict[str, str], dict[str, str]]]) -> dict
         "sqrt_positive_delta_chi2": float(math.sqrt(max(delta_chi2, 0.0))),
         "paired_row_t_delta_chi2": paired_t,
         "mean_row_delta_chi2": mean_d,
-        "median_row_delta_chi2": float(sorted(d)[n // 2] if n % 2 else 0.5 * (sorted(d)[n // 2 - 1] + sorted(d)[n // 2])),
+        "median_row_delta_chi2": float(
+            sorted(d)[n // 2] if n % 2 else 0.5 * (sorted(d)[n // 2 - 1] + sorted(d)[n // 2])
+        ),
         "best_lower_abs_residual_fraction": float(sum(abs(b) < abs(o) for b, o in zip(rb, ro, strict=True)) / n),
         "best_lower_squared_residual_fraction": float(sum(x > 0.0 for x in d) / n),
     }
@@ -130,6 +132,8 @@ def main() -> None:
 
     best_path = Path(args.best)
     other_path = Path(args.other)
+    out_path = Path(args.out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     missing_files = [str(path) for path in (best_path, other_path) if not path.exists()]
     if missing_files:
         out = {
@@ -154,7 +158,7 @@ def main() -> None:
             "work": {"label": "work", "n": 0},
             "free": {"label": "free", "n": 0},
         }
-        Path(args.out).write_text(json.dumps(out, indent=2, allow_nan=True) + "\n")
+        out_path.write_text(json.dumps(out, indent=2, allow_nan=True) + "\n")
         return
 
     best_rows, best_fields = read_rows(best_path)
@@ -192,7 +196,7 @@ def main() -> None:
         "work": block("work", work),
         "free": block("free", free),
     }
-    Path(args.out).write_text(json.dumps(out, indent=2, allow_nan=True) + "\n")
+    out_path.write_text(json.dumps(out, indent=2, allow_nan=True) + "\n")
 
 
 if __name__ == "__main__":
