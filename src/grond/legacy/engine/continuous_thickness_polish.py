@@ -39,6 +39,102 @@ else:  # pragma: no cover - direct script execution
 
 DEFAULT_HKL = Path("INTEGRATE.HKL")
 DEFAULT_RES = Path("model.res")
+PHYSICAL_GRAD_MIN = 0.0
+PHYSICAL_GRAD_MAX = 1.0
+
+
+def local_thickness_search_bounds(
+    start_thickness: float,
+    bracket_frac: float,
+    *,
+    t_min: float | None = None,
+    t_max: float | None = None,
+) -> tuple[float, float]:
+    """Return the local thickness basin established by the coarse-grid winner.
+
+    Dynamical intensities can have separated thickness aliases.  This stage is
+    therefore a local polish: the fractional bracket selects the basin, while
+    optional hard bounds may only make that basin narrower.  The old
+    400--2600 A defaults were numerical limits rather than physical limits and
+    must not reject an otherwise valid coarse-grid winner.
+    """
+
+    start = float(start_thickness)
+    bracket = float(bracket_frac)
+    if not math.isfinite(start) or start <= 0.0:
+        raise ValueError("start thickness must be finite and positive")
+    if not math.isfinite(bracket) or not 0.0 < bracket < 1.0:
+        raise ValueError("thickness bracket fraction must satisfy 0 < bracket_frac < 1")
+
+    lo = start * (1.0 - bracket)
+    hi = start * (1.0 + bracket)
+    if t_min is not None:
+        hard_min = float(t_min)
+        if not math.isfinite(hard_min) or hard_min <= 0.0:
+            raise ValueError("t_min must be finite and positive")
+        lo = max(lo, hard_min)
+    if t_max is not None:
+        hard_max = float(t_max)
+        if not math.isfinite(hard_max) or hard_max <= 0.0:
+            raise ValueError("t_max must be finite and positive")
+        hi = min(hi, hard_max)
+    if not lo <= start <= hi:
+        raise ValueError("explicit thickness bounds must include the starting thickness")
+    if not lo < hi:
+        raise ValueError("local thickness search bounds must span a nonzero interval")
+    return float(lo), float(hi)
+
+
+def thickness_candidate_domain_reasons(
+    t0: float,
+    grad: float,
+    *,
+    t_min: float = 0.0,
+    t_max: float = math.inf,
+    grad_min: float = PHYSICAL_GRAD_MIN,
+    grad_max: float = PHYSICAL_GRAD_MAX,
+) -> list[str]:
+    """Return fail-closed reasons why a continuous-thickness point is invalid.
+
+    A uniform-gradient fraction above one permits non-positive crystal
+    thickness at the edge of the distribution and is rejected by the Bloch
+    engine.  Keep that physical domain independent of user search bounds so an
+    optimizer result can never be promoted merely because a wider numerical
+    bound was requested.
+    """
+
+    reasons: list[str] = []
+    t0 = float(t0)
+    grad = float(grad)
+    t_min = float(t_min)
+    t_max = float(t_max)
+    grad_min = float(grad_min)
+    grad_max = float(grad_max)
+    if not math.isfinite(t0):
+        reasons.append("nonfinite_thickness")
+    elif t0 <= 0.0:
+        reasons.append("nonpositive_thickness")
+    elif not t_min <= t0 <= t_max:
+        reasons.append("thickness_outside_search_bounds")
+    if not math.isfinite(grad):
+        reasons.append("nonfinite_thickness_gradient")
+    else:
+        if not PHYSICAL_GRAD_MIN <= grad <= PHYSICAL_GRAD_MAX:
+            reasons.append("thickness_gradient_outside_physical_domain")
+        if not grad_min <= grad <= grad_max:
+            reasons.append("thickness_gradient_outside_search_bounds")
+    return reasons
+
+
+def require_physical_thickness_candidate(t0: float, grad: float) -> None:
+    """Raise before constructing a nuisance model outside the engine domain."""
+
+    reasons = thickness_candidate_domain_reasons(t0, grad)
+    if reasons:
+        raise ValueError(
+            f"invalid continuous-thickness candidate t={float(t0)!r}, grad={float(grad)!r}: "
+            + ", ".join(reasons)
+        )
 
 
 def thickness_grid(t0: float, grad: float, points: int) -> tuple[np.ndarray, np.ndarray]:
@@ -46,6 +142,7 @@ def thickness_grid(t0: float, grad: float, points: int) -> tuple[np.ndarray, np.
 
     t0 = float(t0)
     grad = float(grad)
+    require_physical_thickness_candidate(t0, grad)
     points = max(1, int(points))
     if points <= 1 or abs(grad) <= 0.0:
         return np.asarray([t0], dtype=float), np.asarray([1.0], dtype=float)
@@ -229,6 +326,7 @@ def predict_from_response(records: list[dict], n_rows: int, t0: float, grad: flo
 
 
 def make_nuisance(args, t0: float, grad: float) -> nrf.Nuisance:
+    require_physical_thickness_candidate(t0, grad)
     return nrf.Nuisance(
         thickness_A=float(t0),
         thickness_grad_frac=float(grad),
@@ -308,10 +406,10 @@ def main() -> int:
     ap.add_argument("--strong-rows", type=int, default=500)
     ap.add_argument("--max-rows", type=int, default=0)
     ap.add_argument("--bracket-frac", type=float, default=0.35)
-    ap.add_argument("--t-min", type=float, default=400.0)
-    ap.add_argument("--t-max", type=float, default=2600.0)
+    ap.add_argument("--t-min", type=float, default=None, help="Optional lower clamp on the local thickness bracket.")
+    ap.add_argument("--t-max", type=float, default=None, help="Optional upper clamp on the local thickness bracket.")
     ap.add_argument("--grad-min", type=float, default=0.0)
-    ap.add_argument("--grad-max", type=float, default=1.2)
+    ap.add_argument("--grad-max", type=float, default=PHYSICAL_GRAD_MAX)
     ap.add_argument("--grid-thickness-step", type=float, default=100.0)
     ap.add_argument("--grid-grad-step", type=float, default=0.2)
     ap.add_argument("--powell-maxiter", type=int, default=24)
@@ -320,6 +418,45 @@ def main() -> int:
     ap.add_argument("--max-all-r1-loss", type=float, default=0.001, help="Maximum tolerated all-row R1 loss for a promoted continuous thickness.")
     ap.add_argument("--progress-every", type=int, default=100)
     args = ap.parse_args()
+
+    try:
+        args.t_min, args.t_max = local_thickness_search_bounds(
+            float(args.start_thickness),
+            float(args.bracket_frac),
+            t_min=args.t_min,
+            t_max=args.t_max,
+        )
+    except ValueError as exc:
+        ap.error(str(exc))
+    search_values = {
+        "t_min": float(args.t_min),
+        "t_max": float(args.t_max),
+        "grad_min": float(args.grad_min),
+        "grad_max": float(args.grad_max),
+        "grid_thickness_step": float(args.grid_thickness_step),
+        "grid_grad_step": float(args.grid_grad_step),
+    }
+    if not all(math.isfinite(value) for value in search_values.values()):
+        ap.error("continuous-thickness search bounds and steps must be finite")
+    if not PHYSICAL_GRAD_MIN <= float(args.grad_min) <= float(args.grad_max) <= PHYSICAL_GRAD_MAX:
+        ap.error(
+            "continuous-thickness gradient bounds must satisfy "
+            f"{PHYSICAL_GRAD_MIN:g} <= grad_min <= grad_max <= {PHYSICAL_GRAD_MAX:g}"
+        )
+    if float(args.grid_thickness_step) <= 0.0 or float(args.grid_grad_step) <= 0.0:
+        ap.error("continuous-thickness grid steps must be positive")
+    if int(args.powell_maxiter) <= 0:
+        ap.error("continuous-thickness Powell iterations must be positive")
+    start_reasons = thickness_candidate_domain_reasons(
+        float(args.start_thickness),
+        float(args.start_grad),
+        t_min=float(args.t_min),
+        t_max=float(args.t_max),
+        grad_min=float(args.grad_min),
+        grad_max=float(args.grad_max),
+    )
+    if start_reasons:
+        ap.error("invalid starting continuous-thickness point: " + ", ".join(start_reasons))
 
     global args_progress_every
     args_progress_every = max(1, int(args.progress_every))
@@ -363,7 +500,14 @@ def main() -> int:
     eval_history: list[dict] = []
 
     def evaluate(t0: float, grad: float, label: str = "eval") -> tuple[float, dict]:
-        if not (float(args.t_min) <= t0 <= float(args.t_max)) or not (float(args.grad_min) <= grad <= float(args.grad_max)):
+        if thickness_candidate_domain_reasons(
+            t0,
+            grad,
+            t_min=float(args.t_min),
+            t_max=float(args.t_max),
+            grad_min=float(args.grad_min),
+            grad_max=float(args.grad_max),
+        ):
             return 1.0e9, {}
         pred = predict_from_response(records, len(target), float(t0), float(grad), int(args.thickness_points))
         nui = make_nuisance(args, float(t0), float(grad))
@@ -402,8 +546,8 @@ def main() -> int:
 
     # 2. Local scalar bounded regularization of thickness at fixed gradient.
     t0 = float(args.start_thickness)
-    lo = max(float(args.t_min), t0 * (1.0 - float(args.bracket_frac)))
-    hi = min(float(args.t_max), t0 * (1.0 + float(args.bracket_frac)))
+    lo = float(args.t_min)
+    hi = float(args.t_max)
     scalar_t0 = time.perf_counter()
     scalar_res = minimize_scalar(
         lambda x: evaluate(float(x), float(args.start_grad), "scalar_t")[0],
@@ -421,11 +565,14 @@ def main() -> int:
 
     # 3. Parabolic/Newton-like one-step from three local points.
     step = max(10.0, 0.05 * t0)
-    xs = np.asarray([max(float(args.t_min), t0 - step), t0, min(float(args.t_max), t0 + step)], dtype=float)
+    xs = np.unique(np.asarray([max(lo, t0 - step), t0, min(hi, t0 + step)], dtype=float))
     ys = np.asarray([evaluate(float(x), float(args.start_grad), "parabolic_probe")[0] for x in xs], dtype=float)
-    coeff = np.polyfit(xs, ys, 2)
-    if coeff[0] > 0:  # noqa: SIM108 - keep the fitted and fallback branches explicit
-        t_parab = float(np.clip(-coeff[1] / (2.0 * coeff[0]), lo, hi))
+    if len(xs) == 3:
+        coeff = np.polyfit(xs, ys, 2)
+        if coeff[0] > 0:  # noqa: SIM108 - keep the fitted and fallback branches explicit
+            t_parab = float(np.clip(-coeff[1] / (2.0 * coeff[0]), lo, hi))
+        else:
+            t_parab = float(xs[int(np.argmin(ys))])
     else:
         t_parab = float(xs[int(np.argmin(ys))])
     parab_val, parab_ev = evaluate(t_parab, float(args.start_grad), "parabolic_newton")
@@ -434,8 +581,8 @@ def main() -> int:
     # 4. Small direct grid over t and gradient to guard against local minima.
     grid_t0 = time.perf_counter()
     t_values = np.arange(
-        max(float(args.t_min), t0 * (1.0 - float(args.bracket_frac))),
-        min(float(args.t_max), t0 * (1.0 + float(args.bracket_frac))) + 0.5 * float(args.grid_thickness_step),
+        lo,
+        hi + 0.5 * float(args.grid_thickness_step),
         float(args.grid_thickness_step),
     )
     g_values = np.arange(
@@ -463,13 +610,31 @@ def main() -> int:
         lambda x: evaluate(float(x[0]), float(x[1]), "powell")[0],
         x0,
         method="Powell",
-        bounds=[(float(args.t_min), float(args.t_max)), (float(args.grad_min), float(args.grad_max))],
+        bounds=[(lo, hi), (float(args.grad_min), float(args.grad_max))],
         options={"maxiter": int(args.powell_maxiter), "xtol": 0.05, "ftol": 1e-5},
     )
     powell_seconds = time.perf_counter() - powell_t0
-    powell_val, powell_ev = evaluate(float(powell_res.x[0]), float(powell_res.x[1]), "powell_final")
+    powell_t = float(powell_res.x[0])
+    powell_g = float(powell_res.x[1])
+    powell_domain_reasons = thickness_candidate_domain_reasons(
+        powell_t,
+        powell_g,
+        t_min=float(args.t_min),
+        t_max=float(args.t_max),
+        grad_min=float(args.grad_min),
+        grad_max=float(args.grad_max),
+    )
+    if powell_domain_reasons:
+        powell_val, powell_ev = 1.0e9, {}
+        print(
+            f"Powell result rejected before promotion: t={powell_t!r} A grad={powell_g!r}; "
+            + ", ".join(powell_domain_reasons),
+            flush=True,
+        )
+    else:
+        powell_val, powell_ev = evaluate(powell_t, powell_g, "powell_final")
     print(
-        f"Powell optimum t={powell_res.x[0]:.3f} A grad={powell_res.x[1]:.4f} "
+        f"Powell optimum t={powell_t:.3f} A grad={powell_g:.4f} "
         f"objective={powell_val:.6f} in {powell_seconds:.2f}s",
         flush=True,
     )
@@ -479,13 +644,36 @@ def main() -> int:
         ("scalar_t", scalar_val, float(scalar_res.x), float(args.start_grad), scalar_ev),
         ("parabolic_newton", parab_val, t_parab, float(args.start_grad), parab_ev),
         ("guard_grid", grid_best[0], grid_best[1], grid_best[2], grid_best[3]),
-        ("powell", powell_val, float(powell_res.x[0]), float(powell_res.x[1]), powell_ev),
+        ("powell", powell_val, powell_t, powell_g, powell_ev),
     ]
     baseline_free = float(baseline_ev["metrics"]["free"]["dyn"]["wR2_all"])
     baseline_r1 = float(baseline_ev["metrics"]["all"]["dyn"]["R1_all"])
     eligible = []
     rejected = []
     for name, val, tv, gv, ev in candidates:
+        reasons = thickness_candidate_domain_reasons(
+            tv,
+            gv,
+            t_min=float(args.t_min),
+            t_max=float(args.t_max),
+            grad_min=float(args.grad_min),
+            grad_max=float(args.grad_max),
+        )
+        if not math.isfinite(float(val)):
+            reasons.append("nonfinite_objective")
+        if not ev:
+            reasons.append("missing_valid_evaluation")
+        if reasons:
+            rejected.append(
+                {
+                    "strategy": name,
+                    "gain": None,
+                    "free_wR2_loss": None,
+                    "all_R1_loss": None,
+                    "reasons": list(dict.fromkeys(reasons)),
+                }
+            )
+            continue
         gain = float(baseline_val - val)
         free_loss = float(ev["metrics"]["free"]["dyn"]["wR2_all"] - baseline_free)
         all_r1_loss = float(ev["metrics"]["all"]["dyn"]["R1_all"] - baseline_r1)
@@ -565,16 +753,25 @@ def main() -> int:
         },
         "strategies": {
             name: {
-                "objective": float(val),
+                "status": "ok" if ev else "rejected_invalid_domain",
+                "objective": float(val) if ev else None,
                 "thickness_A": float(tv),
                 "thickness_nm": float(tv) / 10.0,
                 "thickness_grad_frac": float(gv),
-                "all_wR2": float(ev["metrics"]["all"]["dyn"]["wR2_all"]),
-                "all_R1": float(ev["metrics"]["all"]["dyn"]["R1_all"]),
-                "all_R1gt": float(ev["metrics"]["all"]["dyn"]["R1_gt"]),
-                "free_wR2": float(ev["metrics"]["free"]["dyn"]["wR2_all"]),
-                "scale_count": int(ev["scale_count"]),
-                "valid_rows": int(ev["valid_rows"]),
+                "all_wR2": float(ev["metrics"]["all"]["dyn"]["wR2_all"]) if ev else None,
+                "all_R1": float(ev["metrics"]["all"]["dyn"]["R1_all"]) if ev else None,
+                "all_R1gt": float(ev["metrics"]["all"]["dyn"]["R1_gt"]) if ev else None,
+                "free_wR2": float(ev["metrics"]["free"]["dyn"]["wR2_all"]) if ev else None,
+                "scale_count": int(ev["scale_count"]) if ev else None,
+                "valid_rows": int(ev["valid_rows"]) if ev else None,
+                "domain_reasons": thickness_candidate_domain_reasons(
+                    tv,
+                    gv,
+                    t_min=float(args.t_min),
+                    t_max=float(args.t_max),
+                    grad_min=float(args.grad_min),
+                    grad_max=float(args.grad_max),
+                ),
             }
             for name, val, tv, gv, ev in candidates
         },
@@ -612,13 +809,18 @@ def main() -> int:
         "|---|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for name, _val, tv, gv, ev in candidates:
-        report.append(
-            f"| {name} | {tv:.3f} | {tv / 10.0:.3f} | {gv:.4f} | "
-            f"{ev['metrics']['all']['dyn']['wR2_all']:.6f} | "
-            f"{ev['metrics']['all']['dyn']['R1_all']:.6f} | "
-            f"{ev['metrics']['all']['dyn']['R1_gt']:.6f} | "
-            f"{ev['metrics']['free']['dyn']['wR2_all']:.6f} |"
-        )
+        if ev:
+            report.append(
+                f"| {name} | {tv:.3f} | {tv / 10.0:.3f} | {gv:.4f} | "
+                f"{ev['metrics']['all']['dyn']['wR2_all']:.6f} | "
+                f"{ev['metrics']['all']['dyn']['R1_all']:.6f} | "
+                f"{ev['metrics']['all']['dyn']['R1_gt']:.6f} | "
+                f"{ev['metrics']['free']['dyn']['wR2_all']:.6f} |"
+            )
+        else:
+            report.append(
+                f"| {name} | {tv:.3f} | {tv / 10.0:.3f} | {gv:.4f} | rejected | rejected | rejected | rejected |"
+            )
     report.extend(
         [
             "",

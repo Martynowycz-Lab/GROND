@@ -102,6 +102,14 @@ DENSE_UG_BUILD_BYTES_PER_VOXEL = 256
 DENSE_UG_CACHE_LOAD_BYTES_PER_VOXEL = 64
 
 
+class LocalSgCrossingError(ValueError):
+    """A requested target Sg has no crossing inside the local geometry bound."""
+
+
+class InfeasibleSgJitterProfileError(ValueError):
+    """An active Sg-jitter candidate requests an unreachable quadrature point."""
+
+
 def dense_ug_memory_plan(h_lim: int, k_lim: int, l_lim: int) -> dict[str, int | list[int]]:
     """Estimate dense U_g grid storage and peak working memory before allocation."""
 
@@ -2495,7 +2503,7 @@ class XDSBlochPort:
                 midpoint = 0.5 * (offsets[i] + offsets[i + 1])
                 brackets.append((abs(midpoint), i))
         if not brackets:
-            raise ValueError(
+            raise LocalSgCrossingError(
                 f"no local Sg={target_sg:.6g} crossing for HKL {tuple(int(v) for v in hkl)} "
                 f"within {max_delta_deg:.6g} degrees of omega={omega0:.6g}"
             )
@@ -2510,6 +2518,31 @@ class XDSBlochPort:
                 f"residual={final_residual:.3g}, delta_omega={omega - omega0:.3g} degrees"
             )
         return omega
+
+    def solve_sg_profile_target(self, row_idx, hkl, omega_center, target_sg, jitter_meta):
+        """Solve one profile target while preserving the strict local-root contract.
+
+        A nonzero jitter kernel is a nuisance candidate, not required geometry.
+        If one of its convolved off-center samples has no crossing inside the
+        audited local angular bound, the whole jitter candidate is infeasible.
+        The caller can then retain ordinary or otherwise feasible candidates;
+        it must not widen the bound or silently truncate and renormalize the
+        requested orientation distribution.
+        """
+
+        try:
+            return self.solve_omega_for_sg(hkl, omega_center, target_sg)
+        except LocalSgCrossingError as exc:
+            mode = str(jitter_meta.get("sg_jitter_mode", "none") or "none").lower()
+            sigma = float(jitter_meta.get("sg_jitter_sigma_inv_A", 0.0) or 0.0)
+            if mode == "none" or sigma <= 0.0:
+                raise
+            raise InfeasibleSgJitterProfileError(
+                "infeasible Sg-jitter quadrature target for "
+                f"row {int(row_idx)}, HKL {tuple(int(v) for v in hkl)}: "
+                f"mode={mode}, sigma={sigma:.6g} 1/A, target Sg={float(target_sg):.6g} 1/A; "
+                f"{exc}. Reject this nuisance candidate; the local root-search bound is unchanged."
+            ) from exc
 
     def sg_derivative_per_deg(self, hkl, omega_deg):
         step = 1e-4
@@ -2992,7 +3025,13 @@ class XDSBlochPort:
         h10_born = H_born_static[1, 0]
         dyn_matrices, born_vals, born_deltas, sg_resid, solved_omegas = [], [], [], [], []
         for target_sg in physical_targets:
-            omega = self.solve_omega_for_sg(hkl, omega_center, target_sg)
+            omega = self.solve_sg_profile_target(
+                row_idx,
+                hkl,
+                omega_center,
+                target_sg,
+                jitter_meta,
+            )
             solved_omegas.append(float(omega))
             sg_basis = self.sg_for_hkls(basis, omega)
             sg_resid.append(float(sg_basis[1] - target_sg))
@@ -3187,7 +3226,13 @@ class XDSBlochPort:
             sg_resid = []
             solved_omegas = []
             for target_sg in physical_targets:
-                omega = self.solve_omega_for_sg(hkl, omega_c, target_sg)
+                omega = self.solve_sg_profile_target(
+                    row_idx,
+                    hkl,
+                    omega_c,
+                    target_sg,
+                    jitter_meta,
+                )
                 solved_omegas.append(float(omega))
                 sg_basis = self.sg_for_hkls(basis, omega)
                 sg_basis_rows.append(np.asarray(sg_basis, dtype=float))
@@ -3826,6 +3871,8 @@ class XDSBlochPort:
                             accept_result(idx, r)
                     ran_parallel = True
                     break
+                except InfeasibleSgJitterProfileError:
+                    raise
                 except Exception:
                     ran_parallel = False
                     continue

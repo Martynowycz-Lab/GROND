@@ -1,7 +1,10 @@
+import csv
 import json
+import math
 from pathlib import Path
 
 import gemmi
+import pytest
 
 from grond.maps.native_dynamic import NativeDynamicMapOptions, write_native_dynamic_map_package
 
@@ -149,3 +152,106 @@ def test_native_dynamic_map_package_accepts_labeled_multi_dataset_rows(tmp_path:
     assert "_grond_dynamic_map_source_row_table_count 2" in cif_text
     assert "_grond_dynamic_map_row_table_dataset" in cif_text
     assert "_refln_grond_dataset_count" in cif_text
+
+
+def test_native_dynamic_multi_maps_apply_dataset_policy_once(tmp_path: Path):
+    model = tmp_path / "model.res"
+    model.write_text(
+        "\n".join(
+            [
+                "TITL native map policy contract",
+                "CELL 0.025079 5 6 7 90 90 90",
+                "LATT -1",
+                "SFAC C 1 0 0 0 0 0 0 0 0",
+                "UNIT 1",
+                "C1 1 0 0 0 1 0.05",
+                "HKLF 4",
+                "END",
+            ]
+        )
+        + "\n"
+    )
+    header = (
+        "h,k,l,d_A,target_I,sigma_eff,sigma_eff_original,dyn_scaled,split,"
+        "dataset_role,raw_row_weight,policy_sigma_weight_applied\n"
+    )
+    tables = []
+    specifications = [
+        ("primary", "1,0,0,5.0,4.0,2.0,,4.0,work,primary,1.0,false\n"),
+        # sigma_eff is already weighted in this copied table.  The map reader
+        # must restore 2.0, then apply 0.25 once to obtain 4.0 (not 8.0).
+        ("downweight", "1,0,0,5.0,4.0,4.0,2.0,4.0,work,downweight,0.25,true\n"),
+        ("complete", "1,0,0,5.0,400.0,1.0,1.0,4.0,work,completeness_only,0.25,false\n"),
+        ("excluded", "1,0,0,5.0,400.0,1.0,1.0,4.0,work,exclude,1.0,false\n"),
+        ("zero", "1,0,0,5.0,400.0,1.0,1.0,4.0,work,primary,0.0,false\n"),
+        ("invalid", "1,0,0,5.0,400.0,1.0,1.0,4.0,work,primary,not-a-weight,false\n"),
+    ]
+    for label, row in specifications:
+        table = tmp_path / f"{label}_native_dyn_calc.csv"
+        table.write_text(header + row)
+        tables.append(table)
+
+    manifest = write_native_dynamic_map_package(
+        row_table=tables,
+        row_table_labels=[label for label, _row in specifications],
+        model_path=model,
+        out_dir=tmp_path / "native_maps",
+        options=NativeDynamicMapOptions(grid_spacing_A=1.0),
+    )
+
+    assert manifest["status"] == "ok"
+    summary = manifest["summary"]
+    assert summary["input_rows"] == 6
+    assert summary["policy_eligible_rows"] == 2
+    assert summary["valid_positive_rows"] == 2
+    assert summary["rejected_rows"] == 4
+    assert summary["rejected_after_policy_rows"] == 0
+    policy = summary["dataset_policy"]
+    assert policy["source_rows"] == 6
+    assert policy["included_rows"] == 2
+    assert policy["excluded_rows"] == 4
+    assert policy["excluded_completeness_only_rows"] == 1
+    assert policy["excluded_explicit_role_rows"] == 1
+    assert policy["excluded_nonpositive_raw_row_weight_rows"] == 1
+    assert policy["excluded_invalid_raw_row_weight_rows"] == 1
+    assert policy["downweighted_rows"] == 1
+    assert policy["sigma_eff_reset_from_original_rows"] == 1
+    assert policy["raw_row_weight_applied_rows"] == 1
+
+    with Path(manifest["outputs"]["coefficients_csv"]).open(newline="") as handle:
+        coefficient = next(csv.DictReader(handle))
+    assert int(coefficient["n_rows"]) == 2
+    assert coefficient["datasets"] == "downweight,primary"
+    assert int(coefficient["dataset_count"]) == 2
+    assert float(coefficient["sigF_dyn_obs"]) / float(coefficient["F_dyn_calc"]) == pytest.approx(1.0 / math.sqrt(20.0))
+
+
+def test_native_dynamic_maps_report_all_rows_removed_by_policy(tmp_path: Path):
+    model = tmp_path / "model.res"
+    model.write_text(
+        "TITL native map excluded rows\n"
+        "CELL 0.025079 5 6 7 90 90 90\n"
+        "LATT -1\n"
+        "SFAC C 1 0 0 0 0 0 0 0 0\n"
+        "UNIT 1\n"
+        "C1 1 0 0 0 1 0.05\n"
+        "HKLF 4\n"
+        "END\n"
+    )
+    rows = tmp_path / "native_dyn_calc.csv"
+    rows.write_text(
+        "h,k,l,d_A,target_I,sigma_eff,dyn_scaled,split,dataset_role,raw_row_weight\n"
+        "1,0,0,5.0,4.0,1.0,4.0,work,completeness_only,1.0\n"
+    )
+
+    manifest = write_native_dynamic_map_package(
+        row_table=rows,
+        model_path=model,
+        out_dir=tmp_path / "native_maps",
+        options=NativeDynamicMapOptions(grid_spacing_A=1.0),
+    )
+
+    assert manifest["status"] == "no_coefficients"
+    assert manifest["summary"]["input_rows"] == 1
+    assert manifest["summary"]["policy_eligible_rows"] == 0
+    assert manifest["summary"]["dataset_policy"]["excluded_completeness_only_rows"] == 1

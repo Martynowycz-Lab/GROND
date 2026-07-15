@@ -34,10 +34,12 @@ from .io.tool_config import (
     configured_tools,
     find_tool_config,
     load_tool_config,
+    resolve_executable,
     tool_env_updates,
     tool_statuses,
     write_config_template,
 )
+from .legacy.engine.shelx_diagnostics import parse_shelx_lst_pathologies
 from .macromolecule import (
     FREE_FLAG_LABEL,
     export_corrected_mtz,
@@ -47,6 +49,7 @@ from .macromolecule import (
     read_free_flags,
     render_protein_endpoint_command,
     run_protein_endpoint,
+    sha256_file,
 )
 from .macromolecule import (
     read_table as read_macromolecule_table,
@@ -76,7 +79,12 @@ from .workflows.decision import (
     thickness_polish_nuisance,
     write_json,
 )
-from .workflows.endpoint_chooser import write_publication_endpoint_choice
+from .workflows.endpoint_chooser import (
+    endpoint_artifact_provenance,
+    endpoint_lst_metric_consistency,
+    endpoint_promotion_field_contract,
+    write_publication_endpoint_choice,
+)
 from .workflows.transform_metadata import metadata_prefilter_transforms
 
 _PROGRESS: ProgressState | None = None
@@ -270,7 +278,7 @@ def _estimated_sg_window_scout_steps(args: argparse.Namespace) -> int:
 def estimate_run_steps(prep: PrepConfig, args: argparse.Namespace) -> int:
     """Estimate how many external stages this run will launch."""
 
-    total = 0
+    total = 1 if _publication_baseline_hkl(prep) else 0
     for ds in prep.datasets:
         if getattr(args, "auto_decide", True) and not getattr(args, "trust_hkl_transform", False):
             transform_candidates = expand_transform_candidates(ds.hkl_transform, args.transform_candidates)
@@ -279,16 +287,21 @@ def estimate_run_steps(prep: PrepConfig, args: argparse.Namespace) -> int:
             if len(transform_candidates) > 1 and rerank_top > 0:
                 total += min(rerank_top, len(transform_candidates))
         total += 1
-        if getattr(args, "hand_control", True):
-            total += 1
+        if getattr(args, "auto_decide", True) and getattr(args, "hand_control", True):
+            total += 2
         if not getattr(args, "fast", False):
             total += 1
+            if continuous_thickness_enabled(args):
+                # The optimizer works on its bounded diagnostic row subset.  A
+                # second stage materializes the selected nuisance on the full
+                # native row contract before any downstream gate consumes it.
+                total += 2
             total += sum(1 for family in ("row_resolution", "absorption", "sg_jitter", "sigma_error", "dose") if feature_is_enabled(args, family))
             if getattr(args, "mode", "auto") in {"regularize", "auto"}:
                 total += 1
             total += 1
         total += 1
-        if getattr(args, "hand_control", True):
+        if len(prep.datasets) == 1 and getattr(args, "hand_control", True):
             total += 2
         if getattr(args, "h_omit", "off") in {"on", "both", "only"}:
             total += 2
@@ -298,6 +311,10 @@ def estimate_run_steps(prep: PrepConfig, args: argparse.Namespace) -> int:
         total += _estimated_sg_window_scout_steps(args)
         total += _estimated_forensic_steps(args)
     if len(prep.datasets) > 1:
+        if getattr(args, "hand_control", True):
+            # One shared opposite-model materialization plus one native
+            # recomputation and paired-row diagnostic per publication crystal.
+            total += 1 + 2 * len(prep.datasets)
         total += 2
         total += _estimated_resolution_steps(args)
     return max(total, 1)
@@ -496,31 +513,72 @@ def shelx_model_is_usable(path: Path | str) -> bool:
     """Return whether a SHELX model path can be reused as a GROND structure."""
 
     p = Path(path)
-    if not p.exists():
-        return False
     try:
-        if p.stat().st_size <= 0:
-            return False
-        return any(line.strip().upper().startswith("CELL ") for line in p.read_text(errors="replace").splitlines())
-    except OSError:
+        from .legacy.engine.native_row_regularize import shelx_res_health
+
+        health = shelx_res_health(p, p.with_suffix(".lst"))
+    except (ImportError, OSError, TypeError, ValueError):
         return False
+    return bool(
+        health.get("ok")
+        and int(health.get("atom_count", 0) or 0) > 0
+        and int(health.get("sfac_count", 0) or 0) > 0
+    )
 
 
 def shelxl_feedback_record_safe_for_reuse(record: Mapping[str, object]) -> bool:
     """Return whether a feedback-loop record is safe as a later starting model."""
 
+    endpoint_status = str(record.get("endpoint_shelxl_status", "")).strip().lower()
+    if endpoint_status not in {"ok", "reused_validated_input_model"}:
+        return False
     health = record.get("endpoint_res_health")
     if not isinstance(health, Mapping):
-        return True
+        return False
     if not bool(health.get("ok", False)):
         return False
     if health.get("safe_for_feedback") is False:
         return False
     try:
+        atom_count = int(health.get("atom_count", 0) or 0)
+        sfac_count = int(health.get("sfac_count", 0) or 0)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    if atom_count <= 0 or sfac_count <= 0:
+        return False
+    try:
         npd_count = int(health.get("npd_count", 0) or 0)
     except (TypeError, ValueError):
-        return not bool(health.get("has_npd"))
-    return npd_count <= 0 and not bool(health.get("has_npd"))
+        return False
+    if npd_count > 0 or bool(health.get("has_npd")):
+        return False
+
+    output_value = str(record.get("output_model") or "")
+    health_path_value = str(health.get("path") or "")
+    recorded_sha = str(health.get("sha256") or "")
+    if not output_value or not health_path_value or not recorded_sha:
+        # Older summaries did not bind the output bytes to their health
+        # record.  They are intentionally recomputed rather than reused.
+        return False
+    output = Path(output_value).expanduser()
+    health_path = Path(health_path_value).expanduser()
+    try:
+        if output.resolve() != health_path.resolve():
+            return False
+        from .legacy.engine.native_row_regularize import shelx_res_health
+
+        current = shelx_res_health(output, output.with_suffix(".lst"))
+    except (ImportError, OSError, TypeError, ValueError):
+        return False
+    return bool(
+        current.get("ok")
+        and current.get("safe_for_feedback") is not False
+        and int(current.get("atom_count", 0) or 0) > 0
+        and int(current.get("sfac_count", 0) or 0) > 0
+        and str(current.get("sha256") or "") == recorded_sha
+        and int(current.get("npd_count", 0) or 0) <= 0
+        and not bool(current.get("has_npd"))
+    )
 
 
 def best_endpoint_model(run_dir: Path) -> Path | None:
@@ -533,7 +591,12 @@ def best_endpoint_model(run_dir: Path) -> Path | None:
     if not lst:
         return None
     res = Path(lst).with_suffix(".res")
-    return res if shelx_model_is_usable(res) else None
+    record = {
+        "output_model": str(res),
+        "endpoint_shelxl_status": shelxl.get("status"),
+        "endpoint_res_health": shelxl.get("res_health"),
+    }
+    return res if shelx_model_is_usable(res) and shelxl_feedback_record_safe_for_reuse(record) else None
 
 
 def shelxl_is_available(executable: str) -> bool:
@@ -582,6 +645,24 @@ def apply_tool_config(args: argparse.Namespace) -> None:
         args.python = tools["python"]
     if hasattr(args, "shelxl") and tools.get("shelxl") and getattr(args, "shelxl", "shelxl") in {"", "shelxl"}:
         args.shelxl = tools["shelxl"]
+    if hasattr(args, "shelxl"):
+        requested_shelxl = str(getattr(args, "shelxl", "") or "").strip()
+        args.shelxl_requested = requested_shelxl
+        status = resolve_executable(
+            "shelxl",
+            configured=requested_shelxl,
+            aliases=("shelxl", "shelxl2019"),
+        )
+        if not status.get("available") and requested_shelxl == "shelxl":
+            status = resolve_executable(
+                "shelxl",
+                aliases=("shelxl", "shelxl2019"),
+            )
+        if status.get("available") and status.get("resolved"):
+            # Workers execute from the vendored engine directory, not from the
+            # user's launch directory.  Freeze the preflight resolution now so
+            # relative paths and PATH aliases keep the exact same meaning.
+            args.shelxl = str(status["resolved"])
     args.tool_config_path = str(path) if path else ""
     args.tool_config = config
     args.configured_tools = tools
@@ -590,7 +671,19 @@ def apply_tool_config(args: argparse.Namespace) -> None:
 def external_tool_statuses(args: argparse.Namespace) -> dict[str, dict]:
     """Return the active external-tool status block for run configs and doctor."""
 
-    return tool_statuses(getattr(args, "tool_config", {}) or {})
+    statuses = tool_statuses(getattr(args, "tool_config", {}) or {})
+    explicit_shelxl = str(getattr(args, "shelxl", "") or "").strip()
+    if explicit_shelxl:
+        statuses["shelxl"] = resolve_executable(
+            "shelxl",
+            configured=explicit_shelxl,
+            aliases=("shelxl", "shelxl2019"),
+        )
+        statuses["shelxl"]["source"] = "argument:--shelxl"
+        statuses["shelxl"]["requested"] = str(
+            getattr(args, "shelxl_requested", explicit_shelxl) or explicit_shelxl
+        )
+    return statuses
 
 
 def required_external_tool_errors(args: argparse.Namespace, *, structure: str = "", multi_dataset: bool = False) -> list[str]:
@@ -1025,6 +1118,8 @@ def observation_polish_cmd(python: str, row_table: Path, hkl: str, res: str, out
         str(getattr(args, "observation_polish_min_raw_wR2_gain", 0.002)),
         "--endpoint-wR2-tolerance",
         str(getattr(args, "observation_polish_endpoint_wR2_tolerance", 0.0005)),
+        "--shelxl",
+        str(getattr(args, "shelxl", "") or default_shelxl_executable()),
         "--shelxl-iterations",
         str(getattr(args, "shelxl_iterations", 5)),
     ]
@@ -1483,7 +1578,24 @@ def absolute_structure_policy(structure: str) -> dict:
     }
     try:
         if suffix in {".res", ".ins"}:
-            for line in path.read_text(errors="replace").splitlines():
+            shelx_lines = path.read_text(errors="replace").splitlines()
+            chiv_lines = [
+                line.strip()
+                for line in shelx_lines
+                if line.strip().split() and line.strip().split()[0].upper() == "CHIV"
+            ]
+            if chiv_lines:
+                policy.update(
+                    run_hand_control=False,
+                    run_absolute_structure_control=False,
+                    reason=(
+                        "SHELX model contains signed CHIV restraints; automatic hand inversion is disabled "
+                        "because GROND does not yet transform CHIV targets"
+                    ),
+                    unsupported_hand_records=chiv_lines,
+                )
+                return policy
+            for line in shelx_lines:
                 parts = line.strip().split()
                 if parts and parts[0].upper() == "LATT" and len(parts) > 1:
                     latt = int(float(parts[1]))
@@ -1952,14 +2064,35 @@ def make_noh_model(python: str, structure: str, out_dir: Path, logs: Path, dry_r
 
 
 def make_alternate_hand_model(python: str, structure: str, out_dir: Path, logs: Path, dry_run: bool) -> Path:
-    """Create or reuse the alternate-hand model variant."""
+    """Create or content-validate the alternate-hand model variant."""
 
-    src = Path(structure)
+    src = Path(structure).expanduser().resolve()
     dst = out_dir / "input" / f"{src.stem}_alternate_hand{src.suffix or '.res'}"
-    if dst.exists():
+    manifest_path = dst.with_suffix(dst.suffix + ".source.json")
+    expected_manifest = {
+        "schema_version": 1,
+        "variant": "alternate_hand",
+        "materialization_contract": "invert_atoms_and_shelx_symmetry_translations_v1",
+        "source_path": str(src),
+        "source_sha256": sha256_file(src),
+    }
+    recorded = try_read_json(manifest_path)
+    output_matches = bool(
+        dst.is_file()
+        and recorded.get("output_sha256")
+        and recorded.get("output_sha256") == sha256_file(dst)
+    )
+    if output_matches and all(recorded.get(key) == value for key, value in expected_manifest.items()):
         return dst
+    if not dry_run:
+        dst.unlink(missing_ok=True)
+        manifest_path.unlink(missing_ok=True)
     cmd = [python, str(engine_script("make_res_variants.py")), "--input", str(src), "--output", str(dst), "--alternate-hand"]
     run_logged(cmd, logs, "make_alternate_hand_model", dry_run=dry_run)
+    if not dry_run:
+        if not dst.is_file() or dst.stat().st_size <= 0:
+            raise RuntimeError(f"alternate-hand model materialization did not produce {dst}")
+        write_json(manifest_path, {**expected_manifest, "output_sha256": sha256_file(dst)})
     return dst
 
 
@@ -1982,6 +2115,8 @@ def native_stage_cmd(
     workers_override: int | None = None,
     sg_window_override: float | None = None,
     sg_window_mode_override: str | None = None,
+    scale_fit_split_override: str | None = None,
+    strict_pinned_contract: bool = False,
 ) -> list[str]:
     """Build one native nuisance-regularization command for the vendored engine."""
 
@@ -2003,6 +2138,9 @@ def native_stage_cmd(
     sigma_c = grid_from_nuisance(pinned, "sigma_c_peak", "0.0") if pinned else ("0.0" if fast else args.sigma_c_peak_grid)
     row_resolution_b = grid_from_nuisance(pinned, "row_resolution_b", "0.0") if pinned else ("0.0" if fast else args.row_resolution_b_grid)
     detector_scale_bins = grid_from_nuisance(pinned, "detector_scale_bins", "0") if pinned else ("0" if fast else args.detector_scale_bins)
+    scale_fit_split = scale_fit_split_override or ("all" if args.production_scales else "work")
+    if scale_fit_split not in {"work", "all"}:
+        raise ValueError(f"invalid scale-fit split override {scale_fit_split!r}")
     cmd = [
         python,
         str(engine_script("native_row_regularize.py")),
@@ -2101,7 +2239,7 @@ def native_stage_cmd(
         "--split-seed",
         str(args.split_seed),
         "--scale-fit-split",
-        "all" if args.production_scales else "work",
+        scale_fit_split,
         "--selection-metric",
         args.selection_metric,
         "--lambda-grid",
@@ -2112,6 +2250,8 @@ def native_stage_cmd(
         endpoint_b_grid,
         "--endpoint-exti-grid",
         endpoint_exti_grid,
+        "--shelxl",
+        str(getattr(args, "shelxl", "") or default_shelxl_executable()),
         "--shelxl-iterations",
         str(shelxl_iterations),
         "--endpoint-wght-mode",
@@ -2149,10 +2289,25 @@ def native_stage_cmd(
         "--bethe-denom-eps",
         f"{args.bethe_denom_eps:g}",
         "--matrix-convention",
-        args.matrix_convention,
+        str(pinned.get("matrix_convention", args.matrix_convention)) if strict_pinned_contract else args.matrix_convention,
         "--hkl-float-format",
         "shelx_fixed",
     ]
+    if strict_pinned_contract:
+        cmd.extend(
+            [
+                "--sg-jitter-student-df",
+                grid_from_nuisance(pinned, "sg_jitter_student_df", "4.0"),
+                "--sg-jitter-width-factor",
+                grid_from_nuisance(pinned, "sg_jitter_width_factor", "3.0"),
+                "--dose-b-ref-frame",
+                grid_from_nuisance(pinned, "dose_b_ref_frame", "nan"),
+                "--wght-a-grid",
+                grid_from_nuisance(pinned, "native_wght_a", "") if "native_wght_a" in pinned else "",
+                "--wght-b-grid",
+                grid_from_nuisance(pinned, "native_wght_b", "") if "native_wght_b" in pinned else "",
+            ]
+        )
     if ds.include_nonpositive:
         cmd.append("--include-nonpositive")
     else:
@@ -2164,6 +2319,8 @@ def native_stage_cmd(
         cmd.append("--alternate-hand")
     if make_maps and endpoint_ok:
         cmd.append("--make-maps")
+    if not endpoint_ok:
+        cmd.append("--skip-endpoint-refinement")
     return cmd
 
 
@@ -2323,6 +2480,236 @@ def continuous_thickness_seed_nuisance(args: argparse.Namespace, *candidates: Ma
         "sigma_b_corr": "0.0",
         "sigma_c_peak": "0.0",
         "row_resolution_b": "0.0",
+    }
+
+
+def numeric_nuisance_contract_matches(expected_value: object, actual_value: object) -> bool:
+    """Compare one numeric nuisance value without mishandling N/A NaNs.
+
+    Controlled engine summaries use NaN for numeric fields that do not apply,
+    such as ``dose_b_ref_frame`` when dose correction is disabled.  Matching
+    NaN sentinels describe the same contract; one-sided NaNs, infinities, and
+    non-numeric values do not.  Finite values retain the existing relative
+    replay tolerance.
+    """
+
+    try:
+        expected = float(expected_value)
+        actual = float(actual_value)
+    except (TypeError, ValueError):
+        return False
+    if math.isnan(expected) and math.isnan(actual):
+        return True
+    if not math.isfinite(expected) or not math.isfinite(actual):
+        return False
+    tolerance = 1e-8 * max(1.0, abs(expected))
+    return abs(actual - expected) <= tolerance
+
+
+def materialize_continuous_nuisance_run(
+    prep: PrepConfig,
+    ds: DatasetSpec,
+    args: argparse.Namespace,
+    python: str,
+    logs: Path,
+    *,
+    active_model: str,
+    baseline_run: Path,
+    continuous_run: Path,
+    selected_nuisance: Mapping[str, object],
+    n_basis: int,
+    n_points: int,
+    stage: str,
+) -> tuple[dict, Path, dict]:
+    """Materialize a continuous-thickness choice on the full row contract.
+
+    ``continuous_thickness_polish.py`` intentionally optimizes a bounded row
+    subset and writes a summary rather than ``native_dyn_calc.csv``.  Feature
+    gates and multi-dataset policy decisions require a complete, comparable
+    row table.  Reusing the optimizer directory as if it were a native run
+    silently disables those gates, so the selected nuisance is replayed once
+    through the ordinary native stage before it can flow downstream.
+    """
+
+    nuisance = dict(selected_nuisance or {})
+    if not nuisance:
+        raise RuntimeError(
+            f"continuous thickness stage for {ds.name} did not record a selected nuisance: "
+            f"{continuous_run / 'summary.json'}"
+        )
+    source_row_table = continuous_run / "native_dyn_calc.csv"
+    materialized = continuous_run if source_row_table.exists() else continuous_run / "materialized_full_rows"
+    if not source_row_table.exists():
+        run_logged(
+            native_stage_cmd(
+                python,
+                ds,
+                active_model,
+                dataset_baseline_hkl(prep, ds),
+                materialized,
+                args,
+                n_basis=int(n_basis),
+                n_points=int(n_points),
+                stage=stage,
+                pinned=nuisance,
+                make_maps=False,
+                endpoint=False,
+            ),
+            logs,
+            f"{ds.name}_{stage}",
+            dry_run=args.dry_run,
+        )
+    row_table = materialized / "native_dyn_calc.csv"
+    if not args.dry_run and not row_table.exists():
+        raise RuntimeError(
+            "continuous-thickness materialization did not produce the required full row table: "
+            f"{row_table}"
+        )
+    materialized_nuisance = best_nuisance(materialized) if not args.dry_run else nuisance
+    if not args.dry_run and not materialized_nuisance:
+        raise RuntimeError(
+            "continuous-thickness materialization did not record a reusable nuisance block: "
+            f"{materialized / 'summary.json'}"
+        )
+    numeric_contract_keys = (
+        "thickness_A",
+        "thickness_grad_frac",
+        "thickness_sigma_frac",
+        "frame_offset",
+        "group_width_deg",
+        "detector_scale_bins",
+        "sigma_a",
+        "sigma_b_corr",
+        "sigma_c_peak",
+        "row_resolution_b",
+        "scale_smoothness",
+        "sg_jitter_sigma0",
+        "sg_jitter_sigma_d_inv",
+        "sg_jitter_sigma_frame",
+        "sg_jitter_points",
+        "sg_jitter_student_df",
+        "sg_jitter_width_factor",
+        "absorption_mu",
+        "absorption_frac",
+        "absorption_mu_g2",
+        "absorption_mu_theta2",
+        "absorption_tds_b",
+        "dose_b_per_frame",
+        "dose_b_ref_frame",
+    )
+    categorical_contract_keys = (
+        "thickness_model",
+        "sg_jitter_mode",
+        "absorption_mode",
+        "dose_b_mode",
+        "matrix_convention",
+    )
+    mismatches: list[str] = []
+    if not args.dry_run:
+        for key in numeric_contract_keys:
+            if key not in nuisance:
+                continue
+            if key not in materialized_nuisance or not numeric_nuisance_contract_matches(
+                nuisance.get(key), materialized_nuisance.get(key)
+            ):
+                mismatches.append(f"{key}: selected={nuisance.get(key)!r}, materialized={materialized_nuisance.get(key)!r}")
+        for key in categorical_contract_keys:
+            if key in nuisance and str(materialized_nuisance.get(key)) != str(nuisance.get(key)):
+                mismatches.append(f"{key}: selected={nuisance.get(key)!r}, materialized={materialized_nuisance.get(key)!r}")
+        if mismatches:
+            raise RuntimeError(
+                "continuous-thickness full-row materialization changed the selected nuisance contract: "
+                + "; ".join(mismatches)
+            )
+    baseline_summary_path = Path(baseline_run) / "summary.json"
+    materialized_summary_path = materialized / "summary.json"
+    if not args.dry_run and not baseline_summary_path.exists():
+        raise RuntimeError(
+            "continuous-thickness full-row promotion has no comparable baseline summary: "
+            f"{baseline_summary_path}"
+        )
+    baseline_summary = try_read_json(baseline_summary_path) if not args.dry_run else {}
+    candidate_summary = try_read_json(materialized_summary_path) if not args.dry_run else {}
+    baseline_score = score_native_summary(baseline_summary) if not args.dry_run else {}
+    candidate_score = score_native_summary(candidate_summary) if not args.dry_run else {}
+    promotion_reasons: list[str] = []
+    score_gain = float("nan")
+    free_wR2_loss = float("nan")
+    all_R1_loss = float("nan")
+    baseline_free_rows = 0
+    candidate_free_rows = 0
+    if not args.dry_run:
+        def positive_free_rows(summary: Mapping[str, object]) -> int:
+            best = summary.get("best_native") if isinstance(summary.get("best_native"), Mapping) else {}
+            metrics = best.get("metrics") if isinstance(best.get("metrics"), Mapping) else {}
+            free = metrics.get("free") if isinstance(metrics.get("free"), Mapping) else {}
+            free_dyn = free.get("dyn") if isinstance(free.get("dyn"), Mapping) else {}
+            count = safe_float(free_dyn.get("n"), float("nan"))
+            if not math.isfinite(count):
+                selection = summary.get("row_selection") if isinstance(summary.get("row_selection"), Mapping) else {}
+                count = safe_float(selection.get("free_rows"), 0.0)
+            return max(0, int(count)) if math.isfinite(count) else 0
+
+        baseline_free_rows = positive_free_rows(baseline_summary)
+        candidate_free_rows = positive_free_rows(candidate_summary)
+        if baseline_free_rows <= 0:
+            promotion_reasons.append("baseline_missing_positive_free_rows")
+        if candidate_free_rows <= 0:
+            promotion_reasons.append("candidate_missing_positive_free_rows")
+        baseline_total = safe_float(baseline_score.get("score"), float("nan"))
+        candidate_total = safe_float(candidate_score.get("score"), float("nan"))
+        baseline_free = safe_float(baseline_score.get("free_dyn_wR2_all"), float("nan"))
+        candidate_free = safe_float(candidate_score.get("free_dyn_wR2_all"), float("nan"))
+        baseline_r1 = safe_float(baseline_score.get("dyn_R1_all"), float("nan"))
+        candidate_r1 = safe_float(candidate_score.get("dyn_R1_all"), float("nan"))
+        if not all(
+            math.isfinite(value)
+            for value in (baseline_total, candidate_total, baseline_free, candidate_free, baseline_r1, candidate_r1)
+        ):
+            promotion_reasons.append("missing_finite_full_row_metrics")
+        else:
+            score_gain = baseline_total - candidate_total
+            free_wR2_loss = candidate_free - baseline_free
+            all_R1_loss = candidate_r1 - baseline_r1
+            if score_gain < float(args.continuous_thickness_min_gain):
+                promotion_reasons.append("full_row_gain_below_minimum")
+            if free_wR2_loss > float(args.continuous_thickness_max_free_wr2_loss):
+                promotion_reasons.append("full_row_free_wR2_loss")
+            if all_R1_loss > float(args.continuous_thickness_max_all_r1_loss):
+                promotion_reasons.append("full_row_all_R1_loss")
+    accepted = bool(args.dry_run or not promotion_reasons)
+    selected_run = materialized if accepted else Path(baseline_run)
+    selected_nuisance = (
+        dict(materialized_nuisance or nuisance)
+        if accepted
+        else best_nuisance(Path(baseline_run))
+    )
+    if not args.dry_run and not selected_nuisance:
+        raise RuntimeError(
+            "continuous-thickness full-row rejection could not restore the preceding nuisance contract: "
+            f"{baseline_summary_path}"
+        )
+    return selected_nuisance, selected_run, {
+        "family": "continuous_thickness_materialization",
+        "status": "dry_run" if args.dry_run else ("accepted_full_row" if accepted else "rejected_full_row"),
+        "source": str(continuous_run),
+        "run": str(materialized),
+        "row_table": str(row_table),
+        "baseline_run": str(baseline_run),
+        "selected_run": str(selected_run),
+        "full_row_contract": True,
+        "nuisance_contract_verified": not mismatches,
+        "baseline_score": baseline_score,
+        "candidate_score": candidate_score,
+        "full_row_score_gain": score_gain,
+        "full_row_free_wR2_loss": free_wR2_loss,
+        "full_row_all_R1_loss": all_R1_loss,
+        "baseline_free_rows": baseline_free_rows,
+        "candidate_free_rows": candidate_free_rows,
+        "min_promotion_gain": float(args.continuous_thickness_min_gain),
+        "max_free_wR2_loss": float(args.continuous_thickness_max_free_wr2_loss),
+        "max_all_R1_loss": float(args.continuous_thickness_max_all_r1_loss),
+        "promotion_reasons": promotion_reasons,
     }
 
 
@@ -2838,6 +3225,19 @@ def run_dataset_policy_gate(runs: dict[str, Path], out_dir: Path, args: argparse
     return policy
 
 
+def require_materialized_dataset_policy(policy: Mapping[str, object], *, context: str, dry_run: bool) -> None:
+    """Stop a multi workflow instead of degrading after a missing row table."""
+
+    if dry_run or str(policy.get("status") or "") != "missing_row_table":
+        return
+    missing = policy.get("missing") if isinstance(policy.get("missing"), list) else []
+    raise RuntimeError(
+        f"multi-dataset {context} policy is missing a required materialized native row table; "
+        "refusing to silently fall back to equal dataset weights: "
+        + ", ".join(str(path) for path in missing)
+    )
+
+
 def apply_dataset_policy_to_nuisance(nuisance: dict[str, dict], policy: dict) -> dict[str, dict]:
     """Merge dataset policy weights into the datasets CSV nuisance rows."""
 
@@ -2868,18 +3268,85 @@ def policy_active_runs(runs: dict[str, Path], policy: dict) -> dict[str, Path]:
         action = str(decisions.get(name, {}).get("action", "primary"))
         if action in {"primary", "downweight"}:
             active[name] = run
-    return active or runs
+    return active
+
+
+def require_policy_active_runs(runs: Mapping[str, Path], *, context: str) -> None:
+    """Stop when an evaluated policy leaves no raw-row anchor dataset."""
+
+    if runs:
+        return
+    raise RuntimeError(
+        f"multi-dataset {context} policy selected no primary or downweighted dataset; "
+        "refusing to resurrect excluded/completeness-only crystals or publish an unanchored endpoint"
+    )
 
 
 def multi_combined_endpoint_model(combined_dir: Path) -> Path | None:
-    """Return the usable shared SHELXL model from a multi-dataset combine run."""
+    """Return the exact summary-selected shared SHELXL model.
 
-    candidates = [combined_dir / "combined_endpoint_lam_1p0" / "multi_dyn_corrected.res"]
-    candidates.extend(sorted(combined_dir.glob("combined_endpoint_lam_*/multi_dyn_corrected.res")))
-    for candidate in candidates:
-        if shelx_model_is_usable(candidate):
-            return candidate
-    return None
+    Endpoint directories are durable resume artifacts.  Selecting by glob can
+    therefore pair current health/metrics with an older lambda's RES file.
+    Require the current summary's lambda, artifact path, health path, and hash
+    to identify the same bytes before allowing feedback reuse.
+    """
+
+    summary = try_read_json(combined_dir / "combined_summary.json")
+    endpoint = summary.get("combined_endpoint")
+    endpoint = endpoint if isinstance(endpoint, Mapping) else {}
+    try:
+        lam = float(endpoint["lambda_q"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not math.isfinite(lam):
+        return None
+    lam_tag = str(lam).replace(".", "p")
+    expected = combined_dir / f"combined_endpoint_lam_{lam_tag}" / "multi_dyn_corrected.res"
+    artifacts = endpoint.get("artifacts")
+    artifacts = artifacts if isinstance(artifacts, Mapping) else {}
+    recorded_res = str(artifacts.get("res") or "")
+    if not recorded_res:
+        return None
+    candidate = Path(recorded_res).expanduser()
+    try:
+        candidate.resolve().relative_to(combined_dir.resolve())
+    except (OSError, ValueError):
+        return None
+    if candidate.resolve() != expected.resolve():
+        return None
+
+    shelxl = endpoint.get("shelxl")
+    shelxl = shelxl if isinstance(shelxl, Mapping) else {}
+    if not shelx_model_is_usable(candidate):
+        return None
+    health = shelxl.get("res_health")
+    health = health if isinstance(health, Mapping) else {}
+    health_path = str(health.get("path") or "")
+    health_sha = str(health.get("sha256") or "")
+    artifact_sha = str(artifacts.get("res_sha256") or "")
+    try:
+        health_path_matches = bool(health_path) and Path(health_path).resolve() == candidate.resolve()
+        current_sha = sha256_file(candidate)
+    except OSError:
+        return None
+    return (
+        candidate
+        if health_path_matches
+        and artifact_sha
+        and health_sha
+        and artifact_sha == health_sha == current_sha
+        else None
+    )
+
+
+def multi_combined_endpoint_shelxl(combined_dir: Path) -> dict[str, object]:
+    """Return the recorded SHELXL result for a combined multi-dataset endpoint."""
+
+    summary = try_read_json(combined_dir / "combined_summary.json")
+    endpoint = summary.get("combined_endpoint")
+    endpoint = endpoint if isinstance(endpoint, Mapping) else {}
+    shelxl = endpoint.get("shelxl")
+    return dict(shelxl) if isinstance(shelxl, Mapping) else {}
 
 
 def run_multi_shelxl_feedback_loop(
@@ -2954,7 +3421,8 @@ def run_multi_shelxl_feedback_loop(
                 cycle_dir / "weighted_runs",
                 include_endpoint_only=False,
             )
-            cycle_input_runs = policy_active_runs(weighted_runs or cycle_runs, structure_dataset_policy)
+            cycle_input_runs = policy_active_runs(weighted_runs, structure_dataset_policy)
+            require_policy_active_runs(cycle_input_runs, context=f"structure-feedback cycle {cycle}")
 
         combined_dir = cycle_dir / "combined"
         run_logged(
@@ -2971,11 +3439,44 @@ def run_multi_shelxl_feedback_loop(
             dry_run=False,
         )
         output_model = multi_combined_endpoint_model(combined_dir)
+        endpoint_shelxl = multi_combined_endpoint_shelxl(combined_dir)
+        combined_summary = try_read_json(combined_dir / "combined_summary.json")
+        combined_endpoint = (
+            combined_summary.get("combined_endpoint")
+            if isinstance(combined_summary.get("combined_endpoint"), Mapping)
+            else {}
+        )
+        endpoint_modulation_p95 = safe_float(
+            combined_endpoint.get("mod_p95", combined_endpoint.get("modulation_p95")),
+            float("nan"),
+        )
+        max_modulation_p95 = float(getattr(args, "publication_endpoint_max_modulation_p95", 20.0))
+        modulation_gate_passed = bool(
+            math.isfinite(endpoint_modulation_p95)
+            and endpoint_modulation_p95 <= max_modulation_p95
+        )
+        endpoint_health = endpoint_shelxl.get("res_health")
+        endpoint_health = dict(endpoint_health) if isinstance(endpoint_health, Mapping) else {}
         record = {
             "cycle": cycle,
             "label": cycle_label,
             "input_model": current_model,
             "output_model": str(output_model) if output_model else "",
+            "endpoint_shelxl_status": str(endpoint_shelxl.get("status", "")),
+            "endpoint_res_health": endpoint_health,
+            "endpoint_modulation_p95": endpoint_modulation_p95,
+            "endpoint_modulation_metric": str(combined_endpoint.get("modulation_metric") or ""),
+            "endpoint_modulation_gate": {
+                "passed": modulation_gate_passed,
+                "maximum_p95": max_modulation_p95,
+                "reason": (
+                    "passed"
+                    if modulation_gate_passed
+                    else "missing finite modulation p95"
+                    if not math.isfinite(endpoint_modulation_p95)
+                    else f"modulation p95 {endpoint_modulation_p95:.4g} exceeds {max_modulation_p95:.4g}"
+                ),
+            },
             "combined": str(combined_dir),
             "runs": {name: str(path) for name, path in cycle_runs.items()},
             "combined_input_runs": {name: str(path) for name, path in cycle_input_runs.items()},
@@ -2985,6 +3486,50 @@ def run_multi_shelxl_feedback_loop(
             summary["status"] = "failed_no_usable_endpoint_model"
             write_json(feedback_root / "multi_shelxl_feedback_loop_summary.json", summary)
             raise RuntimeError(f"{cycle_label} did not produce a usable shared SHELXL .res model in {combined_dir}")
+        if not modulation_gate_passed:
+            record["adopted_for_feedback"] = False
+            summary["status"] = "stopped_endpoint_modulation_gate"
+            summary["stopped_reason"] = (
+                "Shared SHELXL feedback cycle lacks a bounded, measured multiplicative intensity-correction "
+                f"contract; keeping the previous clean model. {record['endpoint_modulation_gate']['reason']}."
+            )
+            summary["unsafe_model"] = str(output_model)
+            write_json(feedback_root / "multi_shelxl_feedback_loop_summary.json", summary)
+            break
+        if not shelxl_feedback_record_safe_for_reuse(record):
+            record["adopted_for_feedback"] = False
+            endpoint_status = str(record.get("endpoint_shelxl_status", "")).strip().lower()
+            try:
+                endpoint_npd_count = int(endpoint_health.get("npd_count", 0) or 0)
+            except (TypeError, ValueError, OverflowError):
+                endpoint_npd_count = 0
+            try:
+                endpoint_split_count = int(endpoint_health.get("split_count", 0) or 0)
+            except (TypeError, ValueError, OverflowError):
+                endpoint_split_count = 0
+            has_adp_pathology = bool(
+                endpoint_status == "adp_pathology"
+                or endpoint_health.get("has_npd") is True
+                or endpoint_npd_count > 0
+            )
+            if has_adp_pathology:
+                summary["status"] = "stopped_adp_pathology"
+                summary["stopped_reason"] = (
+                    "Shared SHELXL feedback cycle produced ADP pathology; keeping the previous clean model. "
+                    f"NPD atoms={endpoint_npd_count}, split warnings={endpoint_split_count}."
+                )
+                summary["pathological_model"] = str(output_model)
+            else:
+                reason = str(endpoint_shelxl.get("invalid_res_reason") or endpoint_health.get("reason") or "unsafe endpoint")
+                summary["status"] = "stopped_unsafe_endpoint"
+                summary["stopped_reason"] = (
+                    "Shared SHELXL feedback cycle produced an unsafe endpoint; keeping the previous clean model. "
+                    f"SHELXL status={endpoint_status or 'unknown'}, reason={reason}."
+                )
+                summary["unsafe_model"] = str(output_model)
+            write_json(feedback_root / "multi_shelxl_feedback_loop_summary.json", summary)
+            break
+        record["adopted_for_feedback"] = True
         current_model = str(output_model)
         summary["current_model"] = current_model
         summary["status"] = "ok"
@@ -3030,13 +3575,38 @@ def run_publication_report(python: str, prep: PrepConfig, result: dict, args: ar
     }
 
 
+def _multi_hand_publication_blockers(result: Mapping[str, object]) -> list[str]:
+    """Return fail-closed publication blockers from the final shared-hand audit."""
+
+    if not result.get("combined"):
+        return []
+    raw = result.get("post_feedback_multi_hand_diagnostic")
+    diagnostic = raw if isinstance(raw, Mapping) else {}
+    if not diagnostic:
+        path_text = str(result.get("post_feedback_multi_hand_diagnostic_path") or "").strip()
+        diagnostic = try_read_json(Path(path_text)) if path_text else {}
+    status = str(diagnostic.get("status") or "missing")
+    consistency = diagnostic.get("consistency_gate") if isinstance(diagnostic.get("consistency_gate"), Mapping) else {}
+    explicitly_not_applicable = status in {"not_applicable", "skipped_not_applicable"} and str(
+        consistency.get("status") or ""
+    ) == "not_applicable"
+    if status == "consistent" or explicitly_not_applicable:
+        return []
+    warnings = [str(value) for value in (consistency.get("warnings") or diagnostic.get("warnings") or []) if str(value)]
+    detail = "; ".join(warnings[:4]) or "the diagnostic is missing, incomplete, disabled, or materially favors the opposite hand"
+    return [
+        f"shared post-feedback hand diagnostic status {status!r} is not publication-consistent: {detail}; "
+        "absolute structure remains unresolved and GROND does not auto-switch the hand"
+    ]
+
+
 def run_publication_endpoint_chooser(prep: PrepConfig, result: dict, args: argparse.Namespace) -> dict:
     """Write the publication-vs-diagnostic endpoint chooser report."""
 
     if not getattr(args, "publication_endpoint_chooser", True):
         return {"status": "disabled"}
-    out_dir = Path(args.out_dir) / "endpoint_chooser"
-    if args.dry_run:
+    out_dir = Path(getattr(args, "out_dir", ".")) / "endpoint_chooser"
+    if getattr(args, "dry_run", False):
         return {"status": "dry_run", "out_dir": str(out_dir)}
     if result.get("combined"):
         runs = {name: Path(run) for name, run in (result.get("publication_runs") or result.get("runs") or {}).items()}
@@ -3059,17 +3629,27 @@ def run_publication_endpoint_chooser(prep: PrepConfig, result: dict, args: argpa
     model_candidate = _publication_model_endpoint_candidate(result)
     if model_candidate:
         extra_candidates.append(model_candidate)
+    combined_baseline = _validated_fresh_conventional_baseline(result) if result.get("combined") else {}
+    global_publication_blockers = _multi_hand_publication_blockers(result)
     return write_publication_endpoint_choice(
         runs,
         out_dir,
         combined_run=combined_run,
         forensic_summaries=forensic_summaries,
         extra_candidates=extra_candidates,
-        min_hkl_safe_factor=args.publication_endpoint_min_hkl_safe_factor,
-        max_modulation_p95=args.publication_endpoint_max_modulation_p95,
-        publication_goof_min=args.endpoint_calibration_goof_min,
-        publication_goof_max=args.endpoint_calibration_goof_max,
+        min_hkl_safe_factor=getattr(args, "publication_endpoint_min_hkl_safe_factor", 0.25),
+        max_modulation_p95=getattr(args, "publication_endpoint_max_modulation_p95", 20.0),
+        publication_goof_min=getattr(args, "endpoint_calibration_goof_min", 0.85),
+        publication_goof_max=getattr(args, "endpoint_calibration_goof_max", 1.15),
         allow_npd=bool(getattr(args, "publication_allow_npd", False)),
+        combined_baseline_r1_all=(
+            safe_float(combined_baseline.get("R1_all"), float("nan"))
+            if combined_baseline
+            else None
+        ),
+        combined_baseline_source=str(combined_baseline.get("baseline_source") or ""),
+        require_combined_baseline=bool(result.get("combined")),
+        global_publication_blockers=global_publication_blockers,
     )
 
 
@@ -3088,25 +3668,74 @@ def _endpoint_calibration_chooser_candidate(result: Mapping[str, object]) -> dic
     if not isinstance(endpoint, Mapping) or not endpoint:
         return {}
 
-    npd_count = int(endpoint.get("shelxl_npd_count", 0) or 0)
-    raw_npd_atoms = endpoint.get("shelxl_npd_atoms", [])
-    if isinstance(raw_npd_atoms, str):
-        npd_atoms = [atom.strip() for atom in raw_npd_atoms.split(",") if atom.strip()]
-    elif isinstance(raw_npd_atoms, (list, tuple)):
-        npd_atoms = [str(atom) for atom in raw_npd_atoms]
-    else:
-        npd_atoms = []
-
     lst = str(endpoint.get("endpoint_lst", "") or "")
     manifest_path = str(endpoint.get("endpoint_manifest", "") or "")
     manifest = try_read_json(Path(manifest_path)) if manifest_path else {}
-    hkl_safe_factor = endpoint.get("hkl_safe_factor", manifest.get("hkl_safe_factor"))
+    manifest_artifacts = manifest.get("artifacts") if isinstance(manifest.get("artifacts"), Mapping) else {}
+    hkl_safe_factor = endpoint.get("hkl_safe_factor")
     try:
         hkl_safe_factor = float(hkl_safe_factor)
     except (TypeError, ValueError):
         hkl_safe_factor = 0.0
     if not math.isfinite(hkl_safe_factor):
         hkl_safe_factor = 0.0
+    modulation_p95 = safe_float(
+        endpoint.get("mod_p95", endpoint.get("modulation_p95")),
+        float("nan"),
+    )
+    endpoint_b_recorded = endpoint.get("endpoint_b")
+    keep_exti_recorded = endpoint.get("keep_exti")
+    endpoint_policy_complete = endpoint_b_recorded is not None and keep_exti_recorded is not None
+    artifact_provenance = endpoint_artifact_provenance(
+        {
+            **endpoint,
+            "res": str(endpoint.get("endpoint_res", "") or ""),
+            "hkl": str(endpoint.get("endpoint_hkl", "") or ""),
+            "lst": lst,
+            "endpoint_manifest": manifest_path,
+            "artifacts": manifest_artifacts,
+        }
+    )
+    pathology = (
+        artifact_provenance.get("lst_pathology")
+        if isinstance(artifact_provenance.get("lst_pathology"), Mapping)
+        else {}
+    )
+    pathology_complete = str(pathology.get("pathology_status") or "") == "complete"
+    recorded_npd = _quick_int(endpoint.get("shelxl_npd_count"))
+    recorded_split = _quick_int(endpoint.get("shelxl_split_count"))
+    npd_count = max(recorded_npd or 0, int(pathology.get("npd_count", 0) or 0)) if pathology_complete else recorded_npd
+    split_count = (
+        max(recorded_split or 0, int(pathology.get("split_count", 0) or 0))
+        if pathology_complete
+        else recorded_split
+    )
+    raw_recorded_atoms = endpoint.get("shelxl_npd_atoms", [])
+    if isinstance(raw_recorded_atoms, str):
+        recorded_atoms = [atom.strip() for atom in raw_recorded_atoms.split(",") if atom.strip()]
+    elif isinstance(raw_recorded_atoms, (list, tuple, set)):
+        recorded_atoms = [str(atom) for atom in raw_recorded_atoms]
+    else:
+        recorded_atoms = []
+    npd_atoms = sorted(
+        {
+            str(atom)
+            for atom in [*recorded_atoms, *((pathology.get("npd_atoms") or []) if pathology_complete else [])]
+            if str(atom).strip()
+        }
+    )
+    recorded_has_npd = endpoint.get("shelxl_has_npd")
+    recorded_has_split = endpoint.get("shelxl_has_split_warnings")
+    has_npd = (
+        bool(recorded_has_npd) or bool(pathology.get("has_npd")) or bool((npd_count or 0) > 0)
+        if recorded_has_npd is not None or pathology_complete or npd_count is not None
+        else None
+    )
+    has_split = (
+        bool(recorded_has_split) or bool(pathology.get("has_split_warnings")) or bool((split_count or 0) > 0)
+        if recorded_has_split is not None or pathology_complete or split_count is not None
+        else None
+    )
     shelxl = {
         "R1_gt": endpoint.get("shelxl_R1gt"),
         "R1_all": endpoint.get("shelxl_R1all"),
@@ -3117,12 +3746,28 @@ def _endpoint_calibration_chooser_candidate(result: Mapping[str, object]) -> dic
         "Rint": endpoint.get("shelxl_Rint"),
         "Rsigma": endpoint.get("shelxl_Rsigma"),
         "npd_count": npd_count,
-        "split_count": int(endpoint.get("shelxl_split_count", 0) or 0),
+        "split_count": split_count,
         "npd_atoms": npd_atoms,
-        "has_npd": bool(endpoint.get("shelxl_has_npd", npd_count > 0)),
-        "has_split_warnings": bool(endpoint.get("shelxl_has_split_warnings", False)),
+        "has_npd": has_npd,
+        "has_split_warnings": has_split,
         "lst": lst,
     }
+    metric_consistency = endpoint_lst_metric_consistency(shelxl, artifact_provenance)
+    live_metrics = (
+        artifact_provenance.get("lst_metrics")
+        if isinstance(artifact_provenance.get("lst_metrics"), Mapping)
+        else {}
+    )
+    live_metrics_complete = str(live_metrics.get("metric_status") or "") == "complete"
+    promotion_fields = endpoint_promotion_field_contract(endpoint)
+    canonical = (
+        artifact_provenance.get("canonical_artifacts")
+        if isinstance(artifact_provenance.get("canonical_artifacts"), Mapping)
+        else {}
+    )
+    canonical_res = canonical.get("res") if isinstance(canonical.get("res"), Mapping) else {}
+    canonical_hkl = canonical.get("hkl") if isinstance(canonical.get("hkl"), Mapping) else {}
+    canonical_lst = canonical.get("lst") if isinstance(canonical.get("lst"), Mapping) else {}
     spec = str(endpoint.get("spec", "calibrated"))
     combined = str(calibration.get("label", "")) == "combined" or bool(result.get("combined"))
     return {
@@ -3131,24 +3776,43 @@ def _endpoint_calibration_chooser_candidate(result: Mapping[str, object]) -> dic
         "source_kind": "combined_endpoint_calibration" if combined else "endpoint_calibration",
         "run_dir": str(endpoint.get("endpoint_dir", calibration.get("out_dir", "")) or ""),
         "lambda_q": calibration.get("lambda_q", 1.0),
-        "endpoint_b": 0.0,
-        "keep_exti": False,
+        "endpoint_b": safe_float(endpoint_b_recorded, float("nan")),
+        "keep_exti": bool(keep_exti_recorded) if keep_exti_recorded is not None else None,
+        "endpoint_policy_required": True,
+        "endpoint_policy_complete": endpoint_policy_complete,
         "hkl_safe_factor": hkl_safe_factor,
-        "modulation_p95": 1.0,
-        "R1_gt": shelxl["R1_gt"],
-        "R1_all": shelxl["R1_all"],
-        "wR2_all": shelxl["wR2_all"],
-        "GooF": shelxl["GooF"],
-        "N_gt": shelxl["N_gt"],
-        "N_all": shelxl["N_all"],
+        "modulation_p95": modulation_p95,
+        "modulation_metric": str(endpoint.get("modulation_metric") or manifest.get("modulation_metric") or ""),
+        "R1_gt": live_metrics.get("R1_gt") if live_metrics_complete else shelxl["R1_gt"],
+        "R1_all": live_metrics.get("R1_all") if live_metrics_complete else shelxl["R1_all"],
+        "wR2_all": live_metrics.get("wR2_all") if live_metrics_complete else shelxl["wR2_all"],
+        "GooF": live_metrics.get("GooF") if live_metrics_complete else shelxl["GooF"],
+        "N_gt": live_metrics.get("N_gt") if live_metrics_complete else shelxl["N_gt"],
+        "N_all": live_metrics.get("N_all") if live_metrics_complete else shelxl["N_all"],
+        "metric_consistency_required": True,
+        "metric_consistency_ok": metric_consistency.get("passed") is True,
+        "metric_consistency": metric_consistency,
         "npd_count": npd_count,
         "split_count": shelxl["split_count"],
         "npd_atoms": npd_atoms,
         "has_npd": shelxl["has_npd"],
         "has_split_warnings": shelxl["has_split_warnings"],
-        "hkl": str(endpoint.get("endpoint_hkl", "") or ""),
-        "lst": lst,
-        "res": str(endpoint.get("endpoint_res", "") or ""),
+        "hkl": str(canonical_hkl.get("path") or endpoint.get("endpoint_hkl", "") or ""),
+        "lst": str(canonical_lst.get("path") or lst),
+        "res": str(canonical_res.get("path") or endpoint.get("endpoint_res", "") or ""),
+        "res_sha256": str(canonical_res.get("sha256") or ""),
+        "hkl_sha256": str(canonical_hkl.get("sha256") or ""),
+        "lst_sha256": str(canonical_lst.get("sha256") or ""),
+        "provenance_required": True,
+        "artifact_provenance_ok": artifact_provenance.get("passed") is True,
+        "artifact_provenance": artifact_provenance,
+        "res_provenance_ok": artifact_provenance.get("passed") is True,
+        "res_provenance": artifact_provenance,
+        "pathology_required": True,
+        "pathology_status": str(pathology.get("pathology_status") or "unverified"),
+        "promotion_fields_required": True,
+        "promotion_fields_ok": promotion_fields.get("passed") is True,
+        "promotion_field_contract": promotion_fields,
         "shelxl": shelxl,
         "scale_spec": spec,
         "scale_params": endpoint.get("scale_params"),
@@ -3169,9 +3833,89 @@ def _publication_model_endpoint_candidate(result: Mapping[str, object]) -> dict[
     hkl = res.with_suffix(".hkl")
     if not res.exists() or not lst.exists():
         return {}
-    details = _quick_shelxl_details({}, lst)
+    origin_summary_path = res.parent.parent / (
+        "combined_summary.json" if result.get("combined") else "summary.json"
+    )
+    origin_summary = try_read_json(origin_summary_path)
+    origin_endpoint: Mapping[str, object] = {}
+    if result.get("combined"):
+        value = origin_summary.get("combined_endpoint")
+        origin_endpoint = value if isinstance(value, Mapping) else {}
+    else:
+        raw_endpoints = origin_summary.get("endpoint_results_sorted")
+        candidates = raw_endpoints if isinstance(raw_endpoints, list) else []
+        best = origin_summary.get("best_endpoint")
+        if isinstance(best, Mapping):
+            candidates = [best, *candidates]
+        for value in candidates:
+            if not isinstance(value, Mapping):
+                continue
+            value_shelxl = value.get("shelxl") if isinstance(value.get("shelxl"), Mapping) else {}
+            value_lst = str(value_shelxl.get("lst") or "").strip()
+            if value_lst and Path(value_lst).expanduser().with_suffix(".res").resolve() == res.resolve():
+                origin_endpoint = value
+                break
+    origin_shelxl = origin_endpoint.get("shelxl") if isinstance(origin_endpoint.get("shelxl"), Mapping) else {}
+    artifact_provenance = endpoint_artifact_provenance(
+        {**origin_endpoint, "res": str(res), "hkl": str(hkl), "lst": str(lst)}
+    )
+    provenance_ok = artifact_provenance.get("passed") is True
+    pathology = (
+        artifact_provenance.get("lst_pathology")
+        if isinstance(artifact_provenance.get("lst_pathology"), Mapping)
+        else {}
+    )
+    pathology_complete = str(pathology.get("pathology_status") or "") == "complete"
+    metric_consistency = endpoint_lst_metric_consistency(origin_shelxl, artifact_provenance)
+    live_metrics = (
+        artifact_provenance.get("lst_metrics")
+        if isinstance(artifact_provenance.get("lst_metrics"), Mapping)
+        else {}
+    )
+    live_metrics_complete = str(live_metrics.get("metric_status") or "") == "complete"
+    details = dict(origin_shelxl)
+    if live_metrics_complete:
+        details.update({key: live_metrics[key] for key in ("R1_gt", "R1_all", "wR2_all", "GooF", "N_gt", "N_all")})
+    promotion_fields = endpoint_promotion_field_contract(origin_endpoint)
+    canonical = (
+        artifact_provenance.get("canonical_artifacts")
+        if isinstance(artifact_provenance.get("canonical_artifacts"), Mapping)
+        else {}
+    )
+    canonical_res = canonical.get("res") if isinstance(canonical.get("res"), Mapping) else {}
+    canonical_hkl = canonical.get("hkl") if isinstance(canonical.get("hkl"), Mapping) else {}
+    canonical_lst = canonical.get("lst") if isinstance(canonical.get("lst"), Mapping) else {}
     if _quick_fraction(details.get("R1_all")) is None or _quick_fraction(details.get("wR2_all")) is None:
         return {}
+    recorded_npd = _quick_int(details.get("npd_count"))
+    recorded_split = _quick_int(details.get("split_count"))
+    npd_count = max(recorded_npd or 0, int(pathology.get("npd_count", 0) or 0)) if pathology_complete else recorded_npd
+    split_count = (
+        max(recorded_split or 0, int(pathology.get("split_count", 0) or 0))
+        if pathology_complete
+        else recorded_split
+    )
+    recorded_atoms = details.get("npd_atoms") if isinstance(details.get("npd_atoms"), (list, tuple, set)) else []
+    npd_atoms = sorted(
+        {
+            str(atom)
+            for atom in [*recorded_atoms, *((pathology.get("npd_atoms") or []) if pathology_complete else [])]
+            if str(atom).strip()
+        }
+    )
+    has_npd = (
+        bool(details.get("has_npd")) or bool(pathology.get("has_npd")) or bool((npd_count or 0) > 0)
+        if details.get("has_npd") is not None or pathology_complete or npd_count is not None
+        else None
+    )
+    has_split = (
+        bool(details.get("has_split_warnings"))
+        or bool(pathology.get("has_split_warnings"))
+        or bool((split_count or 0) > 0)
+        if details.get("has_split_warnings") is not None or pathology_complete or split_count is not None
+        else None
+    )
+    endpoint_policy_complete = "endpoint_b" in origin_endpoint and "keep_exti" in origin_endpoint
     shelxl = {
         "R1_gt": details.get("R1_gt"),
         "R1_all": details.get("R1_all"),
@@ -3183,35 +3927,63 @@ def _publication_model_endpoint_candidate(result: Mapping[str, object]) -> dict[
         "Rsigma": details.get("Rsigma"),
         "parameters": details.get("parameters"),
         "restraints": details.get("restraints"),
-        "npd_count": details.get("npd_count"),
-        "split_count": details.get("split_count"),
+        "npd_count": npd_count,
+        "split_count": split_count,
         "lst": str(lst),
     }
+    source_kind = "combined_corrected_hkl" if result.get("combined") else "native_corrected_hkl"
     return {
         "id": "final_ls1_corrected_hkl",
         "label": "final_ls1_corrected_hkl",
-        "source_kind": "native_corrected_hkl",
+        "source_kind": source_kind,
         "run_dir": str(res.parent),
         "lambda_q": 1.0,
-        "endpoint_b": 0.0,
-        "keep_exti": False,
-        "hkl_safe_factor": 1.0,
-        "modulation_p95": 1.0,
+        "endpoint_b": safe_float(origin_endpoint.get("endpoint_b"), float("nan")),
+        "keep_exti": bool(origin_endpoint.get("keep_exti")) if "keep_exti" in origin_endpoint else None,
+        "endpoint_policy_required": True,
+        "endpoint_policy_complete": endpoint_policy_complete,
+        "hkl_safe_factor": (
+            safe_float(origin_endpoint.get("hkl_safe_factor"), 0.0)
+            if provenance_ok
+            else 0.0
+        ),
+        "modulation_p95": (
+            safe_float(origin_endpoint.get("mod_p95", origin_endpoint.get("modulation_p95")), float("nan"))
+            if provenance_ok
+            else float("inf")
+        ),
         "R1_gt": details.get("R1_gt"),
         "R1_all": details.get("R1_all"),
         "wR2_all": details.get("wR2_all"),
         "GooF": details.get("GooF"),
         "N_gt": details.get("N_gt"),
         "N_all": details.get("N_all"),
-        "npd_count": details.get("npd_count"),
-        "split_count": details.get("split_count"),
-        "npd_atoms": details.get("npd_atoms"),
-        "has_npd": details.get("has_npd"),
-        "has_split_warnings": details.get("has_split_warnings"),
-        "hkl": str(hkl) if hkl.exists() else "",
-        "lst": str(lst),
-        "res": str(res),
+        "metric_consistency_required": True,
+        "metric_consistency_ok": metric_consistency.get("passed") is True,
+        "metric_consistency": metric_consistency,
+        "npd_count": npd_count,
+        "split_count": split_count,
+        "npd_atoms": npd_atoms,
+        "has_npd": has_npd,
+        "has_split_warnings": has_split,
+        "hkl": str(canonical_hkl.get("path") or hkl),
+        "lst": str(canonical_lst.get("path") or lst),
+        "res": str(canonical_res.get("path") or res),
+        "res_sha256": str(canonical_res.get("sha256") or ""),
+        "hkl_sha256": str(canonical_hkl.get("sha256") or ""),
+        "lst_sha256": str(canonical_lst.get("sha256") or ""),
         "shelxl": shelxl,
+        "endpoint_origin_summary": str(origin_summary_path),
+        "artifact_provenance_ok": provenance_ok,
+        "artifact_provenance": artifact_provenance,
+        "res_provenance_ok": provenance_ok,
+        "provenance_required": True,
+        "res_provenance": artifact_provenance,
+        "pathology_required": True,
+        "pathology_status": str(pathology.get("pathology_status") or "unverified"),
+        "promotion_fields_required": True,
+        "promotion_fields_ok": promotion_fields.get("passed") is True,
+        "promotion_field_contract": promotion_fields,
     }
 
 
@@ -3221,6 +3993,128 @@ def _endpoint_calibration_lambda(summary: Mapping[str, object], args: argparse.N
     del summary
     value = safe_float(getattr(args, "endpoint_calibration_lambda_q", 1.0), 1.0)
     return value if value > 0.0 else 1.0
+
+
+def _publication_baseline_hkl(prep: PrepConfig) -> str:
+    """Return the conventional HKL that is comparable to the publication endpoint."""
+
+    if str(prep.baseline_hkl or "").strip():
+        return str(prep.baseline_hkl)
+    if len(prep.datasets) == 1 and str(prep.datasets[0].baseline_hkl or "").strip():
+        return str(prep.datasets[0].baseline_hkl)
+    return ""
+
+
+def run_fresh_conventional_baseline(
+    prep: PrepConfig,
+    args: argparse.Namespace,
+    python: str,
+    logs: Path,
+) -> dict[str, object]:
+    """Replay the supplied conventional model/HKL once with exact provenance."""
+
+    hkl_text = _publication_baseline_hkl(prep)
+    if not hkl_text:
+        return {
+            "status": "unavailable",
+            "reason": "no global conventional baseline HKL was supplied",
+        }
+    out_dir = Path(args.out_dir) / "controls" / "fresh_conventional_baseline"
+    if args.dry_run:
+        return {
+            "status": "dry_run",
+            "res": str(prep.structure),
+            "hkl": hkl_text,
+            "out_dir": str(out_dir),
+        }
+    run_logged(
+        [
+            python,
+            str(engine_script("run_shelxl_baseline.py")),
+            "--res",
+            str(prep.structure),
+            "--hkl",
+            hkl_text,
+            "--out-dir",
+            str(out_dir),
+            "--shelxl",
+            str(args.shelxl),
+        ],
+        logs,
+        "fresh_conventional_baseline",
+        dry_run=False,
+    )
+    summary = try_read_json(out_dir / "summary.json")
+    if not summary:
+        raise RuntimeError(f"fresh conventional baseline did not write {out_dir / 'summary.json'}")
+    return {**summary, "out_dir": str(out_dir), "summary": str(out_dir / "summary.json")}
+
+
+def _provenance_file_is_current(record: Mapping[str, object] | None) -> bool:
+    """Return true when a provenance record still matches the file on disk."""
+
+    if not isinstance(record, Mapping):
+        return False
+    path_text = str(record.get("path") or "").strip()
+    expected = str(record.get("sha256") or "").strip()
+    if not path_text or not expected:
+        return False
+    path = Path(path_text).expanduser()
+    try:
+        return bool(path.is_file() and sha256_file(path) == expected)
+    except OSError:
+        return False
+
+
+def _validated_fresh_conventional_baseline(result: Mapping[str, object]) -> dict[str, object]:
+    """Return a healthy, hash-bound supplied-input conventional baseline."""
+
+    baseline = result.get("conventional_baseline")
+    if not isinstance(baseline, Mapping) or str(baseline.get("status") or "") != "ok":
+        return {}
+    if baseline.get("safe_for_feedback") is not True:
+        return {}
+    inputs = baseline.get("inputs") if isinstance(baseline.get("inputs"), Mapping) else {}
+    outputs = baseline.get("outputs") if isinstance(baseline.get("outputs"), Mapping) else {}
+    required_records = [
+        inputs.get("res"),
+        inputs.get("hkl"),
+        outputs.get("ins"),
+        outputs.get("hkl"),
+        outputs.get("res"),
+        outputs.get("lst"),
+    ]
+    if not all(_provenance_file_is_current(record) for record in required_records):
+        return {}
+    shelxl = baseline.get("shelxl") if isinstance(baseline.get("shelxl"), Mapping) else {}
+    health = shelxl.get("res_health") if isinstance(shelxl.get("res_health"), Mapping) else {}
+    r1_all = safe_float(shelxl.get("R1_all"), float("nan"))
+    npd_count = int(safe_float(shelxl.get("npd_count", health.get("npd_count", 0)), 0.0))
+    split_count = int(safe_float(shelxl.get("split_count", health.get("split_count", 0)), 0.0))
+    if not (
+        math.isfinite(r1_all)
+        and safe_float(shelxl.get("returncode"), 1.0) == 0.0
+        and npd_count == 0
+        and split_count == 0
+        and health.get("safe_for_feedback") is not False
+    ):
+        return {}
+    out = dict(shelxl)
+    out.update(
+        {
+            "R1_all": r1_all,
+            "npd_count": npd_count,
+            "split_count": split_count,
+            "baseline_source": "fresh_supplied_input_conventional_control",
+            "res": str((outputs.get("res") or {}).get("path") or ""),
+            "hkl": str((outputs.get("hkl") or {}).get("path") or ""),
+            "lst": str((outputs.get("lst") or {}).get("path") or ""),
+            "source_res": str((inputs.get("res") or {}).get("path") or ""),
+            "source_hkl": str((inputs.get("hkl") or {}).get("path") or ""),
+            "summary": str(baseline.get("summary") or ""),
+        }
+    )
+    return out
 
 
 def _fresh_baseline_shelxl(summary: Mapping[str, object]) -> dict[str, object]:
@@ -3260,15 +4154,17 @@ def _endpoint_baseline_no_harm_gate(
     endpoint: Mapping[str, object],
     *,
     r1_tolerance: float = 0.0,
+    baseline_override: Mapping[str, object] | None = None,
+    require_baseline: bool = False,
 ) -> dict[str, object]:
     """Reject a corrected endpoint whose R1all is worse than a fresh baseline."""
 
-    baseline = _fresh_baseline_shelxl(summary)
+    baseline = dict(baseline_override or {}) or _fresh_baseline_shelxl(summary)
     if not baseline:
         return {
-            "status": "not_applicable",
-            "passed": True,
-            "reason": "fresh healthy baseline_exti is unavailable",
+            "status": "failed_missing_baseline" if require_baseline else "not_applicable",
+            "passed": not require_baseline,
+            "reason": "fresh healthy conventional baseline is unavailable",
         }
     baseline_r1 = safe_float(baseline.get("R1_all"), float("nan"))
     endpoint_r1 = safe_float(
@@ -3301,6 +4197,56 @@ def _endpoint_baseline_no_harm_gate(
     }
 
 
+def _recorded_native_row_tables(
+    result: Mapping[str, object],
+    *,
+    include_endpoint_only: bool = False,
+) -> dict[str, str]:
+    """Return the native row tables that define the raw-row result.
+
+    ``publication_runs`` excludes completeness-only crystals from raw-row
+    metrics while retaining primary and downweighted datasets.  The broader
+    ``combined_input_runs`` contract is useful only when endpoint-completeness
+    provenance is explicitly requested.
+    """
+
+    if result.get("combined"):
+        runs = (
+            result.get("combined_input_runs")
+            if include_endpoint_only
+            else result.get("publication_runs")
+        ) or result.get("combined_input_runs") or result.get("runs") or {}
+        if isinstance(runs, Mapping):
+            return {
+                str(name): str(Path(str(run_dir)).expanduser() / "native_dyn_calc.csv")
+                for name, run_dir in sorted(runs.items(), key=lambda item: str(item[0]))
+                if str(run_dir)
+            }
+        return {}
+    primary = str(result.get("primary_run") or "").strip()
+    return {"dataset": str(Path(primary).expanduser() / "native_dyn_calc.csv")} if primary else {}
+
+
+def _multi_endpoint_calibration_not_applicable(result: Mapping[str, object]) -> dict[str, object]:
+    """Describe why single-table scale replay is unsafe for a multi run."""
+
+    combined = Path(str(result.get("combined") or "")).expanduser()
+    row_tables = _recorded_native_row_tables(result, include_endpoint_only=True)
+    return {
+        "status": "not_applicable_multi_dataset",
+        "reason": (
+            "Multi-dataset scale contracts remain independent by crystal. The single-table endpoint-calibration "
+            "replay would incorrectly share frame groups and detector scales, and would bypass the validated "
+            "per-dataset sigma, policy-weight, overlap-scale, symmetry-merge, and overdispersion sequence. "
+            "The combined corrected-HKL endpoint and publication chooser remain authoritative."
+        ),
+        "combined_summary": str(combined / "combined_summary.json") if str(combined) not in {"", "."} else "",
+        "row_tables": row_tables,
+        "row_tables_exist": {name: Path(path).exists() for name, path in row_tables.items()},
+        "future_contract": "replay each scale candidate independently per dataset, then evaluate through the normal combined endpoint path",
+    }
+
+
 def run_endpoint_calibration(prep: PrepConfig, result: dict, args: argparse.Namespace, python: str, logs: Path) -> dict:
     """Replay the final frozen row table through the endpoint-calibration chooser."""
 
@@ -3311,6 +4257,14 @@ def run_endpoint_calibration(prep: PrepConfig, result: dict, args: argparse.Name
         return {"status": "disabled_fast_mode"}
     if args.dry_run:
         return {"status": "dry_run", "out_dir": str(Path(args.out_dir) / "endpoint_calibration")}
+    if result.get("combined"):
+        if mode == "on":
+            raise RuntimeError(
+                "--endpoint-calibration on is not supported for multi-dataset runs: scale contracts must be "
+                "replayed independently per dataset and then passed through the normal combined endpoint. "
+                "Use --endpoint-calibration auto (safe explicit skip) or calibrate each dataset separately."
+            )
+        return _multi_endpoint_calibration_not_applicable(result)
     label = "combined"
     run_dir: Path | None = None
     if result.get("combined"):
@@ -3366,6 +4320,8 @@ def run_endpoint_calibration(prep: PrepConfig, result: dict, args: argparse.Name
         f"{getattr(args, 'endpoint_calibration_max_r1_cost', 0.010):g}",
         "--publication-free-wr2-tolerance",
         f"{getattr(args, 'endpoint_calibration_free_wr2_tolerance', 0.040):g}",
+        "--publication-max-modulation-p95",
+        f"{getattr(args, 'publication_endpoint_max_modulation_p95', 20.0):g}",
         "--publication-prefer-wght-mode",
         str(getattr(args, "endpoint_calibration_prefer_wght_mode", "freeze-zero")),
         "--publication-selection-policy",
@@ -3872,6 +4828,20 @@ def choose_transform_by_scout(
     return dataset_with_transform(ds, selected["transform"]), payload
 
 
+def raw_free_dyn_wr2(summary: Mapping[str, object]) -> float:
+    """Return the recorded free-row dynamical wR2 without score fallbacks."""
+
+    best = summary.get("best_native")
+    best = best if isinstance(best, Mapping) else {}
+    metrics = best.get("metrics")
+    metrics = metrics if isinstance(metrics, Mapping) else {}
+    free = metrics.get("free")
+    free = free if isinstance(free, Mapping) else {}
+    dyn = free.get("dyn")
+    dyn = dyn if isinstance(dyn, Mapping) else {}
+    return safe_float(dyn.get("wR2_all"), float("nan"))
+
+
 def choose_hand_by_scout(
     prep: PrepConfig,
     ds: DatasetSpec,
@@ -3883,12 +4853,42 @@ def choose_hand_by_scout(
     *,
     scout_max_rows: int | None = None,
 ) -> tuple[str, dict, Path]:
-    """Compare the active model against an alternate-hand scout."""
+    """Compare matched original- and alternate-hand scouts.
 
-    active_summary = read_json(active_run / "summary.json")
-    active_score = score_native_summary(active_summary)
+    ``active_run`` supplies the production nuisance seed only.  It is not used
+    as the original-hand score because its row count can differ from the
+    bounded hand scout.  Both evidence runs below use the same model, rows,
+    N/Q, nuisance grid, transform, and split seed; only ``--alternate-hand``
+    differs.
+    """
+
+    production_active_summary = read_json(active_run / "summary.json")
+    production_active_score = score_native_summary(production_active_summary)
     nui = best_nuisance(active_run)
-    hand_dir = root / "decisions" / ds.name / "hand_scout_alt"
+    hand_root = root / "decisions" / ds.name
+    original_dir = hand_root / "hand_scout_original"
+    alternate_dir = hand_root / "hand_scout_alt"
+    n_basis = 20 if args.fast else int(args.hand_n_basis)
+    n_points = 5 if args.fast else int(args.hand_n_points)
+    max_rows = int(args.scout_max_rows if scout_max_rows is None else scout_max_rows)
+    comparison_contract: dict[str, object] = {
+        "dataset": ds.name,
+        "structure": prep.structure,
+        "hkl_transform": ds.hkl_transform,
+        "n_basis": n_basis,
+        "n_points": n_points,
+        "max_rows": max_rows,
+        "split_seed": int(args.split_seed),
+        "scale_fit_split": "work",
+        "production_scale_preference_ignored_for_holdout": bool(args.production_scales),
+        "endpoint": False,
+        "pinned_nuisance": nui,
+        "only_physical_difference": "alternate-hand inversion",
+    }
+    original_score: dict = {}
+    alternate_score: dict = {}
+    original_summary: dict = {}
+    alternate_summary: dict = {}
     try:
         run_logged(
             native_stage_cmd(
@@ -3896,48 +4896,123 @@ def choose_hand_by_scout(
                 ds,
                 prep.structure,
                 dataset_baseline_hkl(prep, ds),
-                hand_dir,
+                original_dir,
                 args,
-                n_basis=20 if args.fast else args.hand_n_basis,
-                n_points=5 if args.fast else args.hand_n_points,
-                stage="scout_hand",
+                n_basis=n_basis,
+                n_points=n_points,
+                stage="scout_hand_original",
+                pinned=nui,
+                alternate_hand=False,
+                make_maps=False,
+                endpoint=False,
+                max_rows_override=max_rows,
+                scale_fit_split_override="work",
+            ),
+            logs,
+            f"{ds.name}_scout_hand_original",
+            dry_run=args.dry_run,
+        )
+        original_summary = read_json(original_dir / "summary.json")
+        original_score = score_native_summary(original_summary)
+        run_logged(
+            native_stage_cmd(
+                python,
+                ds,
+                prep.structure,
+                dataset_baseline_hkl(prep, ds),
+                alternate_dir,
+                args,
+                n_basis=n_basis,
+                n_points=n_points,
+                stage="scout_hand_alternate",
                 pinned=nui,
                 alternate_hand=True,
                 make_maps=False,
                 endpoint=False,
-                max_rows_override=args.scout_max_rows if scout_max_rows is None else scout_max_rows,
+                max_rows_override=max_rows,
+                scale_fit_split_override="work",
             ),
             logs,
             f"{ds.name}_scout_hand_alt",
             dry_run=args.dry_run,
         )
-        alternate_summary = read_json(hand_dir / "summary.json")
+        alternate_summary = read_json(alternate_dir / "summary.json")
         alternate_score = score_native_summary(alternate_summary)
     except Exception as exc:
         payload = {
             "selected": "original",
             "selected_hand": "original",
-            "active_score": active_score,
-            "alternate_score": {},
+            "scout_selected_before_quality_gate": "original",
+            "quality_gate_status": "scout_failed",
+            "quality_gate_reasons": [f"matched hand scout failed: {exc}"],
+            "active_score": original_score,
+            "matched_original_score": original_score,
+            "alternate_score": alternate_score,
+            "production_active_score": production_active_score,
             "score_delta_original_minus_alternate": float("-inf"),
             "score_delta_original_minus_alternate_hand": float("-inf"),
             "accept_delta": float(args.hand_accept_delta),
-            "alternate_run": str(hand_dir),
-            "warning": f"alternate hand scout failed: {exc}",
+            "production_active_run": str(active_run),
+            "original_run": str(original_dir),
+            "alternate_run": str(alternate_dir),
+            "comparison_contract": comparison_contract,
+            "warning": f"matched hand scout failed: {exc}",
         }
         write_json(root / "decisions" / ds.name / "absolute_structure_decision.json", payload)
-        return "original", payload, hand_dir
-    delta = active_score["score"] - alternate_score["score"]
+        return "original", payload, alternate_dir
+
+    original_rows = original_summary.get("row_selection")
+    original_rows = dict(original_rows) if isinstance(original_rows, Mapping) else {}
+    alternate_rows = alternate_summary.get("row_selection")
+    alternate_rows = dict(alternate_rows) if isinstance(alternate_rows, Mapping) else {}
+    row_contract_keys = ("selected_rows", "work_rows", "free_rows")
+    original_row_counts = _validated_row_selection_counts(original_rows)
+    alternate_row_counts = _validated_row_selection_counts(alternate_rows)
+    row_selection_match = bool(
+        original_row_counts is not None
+        and alternate_row_counts is not None
+        and original_row_counts == alternate_row_counts
+    )
+    original_free_rows = original_row_counts[2] if original_row_counts is not None else 0
+    alternate_free_rows = alternate_row_counts[2] if alternate_row_counts is not None else 0
+    positive_matched_free_rows = bool(
+        original_free_rows > 0
+        and alternate_free_rows > 0
+        and original_free_rows == alternate_free_rows
+    )
+    original_raw_free_wr2 = raw_free_dyn_wr2(original_summary)
+    alternate_raw_free_wr2 = raw_free_dyn_wr2(alternate_summary)
+    finite_raw_free_metrics = math.isfinite(original_raw_free_wr2) and math.isfinite(alternate_raw_free_wr2)
+    comparison_contract.update(
+        {
+            "original_row_selection": {key: original_rows.get(key) for key in row_contract_keys},
+            "alternate_row_selection": {key: alternate_rows.get(key) for key in row_contract_keys},
+            "original_row_selection_valid": original_row_counts is not None,
+            "alternate_row_selection_valid": alternate_row_counts is not None,
+            "row_selection_match": row_selection_match,
+            "positive_matched_free_rows": positive_matched_free_rows,
+            "original_raw_free_dyn_wR2_all": original_raw_free_wr2 if math.isfinite(original_raw_free_wr2) else None,
+            "alternate_raw_free_dyn_wR2_all": alternate_raw_free_wr2 if math.isfinite(alternate_raw_free_wr2) else None,
+            "finite_raw_free_metrics": finite_raw_free_metrics,
+        }
+    )
+    delta = original_score["score"] - alternate_score["score"]
     scout_selected = "alternate" if delta > float(args.hand_accept_delta) else "original"
     selected = scout_selected
     gate_reasons: list[str] = []
+    if not row_selection_match:
+        gate_reasons.append("matched hand scouts did not report identical selected/work/free row counts")
+    if not positive_matched_free_rows:
+        gate_reasons.append("matched hand scouts did not report the same positive number of held-out free rows")
+    if not finite_raw_free_metrics:
+        gate_reasons.append("matched hand scouts did not report finite raw free-row dynamical wR2 metrics")
     if scout_selected == "alternate":
         max_all = float(getattr(args, "hand_max_wR2_all", 0.45))
         max_free = float(getattr(args, "hand_max_free_wR2_all", 0.50))
         min_free_gain = float(getattr(args, "hand_min_free_wR2_gain", 0.0))
         alt_all = safe_float(alternate_score.get("dyn_wR2_all"))
-        alt_free = safe_float(alternate_score.get("free_dyn_wR2_all"))
-        active_free = safe_float(active_score.get("free_dyn_wR2_all"))
+        alt_free = alternate_raw_free_wr2
+        active_free = original_raw_free_wr2
         if not math.isfinite(alt_all) or alt_all > max_all:
             gate_reasons.append(f"alternate all-row wR2 {alt_all:.4g} exceeds hand gate {max_all:.4g}")
         if not math.isfinite(alt_free) or alt_free > max_free:
@@ -3956,40 +5031,1488 @@ def choose_hand_by_scout(
         "scout_selected_before_quality_gate": scout_selected,
         "quality_gate_status": "rejected_switch" if gate_reasons else "passed",
         "quality_gate_reasons": gate_reasons,
-        "active_score": active_score,
+        "active_score": original_score,
+        "matched_original_score": original_score,
         "alternate_score": alternate_score,
+        "production_active_score": production_active_score,
         "score_delta_original_minus_alternate": delta,
         "score_delta_original_minus_alternate_hand": delta,
         "accept_delta": float(args.hand_accept_delta),
         "hand_max_wR2_all": float(getattr(args, "hand_max_wR2_all", 0.45)),
         "hand_max_free_wR2_all": float(getattr(args, "hand_max_free_wR2_all", 0.50)),
         "hand_min_free_wR2_gain": float(getattr(args, "hand_min_free_wR2_gain", 0.0)),
-        "alternate_run": str(hand_dir),
+        "production_active_run": str(active_run),
+        "original_run": str(original_dir),
+        "alternate_run": str(alternate_dir),
+        "comparison_contract": comparison_contract,
     }
     write_json(root / "decisions" / ds.name / "absolute_structure_decision.json", payload)
-    return selected, payload, hand_dir
+    return selected, payload, alternate_dir
+
+
+def aggregate_shared_hand_decisions(
+    decisions: Mapping[str, Mapping[str, object]],
+    args: argparse.Namespace,
+) -> dict[str, object]:
+    """Choose one hand for a multi-dataset model from per-dataset scouts.
+
+    Hand is a property of the shared structure, not of an individual dataset.
+    A switch is therefore allowed only when every dataset independently passes
+    the existing hand-quality gates and exceeds the score margin.  This
+    deliberately treats failed, weak, and mixed evidence as support for keeping
+    the input hand.
+    """
+
+    accept_delta = float(args.hand_accept_delta)
+    evidence: list[dict[str, object]] = []
+    blocking_reasons: list[str] = []
+    finite_deltas: list[float] = []
+
+    def finite_metric(score: Mapping[str, object], key: str) -> float | None:
+        value = safe_float(score.get(key), float("nan"))
+        return value if math.isfinite(value) else None
+
+    for name in sorted(decisions):
+        decision = decisions[name]
+        dataset_selected = str(decision.get("selected_hand") or decision.get("selected") or "original")
+        gate_status = str(decision.get("quality_gate_status") or "not_passed")
+        delta = safe_float(decision.get("score_delta_original_minus_alternate"), float("nan"))
+        warning = str(decision.get("warning") or "")
+        if math.isfinite(delta):
+            finite_deltas.append(delta)
+
+        reasons: list[str] = []
+        if warning:
+            reasons.append(warning)
+        if not math.isfinite(delta):
+            reasons.append("hand-score difference was not finite")
+        elif delta <= accept_delta:
+            reasons.append(f"score improvement {delta:.6g} did not exceed {accept_delta:.6g}")
+        if gate_status != "passed":
+            reasons.append(f"per-dataset quality gate status was {gate_status}")
+        if dataset_selected != "alternate":
+            reasons.append(f"per-dataset scout retained {dataset_selected}")
+        supports_alternate = not reasons
+        if not supports_alternate:
+            blocking_reasons.append(f"{name}: {'; '.join(reasons)}")
+
+        active_score = decision.get("active_score")
+        active_score = active_score if isinstance(active_score, Mapping) else {}
+        alternate_score = decision.get("alternate_score")
+        alternate_score = alternate_score if isinstance(alternate_score, Mapping) else {}
+        evidence.append(
+            {
+                "dataset": name,
+                "dataset_scout_selected_hand": dataset_selected,
+                "quality_gate_status": gate_status,
+                "score_delta_original_minus_alternate": delta if math.isfinite(delta) else None,
+                "active_dyn_wR2_all": finite_metric(active_score, "dyn_wR2_all"),
+                "active_free_dyn_wR2_all": finite_metric(active_score, "free_dyn_wR2_all"),
+                "alternate_dyn_wR2_all": finite_metric(alternate_score, "dyn_wR2_all"),
+                "alternate_free_dyn_wR2_all": finite_metric(alternate_score, "free_dyn_wR2_all"),
+                "supports_shared_alternate": supports_alternate,
+                "blocking_reasons": reasons,
+            }
+        )
+
+    aggregate_delta = sum(finite_deltas) / len(finite_deltas) if finite_deltas else float("nan")
+    all_support_alternate = bool(evidence) and not blocking_reasons and len(finite_deltas) == len(evidence)
+    if all_support_alternate and aggregate_delta <= accept_delta:
+        blocking_reasons.append(
+            f"mean score improvement {aggregate_delta:.6g} did not exceed shared threshold {accept_delta:.6g}"
+        )
+        all_support_alternate = False
+    selected = "alternate" if all_support_alternate else "original"
+    return {
+        "status": "selected_alternate" if selected == "alternate" else "retained_original",
+        "selected": selected,
+        "selected_hand": selected,
+        "accept_delta": accept_delta,
+        "dataset_count": len(evidence),
+        "alternate_support_count": sum(bool(row["supports_shared_alternate"]) for row in evidence),
+        "aggregate_score_delta_original_minus_alternate": aggregate_delta if math.isfinite(aggregate_delta) else None,
+        "quality_gate_status": "passed" if selected == "alternate" else "retained_original",
+        "quality_gate_reasons": blocking_reasons,
+        "dataset_evidence": evidence,
+        "rule": (
+            "switch the one shared model only when every dataset has finite alternate-hand evidence, "
+            "passes the per-dataset all/free-row quality gates, and exceeds the score margin; "
+            "failed, weak, or mixed evidence retains the input hand"
+        ),
+    }
+
+
+def choose_shared_hand_by_scout(
+    prep: PrepConfig,
+    args: argparse.Namespace,
+    python: str,
+    logs: Path,
+    root: Path,
+    active_runs: Mapping[str, Path],
+    scout_rows_by_name: Mapping[str, int],
+) -> tuple[str, dict[str, object], dict[str, Path]]:
+    """Run per-dataset hand scouts and persist one shared model decision."""
+
+    shared_path = root / "decisions" / "shared_absolute_structure_decision.json"
+    policy = absolute_structure_policy(prep.structure)
+    skipped_status = ""
+    skipped_reason = ""
+    if not getattr(args, "auto_decide", True):
+        skipped_status = "skipped_auto_decide_disabled"
+        skipped_reason = "automatic decisions were disabled"
+    elif not getattr(args, "hand_control", True):
+        skipped_status = "skipped_hand_control_disabled"
+        skipped_reason = "alternate-hand control was disabled"
+    elif not policy.get("run_hand_control", True):
+        skipped_status = "skipped_not_applicable"
+        skipped_reason = str(policy.get("reason") or "alternate-hand control is not applicable")
+    elif getattr(args, "dry_run", False):
+        skipped_status = "skipped_dry_run"
+        skipped_reason = "dry-run mode does not execute hand scouts"
+
+    if skipped_status:
+        shared: dict[str, object] = {
+            "status": skipped_status,
+            "selected": "original",
+            "selected_hand": "original",
+            "quality_gate_status": "not_run",
+            "quality_gate_reasons": [skipped_reason],
+            "dataset_count": len(prep.datasets),
+            "dataset_evidence": [],
+            "symmetry_policy": policy,
+            "selected_model": prep.structure,
+            "rule": "retain the input hand when the shared multi-dataset hand gate is not run",
+        }
+        write_json(shared_path, shared)
+        for ds in prep.datasets:
+            dataset_payload = {
+                **policy,
+                "status": skipped_status,
+                "selected": "original",
+                "selected_hand": "original",
+                "dataset_scout_selected_hand": "not_run",
+                "shared_selected_hand": "original",
+                "shared_decision": str(shared_path),
+                "reason": skipped_reason,
+                "selection_scope": "shared_multi_dataset_model",
+            }
+            write_json(root / "decisions" / ds.name / "absolute_structure_decision.json", dataset_payload)
+        return "original", shared, {}
+
+    per_dataset: dict[str, dict[str, object]] = {}
+    alternate_runs: dict[str, Path] = {}
+    for ds in prep.datasets:
+        _selected, decision, alternate_run = choose_hand_by_scout(
+            prep,
+            ds,
+            args,
+            python,
+            logs,
+            root,
+            active_runs[ds.name],
+            scout_max_rows=scout_rows_by_name.get(ds.name, int(getattr(args, "scout_max_rows", 1000))),
+        )
+        per_dataset[ds.name] = {
+            **decision,
+            "active_run": str(active_runs[ds.name]),
+            "scout_max_rows": int(scout_rows_by_name.get(ds.name, int(getattr(args, "scout_max_rows", 1000)))),
+        }
+        alternate_runs[ds.name] = alternate_run
+
+    shared = aggregate_shared_hand_decisions(per_dataset, args)
+    shared["symmetry_policy"] = policy
+    shared["per_dataset_decisions"] = {
+        ds.name: str(root / "decisions" / ds.name / "absolute_structure_decision.json") for ds in prep.datasets
+    }
+    shared["active_runs"] = {ds.name: str(active_runs[ds.name]) for ds in prep.datasets}
+    shared["alternate_runs"] = {ds.name: str(alternate_runs[ds.name]) for ds in prep.datasets}
+    shared["scout_max_rows_by_dataset"] = {
+        ds.name: int(scout_rows_by_name.get(ds.name, int(getattr(args, "scout_max_rows", 1000))))
+        for ds in prep.datasets
+    }
+    if shared.get("selected_hand") == "alternate" and not is_shelx_model(prep.structure):
+        shared["status"] = "retained_original_unmaterializable_model"
+        shared["selected"] = "original"
+        shared["selected_hand"] = "original"
+        shared["quality_gate_status"] = "retained_original"
+        reasons = list(shared.get("quality_gate_reasons") or [])
+        reasons.append("the alternate shared model can currently be materialized only from a SHELX .res/.ins input")
+        shared["quality_gate_reasons"] = reasons
+    shared["selected_model"] = prep.structure
+    write_json(shared_path, shared)
+
+    shared_selected = str(shared["selected_hand"])
+    for ds in prep.datasets:
+        decision = dict(per_dataset[ds.name])
+        dataset_selected = str(decision.get("selected_hand") or decision.get("selected") or "original")
+        decision.update(
+            {
+                "selected": shared_selected,
+                "selected_hand": shared_selected,
+                "dataset_scout_selected_hand": dataset_selected,
+                "shared_selected_hand": shared_selected,
+                "shared_quality_gate_status": shared.get("quality_gate_status"),
+                "shared_quality_gate_reasons": shared.get("quality_gate_reasons", []),
+                "shared_decision": str(shared_path),
+                "selection_scope": "shared_multi_dataset_model",
+            }
+        )
+        write_json(root / "decisions" / ds.name / "absolute_structure_decision.json", decision)
+    return shared_selected, shared, alternate_runs
 
 
 def hand_diagnostic_supports_other(stats: Mapping[str, object], args: argparse.Namespace) -> tuple[bool, list[str]]:
-    """Return whether row-level paired diagnostics support switching to ``other``.
+    """Return whether row-level paired t-style diagnostics support ``other``.
 
-    ``absolute_structure_diagnostic.py`` defines positive paired-row t values as
+    ``absolute_structure_diagnostic.py`` defines positive paired-row t statistics as
     support for the current best/final row table.  A post-feedback promotion
     switches to the opposite-hand row table, so the required sign is negative.
+    This statistic is not a calibrated normal Z score.
     """
 
     min_all = float(getattr(args, "hand_min_z_all", 2.0))
     min_free = float(getattr(args, "hand_min_z_free", 0.5))
+    min_free_rows = max(0, int(getattr(args, "hand_min_free_rows", 10) or 0))
     reasons: list[str] = []
     all_block = stats.get("all") if isinstance(stats, Mapping) else {}
     free_block = stats.get("free") if isinstance(stats, Mapping) else {}
     all_t = safe_float((all_block or {}).get("paired_row_t_delta_chi2") if isinstance(all_block, Mapping) else float("nan"))
     free_t = safe_float((free_block or {}).get("paired_row_t_delta_chi2") if isinstance(free_block, Mapping) else float("nan"))
+    try:
+        free_n = int((free_block or {}).get("n", 0) if isinstance(free_block, Mapping) else 0)
+    except (TypeError, ValueError, OverflowError):
+        free_n = 0
     if not math.isfinite(all_t) or all_t > -min_all:
-        reasons.append(f"all-row hand Z/t {all_t:.4g} does not support switching to other at threshold {min_all:.4g}")
+        reasons.append(
+            f"all-row paired t-style statistic {all_t:.4g} does not support switching to other "
+            f"at threshold {min_all:.4g}"
+        )
     if min_free > 0.0 and (not math.isfinite(free_t) or free_t > -min_free):
-        reasons.append(f"free-row hand Z/t {free_t:.4g} does not support switching to other at threshold {min_free:.4g}")
+        reasons.append(
+            f"free-row paired t-style statistic {free_t:.4g} does not support switching to other "
+            f"at threshold {min_free:.4g}"
+        )
+    if free_n < min_free_rows:
+        reasons.append(
+            f"free-row paired t-style statistic has n={free_n}, below the minimum {min_free_rows} "
+            "required for material opposite-hand support"
+        )
     return not reasons, reasons
+
+
+def _positive_summary_int(config: Mapping[str, object], key: str) -> int | None:
+    """Return one required positive integer from a native-stage config."""
+
+    try:
+        value = int(config.get(key, 0) or 0)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return value if value > 0 else None
+
+
+def _args_with_recorded_native_contract(
+    args: argparse.Namespace,
+    config: Mapping[str, object],
+) -> argparse.Namespace:
+    """Clone CLI arguments with physics-bearing native settings from a summary."""
+
+    cloned = argparse.Namespace(**vars(args))
+    direct_keys = (
+        "sg_window_min",
+        "sg_window_max",
+        "sg_window_scale",
+        "sg_window_frame_floor",
+        "profile_quadrature",
+        "profile_accumulation",
+        "topup_d_min",
+        "max_support_sg",
+        "free_fraction",
+        "split_seed",
+        "selection_metric",
+        "scale_smoothness",
+        "prediction_cache_compression",
+        "compute_backend",
+        "row_plan_cache",
+        "jax_batch_size",
+        "jax_matrix_bucket_size",
+        "bethe_strong_count",
+        "bethe_variant",
+        "bethe_promote_denom",
+        "bethe_denom_eps",
+        "matrix_convention",
+    )
+    for key in direct_keys:
+        if key in config and config.get(key) is not None:
+            setattr(cloned, key, config.get(key))
+    if config.get("thickness_points") is not None:
+        cloned.final_thickness_points = int(config["thickness_points"])
+    return cloned
+
+
+def _native_split_dyn_wr2(summary: Mapping[str, object], split: str) -> float:
+    """Return one split's native dynamical wR2 without applying a fallback."""
+
+    best = summary.get("best_native") if isinstance(summary.get("best_native"), Mapping) else {}
+    metrics = best.get("metrics") if isinstance(best.get("metrics"), Mapping) else {}
+    split_metrics = metrics.get(split) if isinstance(metrics.get(split), Mapping) else {}
+    dyn = split_metrics.get("dyn") if isinstance(split_metrics.get("dyn"), Mapping) else {}
+    return safe_float(dyn.get("wR2_all"), float("nan"))
+
+
+def _validated_row_selection_counts(rows: Mapping[str, object]) -> tuple[int, int, int] | None:
+    """Return an exact selected/work/free count contract, or ``None``.
+
+    Hand comparisons must not treat two absent or equally malformed values as
+    matching evidence. These mappings come from JSON summaries, so requiring
+    actual non-boolean integers is both unambiguous and intentionally strict.
+    """
+
+    keys = ("selected_rows", "work_rows", "free_rows")
+    values: list[int] = []
+    for key in keys:
+        if key not in rows:
+            return None
+        value = rows.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return None
+        values.append(value)
+    selected_rows, work_rows, free_rows = values
+    if selected_rows != work_rows + free_rows:
+        return None
+    return selected_rows, work_rows, free_rows
+
+
+def _pinned_nuisance_mismatches(
+    expected: Mapping[str, object],
+    actual: Mapping[str, object],
+) -> list[str]:
+    """Return material differences in a recomputed one-point nuisance contract."""
+
+    numeric_keys = (
+        "thickness_A",
+        "thickness_grad_frac",
+        "thickness_sigma_frac",
+        "frame_offset",
+        "group_width_deg",
+        "detector_scale_bins",
+        "sigma_a",
+        "sigma_b_corr",
+        "sigma_c_peak",
+        "row_resolution_b",
+        "scale_smoothness",
+        "sg_jitter_sigma0",
+        "sg_jitter_sigma_d_inv",
+        "sg_jitter_sigma_frame",
+        "sg_jitter_points",
+        "sg_jitter_student_df",
+        "sg_jitter_width_factor",
+        "absorption_mu",
+        "absorption_frac",
+        "absorption_mu_g2",
+        "absorption_mu_theta2",
+        "absorption_tds_b",
+        "dose_b_per_frame",
+        "dose_b_ref_frame",
+        "native_wght_a",
+        "native_wght_b",
+    )
+    categorical_keys = (
+        "thickness_model",
+        "sg_jitter_mode",
+        "absorption_mode",
+        "dose_b_mode",
+        "matrix_convention",
+    )
+    mismatches: list[str] = []
+    for key in numeric_keys:
+        if key not in expected:
+            continue
+        if key not in actual or not numeric_nuisance_contract_matches(expected.get(key), actual.get(key)):
+            mismatches.append(f"{key}: selected={expected.get(key)!r}, opposite={actual.get(key)!r}")
+    for key in categorical_keys:
+        if key in expected and str(actual.get(key)) != str(expected.get(key)):
+            mismatches.append(f"{key}: selected={expected.get(key)!r}, opposite={actual.get(key)!r}")
+    return mismatches
+
+
+def _summary_model_binding(
+    summary: Mapping[str, object],
+    expected_model: Path,
+    *,
+    semantic_hand: str,
+) -> dict[str, object]:
+    """Bind one native summary to exact model bytes and explicit hand semantics."""
+
+    inputs = summary.get("inputs") if isinstance(summary.get("inputs"), Mapping) else {}
+    config = summary.get("config") if isinstance(summary.get("config"), Mapping) else {}
+    recorded_path = str(inputs.get("res") or "")
+    recorded_sha = str(inputs.get("res_sha256") or "")
+    model_tag = str(inputs.get("model_tag") or "")
+    inversion_key = "alternate_hand" if "alternate_hand" in config else "invert_hand" if "invert_hand" in config else ""
+    engine_inversion = config.get(inversion_key) if inversion_key else None
+    errors: list[str] = []
+    expected_path = expected_model.expanduser().resolve()
+    expected_sha = ""
+    if not expected_path.is_file():
+        errors.append(f"expected model is missing: {expected_path}")
+    else:
+        try:
+            expected_sha = sha256_file(expected_path)
+        except OSError as exc:
+            errors.append(f"cannot hash expected model {expected_path}: {exc}")
+    if not recorded_path:
+        errors.append("summary inputs.res is missing")
+    else:
+        try:
+            resolved_recorded = Path(recorded_path).expanduser().resolve()
+        except OSError:
+            resolved_recorded = Path(recorded_path).expanduser()
+        if resolved_recorded != expected_path:
+            errors.append(
+                f"summary inputs.res does not match expected model: {resolved_recorded} != {expected_path}"
+            )
+    if not recorded_sha:
+        errors.append("summary inputs.res_sha256 is missing")
+    elif expected_sha and recorded_sha != expected_sha:
+        errors.append(
+            f"summary inputs.res_sha256 does not match expected model bytes: {recorded_sha} != {expected_sha}"
+        )
+    if semantic_hand not in {"original", "alternate"}:
+        errors.append(f"unknown semantic hand label {semantic_hand!r}")
+    if not model_tag:
+        errors.append("summary inputs.model_tag is missing")
+    elif model_tag.split(";", 1)[0].strip().lower() != "original":
+        errors.append(
+            f"summary model_tag {model_tag!r} indicates an additional engine-side hand transformation"
+        )
+    if not inversion_key:
+        errors.append("summary config does not record alternate_hand/invert_hand")
+    elif bool(engine_inversion):
+        errors.append(
+            f"summary config {inversion_key}={engine_inversion!r} applies an unexpected second hand inversion"
+        )
+    return {
+        "status": "passed" if not errors else "failed",
+        "passed": not errors,
+        "semantic_hand": semantic_hand,
+        "expected_model": str(expected_path),
+        "expected_model_sha256": expected_sha,
+        "summary_inputs_res": recorded_path,
+        "summary_inputs_res_sha256": recorded_sha,
+        "summary_model_tag": model_tag,
+        "summary_inversion_key": inversion_key,
+        "summary_engine_inversion": engine_inversion,
+        "semantic_rule": (
+            "the named model bytes already embody this semantic hand; native recomputation must use model_tag "
+            "original with no additional engine-side inversion"
+        ),
+        "errors": errors,
+    }
+
+
+def _summary_hkl_binding(summary: Mapping[str, object], expected_hkl: Path) -> dict[str, object]:
+    """Bind one native summary to the exact dataset observation-file bytes."""
+
+    inputs = summary.get("inputs") if isinstance(summary.get("inputs"), Mapping) else {}
+    recorded_path = str(inputs.get("hkl") or "")
+    recorded_sha = str(inputs.get("hkl_sha256") or "")
+    expected_path = expected_hkl.expanduser().resolve()
+    expected_sha = ""
+    errors: list[str] = []
+    if not expected_path.is_file():
+        errors.append(f"expected dataset HKL is missing: {expected_path}")
+    else:
+        try:
+            expected_sha = sha256_file(expected_path)
+        except OSError as exc:
+            errors.append(f"cannot hash expected dataset HKL {expected_path}: {exc}")
+    if not recorded_path:
+        errors.append("summary inputs.hkl is missing")
+    else:
+        try:
+            resolved_recorded = Path(recorded_path).expanduser().resolve()
+        except OSError:
+            resolved_recorded = Path(recorded_path).expanduser()
+        if resolved_recorded != expected_path:
+            errors.append(
+                f"summary inputs.hkl does not match DatasetSpec.hkl: {resolved_recorded} != {expected_path}"
+            )
+    if not recorded_sha:
+        errors.append("summary inputs.hkl_sha256 is missing")
+    elif expected_sha and recorded_sha != expected_sha:
+        errors.append(
+            f"summary inputs.hkl_sha256 does not match DatasetSpec.hkl bytes: {recorded_sha} != {expected_sha}"
+        )
+    return {
+        "status": "passed" if not errors else "failed",
+        "passed": not errors,
+        "expected_hkl": str(expected_path),
+        "expected_hkl_sha256": expected_sha,
+        "summary_inputs_hkl": recorded_path,
+        "summary_inputs_hkl_sha256": recorded_sha,
+        "errors": errors,
+    }
+
+
+def _summary_native_row_table_binding(
+    summary: Mapping[str, object],
+    expected_table: Path,
+) -> dict[str, object]:
+    """Bind a source final row table to the producer-recorded path and SHA."""
+
+    artifacts = summary.get("artifacts") if isinstance(summary.get("artifacts"), Mapping) else {}
+    recorded_path = str(artifacts.get("native_row_table") or "")
+    recorded_sha = str(artifacts.get("native_row_table_sha256") or "")
+    expected_path = expected_table.expanduser().resolve()
+    expected_sha = ""
+    errors: list[str] = []
+    if not expected_path.is_file():
+        errors.append(f"source final native row table is missing: {expected_path}")
+    else:
+        try:
+            expected_sha = sha256_file(expected_path)
+        except OSError as exc:
+            errors.append(f"cannot hash source final native row table {expected_path}: {exc}")
+    if not recorded_path:
+        errors.append("summary artifacts.native_row_table is missing")
+    else:
+        try:
+            resolved_recorded = Path(recorded_path).expanduser().resolve()
+        except OSError:
+            resolved_recorded = Path(recorded_path).expanduser()
+        if resolved_recorded != expected_path:
+            errors.append(
+                f"summary native row-table path does not match source final table: {resolved_recorded} != {expected_path}"
+            )
+    if not recorded_sha:
+        errors.append("summary artifacts.native_row_table_sha256 is missing")
+    elif expected_sha and recorded_sha != expected_sha:
+        errors.append(
+            "summary native_row_table_sha256 does not match current source final row-table bytes: "
+            f"{recorded_sha} != {expected_sha}"
+        )
+    return {
+        "status": "passed" if not errors else "failed",
+        "passed": not errors,
+        "expected_table": str(expected_path),
+        "expected_table_sha256": expected_sha,
+        "summary_native_row_table": recorded_path,
+        "summary_native_row_table_sha256": recorded_sha,
+        "errors": errors,
+    }
+
+
+def _policy_selected_table_binding(
+    source_path: Path,
+    selected_path: Path,
+) -> dict[str, object]:
+    """Verify a policy-annotated selected table preserves every source data cell."""
+
+    policy_columns = {
+        "dataset",
+        "dataset_role",
+        "raw_row_weight",
+        "endpoint_weight",
+        "sigma_eff_original",
+        "policy_sigma_weight_applied",
+    }
+
+    key_fields = ("row_index", "h", "k", "l")
+
+    def load(path: Path) -> tuple[list[str], dict[tuple[str, ...], dict[str, str]], int, list[str]]:
+        errors: list[str] = []
+        fields: list[str] = []
+        rows: dict[tuple[str, ...], dict[str, str]] = {}
+        duplicates = 0
+        try:
+            with path.open(newline="") as handle:
+                reader = csv.DictReader(handle)
+                fields = list(reader.fieldnames or [])
+                missing = [field for field in key_fields if field not in fields]
+                if missing:
+                    return fields, rows, duplicates, [f"{path} is missing key columns: {', '.join(missing)}"]
+                for row in reader:
+                    key = tuple(str(row.get(field, "")).strip() for field in key_fields)
+                    if key in rows:
+                        duplicates += 1
+                    else:
+                        rows[key] = {field: str(row.get(field, "")) for field in fields}
+        except OSError as exc:
+            errors.append(f"cannot read {path}: {exc}")
+        return fields, rows, duplicates, errors
+
+    source_fields, source_rows, source_duplicates, source_errors = load(source_path)
+    selected_fields, selected_rows, selected_duplicates, selected_errors = load(selected_path)
+    source_contract_fields = [field for field in source_fields if field not in policy_columns]
+    selected_contract_fields = [field for field in selected_fields if field not in policy_columns]
+    errors = [*source_errors, *selected_errors]
+    if set(source_contract_fields) != set(selected_contract_fields):
+        errors.append(
+            "policy-selected table non-policy columns differ from source final table: "
+            f"source_only={sorted(set(source_contract_fields) - set(selected_contract_fields))}, "
+            f"selected_only={sorted(set(selected_contract_fields) - set(source_contract_fields))}"
+        )
+    if source_duplicates or selected_duplicates:
+        errors.append(
+            f"policy/source row keys are ambiguous (source={source_duplicates}, selected={selected_duplicates})"
+        )
+    joined = set(source_rows) & set(selected_rows)
+    if len(joined) != len(source_rows) or len(joined) != len(selected_rows):
+        errors.append(
+            f"policy/source row join is not exact (source={len(source_rows)}, "
+            f"selected={len(selected_rows)}, joined={len(joined)})"
+        )
+    mismatch_counts = {field: 0 for field in source_contract_fields}
+    examples: list[dict[str, object]] = []
+    comparable_fields = [field for field in source_contract_fields if field in selected_contract_fields]
+    for key in sorted(joined):
+        for field in comparable_fields:
+            if source_rows[key].get(field, "") != selected_rows[key].get(field, ""):
+                mismatch_counts[field] += 1
+                if len(examples) < 20:
+                    examples.append(
+                        {
+                            "key": list(key),
+                            "column": field,
+                            "source": source_rows[key].get(field, ""),
+                            "selected": selected_rows[key].get(field, ""),
+                        }
+                    )
+    changed = {field: count for field, count in mismatch_counts.items() if count}
+    if changed:
+        errors.append(f"policy-selected table changed non-policy source cells: {changed}")
+    return {
+        "status": "passed" if not errors else "failed",
+        "passed": not errors,
+        "source_table": str(source_path.expanduser().resolve()),
+        "selected_table": str(selected_path.expanduser().resolve()),
+        "source_table_sha256": sha256_file(source_path) if source_path.is_file() else "",
+        "selected_table_sha256": sha256_file(selected_path) if selected_path.is_file() else "",
+        "policy_columns_allowed_to_differ": sorted(policy_columns),
+        "non_policy_columns_compared": source_contract_fields,
+        "source_rows": len(source_rows),
+        "selected_rows": len(selected_rows),
+        "joined_rows": len(joined),
+        "duplicate_keys_source": source_duplicates,
+        "duplicate_keys_selected": selected_duplicates,
+        "non_policy_mismatch_counts": changed,
+        "mismatch_examples": examples,
+        "errors": errors,
+    }
+
+
+def _native_physics_config_contract(
+    selected_summary: Mapping[str, object],
+    opposite_summary: Mapping[str, object],
+) -> dict[str, object]:
+    """Verify the two hand branches used the same physics-bearing stage config."""
+
+    selected = selected_summary.get("config") if isinstance(selected_summary.get("config"), Mapping) else {}
+    opposite = opposite_summary.get("config") if isinstance(opposite_summary.get("config"), Mapping) else {}
+    exact_fields = (
+        "n_basis",
+        "n_points",
+        "thickness_points",
+        "sg_window_mode",
+        "profile_quadrature",
+        "profile_accumulation",
+        "split_seed",
+        "scale_fit_split",
+        "target_mode",
+        "positive_only",
+        "hkl_transform",
+        "compute_backend",
+        "bethe_strong_count",
+        "bethe_variant",
+        "matrix_convention",
+    )
+    numeric_fields = (
+        "sg_window",
+        "sg_window_min",
+        "sg_window_max",
+        "sg_window_scale",
+        "sg_window_frame_floor",
+        "topup_d_min",
+        "max_support_sg",
+        "free_fraction",
+        "scale_smoothness",
+        "min_d_spacing",
+        "min_peak",
+        "geometry_percentile",
+        "bethe_promote_denom",
+        "bethe_denom_eps",
+    )
+    errors: list[str] = []
+    exact_mismatches: dict[str, dict[str, object]] = {}
+    numeric_mismatches: dict[str, dict[str, object]] = {}
+    for field in exact_fields:
+        if field not in selected or field not in opposite:
+            errors.append(f"physics config field {field} is missing from one or both hand branches")
+            continue
+        if selected.get(field) != opposite.get(field):
+            exact_mismatches[field] = {
+                "selected": selected.get(field),
+                "opposite": opposite.get(field),
+            }
+    for field in numeric_fields:
+        selected_value = safe_float(selected.get(field), float("nan"))
+        opposite_value = safe_float(opposite.get(field), float("nan"))
+        if not math.isfinite(selected_value) or not math.isfinite(opposite_value):
+            errors.append(f"physics config field {field} is missing or nonfinite in one or both hand branches")
+            continue
+        if not math.isclose(selected_value, opposite_value, rel_tol=1e-12, abs_tol=1e-12):
+            numeric_mismatches[field] = {
+                "selected": selected_value,
+                "opposite": opposite_value,
+                "absolute_delta": abs(opposite_value - selected_value),
+            }
+    if exact_mismatches:
+        errors.append(f"exact physics config differs between hand branches: {exact_mismatches}")
+    if numeric_mismatches:
+        errors.append(f"numeric physics config differs between hand branches: {numeric_mismatches}")
+    selected_transform = (
+        (selected_summary.get("inputs") or {}).get("hkl_transform")
+        if isinstance(selected_summary.get("inputs"), Mapping)
+        else None
+    )
+    opposite_transform = (
+        (opposite_summary.get("inputs") or {}).get("hkl_transform")
+        if isinstance(opposite_summary.get("inputs"), Mapping)
+        else None
+    )
+    if not selected_transform or not opposite_transform:
+        errors.append("summary inputs.hkl_transform is missing from one or both hand branches")
+    elif str(selected_transform) != str(opposite_transform):
+        errors.append(
+            f"resolved HKL transform differs between hand branches: {selected_transform!r} != {opposite_transform!r}"
+        )
+    return {
+        "status": "passed" if not errors else "failed",
+        "passed": not errors,
+        "exact_fields_checked": list(exact_fields),
+        "numeric_fields_checked": list(numeric_fields),
+        "selected_resolved_hkl_transform": selected_transform,
+        "opposite_resolved_hkl_transform": opposite_transform,
+        "exact_mismatches": exact_mismatches,
+        "numeric_mismatches": numeric_mismatches,
+        "errors": errors,
+    }
+
+
+def _paired_row_split_contract(best_path: Path, other_path: Path) -> dict[str, object]:
+    """Verify identical selected/opposite observation and row-selection contracts."""
+
+    key_fields = ("row_index", "h", "k", "l")
+    exact_fields = (
+        "split",
+        "group",
+        "detector_bin",
+        "basis_size",
+        "sg_window_clipped",
+        "sg_jitter_kernel_points",
+        "sg_profile_points_total",
+    )
+    numeric_fields = (
+        "target_I",
+        "sigma_eff",
+        "xds_sigma",
+        "d_A",
+        "peak",
+        "corr",
+        "rlp",
+        "row_resolution_factor",
+        "center_sg_inv_A",
+        "omega_bragg_deg",
+        "omega_bragg_minus_center_deg",
+        "sg_window_inv_A",
+        "sg_window_raw_inv_A",
+        "sg_window_half_frames",
+        "sg_dSg_domega_inv_A_per_deg",
+        "sg_dSg_dframe_inv_A",
+        "sg_jitter_sigma_inv_A",
+        "sg_jitter_d_inv_A",
+        "sg_jitter_frame_fraction",
+        "sg_profile_weight_sum",
+        "max_sg_solve_residual",
+    )
+    relative_tolerance = 1e-12
+    absolute_tolerance = 1e-12
+
+    def indexed(path: Path) -> tuple[dict[tuple[str, ...], dict[str, str]], int, list[str]]:
+        rows: dict[tuple[str, ...], dict[str, str]] = {}
+        duplicates = 0
+        errors: list[str] = []
+        try:
+            with path.open(newline="") as handle:
+                reader = csv.DictReader(handle)
+                fields = set(reader.fieldnames or [])
+                missing = [
+                    field
+                    for field in (*key_fields, *exact_fields, *numeric_fields)
+                    if field not in fields
+                ]
+                if missing:
+                    return {}, 0, [f"{path} is missing columns: {', '.join(missing)}"]
+                for row in reader:
+                    key = tuple(str(row.get(field, "")).strip() for field in key_fields)
+                    if key in rows:
+                        duplicates += 1
+                    else:
+                        rows[key] = {field: str(row.get(field, "")).strip() for field in (*exact_fields, *numeric_fields)}
+        except OSError as exc:
+            errors.append(f"cannot read {path}: {exc}")
+        return rows, duplicates, errors
+
+    best, duplicates_best, errors_best = indexed(best_path)
+    other, duplicates_other, errors_other = indexed(other_path)
+    joined = set(best) & set(other)
+    exact_mismatch_counts = {field: 0 for field in exact_fields}
+    numeric_mismatch_counts = {field: 0 for field in numeric_fields}
+    nonfinite_counts = {field: 0 for field in numeric_fields}
+    mismatch_examples: list[dict[str, object]] = []
+    for key in sorted(joined):
+        for field in exact_fields:
+            if best[key][field] != other[key][field]:
+                exact_mismatch_counts[field] += 1
+                if len(mismatch_examples) < 20:
+                    mismatch_examples.append(
+                        {
+                            "key": list(key),
+                            "column": field,
+                            "selected": best[key][field],
+                            "opposite": other[key][field],
+                        }
+                    )
+        for field in numeric_fields:
+            selected_value = safe_float(best[key][field], float("nan"))
+            opposite_value = safe_float(other[key][field], float("nan"))
+            if not math.isfinite(selected_value) or not math.isfinite(opposite_value):
+                nonfinite_counts[field] += 1
+                if len(mismatch_examples) < 20:
+                    mismatch_examples.append(
+                        {
+                            "key": list(key),
+                            "column": field,
+                            "selected": best[key][field],
+                            "opposite": other[key][field],
+                            "reason": "nonfinite",
+                        }
+                    )
+            elif not math.isclose(
+                selected_value,
+                opposite_value,
+                rel_tol=relative_tolerance,
+                abs_tol=absolute_tolerance,
+            ):
+                numeric_mismatch_counts[field] += 1
+                if len(mismatch_examples) < 20:
+                    mismatch_examples.append(
+                        {
+                            "key": list(key),
+                            "column": field,
+                            "selected": selected_value,
+                            "opposite": opposite_value,
+                            "absolute_delta": abs(opposite_value - selected_value),
+                        }
+                    )
+    errors = [*errors_best, *errors_other]
+    if duplicates_best or duplicates_other:
+        errors.append(
+            f"duplicate row keys are ambiguous (selected={duplicates_best}, opposite={duplicates_other})"
+        )
+    if len(joined) != len(best) or len(joined) != len(other):
+        errors.append(
+            f"row-key join is not exact (selected={len(best)}, opposite={len(other)}, joined={len(joined)})"
+        )
+    for field, count in exact_mismatch_counts.items():
+        if count:
+            errors.append(f"{count} joined rows change exact contract column {field}")
+    for field, count in nonfinite_counts.items():
+        if count:
+            errors.append(f"{count} joined rows have nonfinite selected/opposite values for {field}")
+    for field, count in numeric_mismatch_counts.items():
+        if count:
+            errors.append(
+                f"{count} joined rows change numeric contract column {field} beyond "
+                f"rtol={relative_tolerance:g}, atol={absolute_tolerance:g}"
+            )
+    return {
+        "status": "passed" if not errors else "failed",
+        "passed": not errors,
+        "key": list(key_fields),
+        "selected_rows": len(best),
+        "opposite_rows": len(other),
+        "joined_rows": len(joined),
+        "duplicate_keys_selected": duplicates_best,
+        "duplicate_keys_opposite": duplicates_other,
+        "exact_columns_checked": list(exact_fields),
+        "numeric_columns_checked": list(numeric_fields),
+        "ignored_policy_columns": ["raw_row_weight", "endpoint_weight", "sigma_eff_original"],
+        "ignored_policy_reason": (
+            "policy annotation columns are not consumed by absolute_structure_diagnostic; sigma_eff itself must "
+            "still match exactly within tolerance"
+        ),
+        "relative_tolerance": relative_tolerance,
+        "absolute_tolerance": absolute_tolerance,
+        "split_mismatch_count": exact_mismatch_counts["split"],
+        "exact_mismatch_counts": exact_mismatch_counts,
+        "numeric_mismatch_counts": numeric_mismatch_counts,
+        "nonfinite_counts": nonfinite_counts,
+        "mismatch_examples": mismatch_examples,
+        "errors": errors,
+    }
+
+
+def run_multi_post_feedback_hand_diagnostic(
+    prep: PrepConfig,
+    args: argparse.Namespace,
+    python: str,
+    logs: Path,
+    root: Path,
+    *,
+    final_model: str,
+    selected_hand: str,
+    final_runs: Mapping[str, Path],
+    publication_runs: Mapping[str, Path],
+    shared_hand_decision: Mapping[str, object],
+) -> dict[str, object]:
+    """Audit the frozen shared hand independently on each publication crystal.
+
+    This is deliberately diagnostic-only.  It inverts the final shared model,
+    recomputes every publication-eligible crystal with that crystal's exact
+    recorded final nuisance and N/Q contract, and compares matched row tables.
+    The initial shared hand gate remains authoritative; this function can only
+    pass the consistency audit or emit a fail-closed warning.
+    """
+
+    artifact = root / "decisions" / "shared_post_feedback_hand_diagnostic.json"
+    opposite_hand = "alternate" if str(selected_hand) == "original" else "original"
+    eligible = [ds.name for ds in prep.datasets if ds.name in publication_runs]
+    payload: dict[str, object] = {
+        "schema_version": 1,
+        "status": "not_run",
+        "selection_scope": "shared_multi_dataset_model",
+        "selected_hand_authoritative": str(selected_hand),
+        "opposite_hand_diagnostic": opposite_hand,
+        "selected_model": str(final_model),
+        "shared_hand_decision": str(root / "decisions" / "shared_absolute_structure_decision.json"),
+        "artifact": str(artifact),
+        "publication_eligible_datasets": eligible,
+        "selected_row_table_policy": (
+            "use each policy-active publication_runs/native_dyn_calc.csv table exactly; policy annotation columns are "
+            "retained, while the paired residual diagnostic uses dyn_residual_over_sigma and ignores raw_row_weight"
+        ),
+        "datasets": {},
+        "merged_t_style_statistic": None,
+        "merged_t_style_policy": (
+            "not computed: crystals retain independent row, sigma, scale, and free-set contracts"
+        ),
+        "merged_z": None,
+        "merged_z_policy": (
+            "compatibility alias only; the paired Student-t-style contrast is not a calibrated normal Z score, "
+            "and no pooled statistic is computed"
+        ),
+        "decision_rule": (
+            "diagnostic only; retain the initial shared hand after final refinement and warn if a "
+            "per-dataset diagnostic is incomplete or materially favors the opposite hand"
+        ),
+        "hand_switched": False,
+    }
+    symmetry_policy = (
+        shared_hand_decision.get("symmetry_policy")
+        if isinstance(shared_hand_decision.get("symmetry_policy"), Mapping)
+        else {}
+    )
+    if not bool(getattr(args, "hand_control", True)):
+        payload.update(
+            {
+                "status": "skipped_disabled",
+                "consistency_gate": {
+                    "status": "not_applicable",
+                    "passed": None,
+                    "warnings": ["absolute-structure hand control was disabled"],
+                },
+            }
+        )
+        write_json(artifact, payload)
+        return payload
+    if symmetry_policy and not bool(symmetry_policy.get("run_hand_control", True)):
+        payload.update(
+            {
+                "status": "skipped_not_applicable",
+                "consistency_gate": {
+                    "status": "not_applicable",
+                    "passed": None,
+                    "warnings": [str(symmetry_policy.get("reason") or "hand control is not applicable")],
+                },
+            }
+        )
+        write_json(artifact, payload)
+        return payload
+    if bool(getattr(args, "dry_run", False)):
+        payload.update(
+            {
+                "status": "skipped_dry_run",
+                "consistency_gate": {
+                    "status": "not_run",
+                    "passed": None,
+                    "warnings": ["dry-run mode does not materialize final row diagnostics"],
+                },
+            }
+        )
+        write_json(artifact, payload)
+        return payload
+
+    datasets_by_name = {ds.name: ds for ds in prep.datasets}
+    records: dict[str, dict[str, object]] = {}
+    runnable: dict[str, dict[str, object]] = {}
+    for name in eligible:
+        ds = datasets_by_name[name]
+        selected_run = Path(publication_runs[name])
+        source_run = Path(final_runs.get(name, selected_run))
+        selected_table = selected_run / "native_dyn_calc.csv"
+        source_table = source_run / "native_dyn_calc.csv"
+        source_summary_path = source_run / "summary.json"
+        summary = try_read_json(source_summary_path)
+        config = summary.get("config") if isinstance(summary.get("config"), Mapping) else {}
+        nuisance = (
+            (summary.get("best_native") or {}).get("nuisance")
+            if isinstance(summary.get("best_native"), Mapping)
+            else {}
+        )
+        nuisance = dict(nuisance) if isinstance(nuisance, Mapping) else {}
+        n_basis = _positive_summary_int(config, "n_basis")
+        n_points = _positive_summary_int(config, "n_points")
+        scale_fit_split = str(config.get("scale_fit_split") or "")
+        selected_model_binding = _summary_model_binding(
+            summary,
+            Path(final_model),
+            semantic_hand=str(selected_hand),
+        )
+        selected_hkl_binding = _summary_hkl_binding(summary, Path(ds.hkl))
+        source_row_table_binding = _summary_native_row_table_binding(summary, source_table)
+        policy_selected_table_binding = _policy_selected_table_binding(source_table, selected_table)
+        missing: list[str] = []
+        if not selected_table.is_file():
+            missing.append(f"selected row table is missing: {selected_table}")
+        if not source_summary_path.is_file():
+            missing.append(f"source summary is missing: {source_summary_path}")
+        if n_basis is None:
+            missing.append("final summary does not record a positive n_basis")
+        if n_points is None:
+            missing.append("final summary does not record a positive n_points")
+        if not nuisance:
+            missing.append("final summary does not record the selected nuisance contract")
+        if scale_fit_split not in {"work", "all"}:
+            missing.append("final summary does not record a valid scale_fit_split")
+        missing.extend(
+            f"selected-model provenance: {error}"
+            for error in selected_model_binding.get("errors", [])
+        )
+        missing.extend(
+            f"selected-HKL provenance: {error}"
+            for error in selected_hkl_binding.get("errors", [])
+        )
+        missing.extend(
+            f"source-row provenance: {error}"
+            for error in source_row_table_binding.get("errors", [])
+        )
+        missing.extend(
+            f"policy-selected row table: {error}"
+            for error in policy_selected_table_binding.get("errors", [])
+        )
+        record: dict[str, object] = {
+            "dataset": name,
+            "status": "warning_incomplete" if missing else "ready",
+            "selected_hand": str(selected_hand),
+            "opposite_hand": opposite_hand,
+            "selected_run": str(selected_run),
+            "selected_source_run": str(source_run),
+            "selected_source_row_table": str(source_table),
+            "selected_row_table": str(selected_table),
+            "selected_summary": str(source_summary_path),
+            "comparison_contract": {
+                "n_basis": n_basis,
+                "n_points": n_points,
+                "nuisance": nuisance,
+                "scale_fit_split": scale_fit_split or None,
+                "sg_window": config.get("sg_window"),
+                "sg_window_mode": config.get("sg_window_mode"),
+                "max_rows": config.get("max_rows"),
+                "same_final_shared_model": bool(selected_model_binding.get("passed", False)),
+                "selected_model_binding": selected_model_binding,
+                "selected_hkl_binding": selected_hkl_binding,
+                "source_row_table_binding": source_row_table_binding,
+                "policy_selected_table_binding": policy_selected_table_binding,
+                "endpoint_refinement": False,
+                "maps": False,
+            },
+            "selected_row_table_choice": (
+                "publication_runs policy-active frozen row table; it may carry policy annotations, but the paired "
+                "diagnostic consumes dyn_residual_over_sigma and does not merge or apply raw_row_weight"
+            ),
+            "warnings": missing,
+        }
+        records[name] = record
+        if not missing:
+            runnable[name] = {
+                "dataset": ds,
+                "summary": summary,
+                "config": config,
+                "nuisance": nuisance,
+                "n_basis": n_basis,
+                "n_points": n_points,
+                "scale_fit_split": scale_fit_split,
+                "selected_table": selected_table,
+            }
+
+    if not eligible:
+        payload.update(
+            {
+                "status": "warning_incomplete",
+                "datasets": records,
+                "consistency_gate": {
+                    "status": "warning",
+                    "passed": False,
+                    "warnings": ["no publication-eligible crystal was available for a final hand diagnostic"],
+                },
+            }
+        )
+        write_json(artifact, payload)
+        return payload
+
+    opposite_model: Path | None = None
+    materialization_error = ""
+    if runnable:
+        if not is_shelx_model(final_model):
+            materialization_error = "the final shared model is not a materializable SHELX model"
+        else:
+            try:
+                opposite_model = make_alternate_hand_model(python, final_model, root, logs, False)
+            except Exception as exc:
+                materialization_error = f"opposite-hand model materialization failed: {type(exc).__name__}: {exc}"
+    payload["opposite_model"] = str(opposite_model or "")
+
+    for name, context in runnable.items():
+        record = records[name]
+        if opposite_model is None:
+            record["status"] = "warning_incomplete"
+            record["warnings"] = [materialization_error or "opposite-hand model is unavailable"]
+            continue
+        ds = context["dataset"]
+        config = context["config"]
+        opposite_run = root / "runs" / str(name) / "multi_post_feedback_opposite_hand"
+        diagnostic_path = root / "decisions" / "post_feedback_multi_hand" / f"{safe_label(str(name))}.json"
+        record.update(
+            {
+                "opposite_model": str(opposite_model),
+                "opposite_run": str(opposite_run),
+                "opposite_row_table": str(opposite_run / "native_dyn_calc.csv"),
+                "diagnostic": str(diagnostic_path),
+            }
+        )
+        try:
+            sg_window = safe_float(config.get("sg_window"), float("nan"))
+            sg_window_override = sg_window if math.isfinite(sg_window) else None
+            diagnostic_args = _args_with_recorded_native_contract(args, config)
+            max_rows = config.get("max_rows")
+            try:
+                max_rows_override = int(max_rows) if max_rows not in {None, ""} else None
+            except (TypeError, ValueError, OverflowError):
+                max_rows_override = None
+            if max_rows_override is not None and max_rows_override <= 0:
+                max_rows_override = None
+            run_logged(
+                native_stage_cmd(
+                    python,
+                    ds,
+                    str(opposite_model),
+                    dataset_baseline_hkl(prep, ds),
+                    opposite_run,
+                    diagnostic_args,
+                    n_basis=int(context["n_basis"]),
+                    n_points=int(context["n_points"]),
+                    stage="multi_post_feedback_opposite_hand_final",
+                    pinned=dict(context["nuisance"]),
+                    make_maps=False,
+                    endpoint=False,
+                    max_rows_override=max_rows_override,
+                    sg_window_override=sg_window_override,
+                    sg_window_mode_override=str(config.get("sg_window_mode") or "") or None,
+                    scale_fit_split_override=str(context["scale_fit_split"]),
+                    strict_pinned_contract=True,
+                ),
+                logs,
+                f"{name}_multi_post_feedback_opposite_hand",
+                dry_run=False,
+            )
+            run_logged(
+                [
+                    python,
+                    str(engine_script("absolute_structure_diagnostic.py")),
+                    "--best",
+                    str(context["selected_table"]),
+                    "--other",
+                    str(opposite_run / "native_dyn_calc.csv"),
+                    "--out",
+                    str(diagnostic_path),
+                ],
+                logs,
+                f"{name}_multi_post_feedback_absolute_structure_diagnostic",
+                dry_run=False,
+            )
+            stats = try_read_json(diagnostic_path)
+            opposite_summary = try_read_json(opposite_run / "summary.json")
+            row_pair_contract = _paired_row_split_contract(
+                Path(context["selected_table"]),
+                opposite_run / "native_dyn_calc.csv",
+            )
+            row_join = stats.get("row_join") if isinstance(stats.get("row_join"), Mapping) else {}
+            row_counts = {
+                "selected": row_join.get("n_best", 0),
+                "opposite": row_join.get("n_other", 0),
+                "joined": row_join.get("n_joined", 0),
+            }
+            paired_t_style: dict[str, object] = {}
+            paired_z_compatibility: dict[str, object] = {}
+            score_margins: dict[str, object] = {}
+            incomplete_reasons: list[str] = [
+                f"row-pair contract: {error}"
+                for error in row_pair_contract.get("errors", [])
+            ]
+            for split in ("all", "work", "free"):
+                block = stats.get(split) if isinstance(stats.get(split), Mapping) else {}
+                n_rows = int(block.get("n", 0) or 0)
+                paired = safe_float(block.get("paired_row_t_delta_chi2"), float("nan"))
+                chi2_margin = safe_float(block.get("delta_chi2_other_minus_best"), float("nan"))
+                selected_wr2 = _native_split_dyn_wr2(context["summary"], split)
+                opposite_wr2 = _native_split_dyn_wr2(opposite_summary, split)
+                paired_t_style[split] = {
+                    "t": paired,
+                    "n": n_rows,
+                    "df": max(0, n_rows - 1),
+                }
+                paired_z_compatibility[split] = paired
+                row_counts[split] = n_rows
+                score_margins[split] = {
+                    "delta_chi2_opposite_minus_selected": chi2_margin,
+                    "dyn_wR2_opposite_minus_selected": (
+                        opposite_wr2 - selected_wr2
+                        if math.isfinite(selected_wr2) and math.isfinite(opposite_wr2)
+                        else float("nan")
+                    ),
+                    "positive_favors_selected_hand": True,
+                }
+                if n_rows <= 1 or not math.isfinite(paired) or not math.isfinite(chi2_margin):
+                    incomplete_reasons.append(f"{split} split lacks a finite paired-row diagnostic")
+            if str(stats.get("status")) != "ok":
+                incomplete_reasons.append(f"diagnostic status is {stats.get('status', 'missing')}")
+            n_best = int(row_join.get("n_best", 0) or 0)
+            n_other = int(row_join.get("n_other", 0) or 0)
+            n_joined = int(row_join.get("n_joined", 0) or 0)
+            if n_joined <= 0 or n_joined != n_best or n_joined != n_other:
+                incomplete_reasons.append(
+                    f"row join is not exact (selected={n_best}, opposite={n_other}, joined={n_joined})"
+                )
+            diagnostic_duplicates_best = int(row_join.get("duplicate_keys_best", 0) or 0)
+            diagnostic_duplicates_other = int(row_join.get("duplicate_keys_other", 0) or 0)
+            if diagnostic_duplicates_best or diagnostic_duplicates_other:
+                incomplete_reasons.append(
+                    "diagnostic row keys are ambiguous "
+                    f"(selected duplicates={diagnostic_duplicates_best}, "
+                    f"opposite duplicates={diagnostic_duplicates_other})"
+                )
+            if (
+                int(row_pair_contract.get("joined_rows", 0) or 0) != n_joined
+                or int(row_pair_contract.get("selected_rows", 0) or 0) != n_best
+                or int(row_pair_contract.get("opposite_rows", 0) or 0) != n_other
+            ):
+                incomplete_reasons.append(
+                    "independent row-pair audit disagrees with the diagnostic row-join counts"
+                )
+            selected_score = score_native_summary(dict(context["summary"]))
+            opposite_score = score_native_summary(opposite_summary)
+            score_delta = safe_float(selected_score.get("score"), float("nan")) - safe_float(
+                opposite_score.get("score"), float("nan")
+            )
+            opposite_gate_ok, opposite_gate_reasons = hand_diagnostic_supports_other(stats, args)
+            materially_opposite = bool(
+                not incomplete_reasons
+                and math.isfinite(score_delta)
+                and score_delta > float(getattr(args, "hand_accept_delta", 0.0))
+                and opposite_gate_ok
+            )
+            opposite_config = (
+                opposite_summary.get("config")
+                if isinstance(opposite_summary.get("config"), Mapping)
+                else {}
+            )
+            opposite_best = (
+                opposite_summary.get("best_native")
+                if isinstance(opposite_summary.get("best_native"), Mapping)
+                else {}
+            )
+            opposite_nuisance = (
+                opposite_best.get("nuisance")
+                if isinstance(opposite_best.get("nuisance"), Mapping)
+                else {}
+            )
+            nuisance_mismatches = _pinned_nuisance_mismatches(
+                context["nuisance"],
+                opposite_nuisance,
+            )
+            opposite_model_binding = _summary_model_binding(
+                opposite_summary,
+                opposite_model,
+                semantic_hand=opposite_hand,
+            )
+            opposite_hkl_binding = _summary_hkl_binding(
+                opposite_summary,
+                Path(ds.hkl),
+            )
+            opposite_row_table_binding = _summary_native_row_table_binding(
+                opposite_summary,
+                opposite_run / "native_dyn_calc.csv",
+            )
+            physics_config_contract = _native_physics_config_contract(
+                context["summary"],
+                opposite_summary,
+            )
+            opposite_n_basis = _positive_summary_int(opposite_config, "n_basis")
+            opposite_n_points = _positive_summary_int(opposite_config, "n_points")
+            if opposite_n_basis != int(context["n_basis"]) or opposite_n_points != int(context["n_points"]):
+                incomplete_reasons.append(
+                    "opposite-hand recomputation did not preserve the selected N/Q contract"
+                )
+                materially_opposite = False
+            if str(opposite_config.get("scale_fit_split") or "") != str(context["scale_fit_split"]):
+                incomplete_reasons.append(
+                    "opposite-hand recomputation did not preserve the selected scale-fit split"
+                )
+                materially_opposite = False
+            if nuisance_mismatches:
+                incomplete_reasons.extend(
+                    f"pinned nuisance mismatch: {mismatch}" for mismatch in nuisance_mismatches
+                )
+                materially_opposite = False
+            if not bool(opposite_model_binding.get("passed", False)):
+                incomplete_reasons.extend(
+                    f"opposite-model provenance: {error}"
+                    for error in opposite_model_binding.get("errors", [])
+                )
+                materially_opposite = False
+            if not bool(opposite_hkl_binding.get("passed", False)):
+                incomplete_reasons.extend(
+                    f"opposite-HKL provenance: {error}"
+                    for error in opposite_hkl_binding.get("errors", [])
+                )
+                materially_opposite = False
+            if not bool(opposite_row_table_binding.get("passed", False)):
+                incomplete_reasons.extend(
+                    f"opposite-row provenance: {error}"
+                    for error in opposite_row_table_binding.get("errors", [])
+                )
+                materially_opposite = False
+            if not bool(physics_config_contract.get("passed", False)):
+                incomplete_reasons.extend(
+                    f"physics config: {error}"
+                    for error in physics_config_contract.get("errors", [])
+                )
+                materially_opposite = False
+            comparison_contract = record.get("comparison_contract")
+            if isinstance(comparison_contract, dict):
+                selected_binding = comparison_contract.get("selected_model_binding")
+                selected_binding_passed = bool(
+                    isinstance(selected_binding, Mapping) and selected_binding.get("passed", False)
+                )
+                comparison_contract.update(
+                    {
+                        "opposite_n_basis": opposite_n_basis,
+                        "opposite_n_points": opposite_n_points,
+                        "opposite_scale_fit_split": opposite_config.get("scale_fit_split"),
+                        "opposite_selected_nuisance": dict(opposite_nuisance),
+                        "pinned_nuisance_match": not nuisance_mismatches,
+                        "pinned_nuisance_mismatches": nuisance_mismatches,
+                        "opposite_model_binding": opposite_model_binding,
+                        "opposite_hkl_binding": opposite_hkl_binding,
+                        "opposite_row_table_binding": opposite_row_table_binding,
+                        "physics_config_contract": physics_config_contract,
+                        "model_hand_semantics_aligned": bool(
+                            selected_binding_passed and opposite_model_binding.get("passed", False)
+                        ),
+                    }
+                )
+            record.update(
+                {
+                    "status": (
+                        "warning_incomplete"
+                        if incomplete_reasons
+                        else "warning_material_opposite_support"
+                        if materially_opposite
+                        else "consistent_no_material_opposite_support"
+                    ),
+                    "row_counts": row_counts,
+                    "row_pair_contract": row_pair_contract,
+                    "paired_t_style_positive_favors_selected": paired_t_style,
+                    "paired_t_style_z_positive_favors_selected": paired_z_compatibility,
+                    "paired_t_style_z_compatibility_note": (
+                        "legacy field name only; values are paired Student-t-style statistics with df=n-1, "
+                        "not calibrated normal Z scores"
+                    ),
+                    "score_margins_positive_favors_selected": score_margins,
+                    "selected_score": selected_score,
+                    "opposite_score": opposite_score,
+                    "score_delta_selected_minus_opposite_positive_favors_opposite": score_delta,
+                    "composite_score_margin_opposite_minus_selected_positive_favors_selected": -score_delta,
+                    "materially_favors_opposite": materially_opposite,
+                    "opposite_support_gate": {
+                        "passed": opposite_gate_ok,
+                        "reasons": opposite_gate_reasons,
+                        "minimum_z_all": float(getattr(args, "hand_min_z_all", 2.0)),
+                        "minimum_z_free": float(getattr(args, "hand_min_z_free", 0.5)),
+                        "minimum_free_rows": int(getattr(args, "hand_min_free_rows", 10)),
+                        "minimum_score_delta": float(getattr(args, "hand_accept_delta", 0.0)),
+                    },
+                    "warnings": incomplete_reasons,
+                }
+            )
+        except Exception as exc:
+            record["status"] = "warning_incomplete"
+            record["warnings"] = [f"diagnostic execution failed: {type(exc).__name__}: {exc}"]
+
+    warnings: list[str] = []
+    for name in eligible:
+        record = records[name]
+        if str(record.get("status")) == "warning_incomplete":
+            warnings.append(f"{name}: final opposite-hand diagnostic is incomplete")
+        elif bool(record.get("materially_favors_opposite", False)):
+            warnings.append(f"{name}: final row diagnostic materially favors the opposite hand")
+    if warnings:
+        status = (
+            "warning_incomplete_and_opposite_support"
+            if any("incomplete" in warning for warning in warnings)
+            and any("opposite hand" in warning for warning in warnings)
+            else "warning_incomplete"
+            if any("incomplete" in warning for warning in warnings)
+            else "warning_opposite_hand_support"
+        )
+    else:
+        status = "consistent"
+    payload.update(
+        {
+            "status": status,
+            "datasets": records,
+            "consistency_gate": {
+                "status": "passed" if not warnings else "warning",
+                "passed": not warnings,
+                "warnings": warnings,
+            },
+            "selected_hand_after_diagnostic": str(selected_hand),
+        }
+    )
+    write_json(artifact, payload)
+    return payload
+
 
 def run_feature_gate(
     prep: PrepConfig,
@@ -4135,6 +6658,7 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
         feature_source = thickness_run
         continuous_seed = continuous_thickness_seed_nuisance(args, regularized_nui, active_nui)
         if continuous_thickness_enabled(args) and continuous_seed:
+            continuous_baseline_run = feature_source
             continuous_run = root / "runs" / ds.name / "adaptive_thickness_continuous"
             run_logged(
                 continuous_thickness_cmd(
@@ -4153,7 +6677,21 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
                 dry_run=args.dry_run,
             )
             regularized_nui = best_nuisance(continuous_run) or regularized_nui or continuous_seed
-            feature_source = continuous_run
+            regularized_nui, feature_source, materialization_record = materialize_continuous_nuisance_run(
+                prep,
+                ds,
+                args,
+                python,
+                logs,
+                active_model=active_model,
+                baseline_run=continuous_baseline_run,
+                continuous_run=continuous_run,
+                selected_nuisance=regularized_nui,
+                n_basis=args.screen_n_basis,
+                n_points=args.screen_n_points,
+                stage="adaptive_thickness_continuous_materialized",
+            )
+            feature_records.append(materialization_record)
         for family in ["row_resolution", "absorption", "sg_jitter", "sigma_error", "dose"]:
             regularized_nui, feature_source, record = run_feature_gate(
                 prep,
@@ -4280,8 +6818,11 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
     post_feedback_hand_promotion: dict = {}
     if args.hand_control and absolute_structure_decision.get("run_hand_control", True) and not args.dry_run:
         other = root / "runs" / ds.name / "adaptive_other_hand_check"
-        other_model = prep.structure if active_hand == "alternate" else final_model
-        alternate_other = active_hand != "alternate"
+        # Hand inversion is involutive.  Probe the opposite of the *refined
+        # current model* in both directions so the paired diagnostic is not
+        # confounded by comparing refined coordinates with the input model.
+        other_model = final_model
+        alternate_other = True
         run_logged(
             native_stage_cmd(
                 python,
@@ -4671,8 +7212,9 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
     """Run one structure against multiple datasets and combine endpoints."""
 
     root = Path(args.out_dir)
+    scout_rows_by_name = {ds.name: int(getattr(args, "scout_max_rows", 1000)) for ds in prep.datasets}
     if args.auto_decide:
-        def decide_dataset(ds0: DatasetSpec) -> DatasetSpec:
+        def decide_dataset(ds0: DatasetSpec) -> tuple[DatasetSpec, int]:
             preflight = preflight_dataset(
                 ds0,
                 requested_min_peak=ds0.min_peak,
@@ -4685,19 +7227,24 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
             ds = apply_preflight(ds0, preflight)
             scout_rows = preflight.scout_max_rows if preflight.scout_max_rows > 0 else args.scout_max_rows
             ds, _transform_decision = choose_transform_by_scout(prep, ds, args, python, logs, root, scout_max_rows=scout_rows)
-            return ds
+            return ds, int(scout_rows)
 
         if len(prep.datasets) > 1 and not args.dry_run:
             decided_by_name: dict[str, DatasetSpec] = {}
+            decided_scout_rows: dict[str, int] = {}
             max_workers = min(len(prep.datasets), transform_scout_job_count(args))
             with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="grond-dataset-transform") as pool:
                 futures = {pool.submit(decide_dataset, ds0): ds0.name for ds0 in prep.datasets}
                 for future in as_completed(futures):
-                    decided = future.result()
+                    decided, scout_rows = future.result()
                     decided_by_name[decided.name] = decided
+                    decided_scout_rows[decided.name] = scout_rows
             decided = [decided_by_name[ds0.name] for ds0 in prep.datasets]
+            scout_rows_by_name = {ds0.name: decided_scout_rows[ds0.name] for ds0 in prep.datasets}
         else:
-            decided = [decide_dataset(ds0) for ds0 in prep.datasets]
+            decided_rows = [decide_dataset(ds0) for ds0 in prep.datasets]
+            decided = [item[0] for item in decided_rows]
+            scout_rows_by_name = {item[0].name: item[1] for item in decided_rows}
         prep = PrepConfig(
             structure=prep.structure,
             datasets=decided,
@@ -4707,6 +7254,7 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
             geometry_percentile=prep.geometry_percentile,
             metadata=prep.metadata,
         )
+    screen_runs: dict[str, Path] = {}
     initial_runs: dict[str, Path] = {}
     nuisance: dict[str, dict] = {}
     for ds in prep.datasets:
@@ -4729,16 +7277,67 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
             f"{ds.name}_screen",
             dry_run=args.dry_run,
         )
-        active_run = run_dir
-        active_nui = best_nuisance(run_dir)
-        screen_frame_offsets = resolved_frame_offset_candidates(run_dir)
+        screen_runs[ds.name] = run_dir
+        initial_runs[ds.name] = run_dir
+        nuisance[ds.name] = best_nuisance(run_dir)
+
+    selected_hand, shared_hand_decision, alternate_hand_runs = choose_shared_hand_by_scout(
+        prep,
+        args,
+        python,
+        logs,
+        root,
+        screen_runs,
+        scout_rows_by_name,
+    )
+    shared_model = prep.structure
+    if selected_hand == "alternate":
+        shared_model = str(make_alternate_hand_model(python, prep.structure, root, logs, args.dry_run))
+        for ds in prep.datasets:
+            nuisance[ds.name] = best_nuisance(alternate_hand_runs[ds.name]) or nuisance[ds.name]
+    shared_hand_decision["selected_model"] = shared_model
+    write_json(root / "decisions" / "shared_absolute_structure_decision.json", shared_hand_decision)
+    for ds in prep.datasets:
+        decision_path = root / "decisions" / ds.name / "absolute_structure_decision.json"
+        decision = try_read_json(decision_path)
+        decision["selected_model"] = shared_model
+        write_json(decision_path, decision)
+
+    if args.fast and selected_hand == "alternate":
+        for ds in prep.datasets:
+            selected_run = root / "runs" / ds.name / "fast_N20_Q5_selected_hand"
+            run_logged(
+                native_stage_cmd(
+                    python,
+                    ds,
+                    shared_model,
+                    dataset_baseline_hkl(prep, ds),
+                    selected_run,
+                    args,
+                    n_basis=20,
+                    n_points=5,
+                    stage="multi_fast_selected_hand",
+                    pinned=nuisance[ds.name],
+                    make_maps=False,
+                ),
+                logs,
+                f"{ds.name}_multi_fast_selected_hand",
+                dry_run=args.dry_run,
+            )
+            initial_runs[ds.name] = selected_run
+            nuisance[ds.name] = best_nuisance(selected_run) or nuisance[ds.name]
+
+    for ds in prep.datasets:
+        active_run = initial_runs[ds.name]
+        active_nui = nuisance[ds.name]
+        screen_frame_offsets = resolved_frame_offset_candidates(screen_runs[ds.name])
         if not args.fast:
             thick = root / "runs" / ds.name / "multi_thickness_polish"
             run_logged(
                 native_stage_cmd(
                     python,
                     ds,
-                    prep.structure,
+                    shared_model,
                     dataset_baseline_hkl(prep, ds),
                     thick,
                     args,
@@ -4757,12 +7356,13 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
             active_nui = best_nuisance(thick) or active_nui
             continuous_seed = continuous_thickness_seed_nuisance(args, active_nui)
             if continuous_thickness_enabled(args) and continuous_seed:
+                continuous_baseline_run = active_run
                 continuous = root / "runs" / ds.name / "multi_thickness_continuous"
                 run_logged(
                     continuous_thickness_cmd(
                         python,
                         ds,
-                        prep.structure,
+                        shared_model,
                         continuous,
                         args,
                         continuous_seed,
@@ -4774,9 +7374,26 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
                     f"{ds.name}_multi_thickness_continuous",
                     dry_run=args.dry_run,
                 )
-                active_run = continuous
                 active_nui = best_nuisance(continuous) or active_nui or continuous_seed
+                active_nui, active_run, materialization_record = materialize_continuous_nuisance_run(
+                    prep,
+                    ds,
+                    args,
+                    python,
+                    logs,
+                    active_model=shared_model,
+                    baseline_run=continuous_baseline_run,
+                    continuous_run=continuous,
+                    selected_nuisance=active_nui,
+                    n_basis=args.screen_n_basis,
+                    n_points=args.screen_n_points,
+                    stage="multi_thickness_continuous_materialized",
+                )
+            else:
+                materialization_record = None
             feature_records: list[dict] = []
+            if materialization_record is not None:
+                feature_records.append(materialization_record)
             for family in ["row_resolution", "absorption", "sg_jitter", "sigma_error", "dose"]:
                 active_nui, active_run, record = run_feature_gate(
                     prep,
@@ -4786,7 +7403,7 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
                     logs,
                     root,
                     family=family,
-                    active_model=prep.structure,
+                    active_model=shared_model,
                     active_run=active_run,
                     active_nui=active_nui,
                 )
@@ -4801,9 +7418,14 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
         args,
         label="structure_update",
     )
+    require_materialized_dataset_policy(
+        structure_dataset_policy,
+        context="structure-update",
+        dry_run=bool(args.dry_run),
+    )
     datasets_csv = root / "prep_datasets_with_nuisance.csv"
     write_datasets_csv(datasets_csv, prep, apply_dataset_policy_to_nuisance(nuisance, structure_dataset_policy))
-    final_model = prep.structure
+    final_model = shared_model
     structure_strategy = resolve_structure_update_strategy(args, multi_dataset=True)
     structure_feedback: dict = {"status": "not_run", "strategy": structure_strategy}
     if args.mode in {"regularize", "auto"} and not args.fast and structure_strategy != "off":
@@ -4814,7 +7436,7 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
                 python,
                 logs,
                 root,
-                start_model=prep.structure,
+                start_model=shared_model,
                 nuisance=nuisance,
                 structure_dataset_policy=structure_dataset_policy,
             )
@@ -4826,7 +7448,7 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
                 "--datasets-csv",
                 str(datasets_csv),
                 "--res",
-                prep.structure,
+                shared_model,
                 "--out-dir",
                 str(shared),
                 "--n-basis",
@@ -4952,6 +7574,11 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
         args,
         label="final",
     )
+    require_materialized_dataset_policy(
+        final_dataset_policy,
+        context="final",
+        dry_run=bool(args.dry_run),
+    )
     if args.dry_run or final_dataset_policy.get("status") in {"disabled", "single_dataset", "dry_run", "missing_row_table"}:
         combined_input_runs = final_runs
         publication_runs = final_runs
@@ -4962,8 +7589,26 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
             root / "dataset_policy" / "final" / "weighted_runs",
             include_endpoint_only=True,
         )
-        combined_input_runs = weighted_runs or final_runs
-        publication_runs = policy_active_runs(weighted_runs or final_runs, final_dataset_policy)
+        if not weighted_runs:
+            raise RuntimeError(
+                "multi-dataset final policy selected no endpoint-contributing dataset; "
+                "refusing to fall back to all final runs"
+            )
+        combined_input_runs = weighted_runs
+        publication_runs = policy_active_runs(weighted_runs, final_dataset_policy)
+        require_policy_active_runs(publication_runs, context="final publication")
+    post_feedback_multi_hand_diagnostic = run_multi_post_feedback_hand_diagnostic(
+        prep,
+        args,
+        python,
+        logs,
+        root,
+        final_model=final_model,
+        selected_hand=selected_hand,
+        final_runs=final_runs,
+        publication_runs=publication_runs,
+        shared_hand_decision=shared_hand_decision,
+    )
     combined = root / "runs" / "combined"
     run_logged(combine_cmd(python, combined_input_runs, final_model, combined, args), logs, "combine_final", dry_run=args.dry_run)
     merged_resolution_limit = run_resolution_limit_gate(
@@ -4992,9 +7637,14 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
     return {
         "combined": str(combined),
         "model": final_model,
+        "selected_hand": selected_hand,
+        "shared_absolute_structure_decision": str(
+            root / "decisions" / "shared_absolute_structure_decision.json"
+        ),
         "runs": {k: str(v) for k, v in final_runs.items()},
         "combined_input_runs": {k: str(v) for k, v in combined_input_runs.items()},
         "publication_runs": {k: str(v) for k, v in publication_runs.items()},
+        "post_feedback_multi_hand_diagnostic": post_feedback_multi_hand_diagnostic,
         "structure_update_strategy": structure_strategy,
         "structure_feedback": structure_feedback,
         "forensics": forensic_runs,
@@ -5361,6 +8011,12 @@ def cmd_run(args: argparse.Namespace) -> int:
     logs = Path(args.out_dir) / "logs"
     python = choose_python(args.python)
     prep = prep_from_args(args)
+    if len(prep.datasets) > 1 and str(getattr(args, "endpoint_calibration", "auto")) == "on":
+        raise SystemExit(
+            "--endpoint-calibration on cannot be forced for a multi-dataset run. "
+            "Each crystal has an independent scale and sigma contract; a single concatenated replay would mix them. "
+            "Leave the option at auto for the safe combined-endpoint workflow."
+        )
     profile = apply_speed_profile(args, prep.structure)
     args.workers = auto_worker_count(args.workers, args.max_core_fraction)
     args.chunksize = auto_chunksize(args.chunksize, args.workers)
@@ -5517,7 +8173,9 @@ def cmd_run(args: argparse.Namespace) -> int:
         },
     }
     (Path(args.out_dir) / "run_config.json").write_text(json.dumps(config, indent=2) + "\n")
+    conventional_baseline = run_fresh_conventional_baseline(prep, args, python, logs)
     result = run_single(prep, args, python, logs) if len(prep.datasets) == 1 else run_multi(prep, args, python, logs)
+    result["conventional_baseline"] = conventional_baseline
     result["endpoint_calibration"] = run_endpoint_calibration(prep, result, args, python, logs)
     result["publication_endpoint_chooser"] = run_publication_endpoint_chooser(prep, result, args)
     result["publication_tables"] = run_publication_report(python, prep, result, args, logs)
@@ -5858,10 +8516,7 @@ def _quick_best_native(summary: Mapping[str, object]) -> Mapping[str, object]:
     if not metrics:
         return {}
     wght = summary.get("wght") if isinstance(summary.get("wght"), Mapping) else {}
-    nuisance = {
-        "native_wght_a": wght.get("a"),
-        "native_wght_b": wght.get("b"),
-    }
+    nuisance = {"native_weight_mode": wght.get("mode", "per_dataset_native")}
     return {
         "metrics": metrics,
         "native_weight": wght,
@@ -5891,6 +8546,35 @@ def _quick_nuisance(summary: Mapping[str, object]) -> Mapping[str, object]:
         return nuisance
     config = summary.get("config")
     return config if isinstance(config, Mapping) else {}
+
+
+def _quick_dataset_nuisance_contracts(summary: Mapping[str, object]) -> list[dict[str, object]]:
+    """Return exact per-dataset nuisance blocks from a combined summary."""
+
+    runs = summary.get("runs")
+    if not isinstance(runs, list):
+        return []
+    contracts: list[dict[str, object]] = []
+    for raw in runs:
+        if not isinstance(raw, Mapping):
+            continue
+        best = raw.get("best_native_summary")
+        best = best if isinstance(best, Mapping) else {}
+        nuisance = best.get("nuisance")
+        if not isinstance(nuisance, Mapping) or not nuisance:
+            continue
+        contracts.append(
+            {
+                "dataset": str(raw.get("name") or f"dataset_{len(contracts) + 1}"),
+                "run_dir": str(raw.get("run_dir") or ""),
+                "nuisance": dict(nuisance),
+                "scale_count": best.get("scale_count"),
+                "native_weight": dict(best.get("native_weight") or {})
+                if isinstance(best.get("native_weight"), Mapping)
+                else {},
+            }
+        )
+    return contracts
 
 
 def _quick_metric(metrics: Mapping[str, object], split: str, branch: str, key: str) -> object:
@@ -5972,8 +8656,13 @@ def _quick_lst_diagnostics(lst_path: Path | None) -> dict[str, object]:
     """Parse the SHELXL LST fields users need for endpoint sanity checks."""
 
     if lst_path is None:
-        return {"lst": "", "exists": False}
-    out: dict[str, object] = {"lst": str(lst_path), "exists": lst_path.exists()}
+        return {"lst": "", "exists": False, "pathology_status": "missing", "safe_for_feedback": False}
+    out: dict[str, object] = {
+        "lst": str(lst_path),
+        "exists": lst_path.exists(),
+        "pathology_status": "missing",
+        "safe_for_feedback": False,
+    }
     if not lst_path.exists():
         return out
     try:
@@ -6038,13 +8727,33 @@ def _quick_lst_diagnostics(lst_path: Path | None) -> dict[str, object]:
         out["parameters"] = int(parameters)
         out["restraints"] = int(restraints)
     npd_atoms = sorted(set(re.findall(r"\s([A-Z][A-Z0-9]{1,7})\s+\*\* NON POSITIVE DEFINITE \*\*", text)))
-    out["npd_atoms"] = npd_atoms
-    matches = re.findall(r"(\d+)\s+atoms NPD", text)
-    out["npd_count"] = int(matches[-1]) if matches else len(npd_atoms)
-    matches = re.findall(r"(\d+)\s+atoms may be split", text)
-    out["split_count"] = int(matches[-1]) if matches else 0
-    out["has_npd"] = int(out.get("npd_count", 0) or 0) > 0
-    out["has_split_warnings"] = int(out.get("split_count", 0) or 0) > 0
+    npd_matches = re.findall(r"(\d+)\s+atoms NPD", text)
+    if npd_matches or npd_atoms:
+        out["npd_atoms"] = npd_atoms
+        out["npd_count"] = max(int(npd_matches[-1]) if npd_matches else 0, len(npd_atoms))
+        out["has_npd"] = int(out["npd_count"]) > 0
+    split_matches = re.findall(r"(\d+)\s+atoms may be split", text)
+    if split_matches:
+        out["split_count"] = int(split_matches[-1])
+        out["has_split_warnings"] = int(out["split_count"]) > 0
+    pathology = parse_shelx_lst_pathologies(lst_path)
+    out["pathology_status"] = pathology.get("pathology_status", "missing")
+    out["safe_for_feedback"] = bool(
+        pathology.get("pathology_status") == "complete" and not pathology.get("has_npd", False)
+    )
+    for key in ("npd_count", "split_count"):
+        parsed_count = _quick_int(pathology.get(key))
+        current_count = _quick_int(out.get(key))
+        if parsed_count is not None:
+            out[key] = parsed_count if current_count is None else max(parsed_count, current_count)
+    parsed_atoms = pathology.get("npd_atoms") if isinstance(pathology.get("npd_atoms"), list) else []
+    current_atoms = out.get("npd_atoms") if isinstance(out.get("npd_atoms"), list) else []
+    if parsed_atoms or current_atoms:
+        out["npd_atoms"] = sorted({str(atom) for atom in [*parsed_atoms, *current_atoms]})
+    out["has_npd"] = bool(out.get("has_npd", False) or pathology.get("has_npd", False))
+    out["has_split_warnings"] = bool(
+        out.get("has_split_warnings", False) or pathology.get("has_split_warnings", False)
+    )
     return out
 
 
@@ -6058,17 +8767,10 @@ def _quick_shelxl_details(source: Mapping[str, object] | None = None, lst_path: 
     diagnostics = _quick_lst_diagnostics(lst_path)
     out.setdefault("lst", diagnostics.get("lst", ""))
     out["lst_exists"] = bool(diagnostics.get("exists"))
-    overwrite_diagnostic_keys = {
-        "parameters",
-        "restraints",
-        "npd_count",
-        "npd_atoms",
-        "split_count",
-        "has_npd",
-        "has_split_warnings",
-        "recommended_wght_a",
-        "recommended_wght_b",
-    }
+    out["pathology_status"] = diagnostics.get("pathology_status", "missing")
+    out["lst_safe_for_feedback"] = bool(diagnostics.get("safe_for_feedback", False))
+    pathology_count_keys = {"npd_count", "split_count"}
+    pathology_flag_keys = {"has_npd", "has_split_warnings"}
     for key in (
         "R1_gt",
         "R1_all",
@@ -6091,16 +8793,107 @@ def _quick_shelxl_details(source: Mapping[str, object] | None = None, lst_path: 
         "recommended_wght_b",
     ):
         old_value = out.get(key)
-        if key in diagnostics and ((old_value is None or old_value == "") or key in overwrite_diagnostic_keys):
+        if key not in diagnostics:
+            continue
+        if key in pathology_count_keys:
+            old_count = _quick_int(old_value)
+            new_count = _quick_int(diagnostics[key])
+            if old_count is None:
+                out[key] = diagnostics[key]
+            elif new_count is not None:
+                # A later, un-hash-bound LST may add a warning, but it must
+                # never erase pathology recorded by the endpoint producer.
+                out[key] = max(old_count, new_count)
+        elif key == "npd_atoms":
+            old_atoms = old_value if isinstance(old_value, (list, tuple, set)) else []
+            new_atoms = diagnostics[key] if isinstance(diagnostics[key], (list, tuple, set)) else []
+            out[key] = sorted({str(atom) for atom in [*old_atoms, *new_atoms] if str(atom).strip()})
+        elif key in pathology_flag_keys:
+            out[key] = bool(old_value) or bool(diagnostics[key])
+        elif old_value is None or old_value == "":
+            # Recorded summary metrics are the coherent endpoint result.  An
+            # arbitrary file that merely occupies the LST path is only a
+            # fallback source; without an expected hash it cannot replace
+            # already recorded R values, weights, or parameter counts.
             out[key] = diagnostics[key]
     return out
+
+
+def _quick_selected_feedback_shelxl(
+    result: Mapping[str, object],
+    final_model: Path | None,
+    fallback: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    """Load one internally coherent adopted-feedback SHELXL endpoint.
+
+    Multi-dataset auto can finish with a later diagnostic combined endpoint
+    after the shared feedback loop has already retained an earlier clean
+    model.  Metrics from that later endpoint must never be merged with the LST
+    or pathology status of the retained model.
+    """
+
+    if final_model is None:
+        return _quick_shelxl_details(fallback or {}, None)
+    try:
+        model = final_model.expanduser().resolve()
+    except OSError:
+        model = final_model.expanduser()
+    lst = model.with_suffix(".lst")
+    source: Mapping[str, object] = {}
+    feedback = result.get("structure_feedback")
+    feedback = feedback if isinstance(feedback, Mapping) else {}
+    cycles = feedback.get("cycles") if isinstance(feedback.get("cycles"), list) else []
+    matched_feedback_record = False
+    for raw in cycles:
+        if not isinstance(raw, Mapping) or raw.get("adopted_for_feedback") is not True:
+            continue
+        output_text = str(raw.get("output_model") or "").strip()
+        if not output_text:
+            continue
+        try:
+            output = Path(output_text).expanduser().resolve()
+        except OSError:
+            output = Path(output_text).expanduser()
+        if output != model:
+            continue
+        matched_feedback_record = True
+        combined_text = str(raw.get("combined") or "").strip()
+        combined_summary = try_read_json(Path(combined_text) / "combined_summary.json") if combined_text else {}
+        endpoint = combined_summary.get("combined_endpoint") if isinstance(combined_summary, Mapping) else {}
+        endpoint = endpoint if isinstance(endpoint, Mapping) else {}
+        shelxl = endpoint.get("shelxl") if isinstance(endpoint.get("shelxl"), Mapping) else {}
+        artifacts = endpoint.get("artifacts") if isinstance(endpoint.get("artifacts"), Mapping) else {}
+        health = shelxl.get("res_health") if isinstance(shelxl.get("res_health"), Mapping) else {}
+        artifact_path = str(artifacts.get("res") or "").strip()
+        health_path = str(health.get("path") or "").strip()
+        artifact_sha = str(artifacts.get("res_sha256") or "").strip()
+        health_sha = str(health.get("sha256") or "").strip()
+        try:
+            paths_match = bool(artifact_path and health_path) and Path(artifact_path).resolve() == model and Path(health_path).resolve() == model
+            current_sha = sha256_file(model)
+        except OSError:
+            paths_match = False
+            current_sha = ""
+        if paths_match and artifact_sha and health_sha and artifact_sha == health_sha == current_sha:
+            source = shelxl
+        break
+    if source:
+        return _quick_shelxl_details(source, lst)
+    if lst.exists():
+        # The exact LST is still safer than combining statistics recorded for a
+        # different endpoint with this model's pathology record.
+        return _quick_shelxl_details({}, lst)
+    if matched_feedback_record:
+        return _quick_shelxl_details({}, None)
+    return _quick_shelxl_details(fallback or {}, None)
 
 
 def _quick_baseline_shelxl(
     prep: PrepConfig,
     final_summary: Mapping[str, object] | None = None,
+    result: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
-    """Prefer the final run's fresh conventional rerun over sibling log files."""
+    """Prefer the hash-bound supplied-input replay over historical fallbacks."""
 
     structure = Path(prep.structure).expanduser() if prep.structure else None
     hkl = ""
@@ -6111,6 +8904,17 @@ def _quick_baseline_shelxl(
             hkl = prep.baseline_hkl
     elif prep.baseline_hkl:
         hkl = prep.baseline_hkl
+    supplied_fresh = _validated_fresh_conventional_baseline(result or {})
+    if supplied_fresh:
+        lst_text = str(supplied_fresh.get("lst") or "")
+        details = _quick_shelxl_details(supplied_fresh, Path(lst_text) if lst_text else None)
+        details["res"] = str(supplied_fresh.get("res") or structure or "")
+        details["hkl"] = str(supplied_fresh.get("hkl") or hkl or "")
+        details["source_res"] = str(supplied_fresh.get("source_res") or structure or "")
+        details["source_hkl"] = str(supplied_fresh.get("source_hkl") or hkl or "")
+        details["baseline_source"] = "fresh_supplied_input_conventional_control"
+        details["fresh_rerun"] = True
+        return details
     fresh = _fresh_baseline_shelxl(final_summary or {})
     if fresh:
         lst_text = str(fresh.get("lst") or "")
@@ -6137,6 +8941,7 @@ def _quick_baseline_shelxl(
 def _quick_shelxl_issue_text(details: Mapping[str, object]) -> str:
     """Format NPD/split problems in one compact cell."""
 
+    pathology_status = str(details.get("pathology_status") or "unverified")
     npd = _quick_int(details.get("npd_count"))
     split = _quick_int(details.get("split_count"))
     atoms = details.get("npd_atoms")
@@ -6144,7 +8949,11 @@ def _quick_shelxl_issue_text(details: Mapping[str, object]) -> str:
     if isinstance(atoms, list) and atoms:
         shown = ", ".join(str(v) for v in atoms[:5])
         atom_text = f" ({shown}{', ...' if len(atoms) > 5 else ''})"
-    return f"NPD `{npd if npd is not None else 'n/a'}`{atom_text}; split `{split if split is not None else 'n/a'}`"
+    return (
+        f"LST pathology `{pathology_status}`; "
+        f"NPD `{npd if npd is not None else 'n/a'}`{atom_text}; "
+        f"split `{split if split is not None else 'n/a'}`"
+    )
 
 
 def _quick_shelxl_weight_text(details: Mapping[str, object]) -> str:
@@ -6180,24 +8989,26 @@ def _quick_goof_warning(goof_value: object) -> str:
     return "endpoint GooF is outside 0.85-1.15; treat this endpoint as diagnostic unless the row-level and weighting audits justify it"
 
 
-def _quick_residual_z_summary(csv_path: Path) -> dict[str, dict[str, float | int]]:
-    """Summarize row-level intensity residual z values from native_dyn_calc.csv."""
+def _quick_residual_z_summary(csv_paths: Path | list[Path]) -> dict[str, dict[str, float | int]]:
+    """Summarize residual z values across one or more frozen native tables."""
 
     rows: dict[str, list[float]] = {"all": [], "work": [], "free": []}
-    if not csv_path.exists():
-        return {}
-    try:
-        with csv_path.open(newline="") as handle:
-            for row in csv.DictReader(handle):
-                z = _quick_float(row.get("dyn_residual_over_sigma"))
-                if not math.isfinite(z):
-                    continue
-                rows["all"].append(z)
-                split = str(row.get("split", "")).lower()
-                if split in {"work", "free"}:
-                    rows[split].append(z)
-    except OSError:
-        return {}
+    paths = [csv_paths] if isinstance(csv_paths, Path) else list(csv_paths)
+    for csv_path in paths:
+        if not csv_path.exists():
+            continue
+        try:
+            with csv_path.open(newline="") as handle:
+                for row in csv.DictReader(handle):
+                    z = _quick_float(row.get("dyn_residual_over_sigma"))
+                    if not math.isfinite(z):
+                        continue
+                    rows["all"].append(z)
+                    split = str(row.get("split", "")).lower()
+                    if split in {"work", "free"}:
+                        rows[split].append(z)
+        except OSError:
+            continue
 
     out: dict[str, dict[str, float | int]] = {}
     for split, values in rows.items():
@@ -6319,11 +9130,20 @@ def _write_bloch_diagnostics_report(
     final_summary: Mapping[str, object],
     row_metrics: Mapping[str, object],
     file_block: Mapping[str, str],
+    *,
+    row_table_override: Path | None = None,
+    report_name: str = "BLOCH_DIAGNOSTICS.md",
 ) -> Path:
     """Write a human-readable Bloch-matrix/row-contract audit report."""
 
-    report = out_dir / "BLOCH_DIAGNOSTICS.md"
-    row_table = final_run / "native_dyn_calc.csv" if final_run else Path(str(file_block.get("publication_row_table") or ""))
+    report = out_dir / report_name
+    row_table = (
+        row_table_override
+        if row_table_override is not None
+        else final_run / "native_dyn_calc.csv"
+        if final_run
+        else Path(str(file_block.get("publication_row_table") or ""))
+    )
     config = final_summary.get("config") if isinstance(final_summary.get("config"), Mapping) else {}
     best_native = _quick_best_native(final_summary)
     nuisance = _quick_nuisance(final_summary)
@@ -6479,20 +9299,89 @@ def _write_bloch_diagnostics_report(
     return report
 
 
-def _quick_hand_block_z(block: Mapping[str, object], *, final_is_other: bool) -> dict[str, object]:
-    """Orient an absolute-structure diagnostic block so positive values favor the final selected hand."""
+def _write_bloch_diagnostics_reports(
+    out_dir: Path,
+    row_tables: list[tuple[str, Path]],
+    final_run: Path | None,
+    final_summary: Mapping[str, object],
+    row_metrics: Mapping[str, object],
+    file_block: Mapping[str, str],
+) -> Path:
+    """Write one exact Bloch audit per dataset and a multi-run index."""
+
+    if len(row_tables) <= 1:
+        override = row_tables[0][1] if row_tables else None
+        summary = try_read_json(override.parent / "summary.json") if override is not None else final_summary
+        return _write_bloch_diagnostics_report(
+            out_dir,
+            final_run,
+            summary if isinstance(summary, Mapping) and summary else final_summary,
+            row_metrics,
+            file_block,
+            row_table_override=override,
+        )
+
+    entries: list[tuple[str, Path, int]] = []
+    for label, row_table in row_tables:
+        summary = try_read_json(row_table.parent / "summary.json")
+        report_name = f"BLOCH_DIAGNOSTICS_{safe_label(label)}.md"
+        report = _write_bloch_diagnostics_report(
+            out_dir,
+            row_table.parent,
+            summary if isinstance(summary, Mapping) and summary else {},
+            row_metrics,
+            file_block,
+            row_table_override=row_table,
+            report_name=report_name,
+        )
+        audit = _quick_csv_numeric_audit(row_table, [])
+        entries.append((label, report, int(audit.get("rows", 0) or 0)))
+    index = out_dir / "BLOCH_DIAGNOSTICS.md"
+    lines = [
+        "# GROND Multi-Dataset Bloch Diagnostics",
+        "",
+        "Each crystal retains its own frozen row table, nuisance model, scale field, and Bloch audit. No synthetic combined row table is implied by this index.",
+        "",
+        "| dataset | frozen rows | diagnostics | row table |",
+        "|---|---:|---|---|",
+    ]
+    table_by_label = {label: path for label, path in row_tables}
+    for label, report, rows in entries:
+        lines.append(f"| {label} | {rows} | `{report}` | `{table_by_label[label]}` |")
+    index.write_text("\n".join(lines) + "\n")
+    return index
+
+
+def _quick_hand_block_t_style(block: Mapping[str, object], *, final_is_other: bool) -> dict[str, object]:
+    """Orient a paired row-level t-style contrast so positive favors the final hand."""
 
     sign = -1.0 if final_is_other else 1.0
+    n = _quick_int(block.get("n"))
+    df = n - 1 if n is not None and n >= 1 else None
     raw_delta = _quick_float(block.get("delta_chi2_other_minus_best"))
     raw_t = _quick_float(block.get("paired_row_t_delta_chi2"))
     oriented_delta = sign * raw_delta if math.isfinite(raw_delta) else float("nan")
     oriented_t = sign * raw_t if math.isfinite(raw_t) else float("nan")
     return {
-        "n": block.get("n", "n/a"),
+        "n": n,
+        "df": df,
         "delta_chi2_rejected_minus_final": oriented_delta,
-        "paired_z_positive_favors_final": oriented_t,
+        "paired_t_style_positive_favors_final": oriented_t,
+        "paired_t_style_definition": (
+            "paired Student-t-style contrast of per-row delta_chi2; positive favors the final selected hand; "
+            "not a calibrated normal Z score"
+        ),
         "sqrt_positive_delta_chi2": math.sqrt(max(oriented_delta, 0.0)) if math.isfinite(oriented_delta) else float("nan"),
     }
+
+
+def _quick_hand_t_style_text(block: Mapping[str, object]) -> str:
+    """Format one paired hand contrast with its sample count and degrees of freedom."""
+
+    return (
+        f"t {_quick_number(block.get('paired_t_style_positive_favors_final'), 3)} "
+        f"(n {block.get('n', 'n/a')}, df {block.get('df', 'n/a')})"
+    )
 
 
 def _quick_final_hand_summary(decision_tree: Mapping[str, object], diagnostic: Mapping[str, object]) -> dict[str, object]:
@@ -6509,7 +9398,7 @@ def _quick_final_hand_summary(decision_tree: Mapping[str, object], diagnostic: M
     for split in ("all", "work", "free"):
         block = diagnostic.get(split)
         if isinstance(block, Mapping):
-            blocks[split] = _quick_hand_block_z(block, final_is_other=final_is_other)
+            blocks[split] = _quick_hand_block_t_style(block, final_is_other=final_is_other)
     return {
         "initial_hand": initial_hand,
         "final_hand": final_hand,
@@ -6520,10 +9409,174 @@ def _quick_final_hand_summary(decision_tree: Mapping[str, object], diagnostic: M
     }
 
 
+def _quick_multi_hand_diagnostic(result: Mapping[str, object]) -> dict[str, object]:
+    """Load the shared post-feedback multi-crystal hand audit."""
+
+    value = result.get("post_feedback_multi_hand_diagnostic")
+    if isinstance(value, Mapping):
+        return dict(value)
+    if value:
+        return try_read_json(Path(str(value)))
+    path = result.get("post_feedback_multi_hand_diagnostic_path")
+    return try_read_json(Path(str(path))) if path else {}
+
+
+def _quick_multi_hand_console_rows(payload: Mapping[str, object]) -> dict[str, dict[str, object]]:
+    """Return compact per-dataset hand evidence for console/report consumers."""
+
+    datasets = payload.get("datasets") if isinstance(payload.get("datasets"), Mapping) else {}
+    rows: dict[str, dict[str, object]] = {}
+    for name, raw in sorted(datasets.items(), key=lambda item: str(item[0])):
+        record = raw if isinstance(raw, Mapping) else {}
+        paired = (
+            record.get("paired_t_style_positive_favors_selected")
+            if isinstance(record.get("paired_t_style_positive_favors_selected"), Mapping)
+            else {}
+        )
+        paired_compatibility = (
+            record.get("paired_t_style_z_positive_favors_selected")
+            if isinstance(record.get("paired_t_style_z_positive_favors_selected"), Mapping)
+            else {}
+        )
+        counts = record.get("row_counts") if isinstance(record.get("row_counts"), Mapping) else {}
+        margins = (
+            record.get("score_margins_positive_favors_selected")
+            if isinstance(record.get("score_margins_positive_favors_selected"), Mapping)
+            else {}
+        )
+        rows[str(name)] = {
+            "status": record.get("status", "missing"),
+            "rows_all": counts.get("all", 0),
+            "rows_work": counts.get("work", 0),
+            "rows_free": counts.get("free", 0),
+            "t_all": (paired.get("all") or {}).get("t") if isinstance(paired.get("all"), Mapping) else paired_compatibility.get("all"),
+            "t_work": (paired.get("work") or {}).get("t") if isinstance(paired.get("work"), Mapping) else paired_compatibility.get("work"),
+            "t_free": (paired.get("free") or {}).get("t") if isinstance(paired.get("free"), Mapping) else paired_compatibility.get("free"),
+            "df_all": (paired.get("all") or {}).get("df") if isinstance(paired.get("all"), Mapping) else None,
+            "df_work": (paired.get("work") or {}).get("df") if isinstance(paired.get("work"), Mapping) else None,
+            "df_free": (paired.get("free") or {}).get("df") if isinstance(paired.get("free"), Mapping) else None,
+            "chi2_margin_all": (
+                (margins.get("all") or {}).get("delta_chi2_opposite_minus_selected")
+                if isinstance(margins.get("all"), Mapping)
+                else None
+            ),
+            "chi2_margin_work": (
+                (margins.get("work") or {}).get("delta_chi2_opposite_minus_selected")
+                if isinstance(margins.get("work"), Mapping)
+                else None
+            ),
+            "chi2_margin_free": (
+                (margins.get("free") or {}).get("delta_chi2_opposite_minus_selected")
+                if isinstance(margins.get("free"), Mapping)
+                else None
+            ),
+            "composite_margin": record.get(
+                "composite_score_margin_opposite_minus_selected_positive_favors_selected"
+            ),
+            "selected_row_table": record.get("selected_row_table", ""),
+            "opposite_row_table": record.get("opposite_row_table", ""),
+            "diagnostic": record.get("diagnostic", ""),
+        }
+    return rows
+
+
+def _quick_multi_hand_evidence_lines(
+    payload: Mapping[str, object],
+    *,
+    compact: bool = False,
+) -> list[str]:
+    """Render per-crystal paired t-style hand evidence without pooling crystals."""
+
+    rows = _quick_multi_hand_console_rows(payload)
+    lines = [
+        "## Per-Dataset Final Hand Evidence",
+        "",
+        (
+            "The final shared hand remains the initial shared-gate decision. Each row below compares one crystal's "
+            "frozen final row table with an opposite-hand recomputation at the identical pinned nuisance and N/Q. "
+            "Positive paired t-style statistics and score margins favor the selected shared hand. Each t-style "
+            "statistic is reported with n and df=n-1; it is not a calibrated normal Z score. No pooled statistic is "
+            "computed across independent crystal, sigma, scale, and free-set contracts."
+        ),
+        "",
+    ]
+    if not rows:
+        lines.extend(
+            [
+                f"Consistency gate: `{payload.get('status', 'warning_missing_diagnostic')}`. No per-dataset "
+                "diagnostic rows were recorded; treat final hand evidence as incomplete.",
+                "",
+            ]
+        )
+        return lines
+    if compact:
+        lines.extend(
+            [
+                f"Consistency gate: `{payload.get('status', 'missing')}`.",
+                "",
+                "| dataset | status | rows all/work/free | paired t-style all/work/free | df all/work/free |",
+                "|---|---|---:|---:|---:|",
+            ]
+        )
+        for name, row in rows.items():
+            lines.append(
+                f"| {name} | {row.get('status', 'missing')} | "
+                f"{row.get('rows_all', 0)}/{row.get('rows_work', 0)}/{row.get('rows_free', 0)} | "
+                f"{_quick_number(row.get('t_all'), 3)}/{_quick_number(row.get('t_work'), 3)}/"
+                f"{_quick_number(row.get('t_free'), 3)} | "
+                f"{row.get('df_all', 'n/a')}/{row.get('df_work', 'n/a')}/{row.get('df_free', 'n/a')} |"
+            )
+    else:
+        lines.extend(
+            [
+                f"Consistency gate: `{payload.get('status', 'missing')}`; artifact `{payload.get('artifact', '')}`.",
+                "",
+                "| dataset | status | rows all/work/free | paired t-style all/work/free | df all/work/free | chi2 margin all/work/free | composite score margin | selected/opposite row tables |",
+                "|---|---|---:|---:|---:|---:|---:|---|",
+            ]
+        )
+        for name, row in rows.items():
+            lines.append(
+                "| "
+                + " | ".join(
+                    [
+                        name,
+                        str(row.get("status", "missing")),
+                        f"{row.get('rows_all', 0)}/{row.get('rows_work', 0)}/{row.get('rows_free', 0)}",
+                        f"{_quick_number(row.get('t_all'), 3)}/{_quick_number(row.get('t_work'), 3)}/{_quick_number(row.get('t_free'), 3)}",
+                        f"{row.get('df_all', 'n/a')}/{row.get('df_work', 'n/a')}/{row.get('df_free', 'n/a')}",
+                        f"{_quick_number(row.get('chi2_margin_all'), 3)}/{_quick_number(row.get('chi2_margin_work'), 3)}/{_quick_number(row.get('chi2_margin_free'), 3)}",
+                        _quick_number(row.get("composite_margin"), 4),
+                        f"`{row.get('selected_row_table', '')}` / `{row.get('opposite_row_table', '')}`",
+                    ]
+                )
+                + " |"
+            )
+    lines.append("")
+    return lines
+
+
 def _normalize_publication_endpoint_block(endpoint: Mapping[str, object], *, selection_source: str) -> dict[str, object]:
     """Normalize endpoint-chooser and endpoint-calibration records to one shape."""
 
     shelxl = endpoint.get("shelxl") if isinstance(endpoint.get("shelxl"), Mapping) else {}
+    artifact_provenance = endpoint_artifact_provenance(endpoint)
+    provenance_ok = artifact_provenance.get("passed") is True
+    pathology = (
+        artifact_provenance.get("lst_pathology")
+        if isinstance(artifact_provenance.get("lst_pathology"), Mapping)
+        else {}
+    )
+    pathology_complete = str(pathology.get("pathology_status") or "") == "complete"
+    promotion_fields = endpoint_promotion_field_contract(endpoint)
+    canonical = (
+        artifact_provenance.get("canonical_artifacts")
+        if isinstance(artifact_provenance.get("canonical_artifacts"), Mapping)
+        else {}
+    )
+    canonical_res = canonical.get("res") if isinstance(canonical.get("res"), Mapping) else {}
+    canonical_hkl = canonical.get("hkl") if isinstance(canonical.get("hkl"), Mapping) else {}
+    canonical_lst = canonical.get("lst") if isinstance(canonical.get("lst"), Mapping) else {}
 
     def first_text(*keys: str) -> str:
         for key in keys:
@@ -6543,9 +9596,11 @@ def _normalize_publication_endpoint_block(endpoint: Mapping[str, object], *, sel
     out = dict(endpoint)
     out["selection_source"] = selection_source
     out["source_kind"] = str(endpoint.get("source_kind") or ("endpoint_calibration" if selection_source == "endpoint_calibration" else ""))
-    out["endpoint_res"] = first_text("endpoint_res", "res")
-    out["endpoint_hkl"] = first_text("endpoint_hkl", "hkl")
-    out["endpoint_lst"] = first_text("endpoint_lst", "lst") or str(shelxl.get("lst", "") or "")
+    out["endpoint_res"] = str(canonical_res.get("path") or first_text("endpoint_res", "res"))
+    out["endpoint_hkl"] = str(canonical_hkl.get("path") or first_text("endpoint_hkl", "hkl"))
+    out["endpoint_lst"] = str(
+        canonical_lst.get("path") or first_text("endpoint_lst", "lst") or shelxl.get("lst", "") or ""
+    )
     out["endpoint_ins"] = first_text("endpoint_ins", "ins")
     if not out["endpoint_ins"] and out["endpoint_res"]:
         out["endpoint_ins"] = str(Path(out["endpoint_res"]).with_suffix(".ins"))
@@ -6575,7 +9630,36 @@ def _normalize_publication_endpoint_block(endpoint: Mapping[str, object], *, sel
     out["shelxl_GooF"] = first_number("shelxl_GooF", "GooF")
     out["shelxl_Ngt"] = first_number("shelxl_Ngt", "N_gt")
     out["shelxl_Nall"] = first_number("shelxl_Nall", "N_all")
-    shelxl_details = _quick_shelxl_details(shelxl, Path(out["endpoint_lst"]) if out["endpoint_lst"] else None)
+    recorded_metrics = {
+        "R1_gt": out["shelxl_R1gt"],
+        "R1_all": out["shelxl_R1all"],
+        "wR2_all": out["shelxl_wR2all"],
+        "GooF": out["shelxl_GooF"],
+        "N_gt": out["shelxl_Ngt"],
+        "N_all": out["shelxl_Nall"],
+    }
+    metric_consistency = endpoint_lst_metric_consistency(recorded_metrics, artifact_provenance)
+    live_metrics = (
+        artifact_provenance.get("lst_metrics")
+        if isinstance(artifact_provenance.get("lst_metrics"), Mapping)
+        else {}
+    )
+    if str(live_metrics.get("metric_status") or "") == "complete":
+        out.update(
+            {
+                "shelxl_R1gt": live_metrics.get("R1_gt"),
+                "shelxl_R1all": live_metrics.get("R1_all"),
+                "shelxl_wR2all": live_metrics.get("wR2_all"),
+                "shelxl_GooF": live_metrics.get("GooF"),
+                "shelxl_Ngt": live_metrics.get("N_gt"),
+                "shelxl_Nall": live_metrics.get("N_all"),
+            }
+        )
+    shelxl_details = (
+        _quick_shelxl_details(shelxl, Path(out["endpoint_lst"]) if out["endpoint_lst"] else None)
+        if provenance_ok
+        else dict(shelxl)
+    )
     fallback_pairs = {
         "shelxl_R1gt": "R1_gt",
         "shelxl_R1all": "R1_all",
@@ -6597,28 +9681,101 @@ def _normalize_publication_endpoint_block(endpoint: Mapping[str, object], *, sel
         "shelxl_recommended_wght_a": "recommended_wght_a",
         "shelxl_recommended_wght_b": "recommended_wght_b",
     }
-    overwrite_shelxl_detail_keys = {
-        "shelxl_parameters",
-        "shelxl_restraints",
-        "shelxl_npd_count",
-        "shelxl_npd_atoms",
-        "shelxl_split_count",
-        "shelxl_has_npd",
-        "shelxl_has_split_warnings",
-        "shelxl_recommended_wght_a",
-        "shelxl_recommended_wght_b",
-    }
+    pathology_count_pairs = {"shelxl_npd_count", "shelxl_split_count"}
+    pathology_flag_pairs = {"shelxl_has_npd", "shelxl_has_split_warnings"}
     for out_key, detail_key in fallback_pairs.items():
         old_value = out.get(out_key)
-        if detail_key in shelxl_details and ((old_value is None or old_value == "") or out_key in overwrite_shelxl_detail_keys):
-            out[out_key] = shelxl_details[detail_key]
+        if detail_key not in shelxl_details:
+            continue
+        detail_value = shelxl_details[detail_key]
+        if out_key in pathology_count_pairs:
+            old_count = _quick_int(old_value)
+            detail_count = _quick_int(detail_value)
+            if old_count is None:
+                out[out_key] = detail_value
+            elif detail_count is not None:
+                out[out_key] = max(old_count, detail_count)
+        elif out_key == "shelxl_npd_atoms":
+            old_atoms = old_value if isinstance(old_value, (list, tuple, set)) else []
+            detail_atoms = detail_value if isinstance(detail_value, (list, tuple, set)) else []
+            out[out_key] = sorted(
+                {str(atom) for atom in [*old_atoms, *detail_atoms] if str(atom).strip()}
+            )
+        elif out_key in pathology_flag_pairs:
+            out[out_key] = bool(old_value) or bool(detail_value)
+        elif old_value is None or old_value == "":
+            out[out_key] = detail_value
     out["shelxl_lst_exists"] = shelxl_details.get("lst_exists", shelxl_details.get("exists", False))
+    out["provenance_required"] = True
+    out["artifact_provenance_ok"] = provenance_ok
+    out["artifact_provenance"] = artifact_provenance
+    out["res_provenance_ok"] = provenance_ok
+    out["res_provenance"] = artifact_provenance
+    out["res_sha256"] = str(canonical_res.get("sha256") or "")
+    out["hkl_sha256"] = str(canonical_hkl.get("sha256") or "")
+    out["lst_sha256"] = str(canonical_lst.get("sha256") or "")
+    out["endpoint_res_sha256"] = out["res_sha256"]
+    out["endpoint_hkl_sha256"] = out["hkl_sha256"]
+    out["endpoint_lst_sha256"] = out["lst_sha256"]
+    out["metric_consistency_required"] = True
+    out["metric_consistency_ok"] = metric_consistency.get("passed") is True
+    out["metric_consistency"] = metric_consistency
+    out["promotion_fields_required"] = True
+    out["promotion_fields_ok"] = promotion_fields.get("passed") is True
+    out["promotion_field_contract"] = promotion_fields
+    out["pathology_required"] = True
+    out["pathology_status"] = str(pathology.get("pathology_status") or "unverified")
+    if pathology_complete:
+        out["shelxl_npd_count"] = max(
+            _quick_int(out.get("shelxl_npd_count")) or 0,
+            int(pathology.get("npd_count", 0) or 0),
+        )
+        old_atoms = out.get("shelxl_npd_atoms")
+        old_atoms = old_atoms if isinstance(old_atoms, (list, tuple, set)) else []
+        out["shelxl_npd_atoms"] = sorted(
+            {str(atom) for atom in [*old_atoms, *(pathology.get("npd_atoms") or [])] if str(atom).strip()}
+        )
+        out["shelxl_split_count"] = max(
+            _quick_int(out.get("shelxl_split_count")) or 0,
+            int(pathology.get("split_count", 0) or 0),
+        )
+        out["shelxl_has_npd"] = bool(out.get("shelxl_has_npd")) or bool(pathology.get("has_npd"))
+        out["shelxl_has_split_warnings"] = bool(out.get("shelxl_has_split_warnings")) or bool(
+            pathology.get("has_split_warnings")
+        )
+    else:
+        # Preserve every recorded warning in diagnostic output.  An
+        # unverified/truncated LST cannot prove cleanliness, but it must not
+        # erase pathology already recorded by the producer either.
+        out.setdefault("shelxl_npd_count", None)
+        out.setdefault("shelxl_npd_atoms", [])
+        out.setdefault("shelxl_split_count", None)
+        out.setdefault("shelxl_has_npd", None)
+        out.setdefault("shelxl_has_split_warnings", None)
+    if not provenance_ok:
+        out["provenance_error"] = (
+            "publication endpoint RES/HKL/LST no longer match the exact paths and hashes selected by GROND; "
+            "use GROND push-endpoint for an edited model"
+        )
+    elif not pathology_complete:
+        out["provenance_error"] = (
+            "publication endpoint LST does not contain a complete final SHELXL NPD/split summary"
+        )
+    elif metric_consistency.get("passed") is not True:
+        out["provenance_error"] = str(metric_consistency.get("reason") or "stored/live endpoint metrics disagree")
+    elif promotion_fields.get("passed") is not True:
+        out["provenance_error"] = str(promotion_fields.get("reason") or "producer promotion fields are incomplete")
     return out
 
 
 def _endpoint_calibration_publication_endpoint(result: Mapping[str, object]) -> Mapping[str, object]:
     """Return the endpoint-calibration publication replay, if present."""
 
+    if result.get("combined"):
+        # Historical multi summaries may contain an unsafe single-table replay.
+        # Multi-dataset scale contracts are independent and can only be
+        # calibrated through a future per-dataset replay-and-recombine path.
+        return {}
     endpoint_calibration = result.get("endpoint_calibration") if isinstance(result.get("endpoint_calibration"), Mapping) else {}
     selection = endpoint_calibration.get("publication_selection", {}) if isinstance(endpoint_calibration, Mapping) else {}
     endpoint = selection.get("publication_endpoint") if isinstance(selection, Mapping) else {}
@@ -6700,13 +9857,16 @@ def _quick_transform_summary(transform_decision: Mapping[str, object]) -> dict[s
     }
 
 
-def _quick_normal_equivalent_confidence(z_value: object) -> float | None:
-    """Return the one-sided normal-equivalent confidence for an oriented Z value."""
+def _quick_flat_hand_t_style_text(
+    t_value: object,
+    n_value: object,
+    df_value: object,
+) -> str:
+    """Format a flat console-payload paired t-style record."""
 
-    z = _quick_fraction(z_value)
-    if z is None:
-        return None
-    return 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
+    n = _quick_int(n_value)
+    df = _quick_int(df_value)
+    return f"t {_quick_number(t_value, 3)} (n {n if n is not None else 'n/a'}, df {df if df is not None else 'n/a'})"
 
 
 def _quick_delta_percent(before: object, after: object) -> str:
@@ -6759,19 +9919,41 @@ def _quick_source_shelx_control_text(controls: Mapping[str, object]) -> str:
     return f"{hklf}; {exti}; {wght}; {acta}"
 
 
-def _quick_row_weight_definition(nuisance: Mapping[str, object]) -> str:
+def _quick_row_weight_definition(
+    nuisance: Mapping[str, object],
+    dataset_contracts: list[Mapping[str, object]] | None = None,
+) -> str:
     """Return the exact row intensity weighting convention used by the final native report."""
 
-    a = nuisance.get("native_wght_a", nuisance.get("wght_a_grid"))
-    b = nuisance.get("native_wght_b", nuisance.get("wght_b_grid"))
-    return (
+    definition = (
         "Raw signed-row intensity `wR(I)all` is `sqrt(sum_r w_r (Iobs_r - Icalc_r)^2 / sum_r w_r Iobs_r^2)` "
         "over signed observation rows. For dynamical rows `Icalc_r = Idyn_r`; for matched Born rows "
         "`Icalc_r = Iborn_r` under the same row contract, thickness, geometry, scales, and sigma model. "
         "`w_r = 1 / [sigma_eff_r^2 + (a P_r)^2 + b P_r]`, with "
         "`P_r = (max(Iobs_r, 0) + 2 max(Icalc_r, 0)) / 3`. "
-        f"This run reports final native row weights `a={_quick_number(a, 6)}` and `b={_quick_number(b, 6)}`. "
-        "This is the signed-row intensity statistic to compare with native dynamical-refinement row "
+    )
+    if dataset_contracts:
+        weight_text = []
+        for contract in dataset_contracts:
+            block = contract.get("native_weight") if isinstance(contract.get("native_weight"), Mapping) else {}
+            nui = contract.get("nuisance") if isinstance(contract.get("nuisance"), Mapping) else {}
+            a = block.get("a", nui.get("native_wght_a"))
+            b = block.get("b", nui.get("native_wght_b"))
+            weight_text.append(
+                f"{contract.get('dataset', 'dataset')} a={_quick_number(a, 6)}, b={_quick_number(b, 6)}"
+            )
+        definition += (
+            "This multi-dataset result uses independent per-crystal native weights (`per_dataset_native`): "
+            + "; ".join(weight_text)
+            + ". The combined-summary fallback a/b pair is not an active joint weighting equation. "
+        )
+    else:
+        a = nuisance.get("native_wght_a", nuisance.get("wght_a_grid"))
+        b = nuisance.get("native_wght_b", nuisance.get("wght_b_grid"))
+        definition += f"This run reports final native row weights `a={_quick_number(a, 6)}` and `b={_quick_number(b, 6)}`. "
+    return (
+        definition
+        + "This is the signed-row intensity statistic to compare with native dynamical-refinement row "
         "targets; it is not SHELXL's merged-reflection `wR2(F^2)all`."
     )
 
@@ -6779,23 +9961,51 @@ def _quick_row_weight_definition(nuisance: Mapping[str, object]) -> str:
 def _quick_thickness_text(
     nuisance: Mapping[str, object],
     metadata: Mapping[str, object] | None = None,
+    dataset_contracts: list[Mapping[str, object]] | None = None,
 ) -> str:
     """Describe effective thickness as a mean plus its distribution contract."""
 
+    per_dataset: list[tuple[str, float, float, str]] = []
+    for contract in dataset_contracts or []:
+        block = contract.get("nuisance") if isinstance(contract.get("nuisance"), Mapping) else {}
+        thickness_a = safe_float(block.get("thickness_A"), float("nan"))
+        grad = safe_float(block.get("thickness_grad_frac"), float("nan"))
+        if not math.isfinite(thickness_a) or thickness_a <= 0.0:
+            continue
+        per_dataset.append(
+            (
+                str(contract.get("dataset") or f"dataset_{len(per_dataset) + 1}"),
+                thickness_a,
+                grad,
+                str(block.get("thickness_model") or "single"),
+            )
+        )
+    if per_dataset:
+        centers = [row[1] / 10.0 for row in per_dataset]
+        details = []
+        for name, thickness_a, grad, model in per_dataset:
+            grad_text = f", g={grad:.3f}" if math.isfinite(grad) else ""
+            details.append(f"{name} {thickness_a / 10.0:.2f} nm ({model}{grad_text})")
+        return (
+            "per-dataset centers "
+            + "; ".join(details)
+            + f"; center range {min(centers):.2f}-{max(centers):.2f} nm"
+        )
+
     meta = metadata if isinstance(metadata, Mapping) else {}
     thickness_a = safe_float(
-        meta.get("thickness_A_mean", nuisance.get("thickness_A")),
+        nuisance.get("thickness_A", meta.get("thickness_A_mean")),
         float("nan"),
     )
     if not math.isfinite(thickness_a):
         return "n/a"
     thickness_nm = thickness_a / 10.0
-    model = str(meta.get("thickness_model") or nuisance.get("thickness_model") or "single")
+    model = str(nuisance.get("thickness_model") or meta.get("thickness_model") or "single")
     if model == "uniform_gradient":
         grad = max(
             0.0,
             safe_float(
-                meta.get("thickness_grad_frac", nuisance.get("thickness_grad_frac")),
+                nuisance.get("thickness_grad_frac", meta.get("thickness_grad_frac")),
                 0.0,
             ),
         )
@@ -6808,7 +10018,7 @@ def _quick_thickness_text(
     if model in {"gaussian", "gaussian_gradient"}:
         sigma_frac = abs(
             safe_float(
-                meta.get("thickness_sigma_frac", nuisance.get("thickness_sigma_frac")),
+                nuisance.get("thickness_sigma_frac", meta.get("thickness_sigma_frac")),
                 0.0,
             )
         )
@@ -6819,6 +10029,57 @@ def _quick_thickness_text(
     return f"{thickness_nm:.2f} nm ({thickness_a:.1f} A); {model}"
 
 
+def _quick_dataset_nuisance_table_lines(contracts: list[Mapping[str, object]]) -> list[str]:
+    """Render exact per-crystal nuisance contracts for a combined run."""
+
+    if not contracts:
+        return []
+    lines = [
+        "### Per-Dataset Nuisance Contracts",
+        "",
+        "The crystals retain independent thickness, scale, detector, absorption, and rocking contracts. Their arithmetic mean is not a physical thickness distribution.",
+        "",
+        "| dataset | thickness center/support | gradient | frame offset | group width / detector bins | absorption | Sg jitter | row-resolution B | scales | native WGHT a/b |",
+        "|---|---|---:|---:|---|---|---|---:|---:|---|",
+    ]
+    for contract in contracts:
+        nuisance = contract.get("nuisance") if isinstance(contract.get("nuisance"), Mapping) else {}
+        thickness_a = safe_float(nuisance.get("thickness_A"), float("nan"))
+        grad = safe_float(nuisance.get("thickness_grad_frac"), float("nan"))
+        model = str(nuisance.get("thickness_model") or "single")
+        if math.isfinite(thickness_a) and model == "uniform_gradient" and math.isfinite(grad):
+            low = max(0.0, thickness_a * (1.0 - grad)) / 10.0
+            high = max(0.0, thickness_a * (1.0 + grad)) / 10.0
+            thickness_text = f"{thickness_a / 10.0:.2f} nm; support {low:.2f}-{high:.2f} nm"
+        elif math.isfinite(thickness_a):
+            thickness_text = f"{thickness_a / 10.0:.2f} nm; {model}"
+        else:
+            thickness_text = "n/a"
+        native_weight = contract.get("native_weight") if isinstance(contract.get("native_weight"), Mapping) else {}
+        a = nuisance.get("native_wght_a", native_weight.get("a"))
+        b = nuisance.get("native_wght_b", native_weight.get("b"))
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    str(contract.get("dataset") or "n/a"),
+                    thickness_text,
+                    _quick_number(grad, 3),
+                    _quick_number(nuisance.get("frame_offset"), 3),
+                    f"{_quick_number(nuisance.get('group_width_deg'), 3)} deg / {nuisance.get('detector_scale_bins', 'n/a')}",
+                    f"{nuisance.get('absorption_mode', 'n/a')}; frac {_quick_number(nuisance.get('absorption_frac'), 4)}",
+                    str(nuisance.get("sg_jitter_mode", "n/a")),
+                    _quick_number(nuisance.get("row_resolution_b"), 4),
+                    str(contract.get("scale_count", "n/a")),
+                    f"{_quick_number(a, 6)} / {_quick_number(b, 6)}",
+                ]
+            )
+            + " |"
+        )
+    lines.append("")
+    return lines
+
+
 def _format_terminal_finish_summary(payload: Mapping[str, object]) -> str:
     """Return the short human-facing completion report printed by auto/run/finish."""
 
@@ -6826,10 +10087,17 @@ def _format_terminal_finish_summary(payload: Mapping[str, object]) -> str:
     out_dir = str(payload.get("out_dir", ""))
     final_hand = str(payload.get("final_hand", "n/a"))
     transform = str(payload.get("selected_transform", "n/a"))
-    z_all = payload.get("final_hand_z_all")
-    z_free = payload.get("final_hand_z_free")
-    z_all_conf = _quick_normal_equivalent_confidence(z_all)
-    z_free_conf = _quick_normal_equivalent_confidence(z_free)
+    t_all = payload.get("final_hand_t_style_all", payload.get("final_hand_z_all"))
+    t_free = payload.get("final_hand_t_style_free", payload.get("final_hand_z_free"))
+    t_all_n = payload.get("final_hand_t_style_all_n")
+    t_free_n = payload.get("final_hand_t_style_free_n")
+    t_all_df = payload.get("final_hand_t_style_all_df")
+    t_free_df = payload.get("final_hand_t_style_free_df")
+    per_dataset_hand = (
+        payload.get("final_hand_per_dataset")
+        if isinstance(payload.get("final_hand_per_dataset"), Mapping)
+        else {}
+    )
     input_model = payload.get("input_model") if isinstance(payload.get("input_model"), Mapping) else {}
     input_shelxl = payload.get("input_shelxl") if isinstance(payload.get("input_shelxl"), Mapping) else {}
     final_row = payload.get("final_row_model") if isinstance(payload.get("final_row_model"), Mapping) else {}
@@ -6892,6 +10160,26 @@ def _format_terminal_finish_summary(payload: Mapping[str, object]) -> str:
         )
     if endpoint_warning:
         endpoint_lines.append(f"  Warning: {endpoint_warning}")
+    hand_scope = str(payload.get("final_hand_t_style_scope") or payload.get("final_hand_z_scope") or "")
+    if hand_scope == "per_dataset":
+        evidence = "; ".join(
+            f"{name}=t {_quick_number((row or {}).get('t_all'), 3)}/{_quick_number((row or {}).get('t_free'), 3)} "
+            f"(df {(row or {}).get('df_all', 'n/a')}/{(row or {}).get('df_free', 'n/a')})"
+            for name, row in per_dataset_hand.items()
+            if isinstance(row, Mapping)
+        )
+        hand_line = (
+            f"  Hand: {final_hand} (per-dataset paired t-style all/free: "
+            f"{evidence or 'diagnostic missing'}; no pooled statistic; "
+            f"consistency {payload.get('final_hand_consistency_status') or 'missing'})"
+        )
+    else:
+        hand_line = (
+            f"  Hand: {final_hand} (paired t-style all/free = "
+            f"{_quick_flat_hand_t_style_text(t_all, t_all_n, t_all_df)} / "
+            f"{_quick_flat_hand_t_style_text(t_free, t_free_n, t_free_df)}; "
+            "positive favors the selected hand; not a calibrated normal Z score)"
+        )
     lines = [
         "",
         headline,
@@ -6899,7 +10187,7 @@ def _format_terminal_finish_summary(payload: Mapping[str, object]) -> str:
         f"Progress: {stage_note}. Optional gates can make the final stage count smaller than the starting ETA denominator.",
         "",
         "Decision summary",
-        f"  Hand: {final_hand} (Z all/free = {_quick_number(z_all, 3)} / {_quick_number(z_free, 3)}; normal-equivalent confidence all/free = {_quick_percent(z_all_conf)} / {_quick_percent(z_free_conf)})",
+        hand_line,
         f"  HKL transform: {transform}",
         "",
         "Starting SHELXL reference",
@@ -6921,7 +10209,7 @@ def _format_terminal_finish_summary(payload: Mapping[str, object]) -> str:
         f"  Full JSON: {payload.get('full_json', '')}",
         f"  Publication model: {files.get('publication_res', '')}",
         f"  Publication HKL: {files.get('publication_hkl', '')}",
-        f"  Row table: {final_row.get('row_table', '')}",
+        f"  Row table(s): {final_row.get('row_table', '')}",
     ]
     return "\n".join(lines)
 
@@ -6945,9 +10233,32 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
     final_run = _quick_final_run(result)
     final_model = Path(str(result.get("model"))) if result.get("model") else None
     final_summary = _quick_load_run_summary(final_run)
+    dataset_nuisance_contracts = _quick_dataset_nuisance_contracts(final_summary)
+    recorded_row_tables = _recorded_native_row_tables(result)
+    missing_row_tables = {
+        name: path
+        for name, path in recorded_row_tables.items()
+        if not Path(path).expanduser().is_file()
+    }
+    if missing_row_tables:
+        missing_text = ", ".join(f"{name}={path}" for name, path in missing_row_tables.items())
+        raise RuntimeError(
+            "cannot write a coherent final report because a recorded native row table is missing; "
+            "refusing to mix saved joint metrics with partial diagnostics: "
+            + missing_text
+        )
+    frozen_row_tables = [
+        (name, Path(path).expanduser())
+        for name, path in recorded_row_tables.items()
+    ]
     if not publication_endpoint:
         rejected_endpoint = _chooser_publication_endpoint(result) or _endpoint_calibration_publication_endpoint(result)
-        rejected_gate = _endpoint_baseline_no_harm_gate(final_summary, rejected_endpoint)
+        rejected_gate = _endpoint_baseline_no_harm_gate(
+            final_summary,
+            rejected_endpoint,
+            baseline_override=_validated_fresh_conventional_baseline(result) if result.get("combined") else None,
+            require_baseline=bool(result.get("combined")),
+        )
         if rejected_endpoint and str(rejected_gate.get("status")) == "failed":
             diagnostic_endpoint = dict(rejected_endpoint)
             diagnostic_endpoint["baseline_no_harm_gate"] = rejected_gate
@@ -6957,7 +10268,14 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
     native_metrics = best_native.get("metrics") if isinstance(best_native.get("metrics"), Mapping) else {}
     nuisance = _quick_nuisance(final_summary)
     decision_tree_path = Path(str(result.get("decision_tree", ""))) if result.get("decision_tree") else None
-    if decision_tree_path is not None:
+    if result.get("combined"):
+        shared_path_text = str(result.get("shared_absolute_structure_decision") or "").strip()
+        shared_decision = try_read_json(Path(shared_path_text)) if shared_path_text else {}
+        decision_tree = {
+            "selected_hand": str(result.get("selected_hand") or shared_decision.get("selected_hand") or "n/a"),
+            "absolute_structure_decision": shared_decision,
+        }
+    elif decision_tree_path is not None:
         decision_tree = try_read_json(decision_tree_path)
     elif prep.datasets:
         decision_tree = try_read_json(out_dir / "decisions" / prep.datasets[0].name / "decision_tree.json")
@@ -6967,6 +10285,26 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
     if not transform_decision and prep.datasets:
         transform_decision = try_read_json(out_dir / "decisions" / prep.datasets[0].name / "transform_decision.json")
     transform_summary = _quick_transform_summary(transform_decision)
+    per_dataset_transforms: dict[str, dict[str, object]] = {}
+    if result.get("combined"):
+        for ds in prep.datasets:
+            transform_payload = try_read_json(out_dir / "decisions" / ds.name / "transform_decision.json")
+            per_dataset_transforms[ds.name] = _quick_transform_summary(transform_payload)
+        selected_transform_text = "; ".join(
+            f"{name}={row.get('selected_transform', 'n/a')}"
+            for name, row in per_dataset_transforms.items()
+        )
+        unique_transforms = {
+            str(row.get("selected_transform"))
+            for row in per_dataset_transforms.values()
+            if str(row.get("selected_transform") or "n/a") != "n/a"
+        }
+        transform_summary = {
+            **transform_summary,
+            "selected_transform": next(iter(unique_transforms)) if len(unique_transforms) == 1 else selected_transform_text,
+            "per_dataset": per_dataset_transforms,
+            "per_dataset_text": selected_transform_text,
+        }
     screen_run = Path(str(decision_tree.get("screen_run", ""))) if isinstance(decision_tree.get("screen_run"), str) else None
     screen_summary = try_read_json(screen_run / "summary.json") if screen_run else {}
     promotion = decision_tree.get("post_feedback_hand_promotion")
@@ -6979,7 +10317,22 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
     )
     hand_diagnostic = try_read_json(Path(str(diagnostic_path_text))) if diagnostic_path_text else {}
     hand_summary = _quick_final_hand_summary(decision_tree, hand_diagnostic)
-    z_summary = _quick_residual_z_summary(final_run / "native_dyn_calc.csv") if final_run else {}
+    multi_hand_diagnostic = _quick_multi_hand_diagnostic(result) if result.get("combined") else {}
+    if result.get("combined") and not multi_hand_diagnostic:
+        multi_hand_diagnostic = {
+            "status": "warning_missing_diagnostic",
+            "artifact": str(out_dir / "decisions" / "shared_post_feedback_hand_diagnostic.json"),
+            "datasets": {},
+            "consistency_gate": {
+                "status": "warning",
+                "passed": False,
+                "warnings": ["the shared post-feedback multi-dataset hand diagnostic is missing"],
+            },
+        }
+    multi_hand_rows = _quick_multi_hand_console_rows(multi_hand_diagnostic)
+    if multi_hand_diagnostic:
+        hand_summary["promotion_status"] = multi_hand_diagnostic.get("status", "missing")
+    z_summary = _quick_residual_z_summary([path for _name, path in frozen_row_tables])
     free_z = z_summary.get("free", {})
     all_z = z_summary.get("all", {})
     hand_blocks = hand_summary.get("diagnostic_blocks") if isinstance(hand_summary.get("diagnostic_blocks"), Mapping) else {}
@@ -6987,19 +10340,23 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
     hand_work = hand_blocks.get("work", {}) if isinstance(hand_blocks.get("work"), Mapping) else {}
     hand_free = hand_blocks.get("free", {}) if isinstance(hand_blocks.get("free"), Mapping) else {}
     file_block = _quick_endpoint_file_block(publication_endpoint, final_model)
-    bloch_diagnostics_path = _write_bloch_diagnostics_report(out_dir, final_run, final_summary, row_metrics, file_block)
+    bloch_diagnostics_path = _write_bloch_diagnostics_reports(
+        out_dir,
+        frozen_row_tables,
+        final_run,
+        final_summary,
+        row_metrics,
+        file_block,
+    )
     file_block["bloch_diagnostics"] = str(bloch_diagnostics_path)
-    input_shelxl = _quick_baseline_shelxl(prep, final_summary)
+    input_shelxl = _quick_baseline_shelxl(prep, final_summary, result)
     file_block["baseline_res"] = str(input_shelxl.get("res") or "")
     file_block["baseline_hkl"] = str(input_shelxl.get("hkl") or "")
     file_block["baseline_lst"] = str(input_shelxl.get("lst") or "")
     source_structure = Path(prep.structure).expanduser() if prep.structure else None
     source_controls = _quick_source_shelx_controls(source_structure)
     best_endpoint_shelxl = best_endpoint.get("shelxl") if isinstance(best_endpoint.get("shelxl"), Mapping) else {}
-    final_feedback_shelxl = _quick_shelxl_details(
-        best_endpoint_shelxl,
-        Path(file_block["final_feedback_lst"]) if file_block.get("final_feedback_lst") else None,
-    )
+    final_feedback_shelxl = _quick_selected_feedback_shelxl(result, final_model, best_endpoint_shelxl)
     publication_shelxl = _quick_shelxl_details(
         {
             "R1_gt": publication_endpoint.get("shelxl_R1gt"),
@@ -7047,6 +10404,38 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
         if publication_endpoint
         else "no corrected endpoint passed the fresh conventional-baseline no-harm gate"
     )
+    frozen_row_file_lines = [
+        f"- Frozen Bloch row table ({name}): `{path}`"
+        for name, path in frozen_row_tables
+    ] or ["- Frozen Bloch row tables: `none found`"]
+    frozen_row_console_text = "; ".join(f"{name}={path}" for name, path in frozen_row_tables)
+    final_row_summary_path = (
+        final_run / ("combined_summary.json" if result.get("combined") else "summary.json")
+        if final_run
+        else None
+    )
+    final_row_table_sources = "; ".join(f"{name}={path}" for name, path in frozen_row_tables)
+    if result.get("combined"):
+        hand_t_report_line = (
+            "| final hand paired t-style, all/work/free | "
+            "`per-dataset evidence with n and df below; no pooled statistic is computed` |"
+        )
+        hand_delta_report_line = (
+            "| final hand sqrt(delta chi2), all/work/free | "
+            "`per-dataset score margins below; no merged statistic is computed` |"
+        )
+    else:
+        hand_t_report_line = (
+            f"| final hand paired t-style, all/work/free | `{_quick_hand_t_style_text(hand_all)}` / "
+            f"`{_quick_hand_t_style_text(hand_work)}` / "
+            f"`{_quick_hand_t_style_text(hand_free)}`; positive favors final selected hand; "
+            "not a calibrated normal Z score |"
+        )
+        hand_delta_report_line = (
+            f"| final hand sqrt(delta chi2), all/work/free | `{_quick_number(hand_all.get('sqrt_positive_delta_chi2'), 3)}` / "
+            f"`{_quick_number(hand_work.get('sqrt_positive_delta_chi2'), 3)}` / "
+            f"`{_quick_number(hand_free.get('sqrt_positive_delta_chi2'), 3)}`; oriented as rejected-minus-final |"
+        )
 
     lines = [
         "# GROND Quick Stats",
@@ -7064,7 +10453,7 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
         f"- Endpoint decision: `{endpoint_status_text}`",
         f"- Rows in final row table: `{metadata.get('row_count', 'n/a')}`",
         f"- Final N/Q: `{metadata.get('n_basis', 'n/a')}/{metadata.get('n_points', 'n/a')}`",
-        f"- Effective thickness: `{_quick_thickness_text(nuisance, metadata)}`",
+        f"- Effective thickness: `{_quick_thickness_text(nuisance, metadata, dataset_nuisance_contracts)}`",
         f"- Sg window: `{metadata.get('sg_window', 'n/a')}`; absorption: `{metadata.get('absorption_mode', 'n/a')}`; Sg jitter: `{metadata.get('sg_jitter_mode', 'n/a')}`",
         "",
     ]
@@ -7107,7 +10496,7 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
         [
             "## Starting SHELXL Reference",
             "",
-            "GROND reports the fresh conventional `baseline_exti` rerun from the final native stage when it is healthy. A supplied model's sibling `.lst` or `.log` is used only as a fallback when that rerun is unavailable.",
+            "GROND first reports the isolated one-cycle replay of the supplied starting RES/HKL, with inherited EXTI/WGHT and hash-bound inputs and outputs. Historical runs fall back to a healthy final-stage `baseline_exti` control or, last, the supplied model's sibling `.lst`/`.log`; those fallbacks are labeled in the table and do not satisfy the required multi-dataset publication no-harm gate.",
             "",
             "| RES | HKL | stats file found | R1(F)gt | R1(F)all | wR2(F^2)all | GooF | parameters | restraints | pathology | WGHT |",
             "|---|---|---:|---:|---:|---:|---:|---:|---:|---|---|",
@@ -7134,7 +10523,7 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
 
     lines.extend(
         [
-            "## Input Contract, Hand, And Z Diagnostics",
+            "## Input Contract, Hand, And Paired T-Style Diagnostics",
             "",
             "XDS, DIALS, and other integrators can produce different signed-row contracts from the same frames. Row filtering, partiality/Lorentz handling, scan-varying geometry, sigmas, and scale conventions can move nuisance fits such as thickness, frame offset, absorption, and scale counts. GROND therefore treats the selected HKL transform, final absolute-structure hand, and raw row-level Bloch/Born statistics as the most portable cross-pipeline checks; nuisance values are fit-contract parameters, not direct physical measurements unless the row contracts agree.",
             "",
@@ -7142,15 +10531,21 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
             "|---|---|",
             f"| SFAC / endpoint wavelength check | status `{sfac_check.get('status', 'n/a') if isinstance(sfac_check, Mapping) else 'n/a'}`; endpoint wavelength `{_quick_number((sfac_check.get('cell') or {}).get('endpoint_wavelength_A') if isinstance(sfac_check.get('cell'), Mapping) else None, 6)}` A |",
             f"| selected HKL transform | `{transform_summary.get('selected_transform', 'n/a')}` |",
+            *(
+                [f"| per-dataset HKL transforms | `{transform_summary.get('per_dataset_text', '')}` |"]
+                if transform_summary.get("per_dataset_text")
+                else []
+            ),
             f"| transform scout status | `{transform_summary.get('selected_status', 'n/a')}` |",
             f"| metadata transform check | `{transform_summary.get('metadata_status', 'n/a')}`; log-I corr `{_quick_number(transform_summary.get('metadata_log_intensity_corr'), 4)}`; gap `{_quick_number(transform_summary.get('metadata_correlation_gap'), 4)}`; pairs `{transform_summary.get('metadata_paired_rows', 'n/a')}`; unique overlap `{transform_summary.get('metadata_unique_overlap', 'n/a')}` |",
             f"| initial hand scout | `{hand_summary.get('initial_hand', 'n/a')}`; delta original-minus-alternate `{_quick_number(hand_summary.get('initial_score_delta_original_minus_alternate'), 4)}` |",
             f"| final hand | `{hand_summary.get('final_hand', 'n/a')}`; post-feedback status `{hand_summary.get('promotion_status', 'n/a')}` |",
-            f"| final hand Z, all/work/free | `{_quick_number(hand_all.get('paired_z_positive_favors_final'), 3)}` / `{_quick_number(hand_work.get('paired_z_positive_favors_final'), 3)}` / `{_quick_number(hand_free.get('paired_z_positive_favors_final'), 3)}`; positive favors final selected hand |",
-            f"| final hand sqrt(delta chi2), all/work/free | `{_quick_number(hand_all.get('sqrt_positive_delta_chi2'), 3)}` / `{_quick_number(hand_work.get('sqrt_positive_delta_chi2'), 3)}` / `{_quick_number(hand_free.get('sqrt_positive_delta_chi2'), 3)}`; oriented as rejected-minus-final |",
+            hand_t_report_line,
+            hand_delta_report_line,
             f"| free-row I residual Z | n `{free_z.get('n', 'n/a')}`; RMSZ `{_quick_number(free_z.get('rms_z'), 3)}`; meanZ `{_quick_number(free_z.get('mean_z'), 3)}`; median absZ `{_quick_number(free_z.get('median_abs_z'), 3)}` |",
             f"| all-row I residual Z | n `{all_z.get('n', 'n/a')}`; RMSZ `{_quick_number(all_z.get('rms_z'), 3)}`; meanZ `{_quick_number(all_z.get('mean_z'), 3)}`; median absZ `{_quick_number(all_z.get('median_abs_z'), 3)}` |",
             "",
+            *_quick_multi_hand_evidence_lines(multi_hand_diagnostic),
             "## Input Model Row Statistics",
             "",
             "These are the first adaptive-screen row-space statistics for the supplied start model after GROND has selected the row contract used by the run. They are the practical input-model comparator, not final endpoint statistics.",
@@ -7225,7 +10620,7 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
                     "n/a",
                     row_count_text,
                     "final nuisance/scales",
-                    f"`{final_run / 'summary.json' if final_run else ''}`; Born comparator at final model",
+                    f"`{final_row_summary_path or ''}`; Born comparator at final model",
                 ]
             )
             + " |",
@@ -7241,7 +10636,7 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
                     "n/a",
                     row_count_text,
                     "final nuisance/scales",
-                    f"`{final_run / 'native_dyn_calc.csv' if final_run else ''}`; final raw-row statistic",
+                    f"`{final_row_table_sources}`; final raw-row statistic",
                 ]
             )
             + " |",
@@ -7402,20 +10797,30 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
             "",
             "## Row Intensity R-Factor Definitions",
             "",
-            _quick_row_weight_definition(nuisance),
+            _quick_row_weight_definition(nuisance, dataset_nuisance_contracts),
             "",
             "## Final Nuisance Contract",
             "",
             "| field | value |",
             "|---|---|",
-            f"| thickness | `{_quick_number(nuisance.get('thickness_A', nuisance.get('thickness_grid')), 1)} A`; model `{nuisance.get('thickness_model', nuisance.get('thickness_model_grid', 'n/a'))}`; gradient `{_quick_number(nuisance.get('thickness_grad_frac', nuisance.get('thickness_grad_grid')), 3)}` |",
-            f"| frame and rocking | frame offset `{_quick_number(nuisance.get('frame_offset', nuisance.get('frame_offset_grid')), 3)}`; Sg window `{metadata.get('sg_window', 'n/a')}`; matrix `{nuisance.get('matrix_convention', 'n/a')}` |",
-            f"| absorption and jitter | absorption `{nuisance.get('absorption_mode', nuisance.get('absorption_mode_grid', 'n/a'))}`; frac `{_quick_number(nuisance.get('absorption_frac', nuisance.get('absorption_frac_grid')), 4)}`; jitter `{nuisance.get('sg_jitter_mode', nuisance.get('sg_jitter_mode_grid', 'n/a'))}` |",
-            f"| native row weights | a `{_quick_number(nuisance.get('native_wght_a', nuisance.get('wght_a_grid')), 6)}`; b `{_quick_number(nuisance.get('native_wght_b', nuisance.get('wght_b_grid')), 6)}` |",
+            *(
+                [
+                    f"| thickness | `{_quick_thickness_text(nuisance, metadata, dataset_nuisance_contracts)}` |",
+                    "| native row-weight mode | `per_dataset_native`; no active joint a/b pair; exact per-dataset values follow |",
+                ]
+                if dataset_nuisance_contracts
+                else [
+                    f"| thickness | `{_quick_thickness_text(nuisance, metadata)}` |",
+                    f"| frame and rocking | frame offset `{_quick_number(nuisance.get('frame_offset', nuisance.get('frame_offset_grid')), 3)}`; Sg window `{metadata.get('sg_window', 'n/a')}`; matrix `{nuisance.get('matrix_convention', 'n/a')}` |",
+                    f"| absorption and jitter | absorption `{nuisance.get('absorption_mode', nuisance.get('absorption_mode_grid', 'n/a'))}`; frac `{_quick_number(nuisance.get('absorption_frac', nuisance.get('absorption_frac_grid')), 4)}`; jitter `{nuisance.get('sg_jitter_mode', nuisance.get('sg_jitter_mode_grid', 'n/a'))}` |",
+                    f"| native row weights | a `{_quick_number(nuisance.get('native_wght_a', nuisance.get('wght_a_grid')), 6)}`; b `{_quick_number(nuisance.get('native_wght_b', nuisance.get('wght_b_grid')), 6)}` |",
+                ]
+            ),
             f"| row dyn R(I)all / wR(I)all / free wR(I)all | `{_quick_percent(_quick_metric(native_metrics, 'all', 'dyn', 'R1_all'))}` / `{_quick_percent(_quick_metric(native_metrics, 'all', 'dyn', 'wR2_all'))}` / `{_quick_percent(_quick_metric(native_metrics, 'free', 'dyn', 'wR2_all'))}` |",
             f"| row Born R(I)all / wR(I)all / free wR(I)all | `{_quick_percent(_quick_metric(native_metrics, 'all', 'born', 'R1_all'))}` / `{_quick_percent(_quick_metric(native_metrics, 'all', 'born', 'wR2_all'))}` / `{_quick_percent(_quick_metric(native_metrics, 'free', 'born', 'wR2_all'))}` |",
             f"| q p05 / median / p95 | `{_quick_number(best_endpoint.get('q_p05'), 3)}` / `{_quick_number(best_endpoint.get('q_median'), 3)}` / `{_quick_number(best_endpoint.get('q_p95'), 3)}` |",
             "",
+            *_quick_dataset_nuisance_table_lines(dataset_nuisance_contracts),
         ]
     )
 
@@ -7494,6 +10899,8 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
             ),
             "## Endpoint Calibration",
             "",
+            f"Status: `{endpoint_calibration.get('status', 'n/a') if isinstance(endpoint_calibration, Mapping) else 'n/a'}`. {endpoint_calibration.get('reason', '') if isinstance(endpoint_calibration, Mapping) else ''}",
+            "",
             f"Selection policy: `{selection_policy}`; information criterion: `{information_criterion}`.",
             "",
             "| branch | spec | WGHT | scales | R1(F)all | wR2(F^2)all | GooF | row-free wR(I)all | sigma scale |",
@@ -7547,7 +10954,7 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
             f"- Publication corrected HKL used by that endpoint: `{file_block['publication_hkl']}`",
             f"- Publication SHELXL LST with the reported R/GooF values: `{file_block['publication_lst']}`",
             f"- Publication endpoint manifest: `{file_block['publication_manifest']}`",
-            f"- Frozen Bloch row table used to make endpoint statistics: `{final_run / 'native_dyn_calc.csv' if final_run else ''}`",
+            *frozen_row_file_lines,
             f"- Endpoint replay row table after compact scale selection: `{file_block['publication_row_table']}`",
             f"- Bloch matrix and row-contract diagnostics: `{bloch_diagnostics_path}`",
             f"- Detailed row/MR table: `{row_metrics_path}`",
@@ -7570,8 +10977,37 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
         "quick_stats": str(quick_path),
         "full_json": str(out_dir / "grond_summary.json"),
         "final_hand": hand_summary.get("final_hand", "n/a"),
-        "final_hand_z_all": _quick_fraction(hand_all.get("paired_z_positive_favors_final")),
-        "final_hand_z_free": _quick_fraction(hand_free.get("paired_z_positive_favors_final")),
+        "final_hand_t_style_all": (
+            None
+            if result.get("combined")
+            else _quick_fraction(hand_all.get("paired_t_style_positive_favors_final"))
+        ),
+        "final_hand_t_style_all_n": None if result.get("combined") else _quick_int(hand_all.get("n")),
+        "final_hand_t_style_all_df": None if result.get("combined") else _quick_int(hand_all.get("df")),
+        "final_hand_t_style_free": (
+            None
+            if result.get("combined")
+            else _quick_fraction(hand_free.get("paired_t_style_positive_favors_final"))
+        ),
+        "final_hand_t_style_free_n": None if result.get("combined") else _quick_int(hand_free.get("n")),
+        "final_hand_t_style_free_df": None if result.get("combined") else _quick_int(hand_free.get("df")),
+        "final_hand_t_style_scope": "per_dataset" if result.get("combined") else "single_dataset",
+        "final_hand_z_all": (
+            None
+            if result.get("combined")
+            else _quick_fraction(hand_all.get("paired_t_style_positive_favors_final"))
+        ),
+        "final_hand_z_free": (
+            None
+            if result.get("combined")
+            else _quick_fraction(hand_free.get("paired_t_style_positive_favors_final"))
+        ),
+        "final_hand_z_scope": "per_dataset" if result.get("combined") else "single_dataset",
+        "final_hand_z_compatibility_note": (
+            "legacy field names only; values are paired Student-t-style contrasts, not calibrated normal Z scores"
+        ),
+        "final_hand_per_dataset": multi_hand_rows,
+        "final_hand_consistency_status": multi_hand_diagnostic.get("status", "") if multi_hand_diagnostic else "",
         "selected_transform": transform_summary.get("selected_transform", "n/a"),
         "input_shelxl": {
             "R1gt": _quick_fraction(input_shelxl.get("R1_gt")),
@@ -7597,7 +11033,8 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
             "born_R1all": _quick_fraction(_quick_metric(native_metrics, "all", "born", "R1_all")),
             "born_wR2all": _quick_fraction(_quick_metric(native_metrics, "all", "born", "wR2_all")),
             "born_free_wR2all": _quick_fraction(_quick_metric(native_metrics, "free", "born", "wR2_all")),
-            "row_table": str(final_run / "native_dyn_calc.csv") if final_run else "",
+            "row_table": frozen_row_console_text,
+            "row_tables": {name: str(path) for name, path in frozen_row_tables},
         },
         "final_feedback_endpoint": {
             "R1gt": _quick_fraction(final_feedback_shelxl.get("R1_gt")),
@@ -7660,6 +11097,19 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
         )
     endpoint_warning = _quick_goof_warning(publication_shelxl.get("GooF"))
 
+    if result.get("combined"):
+        final_hand_t_line = (
+            f"| final hand paired t-style, all/free | `per-dataset only with n and df; no pooled statistic`; consistency "
+            f"`{multi_hand_diagnostic.get('status', 'missing')}` |"
+        )
+    else:
+        final_hand_t_line = (
+            f"| final hand paired t-style, all/free | "
+            f"`{_quick_flat_hand_t_style_text(console['final_hand_t_style_all'], console['final_hand_t_style_all_n'], console['final_hand_t_style_all_df'])}` / "
+            f"`{_quick_flat_hand_t_style_text(console['final_hand_t_style_free'], console['final_hand_t_style_free_n'], console['final_hand_t_style_free_df'])}`; "
+            "positive favors the selected hand; not a calibrated normal Z score |"
+        )
+
     final_lines = [
         "# GROND Final Summary",
         "",
@@ -7670,12 +11120,13 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
         "| item | value |",
         "|---|---|",
         f"| final hand | `{console['final_hand']}` |",
-        f"| final hand Z, all/free | `{_quick_number(console['final_hand_z_all'], 3)}` / `{_quick_number(console['final_hand_z_free'], 3)}`; positive favors the selected hand |",
+        final_hand_t_line,
         f"| selected HKL transform | `{console['selected_transform']}` |",
         f"| final N/Q | `{metadata.get('n_basis', 'n/a')}/{metadata.get('n_points', 'n/a')}` |",
-        f"| effective thickness model | `{_quick_thickness_text(nuisance, metadata)}`; Sg window `{metadata.get('sg_window', 'n/a')}` |",
+        f"| effective thickness model | `{_quick_thickness_text(nuisance, metadata, dataset_nuisance_contracts)}`; Sg window `{metadata.get('sg_window', 'n/a')}` |",
         f"| publication endpoint source | `{console['publication_endpoint'].get('source') or 'none'}` / `{console['publication_endpoint'].get('source_kind') or 'no_physical_endpoint'}` |",
         "",
+        *_quick_multi_hand_evidence_lines(multi_hand_diagnostic, compact=True),
         "## Statistics",
         "",
         "Rows labeled `raw signed rows (I)` report signed-row intensity residuals. Endpoint rows report merged corrected-HKL SHELXL refinement statistics, with R1 on F and wR2 on F^2. Read `QUICK_STATS.md` for the full definition, denominator, and delta matrix.",
@@ -7708,7 +11159,7 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
         f"- Open this publication endpoint model: `{file_block['publication_res']}`",
         f"- Use this corrected HKL with that model: `{file_block['publication_hkl']}`",
         f"- The endpoint statistics above come from: `{file_block['publication_lst']}`",
-        f"- Frozen row-level Bloch table: `{console['final_row_model']['row_table']}`",
+        *frozen_row_file_lines,
         f"- Bloch matrix and row-contract diagnostics: `{bloch_diagnostics_path}`",
         f"- Full quick report: `{quick_path}`",
         f"- Full machine-readable run summary: `{out_dir / 'grond_summary.json'}`",
@@ -7721,7 +11172,7 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
         "",
         "## Notes",
         "",
-        "Native maps made by `GROND finish` use the frozen row-level GROND table, the final model phase, and dynamically inferred electron amplitudes. Use `--map-mode shelx2map` only for a fast corrected-HKL endpoint-map check.",
+        "Native maps made by `GROND finish` use the frozen per-dataset GROND row table or tables, the final model phase, and dynamically inferred electron amplitudes. Use `--map-mode shelx2map` only for a fast corrected-HKL endpoint-map check.",
     ]
     final_summary_path.write_text("\n".join(final_lines) + "\n")
     return {"status": "ok", "path": str(quick_path), "final_summary": str(final_summary_path), "console": console}
@@ -7745,8 +11196,27 @@ def _publication_endpoint_from_result(result: Mapping[str, object]) -> Mapping[s
     def no_harm_checked(endpoint: Mapping[str, object]) -> Mapping[str, object]:
         if not endpoint:
             return {}
+        if result.get("combined") and _multi_hand_publication_blockers(result):
+            return {}
+        if endpoint.get("artifact_provenance_ok") is not True:
+            return {}
+        if str(endpoint.get("pathology_status") or "") != "complete":
+            return {}
+        if endpoint.get("metric_consistency_ok") is not True:
+            return {}
+        if endpoint.get("promotion_fields_ok") is not True:
+            return {}
+        source_kind = str(endpoint.get("source_kind") or "")
+        if result.get("combined") and "endpoint_calibration" in source_kind:
+            return {}
         final_summary = _quick_load_run_summary(_quick_final_run(result))
-        gate = _endpoint_baseline_no_harm_gate(final_summary, endpoint)
+        combined_baseline = _validated_fresh_conventional_baseline(result) if result.get("combined") else {}
+        gate = _endpoint_baseline_no_harm_gate(
+            final_summary,
+            endpoint,
+            baseline_override=combined_baseline,
+            require_baseline=bool(result.get("combined")),
+        )
         if not bool(gate.get("passed", False)):
             return {}
         checked = dict(endpoint)
@@ -7833,6 +11303,17 @@ def run_finish_endpoint_maps(result: Mapping[str, object], args: argparse.Namesp
 def _finish_native_row_tables(result: Mapping[str, object]) -> list[tuple[str, Path]]:
     """Return labeled row tables for native dynamical maps."""
 
+    if result.get("combined"):
+        runs_block = result.get("publication_runs") or result.get("combined_input_runs") or result.get("runs") or {}
+        if isinstance(runs_block, Mapping):
+            tables = [
+                (str(name), Path(str(run_dir)).expanduser() / "native_dyn_calc.csv")
+                for name, run_dir in sorted(runs_block.items(), key=lambda item: str(item[0]))
+                if str(run_dir)
+            ]
+            if tables:
+                return tables
+
     endpoint = _publication_endpoint_from_result(result)
     source_kind = str(endpoint.get("source_kind", "") or "")
     endpoint_row_table = str(endpoint.get("endpoint_row_table", "") or "").strip()
@@ -7845,7 +11326,7 @@ def _finish_native_row_tables(result: Mapping[str, object]) -> list[tuple[str, P
         if endpoint_run_dir:
             return [(endpoint_label, Path(endpoint_run_dir).expanduser() / "native_dyn_calc.csv")]
 
-    if source_kind == "combined_corrected_hkl" or result.get("combined"):
+    if source_kind == "combined_corrected_hkl":
         runs_block = result.get("combined_input_runs") or result.get("publication_runs") or result.get("runs") or {}
         if isinstance(runs_block, Mapping):
             tables = [
@@ -7865,28 +11346,111 @@ def _finish_native_row_tables(result: Mapping[str, object]) -> list[tuple[str, P
     return []
 
 
-def _finish_native_model(result: Mapping[str, object], args: argparse.Namespace) -> Path:
-    """Return the model whose phases should be used for native maps."""
+def _finish_native_model_contract(
+    result: Mapping[str, object],
+    args: argparse.Namespace,
+    row_tables: list[tuple[str, Path]],
+) -> tuple[Path | None, dict[str, object]]:
+    """Return the exact model that generated the frozen native row tables.
+
+    A corrected-HKL SHELXL endpoint may have coordinates or ADPs that differ
+    from the model used for the row-level Bloch predictions.  Mixing that RES
+    with the older ``dyn_scaled`` values would make native map coefficients
+    internally inconsistent.  Prefer the hash-bound ``inputs.res`` contract
+    recorded beside every row table and require all contributing crystals to
+    agree.  Historical summaries without this provenance fall back explicitly
+    to ``result.model``; they never silently borrow the publication endpoint.
+    """
 
     override = str(getattr(args, "model", "") or "").strip()
     if override:
-        return Path(override).expanduser()
-    endpoint = _publication_endpoint_from_result(result)
-    endpoint_res = str(endpoint.get("endpoint_res", "") or "").strip()
-    if endpoint_res:
-        return Path(endpoint_res).expanduser()
-    model = str(result.get("model", "") or "").strip()
-    return Path(model).expanduser() if model else Path()
+        model = Path(override).expanduser()
+        return model, {
+            "status": "explicit_override",
+            "model": str(model),
+            "definition": "user-supplied native-map model override",
+            "row_models": [],
+        }
+
+    records: list[dict[str, object]] = []
+    missing_contracts: list[str] = []
+    for label, row_table in row_tables:
+        summary_path = row_table.parent / "summary.json"
+        summary = try_read_json(summary_path)
+        inputs = summary.get("inputs") if isinstance(summary.get("inputs"), Mapping) else {}
+        model_text = str(inputs.get("res") or "").strip()
+        if not model_text:
+            missing_contracts.append(f"{label} ({summary_path})")
+            continue
+        model = Path(model_text).expanduser()
+        expected_hash = str(inputs.get("res_sha256") or "").strip()
+        if not model.is_file():
+            raise RuntimeError(
+                f"native-map row model for {label} is missing: {model}; recorded by {summary_path}"
+            )
+        actual_hash = sha256_file(model)
+        if expected_hash and actual_hash != expected_hash:
+            raise RuntimeError(
+                f"native-map row model hash changed for {label}: expected {expected_hash}, "
+                f"found {actual_hash} at {model}"
+            )
+        records.append(
+            {
+                "dataset": label,
+                "row_table": str(row_table),
+                "summary": str(summary_path),
+                "model": str(model.resolve()),
+                "expected_sha256": expected_hash,
+                "actual_sha256": actual_hash,
+            }
+        )
+
+    if records and missing_contracts:
+        raise RuntimeError(
+            "native-map model provenance is present for only some contributing row tables; "
+            "refusing a mixed verified/unverified map contract: missing "
+            + ", ".join(missing_contracts)
+        )
+    if records:
+        identities = {
+            str(record.get("expected_sha256") or record.get("actual_sha256") or record.get("model"))
+            for record in records
+        }
+        if len(identities) != 1:
+            detail = "; ".join(
+                f"{record['dataset']}={record['model']}@{record['actual_sha256']}" for record in records
+            )
+            raise RuntimeError(
+                "native-map row tables were generated from different structural models; "
+                "a single coherent dynamical map cannot be written: " + detail
+            )
+        model = Path(str(records[0]["model"]))
+        return model, {
+            "status": "hash_bound_row_model",
+            "model": str(model),
+            "model_sha256": records[0]["actual_sha256"],
+            "definition": "exact shared structural model used to generate every frozen native row table",
+            "row_models": records,
+        }
+
+    model_text = str(result.get("model", "") or "").strip()
+    model = Path(model_text).expanduser() if model_text else None
+    return model, {
+        "status": "unverified_legacy_result_model" if model_text else "missing_model",
+        "model": str(model) if model is not None else "",
+        "definition": "legacy fallback because row summaries did not record inputs.res provenance",
+        "row_models": [],
+    }
 
 
 def run_finish_native_dynamic_maps(run_dir: Path, result: Mapping[str, object], args: argparse.Namespace) -> dict[str, object]:
     """Generate native row-level dynamical Fourier maps and coefficient files."""
 
     row_tables = _finish_native_row_tables(result)
-    model = _finish_native_model(result, args)
     if not row_tables:
         return {"status": "missing_row_table", "row_table": ""}
-    if not model:
+    model, model_contract = _finish_native_model_contract(result, args, row_tables)
+    if model is None:
         return {"status": "missing_model", "model": ""}
     d_min = getattr(args, "native_map_d_min", 0.0)
     options = NativeDynamicMapOptions(
@@ -7895,13 +11459,15 @@ def run_finish_native_dynamic_maps(run_dir: Path, result: Mapping[str, object], 
         min_i_over_sigma=float(getattr(args, "native_map_min_i_over_sigma", 0.0)),
         max_grid_points=int(getattr(args, "native_map_max_grid_points", 8_000_000)),
     )
-    return write_native_dynamic_map_package(
+    package = write_native_dynamic_map_package(
         row_table=[path for _label, path in row_tables],
         row_table_labels=[label for label, _path in row_tables],
         model_path=model,
         out_dir=run_dir / "native_dynamic_maps",
         options=options,
     )
+    package["row_model_contract"] = model_contract
+    return package
 
 
 def run_finish_maps(run_dir: Path, result: Mapping[str, object], args: argparse.Namespace) -> dict[str, object]:
@@ -7936,7 +11502,30 @@ def cmd_finish(args: argparse.Namespace) -> int:
     if not prep_path.exists():
         raise SystemExit(f"Could not read completed GROND prep file: {prep_path}")
     prep = load_prep(prep_path)
+    if result.get("combined"):
+        result["endpoint_calibration"] = {
+            **_multi_endpoint_calibration_not_applicable(result),
+            "refreshed_by_finish": True,
+        }
+        run_config = try_read_json(run_dir / "run_config.json")
+        chooser_config = run_config.get("publication_endpoint_chooser")
+        chooser_config = chooser_config if isinstance(chooser_config, Mapping) else {}
+        endpoint_config = run_config.get("endpoint_calibration")
+        endpoint_config = endpoint_config if isinstance(endpoint_config, Mapping) else {}
+        chooser_args = argparse.Namespace(
+            out_dir=str(run_dir),
+            dry_run=False,
+            publication_endpoint_chooser=True,
+            publication_endpoint_min_hkl_safe_factor=safe_float(chooser_config.get("min_hkl_safe_factor"), 0.25),
+            publication_endpoint_max_modulation_p95=safe_float(chooser_config.get("max_modulation_p95"), 20.0),
+            endpoint_calibration_goof_min=safe_float(endpoint_config.get("goof_min"), 0.85),
+            endpoint_calibration_goof_max=safe_float(endpoint_config.get("goof_max"), 1.15),
+            publication_allow_npd=bool(chooser_config.get("allow_npd", False)),
+        )
+        result["publication_endpoint_chooser"] = run_publication_endpoint_chooser(prep, result, chooser_args)
     quick = write_quick_stats(prep, result, argparse.Namespace(out_dir=str(run_dir)))
+    result["quick_stats"] = quick
+    result_path.write_text(json.dumps(result, indent=2, allow_nan=True) + "\n")
     maps = run_finish_maps(run_dir, result, args)
     endpoint = _publication_endpoint_from_result(result)
     endpoint_res_text = str(endpoint.get("endpoint_res", "") or "").strip()
@@ -8005,6 +11594,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
         engine_script("native_structure_update.py"),
         engine_script("native_multi_structure_update.py"),
         engine_script("combine_native_nuisance_runs.py"),
+        engine_script("run_shelxl_baseline.py"),
     ]
     cmd = [python, "-m", "py_compile", *map(str, scripts)]
     env = os.environ.copy()
@@ -8925,7 +12515,11 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     except OSError:
         cli_text = ""
     required_features = {
-        "shelxl_feedback_res_guard": "def shelx_res_health" in feedback_text and "rejected.append(health)" in feedback_text,
+        "shelxl_feedback_res_guard": (
+            "def shelx_res_health" in native_regularize_text
+            and "from .native_row_regularize import shelx_res_health" in feedback_text
+            and "summary-selected endpoint model hash" in feedback_text
+        ),
         "usable_feedback_model_selection": "shelxl_feedback_current_model" in cli_text and "shelx_model_is_usable" in cli_text,
         "final_feedback_row_recompute": "final_row_recompute" in feedback_text and "--skip-endpoint-refinement" in feedback_text,
         "corrected_endpoint_hklf4_contract": "HKLF 4" in native_regularize_text and "_unsupported_endpoint_reason" in native_regularize_text,
@@ -9334,6 +12928,8 @@ def cmd_scale_replay(args: argparse.Namespace) -> int:
         str(args.publication_max_r1_cost),
         "--publication-free-wr2-tolerance",
         str(args.publication_free_wr2_tolerance),
+        "--publication-max-modulation-p95",
+        str(args.publication_max_modulation_p95),
         "--publication-prefer-wght-mode",
         args.publication_prefer_wght_mode,
         "--publication-selection-policy",
@@ -9818,8 +13414,17 @@ def _target_ablation_summary_row(variant: str, run_dir: Path, log_path: Path, re
         "elapsed_seconds": elapsed_seconds,
         "elapsed": format_seconds(elapsed_seconds),
         "hand": console.get("final_hand", ""),
+        "hand_t_style_all": console.get("final_hand_t_style_all", console.get("final_hand_z_all")),
+        "hand_t_style_all_n": console.get("final_hand_t_style_all_n"),
+        "hand_t_style_all_df": console.get("final_hand_t_style_all_df"),
+        "hand_t_style_free": console.get("final_hand_t_style_free", console.get("final_hand_z_free")),
+        "hand_t_style_free_n": console.get("final_hand_t_style_free_n"),
+        "hand_t_style_free_df": console.get("final_hand_t_style_free_df"),
         "hand_z_all": console.get("final_hand_z_all"),
         "hand_z_free": console.get("final_hand_z_free"),
+        "hand_z_compatibility_note": (
+            "legacy field names only; values are paired Student-t-style contrasts, not calibrated normal Z scores"
+        ),
         "hkl_transform": console.get("selected_transform", ""),
         "input_shelxl_R1gt": input_shelxl.get("R1gt"),
         "input_shelxl_R1all": input_shelxl.get("R1all"),
@@ -9873,7 +13478,7 @@ def _write_target_ablation_report(out_dir: Path, rows: list[dict[str, object]], 
         "",
         "## Results",
         "",
-        "| target | formula | status | elapsed | hand Z all/free | final dyn R1/wR2 | final Born R1/wR2 | publication R1/wR2/GooF | run |",
+        "| target | formula | status | elapsed | hand paired t-style all/free | final dyn R1/wR2 | final Born R1/wR2 | publication R1/wR2/GooF | run |",
         "|---|---|---|---:|---:|---:|---:|---:|---|",
     ]
     for row in rows:
@@ -9885,7 +13490,8 @@ def _write_target_ablation_report(out_dir: Path, rows: list[dict[str, object]], 
                     str(row.get("target_formula", "")),
                     str(row.get("status", "")),
                     str(row.get("elapsed", "")),
-                    f"{_quick_number(row.get('hand_z_all'), 3)} / {_quick_number(row.get('hand_z_free'), 3)}",
+                    f"{_quick_flat_hand_t_style_text(row.get('hand_t_style_all'), row.get('hand_t_style_all_n'), row.get('hand_t_style_all_df'))} / "
+                    f"{_quick_flat_hand_t_style_text(row.get('hand_t_style_free'), row.get('hand_t_style_free_n'), row.get('hand_t_style_free_df'))}",
                     f"{_quick_percent(row.get('final_dyn_R1all'))} / {_quick_percent(row.get('final_dyn_wR2all'))}",
                     f"{_quick_percent(row.get('final_born_R1all'))} / {_quick_percent(row.get('final_born_wR2all'))}",
                     f"{_quick_percent(row.get('publication_R1all'))} / {_quick_percent(row.get('publication_wR2all'))} / {_quick_number(row.get('publication_GooF'), 3)}",
@@ -9929,7 +13535,7 @@ def _write_target_ablation_report(out_dir: Path, rows: list[dict[str, object]], 
         [
             "## Reading This",
             "",
-            "The production interpretation is conservative. A target transform is interesting only if it improves row-level dynamical statistics, keeps or improves hand Z, and does not win solely by producing a prettier corrected-HKL endpoint. If a PEAK/RLP variant lowers endpoint R but worsens row-space Born/Bloch behavior or hand separation, keep it as a diagnostic and do not promote it.",
+            "The production interpretation is conservative. A target transform is interesting only if it improves row-level dynamical statistics, keeps or improves the paired t-style hand contrast, and does not win solely by producing a prettier corrected-HKL endpoint. This contrast is reported with n and df=n-1 and is not a calibrated normal Z score. If a PEAK/RLP variant lowers endpoint R but worsens row-space Born/Bloch behavior or hand separation, keep it as a diagnostic and do not promote it.",
             "",
         ]
     )
@@ -9989,12 +13595,13 @@ def cmd_target_ablation(args: argparse.Namespace) -> int:
     print(f"GROND target ablation finished in {format_seconds(total_elapsed)}.")
     print(f"Report: {out_dir / 'TARGET_ABLATION_SUMMARY.md'}")
     print("")
-    print("| target | status | hand Z all/free | final dyn R1/wR2 | publication R1/wR2/GooF |")
+    print("| target | status | hand paired t-style all/free | final dyn R1/wR2 | publication R1/wR2/GooF |")
     print("|---|---|---:|---:|---:|")
     for row in rows:
         print(
             f"| {row.get('target_mode', '')} | {row.get('status', '')} | "
-            f"{_quick_number(row.get('hand_z_all'), 3)} / {_quick_number(row.get('hand_z_free'), 3)} | "
+            f"{_quick_flat_hand_t_style_text(row.get('hand_t_style_all'), row.get('hand_t_style_all_n'), row.get('hand_t_style_all_df'))} / "
+            f"{_quick_flat_hand_t_style_text(row.get('hand_t_style_free'), row.get('hand_t_style_free_n'), row.get('hand_t_style_free_df'))} | "
             f"{_quick_percent(row.get('final_dyn_R1all'))} / {_quick_percent(row.get('final_dyn_wR2all'))} | "
             f"{_quick_percent(row.get('publication_R1all'))} / {_quick_percent(row.get('publication_wR2all'))} / {_quick_number(row.get('publication_GooF'), 3)} |"
         )
@@ -10243,8 +13850,9 @@ def add_common_run_args(ap: argparse.ArgumentParser, *, expose_lambda_controls: 
     ap.add_argument("--hand-max-wR2-all", type=float, default=0.45, help="Maximum alternate-hand all-row wR2 allowed before automatic hand switching. Poor row contracts still report the hand diagnostic but keep the input hand.")
     ap.add_argument("--hand-max-free-wR2-all", type=float, default=0.50, help="Maximum alternate-hand free-row wR2 allowed before automatic hand switching.")
     ap.add_argument("--hand-min-free-wR2-gain", type=float, default=0.0, help="Minimum free-row wR2 improvement required before automatic scout-stage hand switching.")
-    ap.add_argument("--hand-min-z-all", type=float, default=2.0, help="Minimum paired all-row hand diagnostic magnitude required before post-feedback hand promotion.")
-    ap.add_argument("--hand-min-z-free", type=float, default=0.5, help="Minimum paired free-row hand diagnostic magnitude required before post-feedback hand promotion. Set to 0 to disable the free-row sign gate.")
+    ap.add_argument("--hand-min-z-all", type=float, default=2.0, help="Legacy option name for the minimum paired all-row t-style hand statistic required before post-feedback hand promotion; this is not a calibrated normal Z score.")
+    ap.add_argument("--hand-min-z-free", type=float, default=0.5, help="Legacy option name for the minimum paired free-row t-style hand statistic required before post-feedback hand promotion. Set to 0 to disable the free-row sign gate; the minimum free-row count still applies.")
+    ap.add_argument("--hand-min-free-rows", type=int, default=10, help="Minimum paired held-out rows required before a post-feedback diagnostic may materially favor the opposite hand.")
     ap.add_argument("--stop-on-bad-preflight", action="store_true", default=False)
     ap.add_argument("--stop-on-bad-fit", action="store_true", default=False)
     ap.add_argument("--stop-if-wR2-above", type=float, default=0.75, help="Bad-data stop threshold for native all-row dynamic wR2 when --stop-on-bad-fit is enabled.")
@@ -10758,6 +14366,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_scale_replay.add_argument("--publication-goof-max", type=float, default=1.15)
     p_scale_replay.add_argument("--publication-max-r1-cost", type=float, default=0.010)
     p_scale_replay.add_argument("--publication-free-wr2-tolerance", type=float, default=0.040)
+    p_scale_replay.add_argument("--publication-max-modulation-p95", type=float, default=20.0)
     p_scale_replay.add_argument("--publication-prefer-wght-mode", default="freeze-zero")
     p_scale_replay.add_argument("--publication-allow-npd", action=argparse.BooleanOptionalAction, default=False, help="Explicit diagnostic override allowing NPD pathology in the selected endpoint. Default requires NPD == 0; split warnings are reported but do not block selection.")
     p_scale_replay.add_argument(
@@ -10809,6 +14418,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_cal_endpoint.add_argument("--publication-goof-max", type=float, default=1.15)
     p_cal_endpoint.add_argument("--publication-max-r1-cost", type=float, default=0.010)
     p_cal_endpoint.add_argument("--publication-free-wr2-tolerance", type=float, default=0.040)
+    p_cal_endpoint.add_argument("--publication-max-modulation-p95", type=float, default=20.0)
     p_cal_endpoint.add_argument("--publication-prefer-wght-mode", default="freeze-zero")
     p_cal_endpoint.add_argument("--publication-allow-npd", action=argparse.BooleanOptionalAction, default=False, help="Explicit diagnostic override allowing NPD pathology in the selected endpoint. Default requires NPD == 0; split warnings are reported but do not block selection.")
     p_cal_endpoint.add_argument(
@@ -10868,7 +14478,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_thick.set_defaults(mode="regularize", n_points=10)
     p_thick.add_argument("--n-basis-grid", default="24,48", help="Comma grid of basis sizes. The first value uses the broad grid; later values use a local confirmation grid by default.")
     p_thick.add_argument("--thickness-grid-nm", default="50,75,110,150,180,220,260,300", help="Broad central-thickness grid in nanometers.")
-    p_thick.add_argument("--gradient-grid", default="0.0,0.4,0.8,1.0,1.2", help="Uniform-gradient fraction grid.")
+    p_thick.add_argument("--gradient-grid", default="0.0,0.4,0.8,1.0", help="Physical uniform-gradient fraction grid (0 through 1).")
     p_thick.add_argument("--scale-modes", default="production,no-detector", help="Comma grid: production and/or no-detector.")
     p_thick.add_argument("--feature-modes", default="bare,final-diagnostic", help="Comma grid: bare and/or final-diagnostic.")
     p_thick.add_argument("--local-confirmation", action=argparse.BooleanOptionalAction, default=True, help="Use local thickness/gradient grids for basis values after the first broad scout.")
@@ -10879,7 +14489,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_thick.add_argument("--thickness-min-nm", type=float, default=10.0)
     p_thick.add_argument("--thickness-max-nm", type=float, default=500.0)
     p_thick.add_argument("--gradient-min", type=float, default=0.0)
-    p_thick.add_argument("--gradient-max", type=float, default=1.2)
+    p_thick.add_argument("--gradient-max", type=float, default=1.0)
     p_thick.add_argument("--warning-shift-nm", type=float, default=75.0, help="Warn when a selected thickness is this far from the promoted reference.")
     p_thick.add_argument("--thickness-scout-max-rows", type=int, default=0, help="Optional row cap for scout runs. 0 uses the selected production row set.")
     p_thick.add_argument("--thickness-scout-thickness-points", type=int, default=5, help="Thickness quadrature points inside each candidate thickness model.")

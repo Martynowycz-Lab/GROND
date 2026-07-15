@@ -96,8 +96,11 @@ def test_combiner_uses_endpoint_only_rows_for_endpoint_not_native_metrics(tmp_pa
         run.joinpath("summary.json").write_text("{}\n")
         run.joinpath("native_dyn_calc.csv").write_text(
             "h,k,l,target_I,sigma_eff,dyn_scaled,born_scaled,dyn_raw,born_raw,q_dyn_over_born,dataset_role,raw_row_weight,endpoint_weight\n"
-            f"1,0,0,100,2,100,90,50,45,1.111,{role},{1.0 if role == 'primary' else 0.0},{1.0 if role == 'primary' else 0.25}\n"
-        )
+                f"1,0,0,100,2,100,90,50,45,1.111,{role},{1.0 if role == 'primary' else 0.0},{1.0 if role == 'primary' else 0.25}\n"
+            )
+    fake_shelxl = tmp_path / "fake_shelxl"
+    fake_shelxl.write_text("#!/bin/sh\nexit 1\n")
+    fake_shelxl.chmod(0o755)
     out = tmp_path / "combined"
     subprocess.run(
         [
@@ -112,7 +115,7 @@ def test_combiner_uses_endpoint_only_rows_for_endpoint_not_native_metrics(tmp_pa
             "--out-dir",
             str(out),
             "--shelxl",
-            str(tmp_path / "missing_shelxl"),
+            str(fake_shelxl),
         ],
         check=True,
     )

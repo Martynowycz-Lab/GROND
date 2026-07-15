@@ -83,7 +83,7 @@ GROND auto \
 
 Fast mode intentionally skips the expensive final polish decisions. Use it to catch wrong paths, wrong transforms, bad integrations, or implausible thickness/hand quickly; use the plain `GROND auto` command for the final answer.
 
-After a completed run, open `FINAL_SUMMARY.md` first. It names the final hand, hand Z score, input and final row-level statistics, promoted endpoint R values, and the exact `.res`, `.hkl`, and `.lst` files to inspect. `QUICK_STATS.md` keeps the fuller audit table. To regenerate those files later without rerunning the physics stages, run:
+After a completed run, open `FINAL_SUMMARY.md` first. It names the final hand, the paired t-style row contrast with its sample count and `df=n-1`, input and final row-level statistics, promoted endpoint R values, and the exact `.res`, `.hkl`, and `.lst` files to inspect. The paired contrast is diagnostic support, not a calibrated normal Z score or confidence. `QUICK_STATS.md` keeps the fuller audit table. To regenerate those files later without rerunning the physics stages, run:
 
 ```bash
 GROND finish --run-dir grond_out

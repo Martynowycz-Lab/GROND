@@ -51,6 +51,7 @@ except ImportError:  # Direct script execution from the legacy engine directory.
 try:  # Package import.
     from .bloch_engine import (
         Config,
+        InfeasibleSgJitterProfileError,
         XDSBlochPort,
         XDSData,
         alternate_hand_model,
@@ -59,11 +60,13 @@ try:  # Package import.
         sha256,
         split_masks,
     )
+    from .endpoint_modulation import modulation_manifest_fields
     from .post_bloch_sigma import fit_uniform_z_rms_sigma_scale, scale_row_sigmas
     from .shelx_diagnostics import parse_shelx_lst_pathologies, shelx_pathology_safe_for_feedback
 except ImportError:  # Direct script execution from this directory.
     from bloch_engine import (
         Config,
+        InfeasibleSgJitterProfileError,
         XDSBlochPort,
         XDSData,
         alternate_hand_model,
@@ -72,6 +75,7 @@ except ImportError:  # Direct script execution from this directory.
         sha256,
         split_masks,
     )
+    from endpoint_modulation import modulation_manifest_fields
     from post_bloch_sigma import fit_uniform_z_rms_sigma_scale, scale_row_sigmas
     from shelx_diagnostics import parse_shelx_lst_pathologies, shelx_pathology_safe_for_feedback
 
@@ -91,6 +95,54 @@ TARGET_MODE_LABELS = {
 }
 DEFAULT_ELECTRON_WAVELENGTH_A = 0.025079
 PREDICTION_CACHE_SCHEMA = 4
+
+
+def configure_shelxl_executable(executable: str) -> str:
+    """Bind the explicit endpoint executable for this worker process."""
+
+    global SHELXL
+    SHELXL = str(executable or "").strip()
+    return SHELXL
+
+
+def shelxl_executable_is_available(executable: str) -> bool:
+    """Return whether an endpoint executable exists and is launchable."""
+
+    value = str(executable or "").strip()
+    if not value:
+        return False
+    if "/" in value:
+        path = Path(value).expanduser()
+        return path.is_file() and os.access(path, os.X_OK)
+    return shutil.which(value) is not None
+
+
+def require_endpoint_shelxl(executable: str, *, skip_endpoint_refinement: bool) -> None:
+    """Fail before native computation when an endpoint tool cannot launch."""
+
+    if skip_endpoint_refinement or shelxl_executable_is_available(executable):
+        return
+    raise SystemExit(
+        f"SHELXL executable is missing or not executable: {executable!r}. "
+        "Supply --shelxl with a launchable executable, or add "
+        "--skip-endpoint-refinement for a deliberate row-only run."
+    )
+
+
+def fail_if_shelxl_became_unavailable(results: list[dict], *, context: str) -> None:
+    """Reject a completed endpoint stage containing a missing-tool record."""
+
+    missing = [
+        record
+        for record in results
+        if str((record.get("shelxl") or {}).get("status", "")).strip().lower()
+        == "missing_shelxl"
+    ]
+    if missing:
+        raise RuntimeError(
+            f"SHELXL became unavailable during {context}; refusing to mark the "
+            "endpoint-enabled native stage complete."
+        )
 
 
 def _prediction_engine_source_fingerprint() -> str:
@@ -1493,7 +1545,12 @@ def parse_recommended_wght(lst_path: Path) -> tuple[float, float] | None:
     return terms[0], terms[1] if len(terms) >= 2 else 0.0
 
 
-def shelx_res_health(res_path: Path, lst_path: Path | None = None) -> dict:
+def shelx_res_health(
+    res_path: Path,
+    lst_path: Path | None = None,
+    *,
+    require_lst: bool = True,
+) -> dict:
     """Return whether a SHELXL RES file is usable as the next model.
 
     SHELXL can fail in ways that still leave a path on disk.  In particular,
@@ -1516,15 +1573,234 @@ def shelx_res_health(res_path: Path, lst_path: Path | None = None) -> dict:
     has_cell = any(line.strip().upper().startswith("CELL ") for line in lines)
     if not has_cell:
         return {"ok": False, "reason": "missing_cell", "path": str(res_path), "size": int(size)}
-    pathology = parse_shelx_lst_pathologies(lst_path or res_path.with_suffix(".lst"))
+    try:
+        model = parse_model(res_path)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "reason": "invalid_structure_model",
+            "path": str(res_path),
+            "size": int(size),
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+    atom_count = len(model.get("atoms") or [])
+    sfac_count = len(model.get("sfac") or [])
+    if atom_count <= 0 or sfac_count <= 0:
+        return {
+            "ok": False,
+            "reason": "missing_model_records",
+            "path": str(res_path),
+            "size": int(size),
+            "atom_count": int(atom_count),
+            "sfac_count": int(sfac_count),
+        }
+    if not require_lst and lst_path is None:
+        # Structural-only validation is reserved for a caller that is
+        # deliberately reusing an already selected input model without running
+        # SHELXL.  Do not let an unrelated sibling LST alter that explicit
+        # decision; generated endpoint models always require a conclusive LST.
+        pathology = {
+            "lst": "",
+            "pathology_status": "not_applicable_structural_only",
+            "npd_count": None,
+            "split_count": None,
+            "npd_atoms": [],
+            "has_npd": None,
+            "has_split_warnings": None,
+        }
+        pathology_safe = True
+    else:
+        resolved_lst = lst_path or res_path.with_suffix(".lst")
+        pathology = parse_shelx_lst_pathologies(resolved_lst)
+        pathology_safe = shelx_pathology_safe_for_feedback(pathology)
     return {
         "ok": True,
         "reason": "ok",
         "path": str(res_path),
         "size": int(size),
+        "sha256": sha256(res_path),
+        "atom_count": int(atom_count),
+        "sfac_count": int(sfac_count),
         **pathology,
-        "safe_for_feedback": shelx_pathology_safe_for_feedback(pathology),
+        "lst_required": bool(require_lst),
+        "safe_for_feedback": pathology_safe,
     }
+
+
+def shelxl_statistics_complete(stats: dict) -> bool:
+    """Return whether SHELXL printed a complete, finite endpoint record."""
+
+    try:
+        r1_all = float(stats.get("R1_all"))
+        wr2_all = float(stats.get("wR2_all"))
+        n_all = int(stats.get("N_all", 0) or 0)
+    except (TypeError, ValueError):
+        return False
+    return bool(
+        stats.get("returncode") == 0
+        and math.isfinite(r1_all)
+        and math.isfinite(wr2_all)
+        and n_all > 0
+    )
+
+
+def classify_shelxl_iteration_rejection(stats: dict) -> tuple[str, str] | None:
+    """Classify a structurally valid, zero-return-code SHELXL iteration.
+
+    ``safe_for_feedback=False`` deliberately covers both an explicit NPD and
+    missing/truncated final pathology diagnostics.  Keep those cases distinct:
+    an NPD is an ADP pathology, while absent statistics or an incomplete final
+    diagnostic footer are separate output-integrity failures.
+    """
+
+    health = stats.get("res_health") if isinstance(stats.get("res_health"), dict) else {}
+    if bool(health.get("has_npd")) or int(health.get("npd_count", 0) or 0) > 0:
+        return "adp_pathology", "adp_pathology"
+    if not shelxl_statistics_complete(stats):
+        parsed_status = str(stats.get("status", "missing"))
+        return (
+            "invalid_shelxl_statistics",
+            "SHELXL output did not contain a complete finite R1/wR2/N statistics record "
+            f"(parse status={parsed_status})",
+        )
+    if health.get("safe_for_feedback") is False:
+        pathology_status = str(health.get("pathology_status", "missing"))
+        return (
+            "incomplete_shelxl_diagnostics",
+            "SHELXL output did not contain a conclusive final NPD/split pathology summary "
+            f"(pathology status={pathology_status})",
+        )
+    return None
+
+
+def shelxl_iteration_safe(stats: dict) -> bool:
+    """Return whether one completed SHELXL iteration is safe to retain."""
+
+    health = stats.get("res_health")
+    return bool(
+        shelxl_statistics_complete(stats)
+        and isinstance(health, dict)
+        and health.get("ok") is True
+        and int(health.get("atom_count", 0) or 0) > 0
+        and int(health.get("sfac_count", 0) or 0) > 0
+        and health.get("safe_for_feedback") is not False
+    )
+
+
+def snapshot_safe_shelxl_iteration(work_dir: Path, stem: str, iteration: int, stats: dict) -> dict:
+    """Snapshot matching safe SHELXL artifacts before a later LS1 pass can overwrite them."""
+
+    if not shelxl_iteration_safe(stats):
+        raise ValueError("cannot snapshot an unsafe SHELXL iteration")
+    source_res = work_dir / f"{stem}.res"
+    source_lst = work_dir / f"{stem}.lst"
+    source_fcf = work_dir / f"{stem}.fcf"
+    snapshot_res = work_dir / f"shelxl_safe_iter_{int(iteration):02d}.res"
+    snapshot_lst = work_dir / f"shelxl_safe_iter_{int(iteration):02d}.lst"
+    snapshot_fcf = work_dir / f"shelxl_safe_iter_{int(iteration):02d}.fcf"
+    shutil.copy2(source_res, snapshot_res)
+    if source_lst.exists():
+        shutil.copy2(source_lst, snapshot_lst)
+    else:
+        snapshot_lst.unlink(missing_ok=True)
+    if source_fcf.exists():
+        shutil.copy2(source_fcf, snapshot_fcf)
+    else:
+        snapshot_fcf.unlink(missing_ok=True)
+    return {
+        "iteration": int(iteration),
+        "res": str(snapshot_res),
+        "lst": str(snapshot_lst) if snapshot_lst.exists() else "",
+        "fcf": str(snapshot_fcf) if snapshot_fcf.exists() else "",
+        "stats": dict(stats),
+    }
+
+
+def select_last_safe_shelxl_iteration(
+    work_dir: Path,
+    stem: str,
+    history: list[dict],
+    last_safe: dict | None,
+) -> dict:
+    """Select the final safe iteration, restoring it after a later rejected pass."""
+
+    attempted = dict(history[-1]) if history else {"returncode": None, "status": "not_run"}
+    attempted_safe = shelxl_iteration_safe(attempted)
+    restored = bool(last_safe and not attempted_safe)
+    rejected_snapshot_res = ""
+    rejected_snapshot_lst = ""
+    rejected_snapshot_fcf = ""
+    if history and restored:
+        try:
+            rejected_iteration = int(attempted.get("iteration", len(history)))
+        except (TypeError, ValueError):
+            rejected_iteration = len(history)
+        canonical_res = work_dir / f"{stem}.res"
+        canonical_lst = work_dir / f"{stem}.lst"
+        canonical_fcf = work_dir / f"{stem}.fcf"
+        rejected_res = work_dir / f"shelxl_rejected_iter_{rejected_iteration:02d}.res"
+        rejected_lst = work_dir / f"shelxl_rejected_iter_{rejected_iteration:02d}.lst"
+        rejected_fcf = work_dir / f"shelxl_rejected_iter_{rejected_iteration:02d}.fcf"
+        if canonical_res.exists():
+            shutil.copy2(canonical_res, rejected_res)
+            rejected_snapshot_res = str(rejected_res)
+        else:
+            rejected_res.unlink(missing_ok=True)
+        if canonical_lst.exists():
+            shutil.copy2(canonical_lst, rejected_lst)
+            rejected_snapshot_lst = str(rejected_lst)
+        else:
+            rejected_lst.unlink(missing_ok=True)
+        attempted["lst"] = rejected_snapshot_lst
+        if canonical_fcf.exists():
+            shutil.copy2(canonical_fcf, rejected_fcf)
+            rejected_snapshot_fcf = str(rejected_fcf)
+        else:
+            rejected_fcf.unlink(missing_ok=True)
+        attempted["rejected_snapshot_res"] = rejected_snapshot_res
+        attempted["rejected_snapshot_lst"] = rejected_snapshot_lst
+        attempted["rejected_snapshot_fcf"] = rejected_snapshot_fcf
+        rejected_health = attempted.get("res_health")
+        if isinstance(rejected_health, dict):
+            rejected_health = dict(rejected_health)
+            rejected_health["path"] = rejected_snapshot_res
+            rejected_health["lst"] = rejected_snapshot_lst
+            attempted["res_health"] = rejected_health
+        history[-1].update(attempted)
+    final = attempted
+    if restored:
+        canonical_res = work_dir / f"{stem}.res"
+        canonical_lst = work_dir / f"{stem}.lst"
+        canonical_fcf = work_dir / f"{stem}.fcf"
+        shutil.copy2(Path(str(last_safe["res"])), canonical_res)
+        snapshot_lst = str(last_safe.get("lst", ""))
+        if snapshot_lst and Path(snapshot_lst).exists():
+            shutil.copy2(Path(snapshot_lst), canonical_lst)
+        else:
+            canonical_lst.unlink(missing_ok=True)
+        snapshot_fcf = str(last_safe.get("fcf", ""))
+        if snapshot_fcf and Path(snapshot_fcf).exists():
+            shutil.copy2(Path(snapshot_fcf), canonical_fcf)
+        else:
+            canonical_fcf.unlink(missing_ok=True)
+        final = dict(last_safe["stats"])
+        final["status"] = "ok"
+        final.pop("invalid_res_reason", None)
+        final["res_health"] = shelx_res_health(canonical_res, canonical_lst)
+
+    selected_iteration = int(last_safe["iteration"]) if last_safe and (attempted_safe or restored) else None
+    final["selected_iteration"] = selected_iteration
+    final["restored_last_safe_iteration"] = restored
+    if not attempted_safe:
+        final["rejected_iteration"] = attempted.get("iteration")
+        final["rejected_status"] = str(attempted.get("status", ""))
+        final["rejected_invalid_res_reason"] = str(attempted.get("invalid_res_reason", ""))
+        rejected_health = attempted.get("res_health")
+        final["rejected_res_health"] = dict(rejected_health) if isinstance(rejected_health, dict) else {}
+        final["rejected_snapshot_res"] = rejected_snapshot_res
+        final["rejected_snapshot_lst"] = rejected_snapshot_lst
+        final["rejected_snapshot_fcf"] = rejected_snapshot_fcf
+    return final
 
 
 def write_active_wght(path: Path, a: float, b: float) -> dict:
@@ -1583,11 +1859,12 @@ def _active_wght_from_stats(stats: dict) -> tuple[float, float] | None:
 
 def run_shelxl(work_dir: Path, stem: str, iterations: int = 1, wght_mode: str = "freeze-zero", endpoint_ls_cycles: int = 1):
     exe = str(SHELXL)
-    if ("/" in exe and not Path(exe).exists()) or ("/" not in exe and shutil.which(exe) is None):
+    if not shelxl_executable_is_available(exe):
         msg = f"SHELXL executable not found: {SHELXL}\n"
         (work_dir / "shelxl_stdout.log").write_text(msg)
         return {"returncode": None, "status": "missing_shelxl", "executable": str(SHELXL)}
     history = []
+    last_safe = None
     last_proc = None
     n_iter = max(1, int(iterations))
     mode = str(wght_mode or "freeze-zero")
@@ -1601,8 +1878,10 @@ def run_shelxl(work_dir: Path, stem: str, iterations: int = 1, wght_mode: str = 
             write_active_wght(work_dir / f"{stem}.ins", 0.0, 0.0)
         res = work_dir / f"{stem}.res"
         lst = work_dir / f"{stem}.lst"
+        fcf = work_dir / f"{stem}.fcf"
         res.unlink(missing_ok=True)
         lst.unlink(missing_ok=True)
+        fcf.unlink(missing_ok=True)
         proc = subprocess.run([exe, stem], cwd=str(work_dir), text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         last_proc = proc
         (work_dir / f"shelxl_iter_{i + 1}.log").write_text(proc.stdout)
@@ -1624,10 +1903,15 @@ def run_shelxl(work_dir: Path, stem: str, iterations: int = 1, wght_mode: str = 
             stats["status"] = "invalid_res_output"
             stats["invalid_res_reason"] = health["reason"]
             break
-        if health.get("safe_for_feedback") is False:
-            stats["status"] = "adp_pathology"
-            stats["invalid_res_reason"] = "adp_pathology"
+        rejection = classify_shelxl_iteration_rejection(stats)
+        if rejection is not None:
+            stats["status"], stats["invalid_res_reason"] = rejection
             break
+        last_safe = snapshot_safe_shelxl_iteration(work_dir, stem, i + 1, stats)
+        stats["safe_snapshot_res"] = last_safe["res"]
+        stats["safe_snapshot_lst"] = last_safe["lst"]
+        stats["safe_snapshot_fcf"] = last_safe["fcf"]
+        last_safe["stats"] = dict(stats)
         if i + 1 < n_iter and res.exists():
             active = (0.0, 0.0) if freeze_zero else _active_wght_from_stats(stats)
             write_endpoint_ins(res, ins, hkl_name=f"{stem}.hkl", keep_exti=False, wght=active, ls_cycles=endpoint_ls_cycles)
@@ -1639,7 +1923,7 @@ def run_shelxl(work_dir: Path, stem: str, iterations: int = 1, wght_mode: str = 
                 stats["next_wght"] = {"promoted": False, "inherited": True}
     if last_proc is not None:
         (work_dir / "shelxl_stdout.log").write_text(last_proc.stdout)
-    final = dict(history[-1]) if history else {"returncode": None, "status": "not_run"}
+    final = select_last_safe_shelxl_iteration(work_dir, stem, history, last_safe)
     final.setdefault("res_health", shelx_res_health(work_dir / f"{stem}.res", work_dir / f"{stem}.lst"))
     if final.get("returncode") not in {None, 0}:
         final["status"] = "shelxl_failed"
@@ -1658,7 +1942,15 @@ def run_shelxl(work_dir: Path, stem: str, iterations: int = 1, wght_mode: str = 
             ls_cycles=endpoint_ls_cycles,
         )
         final["res_normalized_for_reopen"] = True
+        final["res_health"] = shelx_res_health(
+            work_dir / f"{stem}.res",
+            work_dir / f"{stem}.lst",
+        )
+        if not final["res_health"].get("ok"):
+            final["status"] = "invalid_res_output"
+            final["invalid_res_reason"] = final["res_health"].get("reason")
     final["iterations"] = n_iter
+    final["iterations_completed"] = len(history)
     final["endpoint_ls_cycles"] = max(1, int(endpoint_ls_cycles))
     final["iteration_history"] = history
     final["wght_mode"] = mode
@@ -1794,6 +2086,10 @@ def export_corrected_endpoint(
         sigcorr *= factor
     else:
         factor = 1.0
+    modulation_audit = modulation_manifest_fields(
+        float(factor) * modulation / np.maximum(denom, 1e-30),
+        valid,
+    )
     rows_unmerged = [(data.hkl[i, 0], data.hkl[i, 1], data.hkl[i, 2], Icorr[i], sigcorr[i]) for i in np.where(valid)[0]]
     rows_merged = exact_hkl_merge(data.hkl[valid], Icorr[valid], sigcorr[valid])
     hkl = out_dir / "dyn_nuisance_corrected.hkl"
@@ -1848,6 +2144,9 @@ def export_corrected_endpoint(
         endpoint_ls_cycles=endpoint_ls_cycles,
     )
     maps = run_maps(out_dir, "dyn_nuisance_corrected") if make_maps else {}
+    endpoint_res = out_dir / "dyn_nuisance_corrected.res"
+    endpoint_lst = out_dir / "dyn_nuisance_corrected.lst"
+    endpoint_hkl = out_dir / "dyn_nuisance_corrected.hkl"
     manifest = {
         "lambda_q": float(lambda_q),
         "q_min": 0.05,
@@ -1855,6 +2154,7 @@ def export_corrected_endpoint(
         "rescale": rescale,
         "rescale_factor": factor,
         "hkl_safe_factor": hkl_safe_factor,
+        **modulation_audit,
         **modulation_meta,
         "keep_exti": bool(keep_exti),
         "shelxl_iterations": int(max(1, shelxl_iterations)),
@@ -1868,6 +2168,14 @@ def export_corrected_endpoint(
         "q_p95": float(np.nanpercentile(q_clip[valid], 95)),
         "shelxl": shelxl,
         "maps": maps,
+        "artifacts": {
+            "res": str(endpoint_res.resolve()),
+            "res_sha256": sha256(endpoint_res) if endpoint_res.exists() else "",
+            "hkl": str(endpoint_hkl.resolve()),
+            "hkl_sha256": sha256(endpoint_hkl) if endpoint_hkl.exists() else "",
+            "lst": str(endpoint_lst.resolve()),
+            "lst_sha256": sha256(endpoint_lst) if endpoint_lst.exists() else "",
+        },
     }
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, allow_nan=True) + "\n")
     return manifest
@@ -1968,6 +2276,18 @@ def write_row_table(path: Path, data: XDSData, target, best_eval, masks):
             })
 
 
+def native_row_table_artifact(path: Path) -> dict[str, str]:
+    """Return the byte-bound native row-table artifact recorded in summary.json."""
+
+    resolved = path.expanduser().resolve()
+    if not resolved.is_file():
+        raise FileNotFoundError(f"native row table is missing: {resolved}")
+    return {
+        "native_row_table": str(resolved),
+        "native_row_table_sha256": sha256(resolved),
+    }
+
+
 def metric_row(trial):
     m = trial["metrics"]
     n = trial["nuisance"]
@@ -2003,6 +2323,30 @@ def rank_trials(trials, metric_name: str):
     """Rank nuisance trials without using held-out rows as an implicit tie-breaker."""
 
     return sorted(trials, key=lambda trial: trial_metric(trial, metric_name))
+
+
+def sg_jitter_candidate_rejection(cfg: Config, exc: InfeasibleSgJitterProfileError) -> dict:
+    """Return an auditable rejection record for one infeasible jitter candidate."""
+
+    mode = str(cfg.sg_jitter_mode or "none").lower()
+    active = bool(
+        mode != "none"
+        and (
+            abs(float(cfg.sg_jitter_sigma0)) > 0.0
+            or abs(float(cfg.sg_jitter_sigma_d_inv)) > 0.0
+            or abs(float(cfg.sg_jitter_sigma_frame)) > 0.0
+        )
+    )
+    if not active:
+        raise RuntimeError(
+            "an infeasible Sg-jitter profile error reached a candidate with no active jitter"
+        ) from exc
+    return {
+        "status": "rejected",
+        "reason": "infeasible_local_sg_jitter_profile",
+        "message": str(exc),
+        "config": asdict(cfg),
+    }
 
 
 def main():
@@ -2103,6 +2447,7 @@ def main():
     )
     ap.add_argument("--endpoint-b-grid", default="0.0", help="Diagnostic endpoint resolution-scale grid in intensity B units: Icorr *= exp(B*(1/4d^2 - median(1/4d^2))). Nonzero values are not promoted over a neutral B=0 endpoint.")
     ap.add_argument("--endpoint-exti-grid", default="off", help="Comma grid of endpoint EXTI modes: off,on. Off removes EXTI from the corrected endpoint; on keeps/regularizes the source EXTI term.")
+    ap.add_argument("--shelxl", default=SHELXL, help="Explicit SHELXL executable used for corrected-HKL endpoints.")
     ap.add_argument("--shelxl-iterations", type=int, default=1, help="Number of SHELXL polish passes per corrected endpoint. Later passes feed .res back into .ins.")
     ap.add_argument("--endpoint-ls-cycles", type=int, default=1, help="Internal L.S./CGLS cycle count written into generated endpoint .ins/.res files. Production uses 1; larger values are diagnostic stress tests.")
     ap.add_argument(
@@ -2134,6 +2479,11 @@ def main():
     ap.add_argument("--make-maps", action="store_true")
     ap.add_argument("--alternate-hand", dest="alternate_hand", action="store_true", help="Use alternate fractional xyz before building U_g for an alternate-hand control run.")
     args = ap.parse_args()
+    configure_shelxl_executable(args.shelxl)
+    require_endpoint_shelxl(
+        args.shelxl,
+        skip_endpoint_refinement=bool(args.skip_endpoint_refinement),
+    )
     effective_topup_d_min = min(float(args.topup_d_min), float(args.min_d_spacing)) if args.min_d_spacing > 0 else float(args.topup_d_min)
 
     t0 = time.perf_counter()
@@ -2180,6 +2530,7 @@ def main():
     wght_b_values = parse_float_grid(args.wght_b_grid) if str(args.wght_b_grid).strip() else [wght_b]
     geom_trials = []
     all_trials = []
+    rejected_prediction_candidates = []
     print(f"selected {len(indices)} rows; WGHT=({wght_a:g}, {wght_b:g})", flush=True)
 
     thickness_models = [m.strip() for m in str(args.thickness_model_grid).replace(",", " ").split() if m.strip()]
@@ -2275,20 +2626,30 @@ def main():
                                                             f"dose_b={dose_b_mode} per_frame={dose_b_per_frame:g}",
                                                             flush=True,
                                                         )
-                                                        pred = predict_with_cache(
-                                                            data,
-                                                            model,
-                                                            res_hash,
-                                                            Path(args.hkl),
-                                                            Path(args.res),
-                                                            cfg,
-                                                            indices,
-                                                            Path(args.prediction_cache_dir),
-                                                            args.workers,
-                                                            args.chunksize,
-                                                            model_tag=model_tag,
-                                                            cache_compression=args.cache_compression,
-                                                        )
+                                                        try:
+                                                            pred = predict_with_cache(
+                                                                data,
+                                                                model,
+                                                                res_hash,
+                                                                Path(args.hkl),
+                                                                Path(args.res),
+                                                                cfg,
+                                                                indices,
+                                                                Path(args.prediction_cache_dir),
+                                                                args.workers,
+                                                                args.chunksize,
+                                                                model_tag=model_tag,
+                                                                cache_compression=args.cache_compression,
+                                                            )
+                                                        except InfeasibleSgJitterProfileError as exc:
+                                                            rejection = sg_jitter_candidate_rejection(cfg, exc)
+                                                            rejected_prediction_candidates.append(rejection)
+                                                            print(
+                                                                "rejected nuisance candidate: "
+                                                                f"{rejection['reason']}: {rejection['message']}",
+                                                                flush=True,
+                                                            )
+                                                            continue
                                                         geom_trials.append(
                                                             {
                                                                 "cfg": cfg,
@@ -2354,6 +2715,21 @@ def main():
                                                             ev["prediction_cache"] = {"status": pred.get("cache_status"), "path": pred.get("cache_path")}
                                                             all_trials.append(ev)
 
+    if rejected_prediction_candidates:
+        (out / "rejected_prediction_candidates.json").write_text(
+            json.dumps(rejected_prediction_candidates, indent=2, allow_nan=True) + "\n"
+        )
+    if not all_trials:
+        failure = {
+            "reason": "no_feasible_prediction_candidates",
+            "message": "Every requested nuisance prediction candidate was rejected by the strict local-geometry contract.",
+            "rejected_prediction_candidates": rejected_prediction_candidates,
+        }
+        (out / "prediction_grid_failure.json").write_text(
+            json.dumps(failure, indent=2, allow_nan=True) + "\n"
+        )
+        raise RuntimeError(failure["message"])
+
     all_trials_sorted = rank_trials(all_trials, args.selection_metric)
     best = all_trials_sorted[0]
     if args.fail_if_born_r1gt_above > 0.0 and best["metrics"]["all"]["born"]["R1_gt"] > float(args.fail_if_born_r1gt_above):
@@ -2380,7 +2756,9 @@ def main():
         writer.writeheader()
         writer.writerows(rows)
     (out / "best_native_fit.json").write_text(json.dumps({k: v for k, v in best.items() if k != "arrays"}, indent=2, allow_nan=True) + "\n")
-    write_row_table(out / "native_dyn_calc.csv", data, target, best, masks)
+    native_row_table = out / "native_dyn_calc.csv"
+    write_row_table(native_row_table, data, target, best, masks)
+    native_row_artifact = native_row_table_artifact(native_row_table)
 
     endpoint_results = []
     endpoint_exti_modes = [m.strip().lower() for m in str(args.endpoint_exti_grid).replace(",", " ").split() if m.strip()]
@@ -2422,6 +2800,10 @@ def main():
                             endpoint_wght_mode=args.endpoint_wght_mode,
                         )
                     )
+    fail_if_shelxl_became_unavailable(
+        endpoint_results,
+        context="corrected-HKL endpoint refinement",
+    )
     endpoint_results = sorted(endpoint_results, key=lambda r: (r["shelxl"].get("wR2_all", 999), r["shelxl"].get("R1_all", 999)))
     no_exti_endpoint_results = [ep for ep in endpoint_results if not bool(ep.get("keep_exti", False))]
     safe_no_exti_endpoint_results = [ep for ep in no_exti_endpoint_results if not endpoint_has_adp_pathology(ep)]
@@ -2436,8 +2818,12 @@ def main():
     final_endpoint_results = safe_neutral_endpoint_results or safe_no_exti_endpoint_results or neutral_endpoint_results or no_exti_endpoint_results
 
     baseline = {}
-    if Path(args.baseline_hkl).exists():
+    if not args.skip_endpoint_refinement and Path(args.baseline_hkl).exists():
         baseline = copy_baseline(out / "baseline_exti", Path(args.res), Path(args.baseline_hkl))
+        fail_if_shelxl_became_unavailable(
+            [{"shelxl": baseline}],
+            context="matched conventional baseline replay",
+        )
     endpoint_factor_decision = {}
     if no_exti_endpoint_results:
         metric_best_ep = no_exti_endpoint_results[0]
@@ -2520,6 +2906,7 @@ def main():
         }
     kernel_variance = kernel_variance_terms(best["nuisance"])
     summary = {
+        "artifacts": native_row_artifact,
         "inputs": {
             "hkl": str(Path(args.hkl).resolve()),
             "hkl_sha256": sha256(Path(args.hkl)),
@@ -2620,6 +3007,7 @@ def main():
             "geometry_filter": geometry_summary,
         },
         "best_native": {k: v for k, v in best.items() if k != "arrays"},
+        "rejected_prediction_candidates": rejected_prediction_candidates,
         "endpoint_results_sorted": endpoint_results,
         "best_endpoint": final_endpoint_results[0] if final_endpoint_results else {},
         "skip_endpoint_refinement": bool(args.skip_endpoint_refinement),

@@ -81,6 +81,31 @@ def test_progress_resume_requires_matching_command(tmp_path):
     assert not state.should_skip("stage", command)
 
 
+def test_progress_resume_hashes_explicit_shelxl_executable(tmp_path):
+    state = ProgressState(root=tmp_path / "progress", resume=True, total=1)
+    executable = tmp_path / "private-ccp4" / "shelxl"
+    executable.parent.mkdir()
+    executable.write_text("#!/bin/sh\nexit 0\n")
+    output = tmp_path / "run"
+    output.mkdir()
+    (output / "summary.json").write_text("{}\n")
+    log = tmp_path / "stage.log"
+    log.write_text("completed\n")
+    command = [
+        "python",
+        "native_row_regularize.py",
+        "--shelxl",
+        str(executable),
+        "--out-dir",
+        str(output),
+    ]
+    state.mark_completed("native", command, 1.0, 0, log)
+
+    assert state.should_skip("native", command)
+    executable.write_text("#!/bin/sh\nexit 1\n")
+    assert not state.should_skip("native", command)
+
+
 def test_progress_records_finished_workflow(tmp_path):
     state = ProgressState(root=tmp_path, resume=True, total=3)
     (tmp_path / "a.log").write_text("done\n")

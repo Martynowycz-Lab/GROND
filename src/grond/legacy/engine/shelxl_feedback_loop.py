@@ -27,9 +27,9 @@ import time
 from pathlib import Path
 
 try:
-    from .shelx_diagnostics import parse_shelx_lst_pathologies, shelx_pathology_safe_for_feedback
+    from .native_row_regularize import shelx_res_health
 except ImportError:  # Direct script execution from the legacy engine directory.
-    from shelx_diagnostics import parse_shelx_lst_pathologies, shelx_pathology_safe_for_feedback
+    from native_row_regularize import shelx_res_health
 
 
 def read_json(path: Path) -> dict:
@@ -78,45 +78,103 @@ def nuisance(summary: dict) -> dict:
     return out
 
 
-def shelx_res_health(res_path: Path, lst_path: Path | None = None) -> dict:
-    """Return whether a SHELXL RES file can be used as a feedback model."""
+def _path_within(path: Path, root: Path) -> bool:
+    """Return whether ``path`` resolves inside ``root`` without raising."""
 
-    if not res_path.exists():
-        return {"ok": False, "reason": "missing_res", "path": str(res_path)}
     try:
-        size = res_path.stat().st_size
-    except OSError as exc:
-        return {"ok": False, "reason": "stat_failed", "path": str(res_path), "error": str(exc)}
-    if size <= 0:
-        return {"ok": False, "reason": "empty_res", "path": str(res_path), "size": int(size)}
-    try:
-        lines = res_path.read_text(errors="replace").splitlines()
-    except OSError as exc:
-        return {"ok": False, "reason": "read_failed", "path": str(res_path), "size": int(size), "error": str(exc)}
-    if not any(line.strip().upper().startswith("CELL ") for line in lines):
-        return {"ok": False, "reason": "missing_cell", "path": str(res_path), "size": int(size)}
-    pathology = parse_shelx_lst_pathologies(lst_path or res_path.with_suffix(".lst"))
-    return {
-        "ok": True,
-        "reason": "ok",
-        "path": str(res_path),
-        "size": int(size),
-        **pathology,
-        "safe_for_feedback": shelx_pathology_safe_for_feedback(pathology),
-    }
+        path.resolve().relative_to(root.resolve())
+    except (OSError, ValueError):
+        return False
+    return True
 
 
-def endpoint_res(run_dir: Path) -> Path:
-    """Return the no-EXTI B=0 lambda=1 endpoint RES file from one cycle."""
+def endpoint_res(run_dir: Path, summary: dict | None = None) -> Path:
+    """Return the exact summary-selected no-EXTI B=0 endpoint RES.
+
+    A production feedback cycle passes its freshly written summary.  This
+    binds the adopted model to the selected lambda/B/EXTI record rather than
+    to whichever old endpoint directory happens to sort first on a resumed
+    output tree.  The summary-free branch is retained only for older direct
+    callers and diagnostics.
+    """
+
+    if summary is not None:
+        endpoint = summary.get("best_endpoint")
+        endpoint = endpoint if isinstance(endpoint, dict) else {}
+        shelxl = endpoint.get("shelxl")
+        shelxl = shelxl if isinstance(shelxl, dict) else {}
+        if str(shelxl.get("status", "")).strip().lower() != "ok":
+            raise FileNotFoundError(
+                "summary-selected endpoint does not have a successful SHELXL status: "
+                f"{shelxl.get('status', 'missing')}"
+            )
+        try:
+            lam = float(endpoint["lambda_q"])
+            endpoint_b = float(endpoint.get("endpoint_b", 0.0))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise FileNotFoundError("summary-selected endpoint lacks finite lambda_q/endpoint_b") from exc
+        keep_exti = bool(endpoint.get("keep_exti", False))
+        if not math.isfinite(lam) or not math.isfinite(endpoint_b):
+            raise FileNotFoundError("summary-selected endpoint has non-finite lambda_q/endpoint_b")
+        if abs(endpoint_b) > 1e-12 or keep_exti:
+            raise FileNotFoundError(
+                "feedback requires the summary-selected B=0 no-EXTI endpoint; "
+                f"got B={endpoint_b:g}, keep_exti={keep_exti}"
+            )
+        lst_value = str(shelxl.get("lst") or "")
+        if not lst_value:
+            raise FileNotFoundError("summary-selected endpoint does not record its SHELXL LST path")
+        candidate = Path(lst_value).expanduser().with_suffix(".res")
+        lam_tag = str(lam).replace(".", "p")
+        b_tag = str(endpoint_b).replace("-", "m").replace(".", "p")
+        expected_dir = run_dir / f"endpoint_lam_{lam_tag}_B_{b_tag}_noexti"
+        expected = expected_dir / "dyn_nuisance_corrected.res"
+        if candidate.resolve() != expected.resolve() or not _path_within(candidate, run_dir):
+            raise FileNotFoundError(
+                "summary-selected endpoint path disagrees with lambda/B/EXTI identity: "
+                f"recorded={candidate}, expected={expected}"
+            )
+        health = shelx_res_health(candidate, candidate.with_suffix(".lst"))
+        recorded_health = shelxl.get("res_health")
+        recorded_health = recorded_health if isinstance(recorded_health, dict) else {}
+        recorded_path = str(recorded_health.get("path") or "")
+        recorded_sha = str(recorded_health.get("sha256") or "")
+        try:
+            recorded_atom_count = int(recorded_health.get("atom_count", 0) or 0)
+            recorded_sfac_count = int(recorded_health.get("sfac_count", 0) or 0)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise FileNotFoundError("summary-selected endpoint health has invalid model counts") from exc
+        if (
+            not recorded_health.get("ok")
+            or recorded_health.get("safe_for_feedback") is False
+            or recorded_atom_count <= 0
+            or recorded_sfac_count <= 0
+            or not recorded_path
+            or not recorded_sha
+        ):
+            raise FileNotFoundError(
+                "summary-selected endpoint lacks a complete safe path/hash-bound health record"
+            )
+        if Path(recorded_path).resolve() != candidate.resolve():
+            raise FileNotFoundError(
+                "summary-selected endpoint health path disagrees with its LST/model path: "
+                f"health={recorded_path}, model={candidate}"
+            )
+        if recorded_sha != str(health.get("sha256") or ""):
+            raise FileNotFoundError("summary-selected endpoint model hash no longer matches the recorded health hash")
+        if not health.get("ok") or health.get("safe_for_feedback") is False:
+            raise FileNotFoundError(f"summary-selected endpoint is not safe for feedback: {health}")
+        return candidate
 
     direct = run_dir / "endpoint_lam_1p0_B_0p0_noexti" / "dyn_nuisance_corrected.res"
-    if shelx_res_health(direct, direct.with_suffix(".lst"))["ok"]:
+    direct_health = shelx_res_health(direct, direct.with_suffix(".lst"))
+    if direct_health["ok"] and direct_health.get("safe_for_feedback") is not False:
         return direct
     matches = sorted(run_dir.glob("endpoint_lam_*_B_0p0_noexti/dyn_nuisance_corrected.res"))
     rejected = []
     for match in matches:
         health = shelx_res_health(match, match.with_suffix(".lst"))
-        if health["ok"]:
+        if health["ok"] and health.get("safe_for_feedback") is not False:
             return match
         rejected.append(health)
     detail = f"; rejected={rejected}" if rejected else ""
@@ -315,6 +373,8 @@ def native_command(
         "0.0",
         "--endpoint-exti-grid",
         "off",
+        "--shelxl",
+        str(args.shelxl),
         "--shelxl-iterations",
         str(int(args.shelxl_iterations)),
         "--endpoint-ls-cycles",
@@ -419,12 +479,21 @@ def run_cycle(
     summary = read_json(summary_path) if summary_path.exists() else {}
     updated_res = Path("")
     endpoint_health: dict = {"ok": False, "reason": "not_run"}
+    selected_endpoint = summary.get("best_endpoint") if isinstance(summary, dict) else {}
+    selected_endpoint = selected_endpoint if isinstance(selected_endpoint, dict) else {}
+    selected_shelxl = selected_endpoint.get("shelxl")
+    selected_shelxl = selected_shelxl if isinstance(selected_shelxl, dict) else {}
+    endpoint_shelxl_status = str(selected_shelxl.get("status") or "")
     if status["returncode"] == 0 and skip_endpoint_refinement:
         updated_res = model
-        endpoint_health = shelx_res_health(model)
+        endpoint_health = shelx_res_health(model, require_lst=False)
+        endpoint_shelxl_status = "reused_validated_input_model"
+        if not endpoint_health.get("ok") or endpoint_health.get("safe_for_feedback") is False:
+            status["returncode"] = 3
+            status["endpoint_error"] = f"input model is not safe for final row recompute: {endpoint_health}"
     elif status["returncode"] == 0:
         try:
-            updated_res = endpoint_res(run_dir)
+            updated_res = endpoint_res(run_dir, summary=summary)
             endpoint_health = shelx_res_health(updated_res, updated_res.with_suffix(".lst"))
         except FileNotFoundError as exc:
             endpoint_health = {"ok": False, "reason": "missing_or_invalid_endpoint_res", "error": str(exc)}
@@ -435,6 +504,7 @@ def run_cycle(
         "run_dir": str(run_dir),
         "input_model": str(model),
         "output_model": str(updated_res) if updated_res else "",
+        "endpoint_shelxl_status": endpoint_shelxl_status,
         "endpoint_res_health": endpoint_health,
         "n_basis": int(n_basis),
         "n_points": int(n_points),
@@ -534,12 +604,14 @@ def main() -> None:
             result["stopped_reason"] = rec.get("endpoint_error") or f"cycle returned {rec['returncode']}"
             break
         health = rec.get("endpoint_res_health") or {}
-        if health.get("safe_for_feedback") is False:
+        if not health.get("ok") or health.get("safe_for_feedback") is False:
             result["stopped_reason"] = (
-                "SHELXL feedback cycle produced ADP pathology; keeping the previous clean model. "
-                f"NPD atoms={health.get('npd_count', 0)}, split warnings={health.get('split_count', 0)}."
+                "SHELXL feedback cycle did not produce a structurally valid, pathology-free model; "
+                "keeping the previous clean model. "
+                f"reason={health.get('reason', 'unknown')}, NPD atoms={health.get('npd_count', 0)}, "
+                f"split warnings={health.get('split_count', 0)}."
             )
-            result["pathological_model"] = rec.get("output_model", "")
+            result["rejected_model"] = rec.get("output_model", "")
             break
         current_model = Path(rec["output_model"]).resolve()
         result["current_model"] = str(current_model)
@@ -557,9 +629,18 @@ def main() -> None:
             make_maps=bool(args.make_maps_on_final),
         )
         result["runs"].append(rec)
-        if rec["returncode"] == 0:
+        final_health = rec.get("endpoint_res_health") or {}
+        if rec["returncode"] == 0 and final_health.get("ok") and final_health.get("safe_for_feedback") is not False:
             result["current_model"] = rec["output_model"]
             current_model = Path(rec["output_model"]).resolve()
+        elif rec["returncode"] == 0:
+            result["stopped_reason"] = (
+                "final polish produced an unsafe endpoint; keeping the previous clean model. "
+                f"health={final_health}"
+            )
+            result["rejected_model"] = rec.get("output_model", "")
+        else:
+            result["stopped_reason"] = rec.get("endpoint_error") or f"final polish returned {rec['returncode']}"
 
     if not result["runs"] or result["runs"][-1].get("returncode") == 0:
         recompute_n_basis = int(args.final_n_basis) if int(args.final_n_basis) > 0 else int(args.n_basis)

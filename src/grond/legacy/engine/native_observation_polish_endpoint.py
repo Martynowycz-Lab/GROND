@@ -18,29 +18,41 @@ from pathlib import Path
 import numpy as np
 
 if __package__:
+    from .endpoint_modulation import modulation_manifest_fields
     from .native_row_regularize import (
         DEFAULT_HKL,
         DEFAULT_RES,
+        configure_shelxl_executable,
         exact_hkl_merge,
+        fail_if_shelxl_became_unavailable,
         native_metrics,
         parse_wght,
+        require_endpoint_shelxl,
         run_maps,
         run_shelxl,
+        sha256,
         write_hkl,
         write_no_exti_ins,
     )
+    from .native_row_regularize import SHELXL as DEFAULT_SHELXL
 else:  # pragma: no cover - direct script execution
+    from endpoint_modulation import modulation_manifest_fields
     from native_row_regularize import (
         DEFAULT_HKL,
         DEFAULT_RES,
+        configure_shelxl_executable,
         exact_hkl_merge,
+        fail_if_shelxl_became_unavailable,
         native_metrics,
         parse_wght,
+        require_endpoint_shelxl,
         run_maps,
         run_shelxl,
+        sha256,
         write_hkl,
         write_no_exti_ins,
     )
+    from native_row_regularize import SHELXL as DEFAULT_SHELXL
 
 
 def read_rows(path: Path) -> list[dict[str, str]]:
@@ -255,6 +267,7 @@ def write_endpoint(
         factor = src / max(abs(dst), 1e-30)
         i_corr *= factor
         sig_corr *= abs(factor)
+    modulation_audit = modulation_manifest_fields(float(factor) / np.maximum(denom, 1e-30), valid)
     hkls = np.vstack([h, k, l]).T
     rows_unmerged = [(int(h[i]), int(k[i]), int(l[i]), float(i_corr[i]), float(sig_corr[i])) for i in np.where(valid)[0]]
     rows_merged = exact_hkl_merge(hkls[valid], i_corr[valid], sig_corr[valid])
@@ -263,12 +276,18 @@ def write_endpoint(
     write_no_exti_ins(res_path, out_dir / "dyn_observation_polished.ins", hkl_name="dyn_observation_polished.hkl")
     shelxl = run_shelxl(out_dir, "dyn_observation_polished", iterations=shelxl_iterations)
     maps = run_maps(out_dir, "dyn_observation_polished") if make_maps else {}
+    endpoint_res = out_dir / "dyn_observation_polished.res"
+    endpoint_hkl = out_dir / "dyn_observation_polished.hkl"
+    endpoint_lst = out_dir / "dyn_observation_polished.lst"
     manifest = {
         "lambda_q": float(lambda_q),
+        "endpoint_b": 0.0,
+        "keep_exti": False,
         "q_min": 0.05,
         "q_max": 20.0,
         "rescale": rescale,
         "rescale_factor": float(factor),
+        **modulation_audit,
         "rows_unmerged": len(rows_unmerged),
         "rows_merged_exact_hkl": len(rows_merged),
         "clean_obs_p05": float(np.nanpercentile(clean_obs[valid], 5)),
@@ -284,6 +303,14 @@ def write_endpoint(
         "maps": maps,
         "hkl": str((out_dir / "dyn_observation_polished.hkl").resolve()),
         "hkl_unmerged": str((out_dir / "dyn_observation_polished_unmerged.hkl").resolve()),
+        "artifacts": {
+            "res": str(endpoint_res.resolve()),
+            "res_sha256": sha256(endpoint_res) if endpoint_res.exists() else "",
+            "hkl": str(endpoint_hkl.resolve()),
+            "hkl_sha256": sha256(endpoint_hkl) if endpoint_hkl.exists() else "",
+            "lst": str(endpoint_lst.resolve()),
+            "lst_sha256": sha256(endpoint_lst) if endpoint_lst.exists() else "",
+        },
     }
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, allow_nan=True) + "\n")
     return manifest
@@ -404,12 +431,15 @@ def main() -> None:
     ap.add_argument("--rescale", choices=["median-iobs", "none"], default="median-iobs")
     ap.add_argument("--hkl-float-format", choices=["shelx_fixed", "wide"], default="shelx_fixed")
     ap.add_argument("--make-maps", action="store_true")
+    ap.add_argument("--shelxl", default=DEFAULT_SHELXL)
     ap.add_argument("--shelxl-iterations", type=int, default=5)
     ap.add_argument("--require-passed-candidates", action="store_true", default=True)
     ap.add_argument("--no-require-passed-candidates", dest="require_passed_candidates", action="store_false")
     ap.add_argument("--min-raw-wR2-gain", type=float, default=0.002)
     ap.add_argument("--endpoint-wR2-tolerance", type=float, default=0.0005)
     args = ap.parse_args()
+    configure_shelxl_executable(args.shelxl)
+    require_endpoint_shelxl(args.shelxl, skip_endpoint_refinement=False)
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -442,6 +472,10 @@ def main() -> None:
         manifest = write_endpoint(ep_dir, rows, additive, log_mult, Path(args.res), lam, args.hkl_float_format, args.rescale, args.make_maps, args.shelxl_iterations)
         manifest["endpoint_dir"] = str(ep_dir.resolve())
         endpoint_results.append(manifest)
+    fail_if_shelxl_became_unavailable(
+        [*control_results, *endpoint_results],
+        context="observation-polish endpoint refinement",
+    )
     control_results = sorted(control_results, key=lambda r: (r["shelxl"].get("wR2_all", 999), r["shelxl"].get("R1_all", 999)))
     endpoint_results = sorted(endpoint_results, key=lambda r: (r["shelxl"].get("wR2_all", 999), r["shelxl"].get("R1_all", 999)))
     best_control = control_results[0] if control_results else {}

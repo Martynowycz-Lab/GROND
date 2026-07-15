@@ -34,6 +34,8 @@ def test_publication_endpoint_prefers_boring_goof_over_low_r_diagnostic():
             "endpoint_dir": "too_coarse",
         },
     ]
+    for row in rows:
+        row["mod_p95"] = 1.2
 
     selected = choose_publication_endpoint(
         rows,
@@ -82,6 +84,8 @@ def test_publication_endpoint_default_uses_bic_after_sanity_gates():
             "endpoint_dir": "low_r",
         },
     ]
+    for row in rows:
+        row["mod_p95"] = 1.2
 
     selected = choose_publication_endpoint(
         rows,
@@ -121,6 +125,8 @@ def test_publication_endpoint_legacy_policy_keeps_smallest_passing_scale_count()
             "endpoint_dir": "bic_best",
         },
     ]
+    for row in rows:
+        row["mod_p95"] = 1.2
 
     selected = choose_publication_endpoint(
         rows,
@@ -135,3 +141,42 @@ def test_publication_endpoint_legacy_policy_keeps_smallest_passing_scale_count()
     assert selected["status"] == "passed"
     assert selected["selection_policy"] == "gated-smallest"
     assert selected["publication_endpoint"]["spec"] == "few_scales"
+
+
+def test_publication_endpoint_modulation_gate_rejects_missing_and_excessive_values():
+    rows = [
+        {
+            "spec": "missing",
+            "wght_mode": "freeze-zero",
+            "scale_params": 10,
+            "shelxl_R1all": 0.10,
+            "shelxl_GooF": 1.0,
+            "native_free_wR2_all": 0.15,
+            "bic_fitted_variance": 100.0,
+        },
+        {
+            "spec": "excessive",
+            "wght_mode": "freeze-zero",
+            "scale_params": 10,
+            "shelxl_R1all": 0.10,
+            "shelxl_GooF": 1.0,
+            "native_free_wR2_all": 0.15,
+            "bic_fitted_variance": 100.0,
+            "mod_p95": 20.1,
+        },
+    ]
+
+    selected = choose_publication_endpoint(
+        rows,
+        goof_min=0.85,
+        goof_max=1.15,
+        max_r1_cost=0.010,
+        free_wr2_tolerance=0.030,
+        prefer_wght_mode="freeze-zero",
+        max_modulation_p95=20.0,
+    )
+
+    assert selected["status"] == "no_candidate_passed_all_gates"
+    reasons = {row["spec"]: row["reasons"] for row in selected["rejections"]}
+    assert any("missing finite" in reason for reason in reasons["missing"])
+    assert any("exceeds" in reason for reason in reasons["excessive"])

@@ -267,9 +267,10 @@ def test_combined_run_shelxl_freeze_zero_survives_multiple_passes(tmp_path: Path
                 "TITL combined",
                 "CELL 0.025079 5.0 6.0 7.0 90 90 90",
                 "SFAC C 1 0 1 0 1 0 1 0",
-                "WGHT 0.200000 1.000000",
-                "FVAR 1.0",
-                "L.S. 10",
+                    "WGHT 0.200000 1.000000",
+                    "FVAR 1.0",
+                    "C1 1 0.10 0.20 0.30 11.0 0.05",
+                    "L.S. 10",
                 "HKLF 4",
                 "END",
             ]
@@ -292,6 +293,7 @@ Path(stem + ".lst").write_text("\\n".join([
     " wR2 = 0.1234, GooF = S = 0.987, Restrained GooF = 0.987 for all data",
     " R1 = 0.0500 for 1 Fo > 4sig(Fo) and 0.0600 for all 1 data",
     " Recommended weighting scheme:  WGHT    0.3210    0.6540",
+    " 0 atoms may be split and 0 atoms NPD",
 ]) + "\\n")
 Path(stem + ".res").write_text("\\n".join([
     "TITL combined output",
@@ -299,6 +301,7 @@ Path(stem + ".res").write_text("\\n".join([
     "SFAC C 1 0 1 0 1 0 1 0",
     wght,
     "FVAR 1.0",
+    "C1 1 0.10 0.20 0.30 11.0 0.05",
     "L.S. 10",
     "HKLF 4",
     "END",

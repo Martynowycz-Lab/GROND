@@ -34,9 +34,10 @@ INPUT_PATH_FLAGS = {
     "--start-res",
     "--structure",
     "--summary",
+    "--shelxl",
     "--xds-dir",
 }
-OUTPUT_PATH_FLAGS = {"--out", "--out-dir", "--out-mtz", "--write-rows"}
+OUTPUT_PATH_FLAGS = {"--out", "--out-dir", "--out-mtz", "--output", "--write-rows"}
 ASSIGNMENT_PATH_FLAGS = {"--resolution-limit", "--run", "--scale-polish"}
 MANIFEST_ONLY_FLAGS = {"--cbf-dir", "--images"}
 

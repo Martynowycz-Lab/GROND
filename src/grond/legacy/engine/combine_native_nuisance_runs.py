@@ -22,12 +22,34 @@ from pathlib import Path
 import numpy as np
 
 try:  # Package import.
-    from .bloch_engine import parse_model
-    from .native_row_regularize import parse_shelx_wght_terms, shelx_res_health, write_active_wght, write_endpoint_ins
+    from .bloch_engine import parse_model, sha256
+    from .endpoint_modulation import modulation_manifest_fields
+    from .native_row_regularize import (
+        classify_shelxl_iteration_rejection,
+        fail_if_shelxl_became_unavailable,
+        parse_shelx_wght_terms,
+        require_endpoint_shelxl,
+        select_last_safe_shelxl_iteration,
+        shelx_res_health,
+        snapshot_safe_shelxl_iteration,
+        write_active_wght,
+        write_endpoint_ins,
+    )
     from .post_bloch_sigma import fit_uniform_z_rms_sigma_scale, scale_row_sigmas
 except ImportError:  # Direct script execution from this directory.
-    from bloch_engine import parse_model
-    from native_row_regularize import parse_shelx_wght_terms, shelx_res_health, write_active_wght, write_endpoint_ins
+    from bloch_engine import parse_model, sha256
+    from endpoint_modulation import modulation_manifest_fields
+    from native_row_regularize import (
+        classify_shelxl_iteration_rejection,
+        fail_if_shelxl_became_unavailable,
+        parse_shelx_wght_terms,
+        require_endpoint_shelxl,
+        select_last_safe_shelxl_iteration,
+        shelx_res_health,
+        snapshot_safe_shelxl_iteration,
+        write_active_wght,
+        write_endpoint_ins,
+    )
     from post_bloch_sigma import fit_uniform_z_rms_sigma_scale, scale_row_sigmas
 
 
@@ -239,14 +261,26 @@ def safe_fixed_width_factor(rows) -> float:
     return 9000.0 / max_abs
 
 
-def endpoint_rows_from_native(rows: list[dict], lambda_q: float):
+def endpoint_rows_and_corrections_from_native(rows: list[dict], lambda_q: float):
+    """Return corrected endpoint rows and their applied intensity multipliers."""
+
     hkl = [(int(r["h"]), int(r["k"]), int(r["l"])) for r in rows]
     target = np.asarray([safe_float(r["target_I"]) for r in rows], dtype=float)
     sig = np.asarray([safe_float(r["sigma_eff"]) for r in rows], dtype=float)
     dyn_raw = np.asarray([safe_float(r["dyn_raw"]) for r in rows], dtype=float)
     dyn_scaled = np.asarray([safe_float(r["dyn_scaled"]) for r in rows], dtype=float)
     q = np.asarray([safe_float(r["q_dyn_over_born"]) for r in rows], dtype=float)
-    valid = np.isfinite(target) & np.isfinite(sig) & np.isfinite(dyn_raw) & np.isfinite(dyn_scaled) & np.isfinite(q) & (q > 0.0) & (dyn_raw > 0.0)
+    valid = (
+        np.isfinite(target)
+        & np.isfinite(sig)
+        & (sig > 0.0)
+        & np.isfinite(dyn_raw)
+        & (dyn_raw > 0.0)
+        & np.isfinite(dyn_scaled)
+        & (dyn_scaled > 0.0)
+        & np.isfinite(q)
+        & (q > 0.0)
+    )
     q_clip = np.clip(q, 0.05, 20.0)
     scales = np.maximum(dyn_scaled / np.maximum(dyn_raw, 1e-30), 1e-30)
     denom = np.maximum(scales * (q_clip ** float(lambda_q)), 1e-30)
@@ -257,7 +291,17 @@ def endpoint_rows_from_native(rows: list[dict], lambda_q: float):
     factor = src / max(dst, 1e-30)
     icorr *= factor
     sigcorr *= factor
-    return [(*hkl[i], float(icorr[i]), float(sigcorr[i])) for i in np.where(valid)[0]]
+    selected = np.where(valid)[0]
+    endpoint_rows = [(*hkl[i], float(icorr[i]), float(sigcorr[i])) for i in selected]
+    corrections = np.asarray(float(factor) / denom[selected], dtype=float)
+    return endpoint_rows, corrections
+
+
+def endpoint_rows_from_native(rows: list[dict], lambda_q: float):
+    """Compatibility wrapper returning only corrected endpoint rows."""
+
+    endpoint_rows, _corrections = endpoint_rows_and_corrections_from_native(rows, lambda_q)
+    return endpoint_rows
 
 
 def apply_hkl_weight(rows, weight: float):
@@ -272,6 +316,41 @@ def apply_hkl_weight(rows, weight: float):
 def scale_hkl_rows(rows, scale: float):
     scale = float(scale)
     return [(h, k, ell, intensity * scale, sig * abs(scale)) for h, k, ell, intensity, sig in rows]
+
+
+def audit_combined_endpoint_modulation(
+    corrections_by_dataset: dict[str, np.ndarray | None],
+    interdataset_scales: dict[str, float],
+    *,
+    endpoint_source: str,
+) -> tuple[dict[str, object], dict[str, dict[str, object]]]:
+    """Audit row corrections after applying relative interdataset scales."""
+
+    combined_corrections: list[float] = []
+    per_dataset: dict[str, dict[str, object]] = {}
+    for name, source_corrections in corrections_by_dataset.items():
+        dataset_scale = safe_float(interdataset_scales.get(name, 1.0), float("nan"))
+        if source_corrections is None:
+            fields = modulation_manifest_fields([])
+            fields["modulation_audit"] = {
+                **dict(fields["modulation_audit"]),
+                "status": "unavailable_endpoint_source_hkl",
+                "reason": "row-level source intensity multipliers are not recoverable from a prewritten HKL",
+            }
+        else:
+            adjusted = np.asarray(source_corrections, dtype=float) * dataset_scale
+            fields = modulation_manifest_fields(adjusted)
+            combined_corrections.extend(float(value) for value in adjusted)
+        per_dataset[name] = {**fields, "interdataset_scale": dataset_scale}
+
+    combined = modulation_manifest_fields(combined_corrections)
+    if endpoint_source == "hkl":
+        combined["modulation_audit"] = {
+            **dict(combined["modulation_audit"]),
+            "status": "unavailable_endpoint_source_hkl",
+            "reason": "combined modulation requires row-level native correction factors including interdataset scales",
+        }
+    return combined, per_dataset
 
 
 def apply_sigma_holdout_floor(meta: dict) -> dict:
@@ -618,6 +697,7 @@ def run_shelxl(
     if "/" in exe and not Path(exe).exists():
         return {"status": "missing_shelxl", "executable": exe}
     history = []
+    last_safe = None
     last_stdout = ""
     n_iter = max(1, int(iterations))
     n_ls = max(1, int(endpoint_ls_cycles))
@@ -630,8 +710,10 @@ def run_shelxl(
             write_active_wght(work / f"{stem}.ins", 0.0, 0.0)
         res = work / f"{stem}.res"
         lst = work / f"{stem}.lst"
+        fcf = work / f"{stem}.fcf"
         res.unlink(missing_ok=True)
         lst.unlink(missing_ok=True)
+        fcf.unlink(missing_ok=True)
         proc = subprocess.run([exe, stem], cwd=str(work), text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         last_stdout = proc.stdout
         (work / f"shelxl_iter_{i + 1}.log").write_text(proc.stdout)
@@ -648,12 +730,18 @@ def run_shelxl(
         elif not health["ok"]:
             stats["status"] = "invalid_res_output"
             stats["invalid_res_reason"] = health["reason"]
-        elif health.get("safe_for_feedback") is False:
-            stats["status"] = "adp_pathology"
-            stats["invalid_res_reason"] = "adp_pathology"
         history.append(stats)
-        if stats.get("status") in {"shelxl_failed", "invalid_res_output", "adp_pathology"}:
+        if stats.get("status") in {"shelxl_failed", "invalid_res_output"}:
             break
+        rejection = classify_shelxl_iteration_rejection(stats)
+        if rejection is not None:
+            stats["status"], stats["invalid_res_reason"] = rejection
+            break
+        last_safe = snapshot_safe_shelxl_iteration(work, stem, i + 1, stats)
+        stats["safe_snapshot_res"] = last_safe["res"]
+        stats["safe_snapshot_lst"] = last_safe["lst"]
+        stats["safe_snapshot_fcf"] = last_safe["fcf"]
+        last_safe["stats"] = dict(stats)
         if i + 1 < n_iter and (work / f"{stem}.res").exists():
             active = (0.0, 0.0) if freeze_zero else _active_wght_from_stats(stats)
             write_endpoint_ins(
@@ -671,7 +759,7 @@ def run_shelxl(
             else:
                 stats["next_wght"] = {"promoted": False, "inherited": True}
     (work / "shelxl_stdout.log").write_text(last_stdout)
-    final = dict(history[-1]) if history else {"status": "not_run"}
+    final = select_last_safe_shelxl_iteration(work, stem, history, last_safe)
     final.setdefault("res_health", shelx_res_health(work / f"{stem}.res", work / f"{stem}.lst"))
     if final.get("returncode") not in {None, 0}:
         final["status"] = "shelxl_failed"
@@ -687,10 +775,15 @@ def run_shelxl(
             ls_cycles=n_ls,
         )
         final["res_normalized_for_reopen"] = True
+        final["res_health"] = shelx_res_health(work / f"{stem}.res", work / f"{stem}.lst")
+        if not final["res_health"].get("ok"):
+            final["status"] = "invalid_res_output"
+            final["invalid_res_reason"] = final["res_health"].get("reason")
     else:
         final["status"] = "invalid_res_output"
         final["invalid_res_reason"] = final["res_health"].get("reason")
     final["iterations"] = n_iter
+    final["iterations_completed"] = len(history)
     final["endpoint_ls_cycles"] = n_ls
     final["wght_mode"] = mode
     final["iteration_history"] = history
@@ -701,6 +794,21 @@ def run_shelxl(
     final["has_npd"] = bool(pathology.get("has_npd", False))
     final["has_split_warnings"] = bool(pathology.get("has_split_warnings", False))
     return final
+
+
+def require_combined_endpoint_shelxl(
+    executable: str,
+    *,
+    endpoint_rows_available: bool,
+) -> str:
+    """Require SHELXL only when a combined endpoint will be refined."""
+
+    resolved = str(executable or shutil.which("shelxl") or shutil.which("shelxl2019") or "")
+    require_endpoint_shelxl(
+        resolved,
+        skip_endpoint_refinement=not endpoint_rows_available,
+    )
+    return resolved
 
 
 def endpoint_lam_dir(run: Path, lam: str) -> Path:
@@ -813,6 +921,16 @@ def main():
     ap.add_argument("--post-bloch-sigma-max-scale", type=float, default=4.0)
     args = ap.parse_args()
 
+    try:
+        endpoint_lambda_value = float(args.endpoint_lambda)
+    except (TypeError, ValueError) as exc:
+        ap.error(f"--endpoint-lambda must be finite: {exc}")
+    if not math.isfinite(endpoint_lambda_value):
+        ap.error("--endpoint-lambda must be finite")
+    # Native endpoint directories use ``str(float(lambda))``.  Canonicalizing
+    # here keeps values such as ``1`` and ``1.0`` on one artifact identity.
+    args.endpoint_lambda = str(endpoint_lambda_value)
+
     model = parse_model(Path(args.res))
     symmetry_ops = model.get("symmetry_ops", [])
 
@@ -821,6 +939,7 @@ def main():
     all_rows = []
     dataset_summaries = []
     endpoint_rows_by_dataset: dict[str, list[tuple]] = {}
+    endpoint_corrections_by_dataset: dict[str, np.ndarray | None] = {}
     endpoint_weight_by_name: dict[str, float] = {}
     dataset_sigma_by_name: dict[str, dict] = {}
     per_dataset_wght: dict[str, dict[str, float]] = {}
@@ -893,8 +1012,14 @@ def main():
             if not hkl_rows and source_run and source_run.exists():
                 hkl_rows = read_hkl(endpoint_hkl_path(source_run, args.endpoint_lambda))
             endpoint_rows_by_dataset[name] = hkl_rows
+            endpoint_corrections_by_dataset[name] = None
         else:
-            endpoint_rows_by_dataset[name] = endpoint_rows_from_native(endpoint_input_rows, float(args.endpoint_lambda))
+            endpoint_rows, endpoint_corrections = endpoint_rows_and_corrections_from_native(
+                endpoint_input_rows,
+                float(args.endpoint_lambda),
+            )
+            endpoint_rows_by_dataset[name] = endpoint_rows
+            endpoint_corrections_by_dataset[name] = endpoint_corrections
         dataset_sigma_by_name[name] = {"policy": args.dataset_sigma_policy, "status": "not_requested"}
 
     if args.dataset_sigma_policy == "uniform_z_rms":
@@ -930,7 +1055,16 @@ def main():
         }
     endpoint_rows = []
     for name, rows_for_dataset in endpoint_rows_by_dataset.items():
-        endpoint_rows.extend(scale_hkl_rows(rows_for_dataset, interdataset_scale["scales"].get(name, 1.0)))
+        dataset_scale = safe_float(interdataset_scale["scales"].get(name, 1.0), float("nan"))
+        endpoint_rows.extend(scale_hkl_rows(rows_for_dataset, dataset_scale))
+    combined_modulation, per_dataset_modulation = audit_combined_endpoint_modulation(
+        endpoint_corrections_by_dataset,
+        interdataset_scale["scales"],
+        endpoint_source=args.endpoint_source,
+    )
+    for dataset_summary in dataset_summaries:
+        name = str(dataset_summary.get("name", ""))
+        dataset_summary["endpoint_modulation"] = per_dataset_modulation.get(name, {})
     exact_by_dataset = []
     canon_by_dataset = []
     for ds in dataset_summaries:
@@ -949,6 +1083,11 @@ def main():
     merged_endpoint = []
     merge_sigma = {"policy": args.merge_sigma_policy, "status": "skipped_no_endpoint_rows"}
     shelxl = {}
+    endpoint_artifacts: dict[str, object] = {}
+    endpoint_shelxl = require_combined_endpoint_shelxl(
+        args.shelxl,
+        endpoint_rows_available=bool(endpoint_rows),
+    )
     if endpoint_rows:
         merged_endpoint, merge_sigma = merge_hkl_rows(endpoint_rows, args.merge_sigma_policy, canonicalizer=endpoint_key_for)
         merge_sigma["status"] = "ok"
@@ -996,11 +1135,27 @@ def main():
         shelxl = run_shelxl(
             ep_dir,
             "multi_dyn_corrected",
-            args.shelxl,
+            endpoint_shelxl,
             iterations=args.shelxl_iterations,
             wght_mode=args.endpoint_wght_mode,
             endpoint_ls_cycles=args.endpoint_ls_cycles,
         )
+        fail_if_shelxl_became_unavailable(
+            [{"shelxl": shelxl}],
+            context="combined corrected-HKL endpoint refinement",
+        )
+        endpoint_res = ep_dir / "multi_dyn_corrected.res"
+        endpoint_lst = ep_dir / "multi_dyn_corrected.lst"
+        endpoint_hkl = ep_dir / hkl_name
+        endpoint_artifacts = {
+            "directory": str(ep_dir.resolve()),
+            "res": str(endpoint_res.resolve()),
+            "lst": str(endpoint_lst.resolve()),
+            "hkl": str(endpoint_hkl.resolve()),
+            "res_sha256": sha256(endpoint_res) if endpoint_res.exists() else "",
+            "lst_sha256": sha256(endpoint_lst) if endpoint_lst.exists() else "",
+            "hkl_sha256": sha256(endpoint_hkl) if endpoint_hkl.exists() else "",
+        }
 
     result = {
         "runs": dataset_summaries,
@@ -1022,16 +1177,21 @@ def main():
         "interdataset_scale": {"mode": args.interdataset_scale, **interdataset_scale},
         "combined_endpoint": {
             "lambda_q": args.endpoint_lambda,
+            "endpoint_b": 0.0,
+            "keep_exti": False,
             "merge_key": args.endpoint_merge_key,
             "overlap_scale_key": args.endpoint_merge_key if args.interdataset_scale == "overlap" else "none",
             "input_unmerged_rows": len(endpoint_rows),
             "merged_endpoint_rows": len(merged_endpoint),
             "merged_exact_hkl_rows": len(merged_endpoint),
             "hkl_safe_factor": hkl_safe_factor if endpoint_rows else 1.0,
+            **combined_modulation,
+            "per_dataset_modulation": per_dataset_modulation,
             "dataset_sigma": dataset_sigma_by_name,
             "merge_sigma": merge_sigma,
             "post_bloch_sigma": post_bloch_sigma if endpoint_rows else {"policy": args.post_bloch_sigma_policy, "status": "skipped_no_endpoint_rows"},
             "shelxl": shelxl,
+            "artifacts": endpoint_artifacts,
             "endpoint_wght_mode": args.endpoint_wght_mode,
             "endpoint_ls_cycles": max(1, int(args.endpoint_ls_cycles)),
         },
