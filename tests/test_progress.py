@@ -237,6 +237,72 @@ def test_progress_invalidates_missing_or_changed_recorded_output(tmp_path):
     assert not state.should_skip("stage", command)
 
 
+def test_progress_refreshes_intentionally_postprocessed_output_without_recounting(tmp_path):
+    state = ProgressState(root=tmp_path / "progress", resume=True, total=3)
+    source = tmp_path / "input.hkl"
+    source.write_text("input rows\n")
+    output = tmp_path / "run"
+    output.mkdir()
+    result = output / "result.csv"
+    result.write_text("value\n1\n")
+    log = tmp_path / "stage.log"
+    log.write_text("done\n")
+    command = ["python", "stage.py", "--hkl", str(source), "--out-dir", str(output)]
+    state.mark_completed("stage", command, 12.5, 0, log)
+    before = state.load()
+    before_record = before["completed"]["stage"]
+    before_events = list(before["events"])
+    before_done_this_session = state.done_this_session
+
+    result.write_text("value\n2\n")
+    assert not state.should_skip("stage", command)
+    assert state.refresh_output_fingerprints("stage", record_timestamp=False)
+    assert state.should_skip("stage", command)
+    assert "output_fingerprints_refreshed_at" not in state.completed_record("stage")
+
+    result.write_text("value\n3\n")
+    assert not state.should_skip("stage", command)
+    assert state.refresh_output_fingerprints("stage")
+    assert state.should_skip("stage", command)
+
+    after = state.load()
+    after_record = after["completed"]["stage"]
+    assert len(after["completed"]) == len(before["completed"]) == 1
+    assert after["events"] == before_events
+    assert state.done_this_session == before_done_this_session == 1
+    assert after_record["elapsed_seconds"] == before_record["elapsed_seconds"] == 12.5
+    assert after_record["completed_at"] == before_record["completed_at"]
+    assert after_record["command"] == before_record["command"] == command
+    assert after_record["fingerprint"] == before_record["fingerprint"]
+    assert after_record["output_paths"] == before_record["output_paths"]
+    assert after_record["output_fingerprints"] != before_record["output_fingerprints"]
+    assert after_record["output_fingerprints_refreshed_at"]
+
+
+def test_progress_output_refresh_fails_closed_for_missing_failed_or_lost_stage(tmp_path):
+    state = ProgressState(root=tmp_path / "progress", resume=True, total=1)
+    output = tmp_path / "run"
+    output.mkdir()
+    result = output / "result.csv"
+    result.write_text("value\n1\n")
+    log = tmp_path / "stage.log"
+    log.write_text("failed\n")
+    command = ["python", "stage.py", "--out-dir", str(output)]
+    state.mark_completed("failed", command, 2.0, 1, log)
+    saved = state.state_path.read_bytes()
+
+    assert not state.refresh_output_fingerprints("missing")
+    assert state.state_path.read_bytes() == saved
+    assert not state.refresh_output_fingerprints("failed")
+    assert state.state_path.read_bytes() == saved
+
+    state.mark_completed("completed", command, 3.0, 0, log)
+    result.unlink()
+    saved = state.state_path.read_bytes()
+    assert not state.refresh_output_fingerprints("completed")
+    assert state.state_path.read_bytes() == saved
+
+
 def test_progress_tracks_integrate_hkl_and_raw_image_glob(tmp_path):
     state = ProgressState(root=tmp_path / "progress", resume=True, total=1)
     hkl = tmp_path / "INTEGRATE.HKL"

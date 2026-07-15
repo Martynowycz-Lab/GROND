@@ -457,6 +457,7 @@ def test_publication_model_candidate_preserves_hash_bound_hkl_safety(tmp_path: P
     hkl = endpoint_dir / "multi_dyn_corrected.hkl"
     res.write_text("TITL endpoint\nCELL 0.025079 5 6 7 90 90 90\nSFAC C\nC1 1 0 0 0 1 0.05\nEND\n")
     lst.write_text(
+        "WGHT 0 0\n"
         "wR2 = 0.1000, GooF = S = 1.000 for all data\n"
         "R1 = 0.0500 for 1 Fo > 4sig(Fo) and 0.0800 for all 2 data\n"
         "0 atoms may be split and 0 atoms NPD\n"
@@ -499,6 +500,19 @@ def test_publication_model_candidate_preserves_hash_bound_hkl_safety(tmp_path: P
 
     assert candidate["res_provenance_ok"] is True
     assert candidate["hkl_safe_factor"] == pytest.approx(0.10)
+    assert candidate["wght_mode"] is None
+    assert candidate["pathology_status"] == "complete"
+    assert candidate["shelxl"]["pathology_status"] == "complete"
+    assert candidate["shelxl"]["active_wght_a"] == 0.0
+    assert candidate["shelxl"]["active_wght_b"] == 0.0
+    normalized = cli._normalize_publication_endpoint_block(
+        candidate,
+        selection_source="endpoint_chooser",
+    )
+    assert normalized["wght_mode"] == "freeze-zero"
+    assert normalized["pathology_status"] == "complete"
+    assert normalized["shelxl_npd_count"] == 0
+    assert normalized["shelxl_split_count"] == 0
 
     res.write_text(res.read_text() + "REM mutated\n")
     stale = cli._publication_model_endpoint_candidate(
@@ -803,6 +817,7 @@ def test_finish_prefers_endpoint_chooser_physical_endpoint(tmp_path: Path, capsy
         "0 atoms may be split and 0 atoms NPD\n"
     )
     polished_lst.write_text(
+        "WGHT 0 0\n"
         "wR2 = 0.1922, GooF = S = 0.935 for all data\n"
         "R1 = 0.0952 for 1 Fo > 4sig(Fo) and 0.1537 for all 2 data\n"
         "0 atoms may be split and 0 atoms NPD\n"
@@ -871,8 +886,6 @@ def test_finish_prefers_endpoint_chooser_physical_endpoint(tmp_path: Path, capsy
                         "artifact_provenance_ok": True,
                         "pathology_status": "complete",
                         "shelxl": {
-                            "active_wght_a": 0.0,
-                            "active_wght_b": 0.0,
                             "R1_gt": 0.0952,
                             "R1_all": 0.1537,
                             "wR2_all": 0.1922,
@@ -892,7 +905,23 @@ def test_finish_prefers_endpoint_chooser_physical_endpoint(tmp_path: Path, capsy
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["publication_endpoint"]["R1all"] == pytest.approx(0.1537)
+    assert payload["publication_endpoint"]["wght_mode"] == "freeze-zero"
+    assert payload["publication_endpoint"]["pathology_status"] == "complete"
+    assert payload["publication_endpoint"]["npd_count"] == 0
+    assert payload["publication_endpoint"]["npd_atoms"] == []
+    assert payload["publication_endpoint"]["has_npd"] is False
+    assert payload["publication_endpoint"]["has_split_warnings"] is False
+    assert payload["final_feedback_endpoint"]["pathology_status"] == "complete"
+    assert payload["final_feedback_endpoint"]["npd_count"] == 0
+    assert payload["final_feedback_endpoint"]["npd_atoms"] == []
+    assert payload["final_feedback_endpoint"]["has_npd"] is False
+    assert payload["final_feedback_endpoint"]["has_split_warnings"] is False
     assert payload["files"]["publication_res"] == str(polished_res)
+    terminal = cli._format_terminal_finish_summary(payload)
+    assert "WGHT freeze-zero" in terminal
+    assert "LST pathology `complete`; NPD `0`; split `0`" in terminal
+    assert "unverified" not in terminal
+    assert "Scale selector:  /  = n/a" not in terminal
     final_text = (run / "FINAL_SUMMARY.md").read_text()
     quick_text = (run / "QUICK_STATS.md").read_text()
     assert "endpoint_chooser" in final_text
@@ -1210,6 +1239,55 @@ def test_run_completion_summary_write_failure_does_not_persist_finished(tmp_path
 
     assert "finished" not in state.load()
     assert state.load()["invocation"]["status"] == "running"
+
+
+def test_publication_report_refreshes_fingerprint_after_parent_enrichment(
+    tmp_path: Path,
+    monkeypatch,
+):
+    out_dir = tmp_path / "workflow"
+    logs = out_dir / "logs"
+    state = ProgressState(root=out_dir, resume=True, total=1)
+    structure = tmp_path / "model.res"
+    structure.write_text(valid_shelx_res_text())
+    primary_run = tmp_path / "primary_run"
+    primary_run.mkdir()
+    prep = PrepConfig(
+        structure=str(structure),
+        datasets=[DatasetSpec(name="dataset", hkl=str(tmp_path / "INTEGRATE.HKL"))],
+    )
+    result = {
+        "model": str(structure),
+        "primary_run": str(primary_run),
+        "resolution_limits": {"dataset": {"status": "accepted", "min_d_spacing": 1.0}},
+    }
+    args = argparse.Namespace(out_dir=str(out_dir), dry_run=False)
+    captured_command: list[str] = []
+
+    def fake_run_logged(command, log_dir, label, *, dry_run=False, cwd=cli.LEGACY_ROOT):
+        del dry_run, cwd
+        captured_command[:] = command
+        table_dir = Path(command[command.index("--out-dir") + 1])
+        table_dir.mkdir(parents=True)
+        (table_dir / "publication_artifacts.json").write_text(
+            json.dumps({"summary": str(table_dir / "row_mr_metrics.json")}) + "\n"
+        )
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log = log_dir / f"{label}.log"
+        log.write_text("completed\n")
+        state.mark_completed(label, command, 1.0, 0, log)
+
+    monkeypatch.setattr(cli, "_PROGRESS", state)
+    monkeypatch.setattr(cli, "run_logged", fake_run_logged)
+
+    report = cli.run_publication_report(cli.sys.executable, prep, result, args, logs)
+
+    artifact = json.loads((out_dir / "tables" / "publication_artifacts.json").read_text())
+    record = state.completed_record("publication_row_mr_tables")
+    assert report["status"] == "ok"
+    assert artifact["resolution_limits"] == result["resolution_limits"]
+    assert record["output_fingerprints_refreshed_at"]
+    assert state.should_skip("publication_row_mr_tables", captured_command)
 
 
 def test_configured_run_invocation_clears_finished_before_fully_skipped_resume(

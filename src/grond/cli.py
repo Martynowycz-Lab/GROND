@@ -3642,7 +3642,12 @@ def run_publication_report(python: str, prep: PrepConfig, result: dict, args: ar
             artifacts["dataset_policy"] = result.get("dataset_policy")
         if result.get("publication_runs"):
             artifacts["publication_runs"] = result.get("publication_runs")
-        write_json(artifacts_path, artifacts)
+        with _RUN_LOG_LOCK:
+            write_json(artifacts_path, artifacts)
+            if _PROGRESS is not None and not _PROGRESS.refresh_output_fingerprints("publication_row_mr_tables"):
+                raise RuntimeError(
+                    "publication report was written, but its resumable output fingerprint could not be refreshed"
+                )
         return {"status": "ok", **artifacts}
     return {
         "status": "missing_artifact_summary",
@@ -3950,7 +3955,16 @@ def _publication_model_endpoint_candidate(result: Mapping[str, object]) -> dict[
         else {}
     )
     live_metrics_complete = str(live_metrics.get("metric_status") or "") == "complete"
-    details = dict(origin_shelxl)
+    origin_details = dict(origin_shelxl)
+    for key in (
+        "active_wght_a",
+        "active_wght_b",
+        "recommended_wght_a",
+        "recommended_wght_b",
+    ):
+        if origin_details.get(key) is None:
+            origin_details[key] = origin_endpoint.get(key, origin_endpoint.get(f"shelxl_{key}"))
+    details = _quick_shelxl_details(origin_details, lst) if provenance_ok else origin_details
     if live_metrics_complete:
         details.update({key: live_metrics[key] for key in ("R1_gt", "R1_all", "wR2_all", "GooF", "N_gt", "N_all")})
     promotion_fields = endpoint_promotion_field_contract(origin_endpoint)
@@ -4006,6 +4020,14 @@ def _publication_model_endpoint_candidate(result: Mapping[str, object]) -> dict[
         "restraints": details.get("restraints"),
         "npd_count": npd_count,
         "split_count": split_count,
+        "npd_atoms": npd_atoms,
+        "has_npd": has_npd,
+        "has_split_warnings": has_split,
+        "pathology_status": str(pathology.get("pathology_status") or "unverified"),
+        "active_wght_a": details.get("active_wght_a"),
+        "active_wght_b": details.get("active_wght_b"),
+        "recommended_wght_a": details.get("recommended_wght_a"),
+        "recommended_wght_b": details.get("recommended_wght_b"),
         "lst": str(lst),
     }
     source_kind = "combined_corrected_hkl" if result.get("combined") else "native_corrected_hkl"
@@ -4061,6 +4083,7 @@ def _publication_model_endpoint_candidate(result: Mapping[str, object]) -> dict[
         "promotion_fields_required": True,
         "promotion_fields_ok": promotion_fields.get("passed") is True,
         "promotion_field_contract": promotion_fields,
+        "wght_mode": origin_endpoint.get("wght_mode"),
     }
 
 
@@ -9821,11 +9844,6 @@ def _normalize_publication_endpoint_block(endpoint: Mapping[str, object], *, sel
         if run_dir:
             out["endpoint_row_table"] = str(Path(run_dir) / "promoted_observation_rows.csv")
     out["spec"] = str(endpoint.get("spec") or endpoint.get("scale_spec") or endpoint.get("source_kind") or endpoint.get("label") or "")
-    if not out.get("wght_mode"):
-        wght_a = first_number("active_wght_a")
-        wght_b = first_number("active_wght_b")
-        if safe_float(wght_a, float("nan")) == 0.0 and safe_float(wght_b, float("nan")) == 0.0:
-            out["wght_mode"] = "freeze-zero"
     out["shelxl_R1gt"] = first_number("shelxl_R1gt", "R1_gt")
     out["shelxl_R1all"] = first_number("shelxl_R1all", "R1_all")
     out["shelxl_wR2all"] = first_number("shelxl_wR2all", "wR2_all")
@@ -9954,6 +9972,11 @@ def _normalize_publication_endpoint_block(endpoint: Mapping[str, object], *, sel
         out.setdefault("shelxl_split_count", None)
         out.setdefault("shelxl_has_npd", None)
         out.setdefault("shelxl_has_split_warnings", None)
+    if not out.get("wght_mode") and provenance_ok:
+        wght_a = _quick_fraction(out.get("shelxl_active_wght_a"))
+        wght_b = _quick_fraction(out.get("shelxl_active_wght_b"))
+        if wght_a == 0.0 and wght_b == 0.0:
+            out["wght_mode"] = "freeze-zero"
     if not provenance_ok:
         out["provenance_error"] = (
             "publication endpoint RES/HKL/LST no longer match the exact paths and hashes selected by GROND; "
@@ -10432,12 +10455,13 @@ def _format_terminal_finish_summary(payload: Mapping[str, object]) -> str:
             f"  Diagnostic endpoint not promoted: {diagnostic.get('source_kind', 'n/a')} R1(F)all {_quick_percent(diagnostic.get('R1all'))}, wR2(F^2)all {_quick_percent(diagnostic.get('wR2all'))}, GooF {_quick_number(diagnostic.get('GooF'), 3)}; reason: {first_reason}"
         )
     if endpoint:
-        endpoint_lines.extend(
-            [
-                f"  Endpoint source/scales: {_quick_endpoint_scale_text(endpoint)}, WGHT {endpoint.get('wght_mode', 'n/a')}",
-                f"  Scale selector: {endpoint.get('selection_policy', 'n/a')} / {endpoint.get('information_criterion', 'n/a')} = {_quick_number(endpoint.get('information_value'), 3)}",
-            ]
+        endpoint_lines.append(
+            f"  Endpoint source/scales: {_quick_endpoint_scale_text(endpoint)}, WGHT {endpoint.get('wght_mode', 'n/a')}"
         )
+        if endpoint.get("selection_policy") or endpoint.get("information_criterion"):
+            endpoint_lines.append(
+                f"  Scale selector: {endpoint.get('selection_policy', 'n/a')} / {endpoint.get('information_criterion', 'n/a')} = {_quick_number(endpoint.get('information_value'), 3)}"
+            )
     if endpoint_warning:
         endpoint_lines.append(f"  Warning: {endpoint_warning}")
     hand_scope = str(payload.get("final_hand_t_style_scope") or payload.get("final_hand_z_scope") or "")
@@ -10652,6 +10676,9 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
             "npd_count": publication_endpoint.get("shelxl_npd_count"),
             "npd_atoms": publication_endpoint.get("shelxl_npd_atoms"),
             "split_count": publication_endpoint.get("shelxl_split_count"),
+            "has_npd": publication_endpoint.get("shelxl_has_npd"),
+            "has_split_warnings": publication_endpoint.get("shelxl_has_split_warnings"),
+            "pathology_status": publication_endpoint.get("pathology_status"),
             "active_wght_a": publication_endpoint.get("shelxl_active_wght_a"),
             "active_wght_b": publication_endpoint.get("shelxl_active_wght_b"),
             "recommended_wght_a": publication_endpoint.get("shelxl_recommended_wght_a"),
@@ -11336,8 +11363,12 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
             "GooF": _quick_fraction(final_feedback_shelxl.get("GooF")),
             "parameters": final_feedback_shelxl.get("parameters"),
             "restraints": final_feedback_shelxl.get("restraints"),
+            "pathology_status": final_feedback_shelxl.get("pathology_status", "unverified"),
             "npd_count": final_feedback_shelxl.get("npd_count"),
+            "npd_atoms": final_feedback_shelxl.get("npd_atoms", []),
             "split_count": final_feedback_shelxl.get("split_count"),
+            "has_npd": final_feedback_shelxl.get("has_npd"),
+            "has_split_warnings": final_feedback_shelxl.get("has_split_warnings"),
             "lst": final_feedback_shelxl.get("lst", file_block["final_feedback_lst"]),
         },
         "publication_endpoint": {
@@ -11350,8 +11381,15 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
             "wght_mode": selected_row.get("wght_mode") or "n/a",
             "parameters": publication_shelxl.get("parameters"),
             "restraints": publication_shelxl.get("restraints"),
+            "pathology_status": selected_row.get("pathology_status")
+            or publication_shelxl.get("pathology_status", "unverified"),
             "npd_count": publication_shelxl.get("npd_count"),
+            "npd_atoms": publication_shelxl.get("npd_atoms", []),
             "split_count": publication_shelxl.get("split_count"),
+            "has_npd": publication_shelxl.get("has_npd"),
+            "has_split_warnings": publication_shelxl.get("has_split_warnings"),
+            "active_wght_a": publication_shelxl.get("active_wght_a"),
+            "active_wght_b": publication_shelxl.get("active_wght_b"),
             "source": selected_row.get("selection_source", ""),
             "source_kind": selected_row.get("source_kind", ""),
             "selection_policy": endpoint_selection.get("selection_policy", "") if isinstance(endpoint_selection, Mapping) else "",

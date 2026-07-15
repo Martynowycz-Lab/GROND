@@ -411,6 +411,58 @@ class ProgressState:
         record = self.load().get("completed", {}).get(label, {})
         return record if isinstance(record, dict) else {}
 
+    def refresh_output_fingerprints(self, label: str, *, record_timestamp: bool = True) -> bool:
+        """Refresh saved outputs after intentional postprocessing of a completed stage.
+
+        The stage command and its input fingerprint remain immutable.  This is
+        deliberately narrower than marking the stage complete again: it does
+        not add an event, change elapsed time, or increment session counts.
+        """
+
+        payload = self.load()
+        completed = payload.get("completed", {})
+        if not isinstance(completed, dict):
+            return False
+        record = completed.get(label)
+        if not isinstance(record, dict) or record.get("returncode") != 0:
+            return False
+        output_paths = record.get("output_paths")
+        if (
+            not isinstance(output_paths, list)
+            or not output_paths
+            or not all(isinstance(value, str) and value for value in output_paths)
+        ):
+            return False
+        paths = [Path(value) for value in output_paths]
+        try:
+            log = Path(str(record.get("log", "")))
+            if not log.is_file() or log.stat().st_size == 0:
+                return False
+            if not all(path.is_file() or path.is_dir() for path in paths):
+                return False
+            refreshed = [
+                _path_fingerprint(
+                    path,
+                    self._fingerprint_cache,
+                    prefer_xds_inputs=False,
+                )
+                for path in paths
+            ]
+            if not all(_matches_recorded_output(snapshot, self._fingerprint_cache) for snapshot in refreshed):
+                return False
+        except (OSError, ValueError):
+            return False
+
+        refreshed_record = dict(record)
+        refreshed_record["output_fingerprints"] = refreshed
+        if record_timestamp:
+            refreshed_record["output_fingerprints_refreshed_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        refreshed_completed = dict(completed)
+        refreshed_completed[label] = refreshed_record
+        payload["completed"] = refreshed_completed
+        self.save(payload)
+        return True
+
     def begin_invocation(self) -> None:
         """Clear stale completion state before this invocation does any work."""
 
