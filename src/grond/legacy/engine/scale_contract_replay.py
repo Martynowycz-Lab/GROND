@@ -21,13 +21,21 @@ from pathlib import Path
 import numpy as np
 
 try:
+    from .bloch_engine import sha256
+    from .endpoint_modulation import modulation_manifest_fields
     from .native_row_regularize import (
+        classify_shelxl_iteration_rejection,
         exact_hkl_merge,
+        fail_if_shelxl_became_unavailable,
         parse_lst,
         parse_model,
         parse_recommended_wght,
         promote_recommended_wght,
+        require_endpoint_shelxl,
         safe_fixed_width_factor,
+        select_last_safe_shelxl_iteration,
+        shelx_res_health,
+        snapshot_safe_shelxl_iteration,
         write_endpoint_ins,
         write_hkl,
     )
@@ -56,13 +64,21 @@ try:
         write_rows,
     )
 except ImportError:  # pragma: no cover - direct script execution
+    from bloch_engine import sha256
+    from endpoint_modulation import modulation_manifest_fields
     from native_row_regularize import (
+        classify_shelxl_iteration_rejection,
         exact_hkl_merge,
+        fail_if_shelxl_became_unavailable,
         parse_lst,
         parse_model,
         parse_recommended_wght,
         promote_recommended_wght,
+        require_endpoint_shelxl,
         safe_fixed_width_factor,
+        select_last_safe_shelxl_iteration,
+        shelx_res_health,
+        snapshot_safe_shelxl_iteration,
         write_endpoint_ins,
         write_hkl,
     )
@@ -165,9 +181,11 @@ def active_wght_from_stats(stats: dict) -> tuple[float, float] | None:
 
 def run_shelxl_replay(work_dir: Path, stem: str, executable: str, iterations: int, wght_mode: str) -> dict:
     history = []
+    last_safe = None
+    last_stdout = ""
     n_iter = max(1, int(iterations))
     exe = executable
-    if "/" not in exe and shutil.which(exe) is None:
+    if ("/" in exe and not Path(exe).exists()) or ("/" not in exe and shutil.which(exe) is None):
         return {"returncode": None, "status": "missing_shelxl", "executable": exe}
     freeze = wght_mode.startswith("freeze-")
     zero = wght_mode.endswith("zero")
@@ -176,16 +194,40 @@ def run_shelxl_replay(work_dir: Path, stem: str, executable: str, iterations: in
     for i in range(n_iter):
         if freeze and zero:
             write_active_wght(work_dir / f"{stem}.ins", 0.0, 0.0)
-        proc = subprocess.run([exe, stem], cwd=str(work_dir), text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        (work_dir / f"shelxl_iter_{i + 1}.log").write_text(proc.stdout)
+        res = work_dir / f"{stem}.res"
         lst = work_dir / f"{stem}.lst"
+        fcf = work_dir / f"{stem}.fcf"
+        res.unlink(missing_ok=True)
+        lst.unlink(missing_ok=True)
+        fcf.unlink(missing_ok=True)
+        proc = subprocess.run([exe, stem], cwd=str(work_dir), text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        last_stdout = proc.stdout
+        (work_dir / f"shelxl_iter_{i + 1}.log").write_text(proc.stdout)
         stats = {"iteration": i + 1, "returncode": proc.returncode, **parse_lst(lst)}
         recommended_wght = parse_recommended_wght(lst)
         if recommended_wght is not None:
             stats["recommended_wght_a"] = recommended_wght[0]
             stats["recommended_wght_b"] = recommended_wght[1]
+        health = shelx_res_health(res, lst)
+        stats["res_health"] = health
+        if proc.returncode != 0:
+            stats["status"] = "shelxl_failed"
+            stats["invalid_res_reason"] = f"SHELXL returned {proc.returncode}"
+        elif not health["ok"]:
+            stats["status"] = "invalid_res_output"
+            stats["invalid_res_reason"] = health["reason"]
         history.append(stats)
-        res = work_dir / f"{stem}.res"
+        if stats.get("status") in {"shelxl_failed", "invalid_res_output"}:
+            break
+        rejection = classify_shelxl_iteration_rejection(stats)
+        if rejection is not None:
+            stats["status"], stats["invalid_res_reason"] = rejection
+            break
+        last_safe = snapshot_safe_shelxl_iteration(work_dir, stem, i + 1, stats)
+        stats["safe_snapshot_res"] = last_safe["res"]
+        stats["safe_snapshot_lst"] = last_safe["lst"]
+        stats["safe_snapshot_fcf"] = last_safe["fcf"]
+        last_safe["stats"] = dict(stats)
         ins = work_dir / f"{stem}.ins"
         if i + 1 < n_iter and res.exists():
             write_endpoint_ins(res, ins, hkl_name=f"{stem}.hkl", keep_exti=False)
@@ -198,18 +240,49 @@ def run_shelxl_replay(work_dir: Path, stem: str, executable: str, iterations: in
             else:
                 stats["next_wght"] = promote_recommended_wght(ins, recommended_wght)
     if history:
-        (work_dir / "shelxl_stdout.log").write_text((work_dir / f"shelxl_iter_{n_iter}.log").read_text(errors="replace"))
-    final = dict(history[-1]) if history else {"returncode": None, "status": "not_run"}
+        (work_dir / "shelxl_stdout.log").write_text(last_stdout)
+    final = select_last_safe_shelxl_iteration(work_dir, stem, history, last_safe)
     res = work_dir / f"{stem}.res"
-    if final.get("status") in {None, "ok"} or res.exists():
-        active = (0.0, 0.0) if zero else active_wght_from_stats(final)
-        if res.exists():
+    lst = work_dir / f"{stem}.lst"
+    final.setdefault("res_health", shelx_res_health(res, lst))
+    if final.get("returncode") not in {None, 0}:
+        final["status"] = "shelxl_failed"
+        final["invalid_res_reason"] = f"SHELXL returned {final['returncode']}"
+    elif not final["res_health"].get("ok"):
+        final["status"] = "invalid_res_output"
+        final["invalid_res_reason"] = final["res_health"].get("reason")
+    else:
+        rejection = classify_shelxl_iteration_rejection(final)
+        if rejection is not None:
+            final["status"], final["invalid_res_reason"] = rejection
+        else:
+            active = (0.0, 0.0) if zero else active_wght_from_stats(final)
             write_endpoint_ins(res, res, hkl_name=f"{stem}.hkl", keep_exti=False, wght=active)
             final["res_normalized_for_reopen"] = True
+            final["res_health"] = shelx_res_health(res, lst)
+            if not final["res_health"].get("ok"):
+                final["status"] = "invalid_res_output"
+                final["invalid_res_reason"] = final["res_health"].get("reason")
     final["iterations"] = n_iter
+    final["iterations_completed"] = len(history)
     final["iteration_history"] = history
     final["wght_mode"] = wght_mode
+    pathology = final.get("res_health") or {}
+    final["npd_count"] = int(pathology.get("npd_count", 0) or 0)
+    final["split_count"] = int(pathology.get("split_count", 0) or 0)
+    final["npd_atoms"] = pathology.get("npd_atoms", [])
+    final["has_npd"] = bool(pathology.get("has_npd", False))
+    final["has_split_warnings"] = bool(pathology.get("has_split_warnings", False))
     return final
+
+
+def require_scale_replay_shelxl(executable: str, wght_modes: list[str]) -> None:
+    """Require SHELXL only when scale replay requested endpoint branches."""
+
+    require_endpoint_shelxl(
+        executable,
+        skip_endpoint_refinement=not bool(wght_modes),
+    )
 
 
 def endpoint_from_row_table(
@@ -239,6 +312,9 @@ def endpoint_from_row_table(
     born_raw = col(rows, "born_raw")
     valid = np.isfinite(target) & np.isfinite(sig) & np.isfinite(dyn_scaled) & np.isfinite(born_raw) & (sig > 0) & (dyn_scaled > 0) & (born_raw > 0)
     correction = np.power(np.maximum(dyn_scaled / np.maximum(born_raw, 1e-30), 1e-30), float(lambda_q))
+    valid &= np.isfinite(correction) & (correction > 0.0)
+    if not np.any(valid):
+        raise ValueError("no positive finite multiplicative corrections are available for endpoint replay")
     Icorr = target / correction
     sigcorr = sig / correction
     if rescale == "median-iobs":
@@ -247,6 +323,7 @@ def endpoint_from_row_table(
         sigcorr *= factor
     else:
         factor = 1.0
+    modulation_audit = modulation_manifest_fields(float(factor) / correction, valid)
     hkls = np.column_stack([h, k, l])
     rows_unmerged = [(h[i], k[i], l[i], Icorr[i], sigcorr[i]) for i in np.where(valid)[0]]
     rows_merged = exact_hkl_merge(hkls[valid], Icorr[valid], sigcorr[valid])
@@ -277,18 +354,32 @@ def endpoint_from_row_table(
     write_hkl(out_dir / "dyn_scale_replay_unmerged.hkl", rows_unmerged, hkl_format)
     write_endpoint_ins(res_path, out_dir / "dyn_scale_replay.ins", hkl_name="dyn_scale_replay.hkl", keep_exti=False)
     shelxl_stats = run_shelxl_replay(out_dir, "dyn_scale_replay", shelxl, shelxl_iterations, wght_mode)
+    endpoint_res = out_dir / "dyn_scale_replay.res"
+    endpoint_hkl = out_dir / "dyn_scale_replay.hkl"
+    endpoint_lst = out_dir / "dyn_scale_replay.lst"
     manifest = {
         "source_run_dir": str(run_dir),
         "row_table": str(run_dir / "native_dyn_calc.csv"),
         "res": str(res_path),
         "lambda_q": float(lambda_q),
+        "endpoint_b": 0.0,
+        "keep_exti": False,
         "rescale": rescale,
         "rescale_factor": factor,
         "hkl_safe_factor": hkl_safe_factor,
+        **modulation_audit,
         "rows_unmerged": len(rows_unmerged),
         "rows_merged_exact_hkl": len(rows_merged),
         "post_bloch_sigma": post_bloch_sigma,
         "shelxl": shelxl_stats,
+        "artifacts": {
+            "res": str(endpoint_res.resolve()),
+            "res_sha256": sha256(endpoint_res) if endpoint_res.exists() else "",
+            "hkl": str(endpoint_hkl.resolve()),
+            "hkl_sha256": sha256(endpoint_hkl) if endpoint_hkl.exists() else "",
+            "lst": str(endpoint_lst.resolve()),
+            "lst_sha256": sha256(endpoint_lst) if endpoint_lst.exists() else "",
+        },
     }
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, allow_nan=True) + "\n")
     return manifest
@@ -434,6 +525,7 @@ def choose_publication_endpoint(
     selection_policy: str = "bic",
     information_criterion: str = "bic_fitted_variance",
     allow_npd: bool = False,
+    max_modulation_p95: float = 20.0,
 ) -> dict[str, object]:
     """Choose a publication endpoint from replayed scale contracts.
 
@@ -486,6 +578,7 @@ def choose_publication_endpoint(
         r1 = _finite_float(row.get("shelxl_R1all"), float("inf"))
         free_wr2 = _finite_float(row.get("native_free_wR2_all"), float("inf"))
         ic_value = _finite_float(row.get(ic_name), float("inf"))
+        modulation_p95 = _finite_float(row.get("mod_p95", row.get("modulation_p95")))
         try:
             npd_count = int(row.get("shelxl_npd_count", 0) or 0)
         except (TypeError, ValueError):
@@ -498,6 +591,12 @@ def choose_publication_endpoint(
             atoms = str(row.get("shelxl_npd_atoms", "") or "")
             atom_text = f" ({atoms})" if atoms else ""
             reasons.append(f"NPD {npd_count}{atom_text}; publication endpoints require NPD == 0")
+        if not math.isfinite(modulation_p95):
+            reasons.append("missing finite scale-invariant endpoint modulation p95")
+        elif modulation_p95 > float(max_modulation_p95):
+            reasons.append(
+                f"endpoint modulation p95 {modulation_p95:.4g} exceeds {float(max_modulation_p95):.4g}"
+            )
         if policy == "bic" and not math.isfinite(ic_value):
             reasons.append(f"missing finite information criterion {ic_name!r}")
         if policy == "gated-smallest":
@@ -521,6 +620,7 @@ def choose_publication_endpoint(
                     "shelxl_npd_count": row.get("shelxl_npd_count"),
                     "shelxl_split_count": row.get("shelxl_split_count"),
                     "shelxl_npd_atoms": row.get("shelxl_npd_atoms"),
+                    "mod_p95": row.get("mod_p95", row.get("modulation_p95")),
                     information_criterion: row.get(information_criterion),
                     "endpoint_dir": row.get("endpoint_dir"),
                 }
@@ -592,6 +692,7 @@ def choose_publication_endpoint(
             "selection_policy": policy,
             "information_criterion": ic_name,
             "allow_npd": bool(allow_npd),
+            "max_modulation_p95": float(max_modulation_p95),
         },
         "passing_count": len(passing),
         "candidate_count": len(finite),
@@ -678,8 +779,8 @@ def write_publication_report(path: Path, selection: dict[str, object], rows_out:
     lines += [
         "## Candidate Table",
         "",
-        "| spec | WGHT mode | scale params | selection IC | R1(F)all | wR2(F^2)all | GooF | NPD | split | row free wR(I)all | sigma scale | endpoint |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+        "| spec | WGHT mode | scale params | selection IC | R1(F)all | wR2(F^2)all | GooF | modulation p95 | NPD | split | row free wR(I)all | sigma scale | endpoint |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
     ic_name = str(selection.get("information_criterion") or "bic_fitted_variance")
     for row in sorted(
@@ -695,6 +796,7 @@ def write_publication_report(path: Path, selection: dict[str, object], rows_out:
             f"{_finite_float(row.get(ic_name)):.3f} | "
             f"{_percent_or_blank(row.get('shelxl_R1all'))} | {_percent_or_blank(row.get('shelxl_wR2all'))} | "
             f"{_finite_float(row.get('shelxl_GooF')):.3f} | "
+            f"{_finite_float(row.get('mod_p95')):.4g} | "
             f"{row.get('shelxl_npd_count', '')} | {row.get('shelxl_split_count', '')} | "
             f"{_percent_or_blank(row.get('native_free_wR2_all'))} | "
             f"{_finite_float(row.get('sigma_scale')):.4g} | `{row.get('endpoint_dir')}` |"
@@ -736,6 +838,7 @@ def main() -> None:
     ap.add_argument("--publication-goof-max", type=float, default=1.15)
     ap.add_argument("--publication-max-r1-cost", type=float, default=0.010)
     ap.add_argument("--publication-free-wr2-tolerance", type=float, default=0.040)
+    ap.add_argument("--publication-max-modulation-p95", type=float, default=20.0)
     ap.add_argument("--publication-prefer-wght-mode", default="freeze-zero")
     ap.add_argument("--publication-allow-npd", action=argparse.BooleanOptionalAction, default=False, help="Explicit diagnostic override allowing NPD pathology in the selected endpoint. Default requires NPD == 0; split warnings are reported but do not block selection.")
     ap.add_argument(
@@ -776,6 +879,7 @@ def main() -> None:
     detector_base = infer_detector_base(col(rows, "detector_bin").astype(int))
     native_wght_a, native_wght_b = native_weight_from_summary(summary, args.native_wght_a, args.native_wght_b)
     wght_modes = [m.strip() for m in str(args.wght_modes).split(",") if m.strip()]
+    require_scale_replay_shelxl(args.shelxl, wght_modes)
     rows_out = []
     for spec in specs:
         spec_dir = out / re.sub(r"[^A-Za-z0-9_.-]+", "_", str(spec["name"]))
@@ -818,6 +922,10 @@ def main() -> None:
                 shelxl_iterations=args.shelxl_iterations,
                 wght_mode=wght_mode,
             )
+            fail_if_shelxl_became_unavailable(
+                [manifest],
+                context="scale-contract endpoint replay",
+            )
             sh = manifest.get("shelxl") or {}
             sig = manifest.get("post_bloch_sigma") or {}
             rows_out.append({
@@ -858,9 +966,14 @@ def main() -> None:
                 "shelxl_npd_atoms": ",".join(str(atom) for atom in (sh.get("npd_atoms") or [])),
                 "shelxl_has_npd": sh.get("has_npd", False),
                 "shelxl_has_split_warnings": sh.get("has_split_warnings", False),
+                "endpoint_b": manifest.get("endpoint_b"),
+                "keep_exti": manifest.get("keep_exti"),
                 "sigma_scale": sig.get("sigma_scale", ""),
                 "heldout_rms_z_after": sig.get("heldout_rms_z_after", ""),
                 "hkl_safe_factor": manifest.get("hkl_safe_factor", ""),
+                "mod_p95": manifest.get("mod_p95", ""),
+                "modulation_metric": manifest.get("modulation_metric", ""),
+                "modulation_status": (manifest.get("modulation_audit") or {}).get("status", ""),
                 "endpoint_dir": str(endpoint_dir),
                 "endpoint_res": str(endpoint_dir / "dyn_scale_replay.res"),
                 "endpoint_ins": str(endpoint_dir / "dyn_scale_replay.ins"),
@@ -868,6 +981,9 @@ def main() -> None:
                 "endpoint_lst": str(endpoint_dir / "dyn_scale_replay.lst"),
                 "endpoint_manifest": str(endpoint_dir / "manifest.json"),
                 "endpoint_row_table": str(spec_dir / "native_dyn_calc.csv"),
+                "endpoint_res_sha256": ((manifest.get("artifacts") or {}).get("res_sha256", "")),
+                "endpoint_hkl_sha256": ((manifest.get("artifacts") or {}).get("hkl_sha256", "")),
+                "endpoint_lst_sha256": ((manifest.get("artifacts") or {}).get("lst_sha256", "")),
             })
     fieldnames = list(rows_out[0].keys()) if rows_out else []
     write_rows(out / "scale_contract_endpoint_replay.csv", rows_out, fieldnames)
@@ -882,6 +998,7 @@ def main() -> None:
         selection_policy=str(args.publication_selection_policy),
         information_criterion=str(args.publication_information_criterion),
         allow_npd=bool(args.publication_allow_npd),
+        max_modulation_p95=float(args.publication_max_modulation_p95),
     )
     summary_out = {
         "rows": rows_out,

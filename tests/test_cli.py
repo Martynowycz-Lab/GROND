@@ -24,6 +24,7 @@ from grond.cli import (
     transform_scout_job_count,
 )
 from grond.io.config import DatasetSpec, PrepConfig, write_prep
+from grond.progress import ProgressState
 
 EXPECTED_CLI_COMMANDS = {
     "auto",
@@ -52,6 +53,54 @@ EXPECTED_CLI_COMMANDS = {
     "validate",
     "validate-ls1",
 }
+
+
+def valid_shelx_res_text(title: str = "ok") -> str:
+    """Return a minimal model that is structurally usable by the Bloch parser."""
+
+    return (
+        f"TITL {title}\n"
+        "CELL 0.02508 5.0 6.0 7.0 90 90 90\n"
+        "SFAC C 1 0 1 0 1 0 1 0\n"
+        "FVAR 1\n"
+        "C1 1 0.10 0.20 0.30 11.0 0.05\n"
+        "HKLF 4\n"
+        "END\n"
+    )
+
+
+def bound_shelx_health(path: Path, **updates) -> dict:
+    """Return a path/hash-bound health record for feedback-resume tests."""
+
+    from grond.legacy.engine.native_row_regularize import shelx_res_health
+
+    lst = path.with_suffix(".lst")
+    if not lst.exists():
+        lst.write_text("0 atoms may be split and 0 atoms NPD\n")
+    health = shelx_res_health(path, lst)
+    health.update(updates)
+    return health
+
+
+def combined_endpoint_summary(path: Path, *, status: str = "ok", **health_updates) -> dict:
+    """Return a current-format combined endpoint summary bound to ``path``."""
+
+    health = bound_shelx_health(path, **health_updates)
+    return {
+        "combined_endpoint": {
+            "lambda_q": "1.0",
+            "mod_p95": 1.0,
+            "modulation_metric": "scale_invariant_symmetric_fold_change_p95",
+            "artifacts": {
+                "res": str(path),
+                "res_sha256": health.get("sha256", ""),
+            },
+            "shelxl": {
+                "status": status,
+                "res_health": health,
+            },
+        }
+    }
 
 
 def test_run_logged_writes_concise_failure_artifact(tmp_path: Path, monkeypatch, capsys):
@@ -144,6 +193,8 @@ def test_thickness_scout_parser_exposes_contract_diagnostic_defaults():
     assert args.n_basis_grid == "24,48"
     assert args.n_points == 10
     assert args.thickness_grid_nm == "50,75,110,150,180,220,260,300"
+    assert args.gradient_grid == "0.0,0.4,0.8,1.0"
+    assert args.gradient_max == 1.0
     assert args.scale_modes == "production,no-detector"
     assert args.feature_modes == "bare,final-diagnostic"
     assert args.local_confirmation is True
@@ -247,7 +298,28 @@ def test_publication_endpoint_chooser_includes_calibrated_replay(tmp_path: Path)
     endpoint_lst = endpoint / "dyn_scale_replay.lst"
     endpoint_res.write_text("TITL calibrated\nEND\n")
     endpoint_hkl.write_text("   0   0   0    0.00    0.00\n")
-    endpoint_lst.write_text("R1 = 0.05 for 1 Fo > 4sig(Fo) and 0.11 for all 2 data\n")
+    endpoint_lst.write_text(
+        "wR2 = 0.1115, GooF = S = 0.906 for all data\n"
+        "R1 = 0.05 for 1 Fo > 4sig(Fo) and 0.1105 for all 2 data\n"
+        "0 atoms may be split and 0 atoms NPD\n"
+    )
+    endpoint_manifest = endpoint / "manifest.json"
+    endpoint_manifest.write_text(
+        json.dumps(
+            {
+                "mod_p95": 1.2,
+                "modulation_metric": "scale_invariant_symmetric_fold_change_p95",
+                "endpoint_b": 0.0,
+                "keep_exti": False,
+                "artifacts": {
+                    "res_sha256": cli.sha256_file(endpoint_res),
+                    "hkl_sha256": cli.sha256_file(endpoint_hkl),
+                    "lst_sha256": cli.sha256_file(endpoint_lst),
+                },
+            }
+        )
+        + "\n"
+    )
     result = {
         "primary_run": str(native_run),
         "endpoint_calibration": {
@@ -258,17 +330,23 @@ def test_publication_endpoint_chooser_includes_calibrated_replay(tmp_path: Path)
                     "spec": "adaptive_80_det_8",
                     "wght_mode": "freeze-zero",
                     "scale_params": 144,
-                    "shelxl_R1gt": 0.061,
-                    "shelxl_R1all": 0.118,
-                    "shelxl_wR2all": 0.127,
-                    "shelxl_GooF": 0.91,
+                    "shelxl_R1gt": 0.05,
+                    "shelxl_R1all": 0.1105,
+                    "shelxl_wR2all": 0.1115,
+                    "shelxl_GooF": 0.906,
+                    "shelxl_Ngt": 1,
+                    "shelxl_Nall": 2,
                     "shelxl_npd_count": 0,
                     "shelxl_split_count": 0,
                     "hkl_safe_factor": 1.0,
+                    "mod_p95": 1.2,
+                    "endpoint_b": 0.0,
+                    "keep_exti": False,
                     "endpoint_dir": str(endpoint),
                     "endpoint_res": str(endpoint_res),
                     "endpoint_hkl": str(endpoint_hkl),
                     "endpoint_lst": str(endpoint_lst),
+                    "endpoint_manifest": str(endpoint_manifest),
                 }
             },
         },
@@ -289,8 +367,10 @@ def test_publication_endpoint_chooser_includes_calibrated_replay(tmp_path: Path)
 
     assert choice["status"] == "ok"
     assert choice["best_physical_endpoint"]["source_kind"] == "endpoint_calibration"
-    assert choice["best_physical_endpoint"]["R1_all"] == pytest.approx(0.118)
+    assert choice["best_physical_endpoint"]["R1_all"] == pytest.approx(0.1105)
     assert choice["best_physical_endpoint"]["res"] == str(endpoint_res)
+    assert choice["best_physical_endpoint"]["modulation_p95"] == pytest.approx(1.2)
+    assert choice["best_physical_endpoint"]["res_sha256"] == cli.sha256_file(endpoint_res)
 
 
 def test_publication_endpoint_chooser_treats_combined_calibration_as_combined(tmp_path: Path):
@@ -336,8 +416,12 @@ def test_publication_endpoint_chooser_treats_combined_calibration_as_combined(tm
 
     choice = cli.run_publication_endpoint_chooser(prep, result, args)
 
-    assert choice["status"] == "ok"
-    assert choice["best_physical_endpoint"]["source_kind"] == "combined_endpoint_calibration"
+    assert choice["status"] == "diagnostic_only"
+    assert choice["best_physical_endpoint"] == {}
+    diagnostic = choice["best_diagnostic_endpoint"]
+    assert diagnostic["source_kind"] == "combined_endpoint_calibration"
+    assert diagnostic["combined_baseline_gate"]["status"] == "failed_baseline_unavailable"
+    assert diagnostic["combined_baseline_gate"]["passed"] is False
     assert choice["best_single_dataset_physical_endpoint"] == {}
 
 
@@ -360,6 +444,82 @@ def test_publication_endpoint_chooser_rejects_unpassed_or_unsafe_calibration(tmp
 
     assert cli._endpoint_calibration_chooser_candidate(failed) == {}
     assert cli._endpoint_calibration_chooser_candidate(passed_without_safety)["hkl_safe_factor"] == 0.0
+
+
+def test_publication_model_candidate_preserves_hash_bound_hkl_safety(tmp_path: Path):
+    import hashlib
+
+    combined = tmp_path / "cycle" / "combined"
+    endpoint_dir = combined / "combined_endpoint_lam_1p0"
+    endpoint_dir.mkdir(parents=True)
+    res = endpoint_dir / "multi_dyn_corrected.res"
+    lst = endpoint_dir / "multi_dyn_corrected.lst"
+    hkl = endpoint_dir / "multi_dyn_corrected.hkl"
+    res.write_text("TITL endpoint\nCELL 0.025079 5 6 7 90 90 90\nSFAC C\nC1 1 0 0 0 1 0.05\nEND\n")
+    lst.write_text(
+        "WGHT 0 0\n"
+        "wR2 = 0.1000, GooF = S = 1.000 for all data\n"
+        "R1 = 0.0500 for 1 Fo > 4sig(Fo) and 0.0800 for all 2 data\n"
+        "0 atoms may be split and 0 atoms NPD\n"
+    )
+    hkl.write_text("0 0 0 0 0\n")
+    digest = hashlib.sha256(res.read_bytes()).hexdigest()
+    hkl_digest = hashlib.sha256(hkl.read_bytes()).hexdigest()
+    lst_digest = hashlib.sha256(lst.read_bytes()).hexdigest()
+    (combined / "combined_summary.json").write_text(
+        json.dumps(
+            {
+                "combined_endpoint": {
+                    "hkl_safe_factor": 0.10,
+                    "endpoint_b": 0.0,
+                    "keep_exti": False,
+                    "artifacts": {
+                        "res": str(res),
+                        "res_sha256": digest,
+                        "hkl": str(hkl),
+                        "hkl_sha256": hkl_digest,
+                        "lst": str(lst),
+                        "lst_sha256": lst_digest,
+                    },
+                    "shelxl": {
+                        "R1_gt": 0.05,
+                        "R1_all": 0.08,
+                        "wR2_all": 0.10,
+                        "GooF": 1.0,
+                        "lst": str(lst),
+                        "res_health": {"path": str(res), "sha256": digest, "lst": str(lst)},
+                    },
+                }
+            }
+        )
+    )
+
+    candidate = cli._publication_model_endpoint_candidate(
+        {"combined": str(combined), "model": str(res)}
+    )
+
+    assert candidate["res_provenance_ok"] is True
+    assert candidate["hkl_safe_factor"] == pytest.approx(0.10)
+    assert candidate["wght_mode"] is None
+    assert candidate["pathology_status"] == "complete"
+    assert candidate["shelxl"]["pathology_status"] == "complete"
+    assert candidate["shelxl"]["active_wght_a"] == 0.0
+    assert candidate["shelxl"]["active_wght_b"] == 0.0
+    normalized = cli._normalize_publication_endpoint_block(
+        candidate,
+        selection_source="endpoint_chooser",
+    )
+    assert normalized["wght_mode"] == "freeze-zero"
+    assert normalized["pathology_status"] == "complete"
+    assert normalized["shelxl_npd_count"] == 0
+    assert normalized["shelxl_split_count"] == 0
+
+    res.write_text(res.read_text() + "REM mutated\n")
+    stale = cli._publication_model_endpoint_candidate(
+        {"combined": str(combined), "model": str(res)}
+    )
+    assert stale["res_provenance_ok"] is False
+    assert stale["hkl_safe_factor"] == 0.0
 
 
 def test_finish_native_maps_use_publication_runs_for_combined_endpoint(tmp_path: Path):
@@ -388,8 +548,98 @@ def test_finish_native_maps_use_publication_runs_for_combined_endpoint(tmp_path:
     assert row_tables == [
         ("a", run_a / "native_dyn_calc.csv"),
         ("b", run_b / "native_dyn_calc.csv"),
-        ("c", run_c / "native_dyn_calc.csv"),
     ]
+
+
+def test_finish_native_model_is_hash_bound_to_frozen_rows_not_endpoint(tmp_path: Path):
+    import hashlib
+
+    row_model = tmp_path / "row_model.res"
+    endpoint_model = tmp_path / "endpoint_model.res"
+    row_model.write_text("TITL row model\n")
+    endpoint_model.write_text("TITL endpoint model\n")
+    run_a = tmp_path / "weighted" / "a"
+    run_b = tmp_path / "weighted" / "b"
+    for run in (run_a, run_b):
+        run.mkdir(parents=True)
+        (run / "native_dyn_calc.csv").write_text("h,k,l\n")
+        (run / "summary.json").write_text(
+            json.dumps(
+                {
+                    "inputs": {
+                        "res": str(row_model),
+                        "res_sha256": hashlib.sha256(row_model.read_bytes()).hexdigest(),
+                    }
+                }
+            )
+        )
+    result = {
+        "combined": str(tmp_path / "combined"),
+        "model": str(row_model),
+        "publication_runs": {"a": str(run_a), "b": str(run_b)},
+        "publication_endpoint_chooser": {
+            "status": "ok",
+            "best_physical_endpoint": {
+                "source_kind": "combined_corrected_hkl",
+                "res": str(endpoint_model),
+            },
+        },
+    }
+    row_tables = cli._finish_native_row_tables(result)
+
+    selected, contract = cli._finish_native_model_contract(
+        result,
+        argparse.Namespace(model=""),
+        row_tables,
+    )
+
+    assert selected == row_model.resolve()
+    assert selected != endpoint_model
+    assert contract["status"] == "hash_bound_row_model"
+    assert len(contract["row_models"]) == 2
+
+
+def test_finish_native_model_rejects_mutated_row_model(tmp_path: Path):
+    row_model = tmp_path / "row_model.res"
+    row_model.write_text("TITL changed row model\n")
+    run = tmp_path / "weighted" / "a"
+    run.mkdir(parents=True)
+    row_table = run / "native_dyn_calc.csv"
+    row_table.write_text("h,k,l\n")
+    (run / "summary.json").write_text(
+        json.dumps({"inputs": {"res": str(row_model), "res_sha256": "0" * 64}})
+    )
+
+    with pytest.raises(RuntimeError, match="row model hash changed"):
+        cli._finish_native_model_contract(
+            {"model": str(row_model)},
+            argparse.Namespace(model=""),
+            [("a", row_table)],
+        )
+
+
+def test_finish_native_model_rejects_mixed_provenance(tmp_path: Path):
+    import hashlib
+
+    row_model = tmp_path / "row_model.res"
+    row_model.write_text("TITL row model\n")
+    digest = hashlib.sha256(row_model.read_bytes()).hexdigest()
+    row_tables = []
+    for label in ("verified", "legacy"):
+        run = tmp_path / label
+        run.mkdir()
+        table = run / "native_dyn_calc.csv"
+        table.write_text("h,k,l\n")
+        payload = {"inputs": {"res": str(row_model), "res_sha256": digest}} if label == "verified" else {}
+        (run / "summary.json").write_text(json.dumps(payload))
+        row_tables.append((label, table))
+
+    with pytest.raises(RuntimeError, match="mixed verified/unverified"):
+        cli._finish_native_model_contract(
+            {"model": str(row_model)},
+            argparse.Namespace(model=""),
+            row_tables,
+        )
 
 
 def test_finish_regenerates_compact_package(tmp_path: Path, capsys):
@@ -425,7 +675,30 @@ def test_finish_regenerates_compact_package(tmp_path: Path, capsys):
     endpoint_lst = endpoint / "dyn_scale_replay.lst"
     endpoint_res.write_text("TITL endpoint\nCELL 0.025079 5 6 7 90 90 90\nEND\n")
     endpoint_hkl.write_text("   0   0   0    0.00    0.00\n")
-    endpoint_lst.write_text("R1 = 0.05 for 1 Fo > 4sig(Fo) and 0.11 for all 2 data\n")
+    endpoint_lst.write_text(
+        "wR2 = 0.1115, GooF = S = 0.906 for all data\n"
+        "R1 = 0.05 for 1 Fo > 4sig(Fo) and 0.1105 for all 2 data\n"
+        "0 atoms may be split and 0 atoms NPD\n"
+    )
+    (endpoint / "manifest.json").write_text(
+        json.dumps(
+            {
+                "hkl_safe_factor": 1.0,
+                "mod_p95": 1.2,
+                "endpoint_b": 0.0,
+                "keep_exti": False,
+                "artifacts": {
+                    "res": str(endpoint_res),
+                    "res_sha256": cli.sha256_file(endpoint_res),
+                    "hkl": str(endpoint_hkl),
+                    "hkl_sha256": cli.sha256_file(endpoint_hkl),
+                    "lst": str(endpoint_lst),
+                    "lst_sha256": cli.sha256_file(endpoint_lst),
+                },
+            }
+        )
+        + "\n"
+    )
     (run / "decisions" / "dataset" / "decision_tree.json").write_text(
         json.dumps(
             {
@@ -455,13 +728,23 @@ def test_finish_regenerates_compact_package(tmp_path: Path, capsys):
                             "spec": "window_1.5deg_det_8",
                             "wght_mode": "freeze-zero",
                             "scale_params": 137,
+                            "shelxl_R1gt": 0.05,
                             "shelxl_R1all": 0.1105,
                             "shelxl_wR2all": 0.1115,
                             "shelxl_GooF": 0.906,
+                            "shelxl_Ngt": 1,
+                            "shelxl_Nall": 2,
                             "native_free_wR2_all": 0.1508,
+                            "hkl_safe_factor": 1.0,
+                            "mod_p95": 1.2,
+                            "endpoint_b": 0.0,
+                            "keep_exti": False,
                             "endpoint_res": str(endpoint_res),
                             "endpoint_hkl": str(endpoint_hkl),
                             "endpoint_lst": str(endpoint_lst),
+                            "endpoint_res_sha256": cli.sha256_file(endpoint_res),
+                            "endpoint_hkl_sha256": cli.sha256_file(endpoint_hkl),
+                            "endpoint_lst_sha256": cli.sha256_file(endpoint_lst),
                             "endpoint_manifest": str(endpoint / "manifest.json"),
                             "endpoint_row_table": str(endpoint.parent / "native_dyn_calc.csv"),
                         }
@@ -470,12 +753,32 @@ def test_finish_regenerates_compact_package(tmp_path: Path, capsys):
             }
         )
     )
+    (run / "grond_progress.json").write_text(
+        json.dumps(
+            {
+                "completed": {},
+                "finished": {
+                    "status": "ok",
+                    "snapshot_kind": "completed_invocation",
+                    "invocation_elapsed_seconds": 300.0,
+                    "completed_stages": 0,
+                    "failed_stages": 0,
+                    "estimated_stages": 0,
+                    "cumulative_stage_elapsed_seconds": 0.0,
+                    "stage_elapsed_seconds": 0.0,
+                },
+            }
+        )
+        + "\n"
+    )
 
     args = build_parser().parse_args(["finish", "--run-dir", str(run), "--no-make-maps", "--json"])
     cli.cmd_finish(args)
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["status"] == "ok"
+    assert payload["timing_context"]["kind"] == "finish_replay"
+    assert payload["finished"]["invocation_elapsed_seconds"] == 300.0
     assert payload["publication_endpoint"]["R1all"] == pytest.approx(0.1105)
     assert (run / "FINAL_SUMMARY.md").exists()
     assert (run / "QUICK_STATS.md").exists()
@@ -508,8 +811,17 @@ def test_finish_prefers_endpoint_chooser_physical_endpoint(tmp_path: Path, capsy
         res.write_text("TITL endpoint\nCELL 0.025079 5 6 7 90 90 90\nEND\n")
     for hkl in (calibration_hkl, polished_hkl):
         hkl.write_text("   0   0   0    0.00    0.00\n")
-    for lst in (calibration_lst, polished_lst):
-        lst.write_text("R1 = 0.05 for 1 Fo > 4sig(Fo) and 0.11 for all 2 data\n")
+    calibration_lst.write_text(
+        "wR2 = 0.2726, GooF = S = 1.073 for all data\n"
+        "R1 = 0.08 for 1 Fo > 4sig(Fo) and 0.1843 for all 2 data\n"
+        "0 atoms may be split and 0 atoms NPD\n"
+    )
+    polished_lst.write_text(
+        "WGHT 0 0\n"
+        "wR2 = 0.1922, GooF = S = 0.935 for all data\n"
+        "R1 = 0.0952 for 1 Fo > 4sig(Fo) and 0.1537 for all 2 data\n"
+        "0 atoms may be split and 0 atoms NPD\n"
+    )
     (run / "decisions" / "dataset" / "decision_tree.json").write_text(
         json.dumps(
             {
@@ -563,16 +875,23 @@ def test_finish_prefers_endpoint_chooser_physical_endpoint(tmp_path: Path, capsy
                         "R1_all": 0.1537,
                         "wR2_all": 0.1922,
                         "GooF": 0.935,
+                        "N_gt": 1,
+                        "N_all": 2,
                         "hkl": str(polished_hkl),
                         "lst": str(polished_lst),
                         "res": str(polished_res),
+                        "res_sha256": cli.sha256_file(polished_res),
+                        "hkl_sha256": cli.sha256_file(polished_hkl),
+                        "lst_sha256": cli.sha256_file(polished_lst),
+                        "artifact_provenance_ok": True,
+                        "pathology_status": "complete",
                         "shelxl": {
-                            "active_wght_a": 0.0,
-                            "active_wght_b": 0.0,
                             "R1_gt": 0.0952,
                             "R1_all": 0.1537,
                             "wR2_all": 0.1922,
                             "GooF": 0.935,
+                            "N_gt": 1,
+                            "N_all": 2,
                             "lst": str(polished_lst),
                         },
                     },
@@ -586,7 +905,23 @@ def test_finish_prefers_endpoint_chooser_physical_endpoint(tmp_path: Path, capsy
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["publication_endpoint"]["R1all"] == pytest.approx(0.1537)
+    assert payload["publication_endpoint"]["wght_mode"] == "freeze-zero"
+    assert payload["publication_endpoint"]["pathology_status"] == "complete"
+    assert payload["publication_endpoint"]["npd_count"] == 0
+    assert payload["publication_endpoint"]["npd_atoms"] == []
+    assert payload["publication_endpoint"]["has_npd"] is False
+    assert payload["publication_endpoint"]["has_split_warnings"] is False
+    assert payload["final_feedback_endpoint"]["pathology_status"] == "complete"
+    assert payload["final_feedback_endpoint"]["npd_count"] == 0
+    assert payload["final_feedback_endpoint"]["npd_atoms"] == []
+    assert payload["final_feedback_endpoint"]["has_npd"] is False
+    assert payload["final_feedback_endpoint"]["has_split_warnings"] is False
     assert payload["files"]["publication_res"] == str(polished_res)
+    terminal = cli._format_terminal_finish_summary(payload)
+    assert "WGHT freeze-zero" in terminal
+    assert "LST pathology `complete`; NPD `0`; split `0`" in terminal
+    assert "unverified" not in terminal
+    assert "Scale selector:  /  = n/a" not in terminal
     final_text = (run / "FINAL_SUMMARY.md").read_text()
     quick_text = (run / "QUICK_STATS.md").read_text()
     assert "endpoint_chooser" in final_text
@@ -673,10 +1008,23 @@ def test_terminal_finish_summary_is_human_readable():
         "final_summary": "/tmp/grond/FINAL_SUMMARY.md",
         "quick_stats": "/tmp/grond/QUICK_STATS.md",
         "full_json": "/tmp/grond/grond_summary.json",
-        "finished": {"completed_stages": 25, "estimated_stages": 30, "stage_elapsed_seconds": 822},
+        "finished": {
+            "completed_stages": 25,
+            "completed_this_invocation": 20,
+            "reused_completed_stages": 5,
+            "estimated_stages": 30,
+            "invocation_elapsed_seconds": 300,
+            "cumulative_stage_elapsed_seconds": 822,
+            "stage_elapsed_seconds": 822,
+        },
         "final_hand": "alternate",
-        "final_hand_z_all": 1.505,
-        "final_hand_z_free": 0.876,
+        "final_hand_t_style_all": 1.505,
+        "final_hand_t_style_all_n": 40,
+        "final_hand_t_style_all_df": 39,
+        "final_hand_t_style_free": 0.876,
+        "final_hand_t_style_free_n": 10,
+        "final_hand_t_style_free_df": 9,
+        "final_hand_t_style_scope": "single_dataset",
         "selected_transform": "identity",
         "input_shelxl": {
             "R1gt": 0.1382,
@@ -722,9 +1070,18 @@ def test_terminal_finish_summary_is_human_readable():
 
     text = cli._format_terminal_finish_summary(payload)
 
-    assert "GROND finished successfully in 13m42s." in text
-    assert "Progress: 25 stages completed; initial estimate was 30." in text
-    assert "Hand: alternate (Z all/free = 1.505 / 0.876" in text
+    assert "GROND finished successfully in 5m00s wall time for this invocation." in text
+    assert "successfully in 13m42s" not in text
+    assert (
+        "Progress: 25 stages completed; initial estimate was 30; 20 ran in this invocation; "
+        "5 reused from prior invocations." in text
+    )
+    assert "Timing: cumulative completed-stage runtime 13m42s." in text
+    assert "concurrent stages overlap" in text
+    assert "not workflow wall time" in text
+    assert "Hand: alternate (paired t-style all/free = t 1.505 (n 40, df 39) / t 0.876 (n 10, df 9)" in text
+    assert "not a calibrated normal Z score" in text
+    assert "normal-equivalent confidence" not in text
     assert "Starting SHELXL reference" in text
     assert "R1(F)gt 13.82%, R1(F)all 17.14%, wR2(F^2)all 38.45%, GooF 1.406" in text
     assert "Input dynamical rows: R(I)all 22.13%, wR(I)all 43.41%" in text
@@ -734,6 +1091,241 @@ def test_terminal_finish_summary_is_human_readable():
     assert "Change: R(I)all -0.83 pp, wR(I)all -10.31 pp" in text
     assert "Direct LS1 corrected-HKL candidate: R1(F)gt 11.00%, R1(F)all 16.00%, wR2(F^2)all 22.00%, GooF 0.950" in text
     assert "Publication endpoint: R1(F)gt 14.46%, R1(F)all 17.85%, wR2(F^2)all 25.72%, GooF 1.036" in text
+
+
+def test_terminal_finish_summary_does_not_treat_legacy_stage_sum_as_wall_time():
+    text = cli._format_terminal_finish_summary(
+        {
+            "status": "ok",
+            "out_dir": "/tmp/legacy",
+            "finished": {
+                "completed_stages": 4,
+                "estimated_stages": 4,
+                "stage_elapsed_seconds": 600,
+            },
+        }
+    )
+
+    assert "GROND finished successfully." in text
+    assert "GROND finished successfully in 10m00s" not in text
+    assert "Timing: cumulative completed-stage runtime 10m00s." in text
+    assert "not workflow wall time" in text
+
+
+def test_terminal_finish_summary_labels_recorded_workflow_timing_for_finish():
+    text = cli._format_terminal_finish_summary(
+        {
+            "status": "ok",
+            "out_dir": "/tmp/grond",
+            "finished": {
+                "completed_stages": 25,
+                "estimated_stages": 25,
+                "invocation_elapsed_seconds": 300,
+                "cumulative_stage_elapsed_seconds": 822,
+            },
+            "timing_context": {
+                "kind": "finish_replay",
+                "finish_invocation_elapsed_seconds": 2,
+            },
+        }
+    )
+
+    assert "GROND finish completed successfully in 0m02s wall time." in text
+    assert "recorded workflow wall time 5m00s" in text
+    assert "wall time for this invocation" not in text
+    assert "cumulative completed-stage runtime 13m42s" in text
+
+
+def test_quick_progress_info_keeps_saved_metadata_but_recomputes_counts_and_stage_sum(tmp_path: Path):
+    (tmp_path / "grond_progress.json").write_text(
+        json.dumps(
+            {
+                "completed": {
+                    "old": {"returncode": 0, "elapsed_seconds": 40.0},
+                    "new": {"returncode": 0, "elapsed_seconds": 30.0},
+                    "failed": {"returncode": 1, "elapsed_seconds": 99.0},
+                },
+                "finished": {
+                    "status": "ok",
+                    "snapshot_kind": "completed_invocation",
+                    "invocation_elapsed_seconds": 20.0,
+                    "completed_stages": 1,
+                    "completed_this_invocation": 1,
+                    "reused_completed_stages": 0,
+                    "failed_stages": 0,
+                    "cumulative_stage_elapsed_seconds": 40.0,
+                    "stage_elapsed_seconds": 40.0,
+                },
+            }
+        )
+        + "\n"
+    )
+
+    info = cli._quick_progress_finish_info(tmp_path)
+
+    assert info["status"] == "ok"
+    assert info["snapshot_kind"] == "completed_invocation"
+    assert info["invocation_elapsed_seconds"] == 20.0
+    assert info["completed_stages"] == 2
+    assert info["completed_this_invocation"] == 1
+    assert info["reused_completed_stages"] == 1
+    assert info["failed_stages"] == 1
+    assert info["cumulative_stage_elapsed_seconds"] == 70.0
+    assert info["stage_elapsed_seconds"] == 70.0
+    assert info["cumulative_stage_elapsed"] == "1m10s"
+    assert info["stage_elapsed"] == "1m10s"
+
+
+def test_dry_run_finalization_does_not_require_materialized_row_statistics(tmp_path: Path, monkeypatch):
+    prep = PrepConfig(
+        structure=str(tmp_path / "model.res"),
+        datasets=[DatasetSpec(name="dataset", hkl=str(tmp_path / "INTEGRATE.HKL"))],
+    )
+    args = argparse.Namespace(out_dir=str(tmp_path / "dry_run"), dry_run=True)
+
+    def unexpected_quick_stats(*_args, **_kwargs):
+        raise AssertionError("dry-run finalization must not inspect materialized row tables")
+
+    monkeypatch.setattr(cli, "write_quick_stats", unexpected_quick_stats)
+
+    quick = cli._finalize_quick_stats(prep, {}, args)
+    text = cli._format_terminal_finish_summary(
+        {"status": "dry_run", "out_dir": str(tmp_path / "dry_run"), "quick_stats": quick}
+    )
+
+    assert quick["status"] == "dry_run"
+    assert "No endpoint or row-level statistics were materialized" in quick["note"]
+    assert "GROND dry run completed successfully" in text
+    assert "no scientific stages ran" in text
+
+
+def test_run_completion_report_failure_does_not_persist_finished(tmp_path: Path, monkeypatch):
+    out_dir = tmp_path / "run"
+    state = ProgressState(root=out_dir, resume=True, total=0)
+    state.begin_invocation()
+    prep = PrepConfig(
+        structure=str(tmp_path / "model.res"),
+        datasets=[DatasetSpec(name="dataset", hkl=str(tmp_path / "INTEGRATE.HKL"))],
+    )
+    args = argparse.Namespace(out_dir=str(out_dir), dry_run=False)
+
+    def fail_quick_stats(*_args, **_kwargs):
+        raise RuntimeError("quick stats failed")
+
+    monkeypatch.setattr(cli, "_finalize_quick_stats", fail_quick_stats)
+
+    with pytest.raises(RuntimeError, match="quick stats failed"):
+        cli._write_run_completion_artifacts(prep, {}, args)
+
+    assert "finished" not in state.load()
+    assert not (out_dir / "grond_summary.json").exists()
+
+
+def test_run_completion_summary_write_failure_does_not_persist_finished(tmp_path: Path, monkeypatch):
+    out_dir = tmp_path / "run"
+    out_dir.mkdir()
+    (out_dir / "grond_summary.json").mkdir()
+    state = ProgressState(root=out_dir, resume=True, total=0)
+    state.begin_invocation()
+    prep = PrepConfig(
+        structure=str(tmp_path / "model.res"),
+        datasets=[DatasetSpec(name="dataset", hkl=str(tmp_path / "INTEGRATE.HKL"))],
+    )
+    args = argparse.Namespace(out_dir=str(out_dir), dry_run=False)
+    monkeypatch.setattr(cli, "_finalize_quick_stats", lambda *_args, **_kwargs: {"status": "ok"})
+
+    with pytest.raises(IsADirectoryError):
+        cli._write_run_completion_artifacts(prep, {}, args)
+
+    assert "finished" not in state.load()
+    assert state.load()["invocation"]["status"] == "running"
+
+
+def test_publication_report_refreshes_fingerprint_after_parent_enrichment(
+    tmp_path: Path,
+    monkeypatch,
+):
+    out_dir = tmp_path / "workflow"
+    logs = out_dir / "logs"
+    state = ProgressState(root=out_dir, resume=True, total=1)
+    structure = tmp_path / "model.res"
+    structure.write_text(valid_shelx_res_text())
+    primary_run = tmp_path / "primary_run"
+    primary_run.mkdir()
+    prep = PrepConfig(
+        structure=str(structure),
+        datasets=[DatasetSpec(name="dataset", hkl=str(tmp_path / "INTEGRATE.HKL"))],
+    )
+    result = {
+        "model": str(structure),
+        "primary_run": str(primary_run),
+        "resolution_limits": {"dataset": {"status": "accepted", "min_d_spacing": 1.0}},
+    }
+    args = argparse.Namespace(out_dir=str(out_dir), dry_run=False)
+    captured_command: list[str] = []
+
+    def fake_run_logged(command, log_dir, label, *, dry_run=False, cwd=cli.LEGACY_ROOT):
+        del dry_run, cwd
+        captured_command[:] = command
+        table_dir = Path(command[command.index("--out-dir") + 1])
+        table_dir.mkdir(parents=True)
+        (table_dir / "publication_artifacts.json").write_text(
+            json.dumps({"summary": str(table_dir / "row_mr_metrics.json")}) + "\n"
+        )
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log = log_dir / f"{label}.log"
+        log.write_text("completed\n")
+        state.mark_completed(label, command, 1.0, 0, log)
+
+    monkeypatch.setattr(cli, "_PROGRESS", state)
+    monkeypatch.setattr(cli, "run_logged", fake_run_logged)
+
+    report = cli.run_publication_report(cli.sys.executable, prep, result, args, logs)
+
+    artifact = json.loads((out_dir / "tables" / "publication_artifacts.json").read_text())
+    record = state.completed_record("publication_row_mr_tables")
+    assert report["status"] == "ok"
+    assert artifact["resolution_limits"] == result["resolution_limits"]
+    assert record["output_fingerprints_refreshed_at"]
+    assert state.should_skip("publication_row_mr_tables", captured_command)
+
+
+def test_configured_run_invocation_clears_finished_before_fully_skipped_resume(
+    tmp_path: Path,
+    monkeypatch,
+):
+    out_dir = tmp_path / "run"
+    prior = ProgressState(root=out_dir, resume=True, total=0)
+    prior.mark_finished("ok")
+    assert prior.load()["finished"]["status"] == "ok"
+    monkeypatch.setattr(cli, "_PROGRESS", None)
+
+    cli.configure_progress(
+        out_dir / "logs",
+        resume=True,
+        total=0,
+        begin_invocation=True,
+    )
+
+    assert cli._PROGRESS is not None
+    payload = cli._PROGRESS.load()
+    assert "finished" not in payload
+    assert payload["invocation"]["status"] == "running"
+
+
+def test_generic_progress_configuration_preserves_finished_without_run_lifecycle(
+    tmp_path: Path,
+    monkeypatch,
+):
+    out_dir = tmp_path / "standalone"
+    prior = ProgressState(root=out_dir, resume=True, total=0)
+    prior.mark_finished("ok")
+    monkeypatch.setattr(cli, "_PROGRESS", None)
+
+    cli.configure_progress(out_dir / "logs", resume=True, total=1)
+
+    assert cli._PROGRESS is not None
+    assert cli._PROGRESS.load()["finished"]["status"] == "ok"
 
 
 def test_q_field_stability_compares_shared_signed_rows(tmp_path: Path):
@@ -832,6 +1424,8 @@ def test_auto_parser_hides_lambda_controls(capsys):
             "2.5",
             "--hand-min-z-free",
             "1.0",
+            "--hand-min-free-rows",
+            "12",
         ]
     )
     assert gated_hand_args.hand_max_wR2_all == 0.4
@@ -839,6 +1433,7 @@ def test_auto_parser_hides_lambda_controls(capsys):
     assert gated_hand_args.hand_min_free_wR2_gain == 0.01
     assert gated_hand_args.hand_min_z_all == 2.5
     assert gated_hand_args.hand_min_z_free == 1.0
+    assert gated_hand_args.hand_min_free_rows == 12
     assert args.structure_n_basis == 24
     assert args.scale_polish_frame_models == "adaptive,fixed"
     assert args.scale_polish_adaptive_counts == "auto"
@@ -984,12 +1579,509 @@ def test_effective_thickness_text_reports_mean_and_support():
     assert text == "120.00 nm mean (1200.0 A); uniform-gradient support 0.00-240.00 nm"
 
 
+def test_multi_thickness_text_and_table_keep_dataset_contracts_separate():
+    contracts = [
+        {
+            "dataset": "a",
+            "scale_count": 17,
+            "native_weight": {"a": 0.0, "b": 0.0},
+            "nuisance": {
+                "thickness_A": 1200.0,
+                "thickness_model": "uniform_gradient",
+                "thickness_grad_frac": 0.5,
+                "frame_offset": 0.0,
+                "group_width_deg": 1.0,
+                "detector_scale_bins": 8,
+                "absorption_mode": "none",
+                "absorption_frac": 0.0,
+                "sg_jitter_mode": "none",
+                "row_resolution_b": 0.0,
+                "native_wght_a": 0.0,
+                "native_wght_b": 0.0,
+            },
+        },
+        {
+            "dataset": "b",
+            "scale_count": 23,
+            "native_weight": {"a": 0.1, "b": 0.2},
+            "nuisance": {
+                "thickness_A": 600.0,
+                "thickness_model": "uniform_gradient",
+                "thickness_grad_frac": 1.0,
+                "frame_offset": 0.25,
+                "group_width_deg": 0.5,
+                "detector_scale_bins": 4,
+                "absorption_mode": "midgley_like",
+                "absorption_frac": 0.02,
+                "sg_jitter_mode": "none",
+                "row_resolution_b": 0.1,
+                "native_wght_a": 0.1,
+                "native_wght_b": 0.2,
+            },
+        },
+    ]
+
+    text = cli._quick_thickness_text({}, {"thickness_A_mean": 900.0}, contracts)
+    table = "\n".join(cli._quick_dataset_nuisance_table_lines(contracts))
+
+    assert "a 120.00 nm (uniform_gradient, g=0.500)" in text
+    assert "b 60.00 nm (uniform_gradient, g=1.000)" in text
+    assert "center range 60.00-120.00 nm" in text
+    assert "90.00-90.00 nm" not in text
+    assert "120.00 nm; support 60.00-180.00 nm" in table
+    assert "60.00 nm; support 0.00-120.00 nm" in table
+
+
+def test_multi_endpoint_calibration_auto_skips_unsafe_single_table_replay(tmp_path: Path):
+    run_a = tmp_path / "a"
+    run_b = tmp_path / "b"
+    for run in (run_a, run_b):
+        run.mkdir()
+        (run / "native_dyn_calc.csv").write_text("h,k,l\n1,0,0\n")
+    combined = tmp_path / "combined"
+    combined.mkdir()
+    prep = PrepConfig(
+        structure=str(tmp_path / "model.res"),
+        datasets=[DatasetSpec(name="a", hkl="a.hkl"), DatasetSpec(name="b", hkl="b.hkl")],
+    )
+    result = {
+        "combined": str(combined),
+        "combined_input_runs": {"a": str(run_a), "b": str(run_b)},
+    }
+    args = argparse.Namespace(endpoint_calibration="auto", fast=False, dry_run=False, out_dir=str(tmp_path))
+
+    status = cli.run_endpoint_calibration(prep, result, args, "python", tmp_path / "logs")
+
+    assert status["status"] == "not_applicable_multi_dataset"
+    assert status["row_tables"] == {
+        "a": str(run_a / "native_dyn_calc.csv"),
+        "b": str(run_b / "native_dyn_calc.csv"),
+    }
+    assert status["row_tables_exist"] == {"a": True, "b": True}
+    assert "single-table" in status["reason"]
+
+
+def test_multi_endpoint_calibration_forced_on_fails_closed(tmp_path: Path):
+    prep = PrepConfig(
+        structure=str(tmp_path / "model.res"),
+        datasets=[DatasetSpec(name="a", hkl="a.hkl"), DatasetSpec(name="b", hkl="b.hkl")],
+    )
+    result = {"combined": str(tmp_path / "combined")}
+    args = argparse.Namespace(endpoint_calibration="on", fast=False, dry_run=False, out_dir=str(tmp_path))
+
+    with pytest.raises(RuntimeError, match="not supported for multi-dataset"):
+        cli.run_endpoint_calibration(prep, result, args, "python", tmp_path / "logs")
+
+
+def test_continuous_nuisance_is_materialized_on_full_row_contract(tmp_path: Path, monkeypatch):
+    selected = {
+        "thickness_A": 875.0,
+        "thickness_grad_frac": 0.8,
+        "thickness_model": "uniform_gradient",
+        "frame_offset": 0.0,
+        "group_width_deg": 1.0,
+        "detector_scale_bins": 8,
+        "row_resolution_b": 0.0,
+        "sg_jitter_mode": "none",
+        "sg_jitter_sigma0": 0.0,
+        "sg_jitter_sigma_d_inv": 0.0,
+        "sg_jitter_sigma_frame": 0.0,
+        "absorption_mode": "none",
+        "absorption_mu": 0.0,
+        "absorption_frac": 0.0,
+        "dose_b_mode": "none",
+        "dose_b_per_frame": 0.0,
+        "dose_b_ref_frame": float("nan"),
+        "matrix_convention": "j_minus_i",
+    }
+    continuous = tmp_path / "continuous"
+    continuous.mkdir()
+    baseline = tmp_path / "baseline"
+    baseline.mkdir()
+    baseline_nuisance = {**selected, "thickness_A": 900.0}
+
+    def summary(nuisance, *, all_wr2, free_wr2, all_r1):
+        return {
+            "best_native": {
+                "nuisance": nuisance,
+                "metrics": {
+                    "all": {
+                        "dyn": {"wR2_all": all_wr2, "R1_all": all_r1, "R1_gt": all_r1, "CC": 0.9},
+                        "born": {"R1_gt": 0.2, "CC": 0.9},
+                    },
+                    "free": {"dyn": {"wR2_all": free_wr2, "n": 10}},
+                },
+            }
+        }
+
+    (baseline / "summary.json").write_text(
+        json.dumps(summary(baseline_nuisance, all_wr2=0.12, free_wr2=0.13, all_r1=0.13)) + "\n"
+    )
+    captured = {}
+
+    def fake_native_stage_cmd(_python, _ds, _structure, _baseline, out_dir, _args, **kwargs):
+        captured["out_dir"] = out_dir
+        captured["pinned"] = dict(kwargs["pinned"])
+        out_dir.mkdir(parents=True)
+        (out_dir / "native_dyn_calc.csv").write_text("h,k,l\n1,0,0\n")
+        (out_dir / "summary.json").write_text(
+            json.dumps(summary(selected, all_wr2=0.10, free_wr2=0.11, all_r1=0.12)) + "\n"
+        )
+        return ["fake-native"]
+
+    monkeypatch.setattr(cli, "native_stage_cmd", fake_native_stage_cmd)
+    monkeypatch.setattr(cli, "run_logged", lambda *_args, **_kwargs: None)
+    prep = PrepConfig(structure=str(tmp_path / "model.res"), datasets=[DatasetSpec(name="a", hkl="a.hkl")])
+    ds = prep.datasets[0]
+    args = argparse.Namespace(
+        dry_run=False,
+        continuous_thickness_min_gain=5e-5,
+        continuous_thickness_max_free_wr2_loss=0.002,
+        continuous_thickness_max_all_r1_loss=0.001,
+    )
+
+    nuisance, run, record = cli.materialize_continuous_nuisance_run(
+        prep,
+        ds,
+        args,
+        "python",
+        tmp_path / "logs",
+        active_model=prep.structure,
+        baseline_run=baseline,
+        continuous_run=continuous,
+        selected_nuisance=selected,
+        n_basis=40,
+        n_points=10,
+        stage="continuous_materialized",
+    )
+
+    assert captured["pinned"] == selected
+    assert run == continuous / "materialized_full_rows"
+    assert (run / "native_dyn_calc.csv").exists()
+    assert nuisance["thickness_A"] == 875.0
+    assert record["nuisance_contract_verified"] is True
+    assert record["status"] == "accepted_full_row"
+    assert record["full_row_score_gain"] > 0.0
+
+
+@pytest.mark.parametrize(
+    ("expected", "actual", "matches"),
+    [
+        (float("nan"), float("nan"), True),
+        ("nan", float("nan"), True),
+        (float("nan"), 0.0, False),
+        (0.0, float("nan"), False),
+        (float("inf"), float("inf"), False),
+        ("not-a-number", "not-a-number", False),
+        (1204.5805095106, 1204.580510, True),
+        (1204.5805095106, 1204.6, False),
+    ],
+)
+def test_numeric_nuisance_contract_handles_nan_only_as_matching_na(
+    expected: object,
+    actual: object,
+    matches: bool,
+) -> None:
+    assert cli.numeric_nuisance_contract_matches(expected, actual) is matches
+
+
+def test_discrete_thickness_baseline_fails_closed_but_has_dry_run_plan_seed():
+    with pytest.raises(RuntimeError, match="no starting nuisance"):
+        cli.discrete_thickness_baseline_nuisance(argparse.Namespace(dry_run=False), {})
+
+    assert cli.discrete_thickness_baseline_nuisance(argparse.Namespace(dry_run=True), {}) == {
+        "thickness_A": 1200.0,
+        "thickness_grad_frac": 0.0,
+        "frame_offset": 0.0,
+    }
+
+
+def test_continuous_full_row_gate_restores_coarse_baseline_on_regression(tmp_path: Path, monkeypatch):
+    baseline = tmp_path / "coarse"
+    continuous = tmp_path / "continuous"
+    baseline.mkdir()
+    continuous.mkdir()
+    baseline_nuisance = {
+        "thickness_A": 1200.0,
+        "thickness_grad_frac": 0.4,
+        "thickness_model": "uniform_gradient",
+        "frame_offset": 0.0,
+        "group_width_deg": 1.0,
+        "detector_scale_bins": 0,
+        "matrix_convention": "j_minus_i",
+    }
+    selected = {**baseline_nuisance, "thickness_A": 700.0, "thickness_grad_frac": 1.0}
+
+    def payload(nuisance, all_wr2, free_wr2, all_r1):
+        return {
+            "best_native": {
+                "nuisance": nuisance,
+                "metrics": {
+                    "all": {
+                        "dyn": {"wR2_all": all_wr2, "R1_all": all_r1, "R1_gt": all_r1, "CC": 0.9},
+                        "born": {"R1_gt": 0.2, "CC": 0.9},
+                    },
+                    "free": {"dyn": {"wR2_all": free_wr2, "n": 10}},
+                },
+            }
+        }
+
+    (baseline / "summary.json").write_text(json.dumps(payload(baseline_nuisance, 0.10, 0.11, 0.12)) + "\n")
+
+    def fake_native_stage_cmd(_python, _ds, _structure, _baseline, out_dir, _args, **_kwargs):
+        out_dir.mkdir(parents=True)
+        (out_dir / "native_dyn_calc.csv").write_text("h,k,l\n1,0,0\n")
+        (out_dir / "summary.json").write_text(json.dumps(payload(selected, 0.11, 0.13, 0.13)) + "\n")
+        return ["fake-native"]
+
+    monkeypatch.setattr(cli, "native_stage_cmd", fake_native_stage_cmd)
+    monkeypatch.setattr(cli, "run_logged", lambda *_args, **_kwargs: None)
+    prep = PrepConfig(structure=str(tmp_path / "model.res"), datasets=[DatasetSpec(name="a", hkl="a.hkl")])
+    args = argparse.Namespace(
+        dry_run=False,
+        continuous_thickness_min_gain=5e-5,
+        continuous_thickness_max_free_wr2_loss=0.002,
+        continuous_thickness_max_all_r1_loss=0.001,
+    )
+
+    nuisance, run, record = cli.materialize_continuous_nuisance_run(
+        prep,
+        prep.datasets[0],
+        args,
+        "python",
+        tmp_path / "logs",
+        active_model=prep.structure,
+        baseline_run=baseline,
+        continuous_run=continuous,
+        selected_nuisance=selected,
+        n_basis=40,
+        n_points=10,
+        stage="continuous_materialized",
+    )
+
+    assert run == baseline
+    assert nuisance["thickness_A"] == 1200.0
+    assert record["status"] == "rejected_full_row"
+    assert "full_row_gain_below_minimum" in record["promotion_reasons"]
+    assert "full_row_free_wR2_loss" in record["promotion_reasons"]
+
+
+def test_continuous_full_row_gate_requires_heldout_rows(tmp_path: Path):
+    baseline = tmp_path / "baseline"
+    continuous = tmp_path / "continuous"
+    baseline.mkdir()
+    continuous.mkdir()
+    nuisance = {
+        "thickness_A": 900.0,
+        "thickness_grad_frac": 0.5,
+        "thickness_model": "uniform_gradient",
+    }
+
+    def payload(*, all_wr2: float, free_wr2: float, free_n: int) -> dict:
+        return {
+            "best_native": {
+                "nuisance": nuisance,
+                "metrics": {
+                    "all": {
+                        "dyn": {"wR2_all": all_wr2, "R1_all": 0.10, "R1_gt": 0.08, "CC": 0.9},
+                        "born": {"R1_gt": 0.2, "CC": 0.9},
+                    },
+                    "free": {"dyn": {"wR2_all": free_wr2, "n": free_n}},
+                },
+            }
+        }
+
+    (baseline / "summary.json").write_text(json.dumps(payload(all_wr2=0.12, free_wr2=0.13, free_n=10)))
+    (continuous / "summary.json").write_text(json.dumps(payload(all_wr2=0.08, free_wr2=0.09, free_n=0)))
+    (continuous / "native_dyn_calc.csv").write_text("h,k,l\n1,0,0\n")
+    prep = PrepConfig(structure=str(tmp_path / "model.res"), datasets=[DatasetSpec(name="a", hkl="a.hkl")])
+    args = argparse.Namespace(
+        dry_run=False,
+        continuous_thickness_min_gain=5e-5,
+        continuous_thickness_max_free_wr2_loss=0.002,
+        continuous_thickness_max_all_r1_loss=0.001,
+    )
+
+    _selected, selected_run, record = cli.materialize_continuous_nuisance_run(
+        prep,
+        prep.datasets[0],
+        args,
+        "python",
+        tmp_path / "logs",
+        active_model=prep.structure,
+        baseline_run=baseline,
+        continuous_run=continuous,
+        selected_nuisance=nuisance,
+        n_basis=40,
+        n_points=10,
+        stage="continuous_materialized",
+    )
+
+    assert selected_run == baseline
+    assert record["candidate_free_rows"] == 0
+    assert "candidate_missing_positive_free_rows" in record["promotion_reasons"]
+
+
+def test_missing_materialized_policy_stops_instead_of_falling_back():
+    with pytest.raises(RuntimeError, match="refusing to silently fall back"):
+        cli.require_materialized_dataset_policy(
+            {"status": "missing_row_table", "missing": ["a/native_dyn_calc.csv"]},
+            context="structure-update",
+            dry_run=False,
+        )
+
+    cli.require_materialized_dataset_policy(
+        {"status": "missing_row_table", "missing": ["planned/native_dyn_calc.csv"]},
+        context="structure-update",
+        dry_run=True,
+    )
+
+
+def test_evaluated_dataset_policy_never_resurrects_excluded_runs(tmp_path: Path):
+    runs = {"a": tmp_path / "a", "b": tmp_path / "b"}
+    policy = {
+        "status": "ok",
+        "datasets": [
+            {"name": "a", "action": "exclude"},
+            {"name": "b", "action": "completeness_only"},
+        ],
+    }
+
+    active = cli.policy_active_runs(runs, policy)
+
+    assert active == {}
+    with pytest.raises(RuntimeError, match="no primary or downweighted dataset"):
+        cli.require_policy_active_runs(active, context="test")
+
+
+def test_dataset_policy_returns_only_raw_row_anchor_runs(tmp_path: Path):
+    runs = {"a": tmp_path / "a", "b": tmp_path / "b", "c": tmp_path / "c"}
+    policy = {
+        "status": "ok",
+        "datasets": [
+            {"name": "a", "action": "primary"},
+            {"name": "b", "action": "downweight"},
+            {"name": "c", "action": "completeness_only"},
+        ],
+    }
+
+    active = cli.policy_active_runs(runs, policy)
+
+    assert active == {"a": runs["a"], "b": runs["b"]}
+    cli.require_policy_active_runs(active, context="test")
+
+
+def test_selected_feedback_endpoint_uses_one_hash_bound_cycle(tmp_path: Path):
+    cycle = tmp_path / "cycle_02" / "combined"
+    endpoint = cycle / "combined_endpoint_lam_1p0"
+    endpoint.mkdir(parents=True)
+    model = endpoint / "multi_dyn_corrected.res"
+    model.write_text("TITL clean\nEND\n")
+    lst = model.with_suffix(".lst")
+    lst.write_text(
+        "wR2 = 0.0874, GooF = S = 0.980 for all data\n"
+        "R1 = 0.0731 for 813 Fo > 4sig(Fo) and 0.1752 for all 1917 data\n"
+        "     0  atoms may be split and     0  atoms NPD\n"
+    )
+    digest = cli.sha256_file(model)
+    (cycle / "combined_summary.json").write_text(
+        json.dumps(
+            {
+                "combined_endpoint": {
+                    "shelxl": {
+                        "R1_gt": 0.0741,
+                        "R1_all": 0.1773,
+                        "wR2_all": 0.0738,
+                        "GooF": 0.99,
+                        "res_health": {"path": str(model), "sha256": digest},
+                    },
+                    "artifacts": {"res": str(model), "res_sha256": digest},
+                }
+            }
+        )
+        + "\n"
+    )
+    result = {
+        "model": str(model),
+        "structure_feedback": {
+            "current_model": str(model),
+            "cycles": [
+                {
+                    "cycle": 2,
+                    "output_model": str(model),
+                    "combined": str(cycle),
+                    "adopted_for_feedback": True,
+                }
+            ],
+        },
+    }
+
+    details = cli._quick_selected_feedback_shelxl(
+        result,
+        model,
+        {"R1_gt": 0.01, "R1_all": 0.02, "wR2_all": 0.03, "npd_count": 2},
+    )
+
+    assert details["R1_gt"] == pytest.approx(0.0741)
+    assert details["R1_all"] == pytest.approx(0.1773)
+    assert details["wR2_all"] == pytest.approx(0.0738)
+    assert details["GooF"] == pytest.approx(0.990)
+    assert details["npd_count"] == 0
+    assert details["split_count"] == 0
+
+
+def test_partial_lst_cannot_erase_recorded_npd_pathology(tmp_path: Path):
+    lst = tmp_path / "partial.lst"
+    lst.write_text(
+        "wR2 = 0.0874, GooF = S = 0.980 for all data\n"
+        "R1 = 0.0731 for 813 Fo > 4sig(Fo) and 0.1752 for all 1917 data\n"
+    )
+
+    details = cli._quick_shelxl_details(
+        {"npd_count": 2, "npd_atoms": ["C6", "C7"], "has_npd": True, "split_count": 0},
+        lst,
+    )
+
+    assert details["R1_all"] == pytest.approx(0.1752)
+    assert details["npd_count"] == 2
+    assert details["npd_atoms"] == ["C6", "C7"]
+    assert details["has_npd"] is True
+
+
+def test_zero_pathology_summary_cannot_erase_recorded_npd_or_split_warnings(tmp_path: Path):
+    lst = tmp_path / "replacement.lst"
+    lst.write_text(
+        "wR2 = 0.0500, GooF = S = 1.000 for all data\n"
+        "R1 = 0.0400 for 100 Fo > 4sig(Fo) and 0.0600 for all 200 data\n"
+        "     0  atoms may be split and     0  atoms NPD\n"
+    )
+    recorded = {
+        "R1_all": 0.20,
+        "wR2_all": 0.25,
+        "npd_count": 2,
+        "npd_atoms": ["C6", "C7"],
+        "split_count": 1,
+        "has_npd": True,
+        "has_split_warnings": True,
+    }
+
+    details = cli._quick_shelxl_details(recorded, lst)
+
+    assert details["R1_all"] == pytest.approx(0.20)
+    assert details["wR2_all"] == pytest.approx(0.25)
+    assert details["npd_count"] == 2
+    assert details["npd_atoms"] == ["C6", "C7"]
+    assert details["split_count"] == 1
+    assert details["has_npd"] is True
+    assert details["has_split_warnings"] is True
+
+
 def test_post_feedback_hand_diagnostic_gate_requires_signed_support():
-    args = argparse.Namespace(hand_min_z_all=2.0, hand_min_z_free=0.5)
+    args = argparse.Namespace(hand_min_z_all=2.0, hand_min_z_free=0.5, hand_min_free_rows=10)
     ok, reasons = cli.hand_diagnostic_supports_other(
         {
-            "all": {"paired_row_t_delta_chi2": -2.4},
-            "free": {"paired_row_t_delta_chi2": -0.8},
+            "all": {"n": 100, "paired_row_t_delta_chi2": -2.4},
+            "free": {"n": 10, "paired_row_t_delta_chi2": -0.8},
         },
         args,
     )
@@ -998,13 +2090,23 @@ def test_post_feedback_hand_diagnostic_gate_requires_signed_support():
 
     weak, weak_reasons = cli.hand_diagnostic_supports_other(
         {
-            "all": {"paired_row_t_delta_chi2": -0.1},
-            "free": {"paired_row_t_delta_chi2": 0.2},
+            "all": {"n": 100, "paired_row_t_delta_chi2": -0.1},
+            "free": {"n": 10, "paired_row_t_delta_chi2": 0.2},
         },
         args,
     )
     assert weak is False
-    assert "all-row hand Z/t" in weak_reasons[0]
+    assert "all-row paired t-style statistic" in weak_reasons[0]
+
+    too_few, too_few_reasons = cli.hand_diagnostic_supports_other(
+        {
+            "all": {"n": 100, "paired_row_t_delta_chi2": -4.0},
+            "free": {"n": 9, "paired_row_t_delta_chi2": -2.0},
+        },
+        args,
+    )
+    assert too_few is False
+    assert any("below the minimum 10" in reason for reason in too_few_reasons)
 
 
 def test_utility_commands_parse():
@@ -1869,7 +2971,7 @@ def test_write_quick_stats_summarizes_row_and_endpoint_tables(tmp_path):
                     "nuisance": {
                         "thickness_A": 1100.0,
                         "thickness_model": "uniform_gradient",
-                        "thickness_grad_frac": 1.2,
+                        "thickness_grad_frac": 1.0,
                         "frame_offset": 0.2,
                         "absorption_mode": "midgley_like",
                         "absorption_frac": 0.0,
@@ -1958,7 +3060,22 @@ def test_write_quick_stats_summarizes_row_and_endpoint_tables(tmp_path):
                             "/new/GROND/src/grond/legacy/engine/native_row_regularize.py",
                         ],
                     },
-                }
+                    "failed": {
+                        "returncode": 1,
+                        "elapsed_seconds": 99.0,
+                        "log": str(out_dir / "logs" / "failed.log"),
+                        "command": ["false"],
+                    },
+                },
+                "finished": {
+                    "status": "ok",
+                    "invocation_elapsed_seconds": 1.25,
+                    "cumulative_stage_elapsed_seconds": 3.0,
+                    "stage_elapsed_seconds": 3.0,
+                    "completed_stages": 2,
+                    "failed_stages": 1,
+                    "estimated_stages": 2,
+                },
             }
         )
         + "\n"
@@ -2006,14 +3123,21 @@ def test_write_quick_stats_summarizes_row_and_endpoint_tables(tmp_path):
     assert "Resume Warning" in text
     assert "mixed-code resume" in text
     assert "Stage Timings" in text
-    assert "Total completed stage wall time: `0m03s`" in text
-    assert "Input Contract, Hand, And Z Diagnostics" in text
+    assert "Recorded workflow wall time: `0m01s`" in text
+    assert "Cumulative completed-stage runtime: `0m03s`" in text
+    assert "Total completed stage wall time" not in text
+    assert "not workflow wall time" in text
+    assert "Input Contract, Hand, And Paired T-Style Diagnostics" in text
     assert "SFAC / endpoint wavelength check | status `ok`; endpoint wavelength `0.025079` A" in text
     assert "selected HKL transform | `identity`" in text
     assert "final hand | `alternate`; post-feedback status `promoted`" in text
-    assert "final hand Z, all/work/free | `5.000` / `4.000` / `3.000`" in text
+    assert (
+        "final hand paired t-style, all/work/free | `t 5.000 (n 4, df 3)` / "
+        "`t 4.000 (n 2, df 1)` / `t 3.000 (n 2, df 1)`" in text
+    )
+    assert "not a calibrated normal Z score" in text
     assert "free-row I residual Z | n `2`; RMSZ `1.581`" in text
-    assert "thickness | `1100.0 A`; model `uniform_gradient`; gradient `1.200`" in text
+    assert "thickness | `110.00 nm mean (1100.0 A); uniform-gradient support 0.00-220.00 nm`" in text
     assert "Master Comparison Matrix" in text
     assert "raw signed rows (I), Bloch dynamical" in text
     assert "merged SHELXL endpoint (F/F^2)" in text
@@ -2033,6 +3157,13 @@ def test_write_quick_stats_summarizes_row_and_endpoint_tables(tmp_path):
     assert "q = Idyn/Iborn" in bloch_text
     assert "Bloch matrix and row-contract diagnostics" in (out_dir / "FINAL_SUMMARY.md").read_text()
     assert info["console"]["files"]["bloch_diagnostics"] == str(bloch_diagnostics)
+    assert info["console"]["final_hand_t_style_all"] == pytest.approx(5.0)
+    assert info["console"]["final_hand_t_style_all_n"] == 4
+    assert info["console"]["final_hand_t_style_all_df"] == 3
+    assert info["console"]["final_hand_t_style_free"] == pytest.approx(3.0)
+    assert info["console"]["final_hand_t_style_free_n"] == 2
+    assert info["console"]["final_hand_t_style_free_df"] == 1
+    assert "legacy field names only" in info["console"]["final_hand_z_compatibility_note"]
 
 
 def test_row_validate_reports_bad_portable_rows_without_traceback(tmp_path: Path, capsys):
@@ -2142,14 +3273,20 @@ def test_shelxl_feedback_current_model_skips_empty_res(tmp_path: Path):
     bad_res = bad_run / "endpoint_lam_1p0_B_0p0_noexti" / "dyn_nuisance_corrected.res"
     good_res.parent.mkdir(parents=True)
     bad_res.parent.mkdir(parents=True)
-    good_res.write_text("TITL ok\nCELL 0.02508 5.0 6.0 7.0 90 90 90\nSFAC C\nEND\n")
+    good_res.write_text(valid_shelx_res_text())
     bad_res.write_text("")
     (run_root / "shelxl_feedback_loop_summary.json").write_text(
         json.dumps(
             {
-                "current_model": str(bad_res),
-                "runs": [
-                    {"run_dir": str(good_run), "returncode": 0, "output_model": str(good_res)},
+                    "current_model": str(bad_res),
+                    "runs": [
+                        {
+                            "run_dir": str(good_run),
+                            "returncode": 0,
+                            "output_model": str(good_res),
+                            "endpoint_shelxl_status": "ok",
+                            "endpoint_res_health": bound_shelx_health(good_res),
+                        },
                     {
                         "run_dir": str(bad_run),
                         "returncode": 3,
@@ -2174,26 +3311,33 @@ def test_shelxl_feedback_current_model_skips_npd_res(tmp_path: Path):
     npd_res = npd_run / "endpoint_lam_1p0_B_0p0_noexti" / "dyn_nuisance_corrected.res"
     good_res.parent.mkdir(parents=True)
     npd_res.parent.mkdir(parents=True)
-    good_res.write_text("TITL ok\nCELL 0.02508 5.0 6.0 7.0 90 90 90\nSFAC C\nEND\n")
-    npd_res.write_text("TITL npd\nCELL 0.02508 5.0 6.0 7.0 90 90 90\nSFAC C\nEND\n")
+    good_res.write_text(valid_shelx_res_text())
+    npd_res.write_text(valid_shelx_res_text("npd"))
     (run_root / "shelxl_feedback_loop_summary.json").write_text(
         json.dumps(
             {
-                "current_model": str(npd_res),
-                "runs": [
-                    {"run_dir": str(good_run), "returncode": 0, "output_model": str(good_res), "endpoint_res_health": {"ok": True, "safe_for_feedback": True}},
-                    {
-                        "run_dir": str(npd_run),
-                        "returncode": 0,
-                        "output_model": str(npd_res),
-                        "endpoint_res_health": {
-                            "ok": True,
-                            "reason": "ok",
-                            "safe_for_feedback": False,
-                            "npd_count": 1,
-                            "split_count": 0,
-                            "npd_atoms": ["O001"],
+                    "current_model": str(npd_res),
+                    "runs": [
+                        {
+                            "run_dir": str(good_run),
+                            "returncode": 0,
+                            "output_model": str(good_res),
+                            "endpoint_shelxl_status": "ok",
+                            "endpoint_res_health": bound_shelx_health(good_res),
                         },
+                        {
+                            "run_dir": str(npd_run),
+                            "returncode": 0,
+                            "output_model": str(npd_res),
+                            "endpoint_shelxl_status": "adp_pathology",
+                            "endpoint_res_health": bound_shelx_health(
+                                npd_res,
+                                safe_for_feedback=False,
+                                npd_count=1,
+                                split_count=0,
+                                npd_atoms=["O001"],
+                                has_npd=True,
+                            ),
                     },
                 ],
             }
@@ -2205,6 +3349,256 @@ def test_shelxl_feedback_current_model_skips_npd_res(tmp_path: Path):
     assert cli.shelxl_feedback_current_run(run_root) == good_run
 
 
+def test_shelxl_feedback_record_rejects_model_replaced_after_summary(tmp_path: Path):
+    model = tmp_path / "endpoint.res"
+    model.write_text(valid_shelx_res_text("recorded"))
+    record = {
+        "output_model": str(model),
+        "endpoint_shelxl_status": "ok",
+        "endpoint_res_health": bound_shelx_health(model),
+    }
+    assert cli.shelxl_feedback_record_safe_for_reuse(record) is True
+
+    model.write_text(valid_shelx_res_text("replaced"))
+
+    assert cli.shelxl_feedback_record_safe_for_reuse(record) is False
+
+
+def test_multi_combined_endpoint_model_binds_current_lambda_and_artifact(tmp_path: Path):
+    combined = tmp_path / "combined"
+    stale = combined / "combined_endpoint_lam_1p0" / "multi_dyn_corrected.res"
+    selected = combined / "combined_endpoint_lam_0p8" / "multi_dyn_corrected.res"
+    stale.parent.mkdir(parents=True)
+    selected.parent.mkdir(parents=True)
+    stale.write_text(valid_shelx_res_text("stale_lambda_one"))
+    selected.write_text(valid_shelx_res_text("selected_lambda_point_eight"))
+    selected_health = bound_shelx_health(selected)
+    summary = {
+        "combined_endpoint": {
+            "lambda_q": "0.8",
+            "artifacts": {
+                "res": str(selected),
+                "res_sha256": selected_health["sha256"],
+            },
+            "shelxl": {"status": "ok", "res_health": selected_health},
+        }
+    }
+    (combined / "combined_summary.json").write_text(json.dumps(summary) + "\n")
+
+    assert cli.multi_combined_endpoint_model(combined) == selected
+
+    summary["combined_endpoint"]["artifacts"]["res"] = str(stale)
+    summary["combined_endpoint"]["artifacts"]["res_sha256"] = bound_shelx_health(stale)["sha256"]
+    (combined / "combined_summary.json").write_text(json.dumps(summary) + "\n")
+    assert cli.multi_combined_endpoint_model(combined) is None
+
+
+def test_multi_shelxl_feedback_stops_before_reusing_npd_model(tmp_path: Path, monkeypatch):
+    start_model = tmp_path / "start.res"
+    start_model.write_text(valid_shelx_res_text("clean"))
+    combined = tmp_path / "runs" / "shared_shelxl_feedback" / "cycle_01" / "combined"
+    pathological_model = combined / "combined_endpoint_lam_1p0" / "multi_dyn_corrected.res"
+    pathological_model.parent.mkdir(parents=True)
+    pathological_model.write_text(valid_shelx_res_text("npd"))
+    (combined / "combined_summary.json").write_text(
+        json.dumps(
+            combined_endpoint_summary(
+                pathological_model,
+                status="adp_pathology",
+                safe_for_feedback=False,
+                npd_count=1,
+                split_count=0,
+                npd_atoms=["O001"],
+                has_npd=True,
+            )
+        )
+        + "\n"
+    )
+    labels = []
+    monkeypatch.setattr(cli, "resolve_final_n_basis", lambda *args, **kwargs: 24)
+    monkeypatch.setattr(cli, "native_stage_cmd", lambda *args, **kwargs: ["native"])
+    monkeypatch.setattr(cli, "combine_cmd", lambda *args, **kwargs: ["combine"])
+    monkeypatch.setattr(cli, "run_logged", lambda cmd, logs, label, **kwargs: labels.append(label))
+    prep = PrepConfig(structure=str(start_model), datasets=[DatasetSpec(name="a", hkl="a.hkl")])
+    args = argparse.Namespace(
+        shelxl_feedback_cycles=3,
+        shelxl_feedback_shelxl_iterations=1,
+        dry_run=False,
+        n_points=10,
+    )
+
+    current_model, summary = cli.run_multi_shelxl_feedback_loop(
+        prep,
+        args,
+        "python",
+        tmp_path / "logs",
+        tmp_path,
+        start_model=str(start_model),
+        nuisance={"a": {}},
+        structure_dataset_policy={"status": "disabled"},
+    )
+
+    assert current_model == str(start_model)
+    assert summary["current_model"] == str(start_model)
+    assert summary["status"] == "stopped_adp_pathology"
+    assert summary["pathological_model"] == str(pathological_model)
+    assert "NPD atoms=1" in summary["stopped_reason"]
+    assert len(summary["cycles"]) == 1
+    assert summary["cycles"][0]["adopted_for_feedback"] is False
+    assert summary["cycles"][0]["endpoint_res_health"]["safe_for_feedback"] is False
+    assert labels == ["a_multi_ls1_cycle_01", "multi_ls1_cycle_01_combine"]
+    saved = json.loads(
+        (tmp_path / "runs" / "shared_shelxl_feedback" / "multi_shelxl_feedback_loop_summary.json").read_text()
+    )
+    assert saved["status"] == "stopped_adp_pathology"
+    assert saved["current_model"] == str(start_model)
+
+
+def test_multi_shelxl_feedback_allows_split_warning_without_npd(tmp_path: Path, monkeypatch):
+    start_model = tmp_path / "start.res"
+    start_model.write_text(valid_shelx_res_text("clean"))
+    combined = tmp_path / "runs" / "shared_shelxl_feedback" / "cycle_01" / "combined"
+    output_model = combined / "combined_endpoint_lam_1p0" / "multi_dyn_corrected.res"
+    output_model.parent.mkdir(parents=True)
+    output_model.write_text(valid_shelx_res_text("split"))
+    (combined / "combined_summary.json").write_text(
+        json.dumps(
+            combined_endpoint_summary(
+                output_model,
+                split_count=2,
+                has_split_warnings=True,
+            )
+        )
+        + "\n"
+    )
+    monkeypatch.setattr(cli, "resolve_final_n_basis", lambda *args, **kwargs: 24)
+    monkeypatch.setattr(cli, "native_stage_cmd", lambda *args, **kwargs: ["native"])
+    monkeypatch.setattr(cli, "combine_cmd", lambda *args, **kwargs: ["combine"])
+    monkeypatch.setattr(cli, "run_logged", lambda *args, **kwargs: None)
+    prep = PrepConfig(structure=str(start_model), datasets=[DatasetSpec(name="a", hkl="a.hkl")])
+    args = argparse.Namespace(
+        shelxl_feedback_cycles=1,
+        shelxl_feedback_shelxl_iterations=1,
+        dry_run=False,
+        n_points=10,
+    )
+
+    current_model, summary = cli.run_multi_shelxl_feedback_loop(
+        prep,
+        args,
+        "python",
+        tmp_path / "logs",
+        tmp_path,
+        start_model=str(start_model),
+        nuisance={"a": {}},
+        structure_dataset_policy={"status": "disabled"},
+    )
+
+    assert current_model == str(output_model)
+    assert summary["current_model"] == str(output_model)
+    assert summary["status"] == "ok"
+    assert summary["cycles"][0]["adopted_for_feedback"] is True
+    assert summary["cycles"][0]["endpoint_res_health"]["split_count"] == 2
+
+
+@pytest.mark.parametrize("modulation_p95", [None, 20.1])
+def test_multi_shelxl_feedback_rejects_missing_or_excessive_modulation(
+    tmp_path: Path,
+    monkeypatch,
+    modulation_p95: float | None,
+):
+    start_model = tmp_path / "start.res"
+    start_model.write_text(valid_shelx_res_text("clean"))
+    combined = tmp_path / "runs" / "shared_shelxl_feedback" / "cycle_01" / "combined"
+    output_model = combined / "combined_endpoint_lam_1p0" / "multi_dyn_corrected.res"
+    output_model.parent.mkdir(parents=True)
+    output_model.write_text(valid_shelx_res_text("bounded_modulation"))
+    combined_summary = combined_endpoint_summary(output_model)
+    if modulation_p95 is None:
+        combined_summary["combined_endpoint"].pop("mod_p95")
+    else:
+        combined_summary["combined_endpoint"]["mod_p95"] = modulation_p95
+    (combined / "combined_summary.json").write_text(json.dumps(combined_summary) + "\n")
+    monkeypatch.setattr(cli, "resolve_final_n_basis", lambda *args, **kwargs: 24)
+    monkeypatch.setattr(cli, "native_stage_cmd", lambda *args, **kwargs: ["native"])
+    monkeypatch.setattr(cli, "combine_cmd", lambda *args, **kwargs: ["combine"])
+    monkeypatch.setattr(cli, "run_logged", lambda *args, **kwargs: None)
+    prep = PrepConfig(structure=str(start_model), datasets=[DatasetSpec(name="a", hkl="a.hkl")])
+    args = argparse.Namespace(
+        shelxl_feedback_cycles=2,
+        shelxl_feedback_shelxl_iterations=1,
+        publication_endpoint_max_modulation_p95=20.0,
+        dry_run=False,
+        n_points=10,
+    )
+
+    current_model, summary = cli.run_multi_shelxl_feedback_loop(
+        prep,
+        args,
+        "python",
+        tmp_path / "logs",
+        tmp_path,
+        start_model=str(start_model),
+        nuisance={"a": {}},
+        structure_dataset_policy={"status": "disabled"},
+    )
+
+    assert current_model == str(start_model)
+    assert summary["status"] == "stopped_endpoint_modulation_gate"
+    assert summary["cycles"][0]["adopted_for_feedback"] is False
+    assert summary["cycles"][0]["endpoint_modulation_gate"]["passed"] is False
+
+
+def test_multi_shelxl_feedback_stops_on_invalid_record_with_usable_res(tmp_path: Path, monkeypatch):
+    start_model = tmp_path / "start.res"
+    start_model.write_text(valid_shelx_res_text("clean"))
+    combined = tmp_path / "runs" / "shared_shelxl_feedback" / "cycle_01" / "combined"
+    invalid_model = combined / "combined_endpoint_lam_1p0" / "multi_dyn_corrected.res"
+    invalid_model.parent.mkdir(parents=True)
+    invalid_model.write_text(valid_shelx_res_text("invalid"))
+    invalid_summary = combined_endpoint_summary(invalid_model, status="invalid_res_output")
+    invalid_summary["combined_endpoint"]["shelxl"].update(
+        {"invalid_res_reason": "missing atom records"}
+    )
+    invalid_summary["combined_endpoint"]["shelxl"]["res_health"].update(
+        {"ok": False, "reason": "missing atom records"}
+    )
+    (combined / "combined_summary.json").write_text(json.dumps(invalid_summary) + "\n")
+    labels = []
+    monkeypatch.setattr(cli, "resolve_final_n_basis", lambda *args, **kwargs: 24)
+    monkeypatch.setattr(cli, "native_stage_cmd", lambda *args, **kwargs: ["native"])
+    monkeypatch.setattr(cli, "combine_cmd", lambda *args, **kwargs: ["combine"])
+    monkeypatch.setattr(cli, "run_logged", lambda cmd, logs, label, **kwargs: labels.append(label))
+    prep = PrepConfig(structure=str(start_model), datasets=[DatasetSpec(name="a", hkl="a.hkl")])
+    args = argparse.Namespace(
+        shelxl_feedback_cycles=3,
+        shelxl_feedback_shelxl_iterations=1,
+        dry_run=False,
+        n_points=10,
+    )
+
+    current_model, summary = cli.run_multi_shelxl_feedback_loop(
+        prep,
+        args,
+        "python",
+        tmp_path / "logs",
+        tmp_path,
+        start_model=str(start_model),
+        nuisance={"a": {}},
+        structure_dataset_policy={"status": "disabled"},
+    )
+
+    assert current_model == str(start_model)
+    assert summary["current_model"] == str(start_model)
+    assert summary["status"] == "stopped_unsafe_endpoint"
+    assert summary["unsafe_model"] == str(invalid_model)
+    assert "status=invalid_res_output" in summary["stopped_reason"]
+    assert "missing atom records" in summary["stopped_reason"]
+    assert len(summary["cycles"]) == 1
+    assert summary["cycles"][0]["adopted_for_feedback"] is False
+    assert labels == ["a_multi_ls1_cycle_01", "multi_ls1_cycle_01_combine"]
+
+
 def test_shelxl_feedback_current_run_prefers_final_row_recompute(tmp_path: Path):
     run_root = tmp_path / "feedback"
     cycle_run = run_root / "cycle_05_N108Q20"
@@ -2212,22 +3606,30 @@ def test_shelxl_feedback_current_run_prefers_final_row_recompute(tmp_path: Path)
     final_res = cycle_run / "endpoint_lam_1p0_B_0p0_noexti" / "dyn_nuisance_corrected.res"
     final_res.parent.mkdir(parents=True)
     final_run.mkdir(parents=True)
-    final_res.write_text("TITL ok\nCELL 0.02508 5.0 6.0 7.0 90 90 90\nSFAC C\nEND\n")
+    final_res.write_text(valid_shelx_res_text())
     (run_root / "shelxl_feedback_loop_summary.json").write_text(
         json.dumps(
             {
                 "current_model": str(final_res),
                 "final_row_stats_run": str(final_run),
                 "final_row_stats_model": str(final_res),
-                "runs": [
-                    {"run_dir": str(cycle_run), "returncode": 0, "output_model": str(final_res)},
-                    {
+                    "runs": [
+                        {
+                            "run_dir": str(cycle_run),
+                            "returncode": 0,
+                            "output_model": str(final_res),
+                            "endpoint_shelxl_status": "ok",
+                            "endpoint_res_health": bound_shelx_health(final_res),
+                        },
+                        {
                         "label": "final_row_recompute",
                         "run_dir": str(final_run),
                         "returncode": 0,
                         "output_model": str(final_res),
-                        "row_stats_model": str(final_res),
-                        "skip_endpoint_refinement": True,
+                            "row_stats_model": str(final_res),
+                            "skip_endpoint_refinement": True,
+                            "endpoint_shelxl_status": "reused_validated_input_model",
+                            "endpoint_res_health": bound_shelx_health(final_res),
                     },
                 ],
             }
@@ -2335,6 +3737,139 @@ def test_combine_cmd_forwards_promoted_multi_dataset_sigma_policies(tmp_path: Pa
     assert cmd[cmd.index("--endpoint-ls-cycles") + 1] == "1"
     assert cmd[cmd.index("--endpoint-wght-mode") + 1] == "freeze-zero"
     assert "--dataset-sigma-holdout-floor" in cmd
+
+
+@pytest.mark.parametrize(
+    ("stage", "endpoint", "expected_skip"),
+    [
+        ("screen", True, False),
+        ("adaptive_final", True, False),
+        ("multi_ls1_cycle_01", False, True),
+    ],
+)
+def test_native_stage_cmd_forwards_explicit_non_path_shelxl(
+    tmp_path: Path,
+    stage: str,
+    endpoint: bool,
+    expected_skip: bool,
+):
+    model = tmp_path / "model.res"
+    model.write_text(valid_shelx_res_text())
+    explicit_shelxl = tmp_path / "private-ccp4" / "shelxl"
+    explicit_shelxl.parent.mkdir()
+    explicit_shelxl.write_text("#!/bin/sh\nexit 0\n")
+    explicit_shelxl.chmod(0o755)
+    args = build_parser().parse_args(
+        [
+            "auto",
+            "--out-dir",
+            str(tmp_path / "out"),
+            "--xds-dir",
+            str(tmp_path / "xds"),
+            "--structure",
+            str(model),
+            "--shelxl",
+            str(explicit_shelxl),
+        ]
+    )
+    dataset = DatasetSpec(name="sample", hkl=str(tmp_path / "rows.hkl"))
+
+    command = cli.native_stage_cmd(
+        "python",
+        dataset,
+        str(model),
+        "",
+        tmp_path / stage,
+        args,
+        n_basis=24,
+        n_points=10,
+        stage=stage,
+        endpoint=endpoint,
+    )
+
+    assert command.count("--shelxl") == 1
+    assert command[command.index("--shelxl") + 1] == str(explicit_shelxl)
+    assert ("--skip-endpoint-refinement" in command) is expected_skip
+
+
+def test_native_stage_cmd_forwards_discrete_thickness_promotion_contract(tmp_path: Path):
+    model = tmp_path / "model.res"
+    model.write_text(valid_shelx_res_text())
+    args = build_parser().parse_args(
+        [
+            "auto",
+            "--out-dir",
+            str(tmp_path / "out"),
+            "--xds-dir",
+            str(tmp_path / "xds"),
+            "--structure",
+            str(model),
+        ]
+    )
+    dataset = DatasetSpec(name="sample", hkl=str(tmp_path / "rows.hkl"))
+    args.selection_metric = "free_wR2"
+    args.production_scales = True
+    baseline = {
+        "thickness_A": 1204.5805095106,
+        "thickness_grad_frac": 0.8,
+        "dose_b_ref_frame": float("nan"),
+    }
+
+    command = cli.native_stage_cmd(
+        "python",
+        dataset,
+        str(model),
+        "",
+        tmp_path / "thickness",
+        args,
+        n_basis=24,
+        n_points=10,
+        stage="multi_thickness_polish",
+        pinned=baseline,
+        promotion_baseline=baseline,
+        scale_fit_split_override="work",
+        selection_metric_override="work_wR2",
+        endpoint=False,
+    )
+
+    forwarded = json.loads(command[command.index("--promotion-baseline-json") + 1])
+    assert forwarded["thickness_A"] == baseline["thickness_A"]
+    assert forwarded["thickness_grad_frac"] == baseline["thickness_grad_frac"]
+    assert cli.math.isnan(forwarded["dose_b_ref_frame"])
+    assert float(command[command.index("--promotion-min-gain") + 1]) == args.continuous_thickness_min_gain
+    assert float(command[command.index("--promotion-max-free-wr2-loss") + 1]) == args.continuous_thickness_max_free_wr2_loss
+    assert float(command[command.index("--promotion-max-all-r1-loss") + 1]) == args.continuous_thickness_max_all_r1_loss
+    assert command[command.index("--scale-fit-split") + 1] == "work"
+    assert command[command.index("--selection-metric") + 1] == "work_wR2"
+
+
+def test_observation_polish_cmd_forwards_explicit_non_path_shelxl(tmp_path: Path):
+    explicit_shelxl = tmp_path / "private-ccp4" / "shelxl"
+    args = build_parser().parse_args(
+        [
+            "auto",
+            "--out-dir",
+            str(tmp_path / "out"),
+            "--xds-dir",
+            str(tmp_path / "xds"),
+            "--structure",
+            str(tmp_path / "model.res"),
+            "--shelxl",
+            str(explicit_shelxl),
+        ]
+    )
+
+    command = cli.observation_polish_cmd(
+        "python",
+        tmp_path / "rows.csv",
+        str(tmp_path / "rows.hkl"),
+        str(tmp_path / "model.res"),
+        tmp_path / "forensics",
+        args,
+    )
+
+    assert command.count("--shelxl") == 1
+    assert command[command.index("--shelxl") + 1] == str(explicit_shelxl)
 
 
 def test_auto_parser_accepts_cuda_jax_backend_explicitly():
@@ -2676,6 +4211,91 @@ def test_missing_map_tool_errors_before_full_auto(tmp_path: Path, monkeypatch):
     assert any("shelx2map" in item for item in errors)
     args.make_maps = False
     assert required_external_tool_errors(args, structure=str(model)) == []
+
+
+def test_explicit_shelxl_argument_satisfies_preflight_without_config(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("PATH", str(tmp_path / "empty_path"))
+    monkeypatch.delenv("SHELXL", raising=False)
+    monkeypatch.delenv("SHELX2MAP", raising=False)
+    fake_shelxl = tmp_path / "ccp4" / "shelxl"
+    fake_shelxl.parent.mkdir()
+    fake_shelxl.write_text("#!/bin/sh\nexit 0\n")
+    fake_shelxl.chmod(0o755)
+    model = tmp_path / "model.res"
+    model.write_text("TITL test\nEND\n")
+    args = build_parser().parse_args(
+        [
+            "auto",
+            "--out-dir",
+            "out",
+            "--xds-dir",
+            "xds",
+            "--structure",
+            str(model),
+            "--shelxl",
+            str(fake_shelxl),
+            "--no-maps",
+        ]
+    )
+    apply_tool_config(args)
+
+    status = cli.external_tool_statuses(args)["shelxl"]
+    assert status["available"] is True
+    assert status["resolved"] == str(fake_shelxl.resolve())
+    assert status["source"] == "argument:--shelxl"
+    assert required_external_tool_errors(args, structure=str(model)) == []
+
+
+def test_explicit_relative_shelxl_is_frozen_to_launch_cwd(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    fake_shelxl = tmp_path / "private-ccp4" / "shelxl"
+    fake_shelxl.parent.mkdir()
+    fake_shelxl.write_text("#!/bin/sh\nexit 0\n")
+    fake_shelxl.chmod(0o755)
+    model = tmp_path / "model.res"
+    model.write_text(valid_shelx_res_text())
+    requested = "./private-ccp4/shelxl"
+    args = build_parser().parse_args(
+        [
+            "auto",
+            "--out-dir",
+            str(tmp_path / "out"),
+            "--xds-dir",
+            str(tmp_path / "xds"),
+            "--structure",
+            str(model),
+            "--shelxl",
+            requested,
+        ]
+    )
+
+    apply_tool_config(args)
+
+    assert args.shelxl_requested == requested
+    assert args.shelxl == str(fake_shelxl.resolve())
+    status = cli.external_tool_statuses(args)["shelxl"]
+    assert status["requested"] == requested
+    assert status["resolved"] == str(fake_shelxl.resolve())
+
+
+def test_default_shelxl_resolution_falls_back_to_shelxl2019(monkeypatch):
+    monkeypatch.delenv("SHELXL", raising=False)
+
+    def fake_resolve(_name: str, *, configured: str = "", **_kwargs):
+        if configured:
+            return {"available": False, "resolved": ""}
+        return {"available": True, "resolved": "/opt/shelx/shelxl2019"}
+
+    monkeypatch.setattr(cli, "resolve_executable", fake_resolve)
+    args = build_parser().parse_args(
+        ["auto", "--out-dir", "out", "--xds-dir", "xds", "--structure", "model.res"]
+    )
+
+    apply_tool_config(args)
+
+    assert args.shelxl_requested == "shelxl"
+    assert args.shelxl == "/opt/shelx/shelxl2019"
 
 
 def test_combined_summary_exposes_joint_native_metrics(tmp_path: Path):

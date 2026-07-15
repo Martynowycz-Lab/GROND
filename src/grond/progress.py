@@ -34,9 +34,10 @@ INPUT_PATH_FLAGS = {
     "--start-res",
     "--structure",
     "--summary",
+    "--shelxl",
     "--xds-dir",
 }
-OUTPUT_PATH_FLAGS = {"--out", "--out-dir", "--out-mtz", "--write-rows"}
+OUTPUT_PATH_FLAGS = {"--out", "--out-dir", "--out-mtz", "--output", "--write-rows"}
 ASSIGNMENT_PATH_FLAGS = {"--resolution-limit", "--run", "--scale-polish"}
 MANIFEST_ONLY_FLAGS = {"--cbf-dir", "--images"}
 
@@ -305,6 +306,7 @@ class ProgressState:
     resume: bool = True
     total: int = 0
     started_at: float = field(default_factory=time.time)
+    invocation_started_monotonic: float = field(default_factory=time.perf_counter, repr=False)
     done_this_session: int = 0
     _source_hash: str = field(default="", init=False, repr=False)
     _fingerprint_cache: dict[
@@ -409,10 +411,82 @@ class ProgressState:
         record = self.load().get("completed", {}).get(label, {})
         return record if isinstance(record, dict) else {}
 
+    def refresh_output_fingerprints(self, label: str, *, record_timestamp: bool = True) -> bool:
+        """Refresh saved outputs after intentional postprocessing of a completed stage.
+
+        The stage command and its input fingerprint remain immutable.  This is
+        deliberately narrower than marking the stage complete again: it does
+        not add an event, change elapsed time, or increment session counts.
+        """
+
+        payload = self.load()
+        completed = payload.get("completed", {})
+        if not isinstance(completed, dict):
+            return False
+        record = completed.get(label)
+        if not isinstance(record, dict) or record.get("returncode") != 0:
+            return False
+        output_paths = record.get("output_paths")
+        if (
+            not isinstance(output_paths, list)
+            or not output_paths
+            or not all(isinstance(value, str) and value for value in output_paths)
+        ):
+            return False
+        paths = [Path(value) for value in output_paths]
+        try:
+            log = Path(str(record.get("log", "")))
+            if not log.is_file() or log.stat().st_size == 0:
+                return False
+            if not all(path.is_file() or path.is_dir() for path in paths):
+                return False
+            refreshed = [
+                _path_fingerprint(
+                    path,
+                    self._fingerprint_cache,
+                    prefer_xds_inputs=False,
+                )
+                for path in paths
+            ]
+            if not all(_matches_recorded_output(snapshot, self._fingerprint_cache) for snapshot in refreshed):
+                return False
+        except (OSError, ValueError):
+            return False
+
+        refreshed_record = dict(record)
+        refreshed_record["output_fingerprints"] = refreshed
+        if record_timestamp:
+            refreshed_record["output_fingerprints_refreshed_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        refreshed_completed = dict(completed)
+        refreshed_completed[label] = refreshed_record
+        payload["completed"] = refreshed_completed
+        self.save(payload)
+        return True
+
+    def begin_invocation(self) -> None:
+        """Clear stale completion state before this invocation does any work."""
+
+        payload = self.load()
+        payload.pop("finished", None)
+        payload.pop("current", None)
+        started_at = time.strftime(
+            "%Y-%m-%dT%H:%M:%S%z",
+            time.localtime(self.started_at),
+        )
+        payload["invocation"] = {
+            "status": "running",
+            "started_at": started_at,
+        }
+        payload.setdefault("events", []).append({"event": "invocation_started", "time": started_at})
+        self.save(payload)
+
     def mark_started(self, label: str, command: list[str]) -> None:
         """Record the currently running stage so an interruption is explainable."""
 
         payload = self.load()
+        # A new stage means any earlier workflow-finished record is historical.
+        # Remove it so an interrupted or failed resume cannot look successful.
+        payload.pop("finished", None)
         payload["current"] = {
             "label": label,
             "command": command,
@@ -460,6 +534,8 @@ class ProgressState:
                 "time": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             }
         )
+        if returncode == 0:
+            self.done_this_session += 1
         self.save(payload)
 
     def mark_interrupted(self, label: str | None = None) -> None:
@@ -477,25 +553,68 @@ class ProgressState:
 
         payload = self.load()
         payload.pop("current", None)
+        payload.pop("invocation", None)
+        finished = self._finish_info_from_payload(
+            payload,
+            status,
+            snapshot_kind="completed_invocation",
+        )
+        payload["finished"] = finished
+        payload.setdefault("events", []).append({"event": "finished", **finished})
+        self.save(payload)
+        return finished
+
+    def finish_info(
+        self,
+        status: str = "ok",
+        *,
+        snapshot_kind: str = "pre_packaging_preview",
+    ) -> dict[str, Any]:
+        """Return completion timing and counts without persisting finished state."""
+
+        return self._finish_info_from_payload(
+            self.load(),
+            status,
+            snapshot_kind=snapshot_kind,
+        )
+
+    def _finish_info_from_payload(
+        self,
+        payload: dict[str, Any],
+        status: str,
+        *,
+        snapshot_kind: str,
+    ) -> dict[str, Any]:
+        """Build one immutable timing snapshot from an already loaded record."""
+
         completed = payload.get("completed", {})
         completed_ok = len([v for v in completed.values() if isinstance(v, dict) and v.get("returncode") == 0])
         failed = len([v for v in completed.values() if isinstance(v, dict) and v.get("returncode") not in {0, None}])
-        total_elapsed = sum(
+        cumulative_stage_elapsed = sum(
             float(v.get("elapsed_seconds", 0.0))
             for v in completed.values()
             if isinstance(v, dict) and v.get("returncode") == 0
         )
+        invocation_elapsed = max(0.0, time.perf_counter() - self.invocation_started_monotonic)
         finished = {
             "status": status,
+            "snapshot_kind": snapshot_kind,
             "time": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "invocation_started_at": time.strftime(
+                "%Y-%m-%dT%H:%M:%S%z",
+                time.localtime(self.started_at),
+            ),
+            "invocation_elapsed_seconds": float(invocation_elapsed),
             "completed_stages": completed_ok,
+            "completed_this_invocation": int(self.done_this_session),
+            "reused_completed_stages": max(0, completed_ok - int(self.done_this_session)),
             "failed_stages": failed,
             "estimated_stages": int(self.total),
-            "stage_elapsed_seconds": float(total_elapsed),
+            "cumulative_stage_elapsed_seconds": float(cumulative_stage_elapsed),
+            # Backward-compatible alias. This is a sum of saved stage runtimes,
+            # not workflow wall-clock time when stages overlap or are resumed.
+            "stage_elapsed_seconds": float(cumulative_stage_elapsed),
         }
-        payload["finished"] = finished
-        payload.setdefault("events", []).append({"event": "finished", **finished})
-        self.save(payload)
         return finished
 
     def line_prefix(self, label: str, skipped: bool = False) -> str:

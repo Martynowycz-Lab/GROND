@@ -67,19 +67,101 @@ def _normalize_row_tables(
     return out
 
 
-def _read_labeled_rows(row_tables: Sequence[tuple[str, Path]]) -> list[dict[str, str]]:
-    """Read native row tables and retain dataset provenance in each row."""
+def _read_labeled_rows(
+    row_tables: Sequence[tuple[str, Path]],
+) -> tuple[list[dict[str, str]], dict[str, object]]:
+    """Read policy-eligible rows and apply each raw-row weight exactly once.
+
+    Dataset-policy tables retain ``sigma_eff_original`` so downstream consumers
+    can recover the unweighted uncertainty.  Always starting from that value
+    prevents a copied or resumed table from applying ``raw_row_weight`` twice.
+    This is the same contract used by ``combine_native_nuisance_runs.py``.
+    """
 
     rows: list[dict[str, str]] = []
+    per_dataset: list[dict[str, object]] = []
+    totals = {
+        "source_rows": 0,
+        "included_rows": 0,
+        "excluded_rows": 0,
+        "excluded_explicit_role_rows": 0,
+        "excluded_completeness_only_rows": 0,
+        "excluded_nonpositive_raw_row_weight_rows": 0,
+        "excluded_invalid_raw_row_weight_rows": 0,
+        "rows_with_explicit_raw_row_weight": 0,
+        "downweighted_rows": 0,
+        "upweighted_rows": 0,
+        "sigma_eff_reset_from_original_rows": 0,
+        "raw_row_weight_applied_rows": 0,
+    }
     for label, path in row_tables:
+        dataset_counts = {key: 0 for key in totals}
         for row in _read_rows(path):
+            totals["source_rows"] += 1
+            dataset_counts["source_rows"] += 1
             copied = dict(row)
             if not str(copied.get("dataset", "")).strip():
                 copied["dataset"] = label
             copied["_grond_row_table_label"] = label
             copied["_grond_row_table_path"] = str(path)
+
+            role = str(copied.get("dataset_role", "primary") or "primary").strip().lower()
+            raw_weight_text = str(copied.get("raw_row_weight", "")).strip()
+            explicit_weight = raw_weight_text != ""
+            if explicit_weight:
+                totals["rows_with_explicit_raw_row_weight"] += 1
+                dataset_counts["rows_with_explicit_raw_row_weight"] += 1
+                try:
+                    raw_weight = float(raw_weight_text)
+                except (TypeError, ValueError):
+                    raw_weight = float("nan")
+            else:
+                raw_weight = 1.0
+
+            exclusion_key = ""
+            if role == "exclude":
+                exclusion_key = "excluded_explicit_role_rows"
+            elif role == "completeness_only":
+                exclusion_key = "excluded_completeness_only_rows"
+            elif not math.isfinite(raw_weight):
+                exclusion_key = "excluded_invalid_raw_row_weight_rows"
+            elif raw_weight <= 0.0:
+                exclusion_key = "excluded_nonpositive_raw_row_weight_rows"
+            if exclusion_key:
+                totals["excluded_rows"] += 1
+                totals[exclusion_key] += 1
+                dataset_counts["excluded_rows"] += 1
+                dataset_counts[exclusion_key] += 1
+                continue
+
+            original_sigma = _as_float(copied, "sigma_eff_original")
+            if math.isfinite(original_sigma) and original_sigma > 0.0:
+                copied["sigma_eff"] = f"{original_sigma:.17g}"
+                totals["sigma_eff_reset_from_original_rows"] += 1
+                dataset_counts["sigma_eff_reset_from_original_rows"] += 1
+            sigma = _as_float(copied, "sigma_eff")
+            if abs(raw_weight - 1.0) > 1e-12:
+                if math.isfinite(sigma) and sigma > 0.0:
+                    copied["sigma_eff"] = f"{sigma / math.sqrt(raw_weight):.17g}"
+                    totals["raw_row_weight_applied_rows"] += 1
+                    dataset_counts["raw_row_weight_applied_rows"] += 1
+                direction_key = "downweighted_rows" if raw_weight < 1.0 else "upweighted_rows"
+                totals[direction_key] += 1
+                dataset_counts[direction_key] += 1
+
+            totals["included_rows"] += 1
+            dataset_counts["included_rows"] += 1
             rows.append(copied)
-    return rows
+        per_dataset.append({"label": label, "path": str(path), **dataset_counts})
+    return rows, {
+        **totals,
+        "per_dataset": per_dataset,
+        "definition": (
+            "dataset_role exclude/completeness_only and nonpositive or invalid raw_row_weight are omitted; "
+            "included sigma_eff is restored from sigma_eff_original when available, then divided by "
+            "sqrt(raw_row_weight) exactly once"
+        ),
+    }
 
 
 def _as_float(row: Mapping[str, object], key: str, default: float = float("nan")) -> float:
@@ -165,6 +247,19 @@ def _merge_native_amplitudes(
     model: Mapping[str, object],
     options: NativeDynamicMapOptions,
 ) -> tuple[list[dict[str, object]], dict[str, object]]:
+    if not rows:
+        return [], {
+            "input_rows": 0,
+            "valid_positive_rows": 0,
+            "merged_reflections": 0,
+            "rejected_rows": 0,
+            "min_i_over_sigma": float(options.min_i_over_sigma),
+            "d_min_A": None if options.d_min_A is None else float(options.d_min_A),
+            "definition": (
+                "|F_dyn_obs,row| = |F_model| * sqrt(I_obs / I_dyn_scaled), merged by signed HKL "
+                "with propagated amplitude weights."
+            ),
+        }
     missing = _required_row_columns(rows)
     if missing:
         raise ValueError(f"native dynamical map row table is missing required columns: {', '.join(missing)}")
@@ -178,9 +273,7 @@ def _merge_native_amplitudes(
     dyn_raw = np.asarray([_as_float(row, "dyn_raw") for row in rows], dtype=float)
     born_scaled = np.asarray([_as_float(row, "born_scaled") for row in rows], dtype=float)
     q_dyn_over_born = np.asarray([_as_float(row, "q_dyn_over_born") for row in rows], dtype=float)
-    d_A = np.asarray([
-        _as_float(row, "d_A", float("nan")) for row in rows
-    ], dtype=float)
+    d_A = np.asarray([_as_float(row, "d_A", float("nan")) for row in rows], dtype=float)
     if not np.any(np.isfinite(d_A)):
         inv_d2 = inv_d2_from_hkl_array(h, k, ell, model["cell"])
         with np.errstate(divide="ignore", invalid="ignore"):
@@ -228,8 +321,7 @@ def _merge_native_amplitudes(
         twofofc = (2.0 * fobs - fc_ref_abs) * phase_factor
         split_values = {str(rows[i].get("split", "")).strip() or "unknown" for i in indices}
         dataset_values = {
-            str(rows[i].get("dataset", rows[i].get("_grond_row_table_label", ""))).strip() or "unknown"
-            for i in indices
+            str(rows[i].get("dataset", rows[i].get("_grond_row_table_label", ""))).strip() or "unknown" for i in indices
         }
         scale_values = np.divide(
             dyn_scaled[idx],
@@ -259,9 +351,15 @@ def _merge_native_amplitudes(
                 "TwoFoFc_imag": twofofc.imag,
                 "mean_Iobs": float(np.mean(target[idx])),
                 "mean_dyn_scaled": float(np.mean(dyn_scaled[idx])),
-                "mean_born_scaled": float(np.nanmean(born_scaled[idx])) if np.any(np.isfinite(born_scaled[idx])) else float("nan"),
-                "mean_q_dyn_over_born": float(np.nanmean(q_dyn_over_born[idx])) if np.any(np.isfinite(q_dyn_over_born[idx])) else float("nan"),
-                "mean_row_scale": float(np.nanmean(scale_values)) if np.any(np.isfinite(scale_values)) else float("nan"),
+                "mean_born_scaled": float(np.nanmean(born_scaled[idx]))
+                if np.any(np.isfinite(born_scaled[idx]))
+                else float("nan"),
+                "mean_q_dyn_over_born": float(np.nanmean(q_dyn_over_born[idx]))
+                if np.any(np.isfinite(q_dyn_over_born[idx]))
+                else float("nan"),
+                "mean_row_scale": float(np.nanmean(scale_values))
+                if np.any(np.isfinite(scale_values))
+                else float("nan"),
                 "mean_I_over_sigma": float(np.mean(isig[idx])),
             }
         )
@@ -539,7 +637,11 @@ def _write_dynamic_cif(
     )
     for atom in model.get("atoms", []):
         adp_type = "Uani" if atom.get("adp_type") == "anis" else "Uiso"
-        uiso = float(atom.get("uiso", (float(atom.get("u11", 0.0)) + float(atom.get("u22", 0.0)) + float(atom.get("u33", 0.0))) / 3.0))
+        uiso = float(
+            atom.get(
+                "uiso", (float(atom.get("u11", 0.0)) + float(atom.get("u22", 0.0)) + float(atom.get("u33", 0.0))) / 3.0
+            )
+        )
         lines.append(
             " ".join(
                 [
@@ -659,9 +761,18 @@ def write_native_dynamic_map_package(
         }
     if not model_path.exists():
         return {"status": "missing_model", "model": str(model_path)}
-    rows = _read_labeled_rows(row_tables)
+    rows, dataset_policy = _read_labeled_rows(row_tables)
     model = parse_model(model_path)
     coefficients, summary = _merge_native_amplitudes(rows, model, options)
+    rejected_after_policy = int(summary.get("rejected_rows", 0))
+    summary = {
+        **summary,
+        "input_rows": int(dataset_policy["source_rows"]),
+        "policy_eligible_rows": int(dataset_policy["included_rows"]),
+        "rejected_rows": int(dataset_policy["source_rows"]) - int(summary.get("valid_positive_rows", 0)),
+        "rejected_after_policy_rows": rejected_after_policy,
+        "dataset_policy": dataset_policy,
+    }
     if not coefficients:
         return {
             "status": "no_coefficients",
@@ -677,7 +788,11 @@ def write_native_dynamic_map_package(
     _write_coefficients_csv(csv_path, coefficients)
     _write_coefficients_hkl(hkl_path, coefficients)
     maps: dict[str, dict[str, object]] = {}
-    for kind, name in (("fo", "grond_native_dynamic_fo.map"), ("2fofc", "grond_native_dynamic_2fofc.map"), ("fofc", "grond_native_dynamic_fofc.map")):
+    for kind, name in (
+        ("fo", "grond_native_dynamic_fo.map"),
+        ("2fofc", "grond_native_dynamic_2fofc.map"),
+        ("fofc", "grond_native_dynamic_fofc.map"),
+    ):
         data, meta = _synthesize_map(coefficients, model, kind, options.grid_spacing_A, options.max_grid_points)
         map_path = out_dir / name
         _write_ccp4(map_path, data, model)

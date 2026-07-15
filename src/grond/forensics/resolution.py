@@ -83,7 +83,7 @@ def classify_endpoint_candidate(
 
     shelxl = candidate.get("shelxl") if isinstance(candidate.get("shelxl"), Mapping) else candidate
     safe = _float(candidate.get("hkl_safe_factor"), 1.0)
-    mod95 = _float(candidate.get("mod_p95", candidate.get("modulation_p95")), 1.0)
+    mod95 = _float(candidate.get("mod_p95", candidate.get("modulation_p95")))
     wr2 = _float(shelxl.get("wR2_all"))
     r1_all = _float(shelxl.get("R1_all"))
     r1_gt = _float(shelxl.get("R1_gt"))
@@ -91,7 +91,9 @@ def classify_endpoint_candidate(
 
     if safe < min_hkl_safe_factor:
         reasons.append(f"HKL safety factor {safe:.4g} is below {min_hkl_safe_factor:.4g}")
-    if mod95 > max_modulation_p95:
+    if not math.isfinite(mod95):
+        reasons.append("95th percentile endpoint modulation is unavailable")
+    elif mod95 > max_modulation_p95:
         reasons.append(f"95th percentile endpoint modulation {mod95:.4g} exceeds {max_modulation_p95:.4g}")
     if best_wR2_all is not None and math.isfinite(wr2):
         penalty = wr2 - float(best_wR2_all)

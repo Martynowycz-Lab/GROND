@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+import gemmi
+
 if __package__:
     from .bloch_engine import alternate_hand_model, parse_model
     from .native_structure_update import update_res_coordinates
@@ -100,6 +102,90 @@ def strip_hydrogens(src: Path, dst: Path) -> None:
     dst.write_text("\n".join(out) + "\n")
 
 
+def inverted_operation_text(text: str) -> str:
+    """Return a SHELX symmetry operation with its translation inverted."""
+
+    operation = gemmi.Op(str(text).strip())
+    operation.tran = [-int(value) for value in operation.tran]
+    return operation.triplet()
+
+
+def rewrite_alternate_hand_symmetry(path: Path) -> None:
+    """Invert explicit SYMM and EQIV translations in a written SHELX model."""
+
+    out: list[str] = []
+    for line in path.read_text(errors="replace").splitlines():
+        stripped = line.strip()
+        parts = stripped.split(maxsplit=2)
+        key = parts[0].upper() if parts else ""
+        prefix = line[: len(line) - len(line.lstrip())]
+        if key == "SYMM" and len(parts) >= 2:
+            operation_text = stripped[len(parts[0]) :].strip()
+            try:
+                inverted = inverted_operation_text(operation_text)
+            except Exception as exc:
+                raise ValueError(f"could not invert SHELX SYMM operation {operation_text!r}") from exc
+            out.append(f"{prefix}{parts[0]} {inverted}")
+            continue
+        if key == "EQIV" and len(parts) >= 3:
+            try:
+                inverted = inverted_operation_text(parts[2])
+            except Exception as exc:
+                raise ValueError(f"could not invert SHELX EQIV operation {parts[2]!r}") from exc
+            out.append(f"{prefix}{parts[0]} {parts[1]} {inverted}")
+            continue
+        out.append(line)
+    path.write_text("\n".join(out) + "\n")
+
+
+def symmetry_signature(model: dict) -> tuple[tuple[float, ...], ...]:
+    """Return an order-independent crystallographic symmetry signature."""
+
+    records: list[tuple[float, ...]] = []
+    for operation in model.get("symmetry_ops", []):
+        rotation = tuple(round(float(value), 8) for row in operation.get("rot", []) for value in row)
+        translation = tuple(round(float(value) % 1.0, 8) for value in operation.get("trans", []))
+        records.append((*rotation, *translation))
+    return tuple(sorted(records))
+
+
+def validate_alternate_hand_materialization(expected: dict, written: dict) -> None:
+    """Fail if a written variant does not encode the requested hand exactly."""
+
+    if symmetry_signature(written) != symmetry_signature(expected):
+        raise ValueError("written alternate-hand RES does not encode the inverted symmetry operations")
+    expected_atoms = {str(atom["name"]): atom for atom in expected.get("atoms", [])}
+    written_atoms = {str(atom["name"]): atom for atom in written.get("atoms", [])}
+    if expected_atoms.keys() != written_atoms.keys():
+        raise ValueError("written alternate-hand RES atom labels differ from the requested model")
+    for name, expected_atom in expected_atoms.items():
+        written_atom = written_atoms[name]
+        for axis in ("x", "y", "z"):
+            delta = abs((float(written_atom[axis]) - float(expected_atom[axis]) + 0.5) % 1.0 - 0.5)
+            if delta > 1.0e-5:
+                raise ValueError(f"written alternate-hand coordinate {name}.{axis} differs by {delta:.6g}")
+
+
+def write_alternate_hand_variant(src: Path, dst: Path) -> dict:
+    """Write atoms and explicit symmetry cards for the inverted SHELX hand."""
+
+    chiv_lines = [
+        line.strip()
+        for line in src.read_text(errors="replace").splitlines()
+        if line.strip().upper().startswith("CHIV ") or line.strip().upper() == "CHIV"
+    ]
+    if chiv_lines:
+        raise ValueError(
+            "cannot materialize an alternate-hand RES with CHIV restraints: "
+            "signed CHIV targets are not transformed; retain the input hand or edit the restraints explicitly"
+        )
+    model = alternate_hand_model(parse_model(src))
+    update_res_coordinates(src, dst, model)
+    rewrite_alternate_hand_symmetry(dst)
+    validate_alternate_hand_materialization(model, parse_model(dst))
+    return model
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--input", required=True, help="Input RES path.")
@@ -113,8 +199,7 @@ def main() -> None:
     dst.parent.mkdir(parents=True, exist_ok=True)
     tmp = dst
     if args.alternate_hand:
-        model = alternate_hand_model(parse_model(src))
-        update_res_coordinates(src, dst, model)
+        write_alternate_hand_variant(src, dst)
         tmp = dst
     if args.remove_h:
         src_for_strip = dst if tmp == dst and args.alternate_hand else src

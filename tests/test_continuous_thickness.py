@@ -1,4 +1,6 @@
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -110,3 +112,104 @@ def test_response_cache_uses_direct_exponential_for_defective_absorptive_matrix(
     expected = abs((expm(2j * np.pi * thickness[0] * hamiltonian) @ psi0)[1]) ** 2
 
     assert got == pytest.approx(expected, rel=1e-12)
+
+
+def test_optimizer_proposal_above_one_is_rejected_before_promotion():
+    reasons = continuous.thickness_candidate_domain_reasons(
+        794.6548514,
+        1.182558445,
+        t_min=400.0,
+        t_max=2600.0,
+        grad_min=0.0,
+        grad_max=1.0,
+    )
+
+    assert "thickness_gradient_outside_physical_domain" in reasons
+    assert "thickness_gradient_outside_search_bounds" in reasons
+    with pytest.raises(ValueError, match="thickness_gradient_outside_physical_domain"):
+        continuous.thickness_grid(794.6548514, 1.182558445, 5)
+
+
+@pytest.mark.parametrize(
+    ("seed", "expected"),
+    [
+        (200.0, (130.0, 270.0)),
+        (3000.0, (1950.0, 4050.0)),
+    ],
+)
+def test_local_thickness_bounds_follow_coarse_seed_without_legacy_caps(seed, expected):
+    assert continuous.local_thickness_search_bounds(seed, 0.35) == pytest.approx(expected)
+
+
+def test_local_thickness_bounds_apply_only_explicit_clamps():
+    assert continuous.local_thickness_search_bounds(
+        1000.0,
+        0.35,
+        t_min=800.0,
+        t_max=1200.0,
+    ) == pytest.approx((800.0, 1200.0))
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"start_thickness": 3000.0, "bracket_frac": 0.35, "t_max": 2600.0}, "must include"),
+        ({"start_thickness": 1000.0, "bracket_frac": 0.0}, "0 < bracket_frac < 1"),
+        ({"start_thickness": 1000.0, "bracket_frac": float("nan")}, "0 < bracket_frac < 1"),
+    ],
+)
+def test_local_thickness_bounds_fail_closed(kwargs, message):
+    with pytest.raises(ValueError, match=message):
+        continuous.local_thickness_search_bounds(**kwargs)
+
+
+def test_cli_rejects_search_bound_above_physical_gradient_domain(monkeypatch, capsys, tmp_path: Path):
+    out = tmp_path / "must_not_be_created"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["continuous_thickness_polish.py", "--grad-max", "1.2", "--out-dir", str(out)],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        continuous.main()
+
+    assert exc.value.code == 2
+    assert "grad_max <= 1" in capsys.readouterr().err
+    assert not out.exists()
+
+
+@pytest.mark.parametrize(
+    ("thickness", "grad", "reason"),
+    [
+        (float("nan"), 0.5, "nonfinite_thickness"),
+        (800.0, float("nan"), "nonfinite_thickness_gradient"),
+        (0.0, 0.5, "nonpositive_thickness"),
+    ],
+)
+def test_continuous_thickness_candidate_validation_fails_closed(thickness, grad, reason):
+    assert reason in continuous.thickness_candidate_domain_reasons(thickness, grad)
+
+
+def test_valid_promoted_nuisance_remains_in_downstream_engine_domain():
+    args = SimpleNamespace(
+        frame_offset=0.0,
+        group_width_deg=0.888,
+        detector_scale_bins=8,
+        sigma_a=0.0,
+        sigma_b_corr=0.0,
+        sigma_c_peak=0.0,
+        matrix_convention="j_minus_i",
+        row_resolution_b=0.0,
+        scale_smoothness=0.0,
+    )
+
+    nuisance = continuous.make_nuisance(args, 794.6548514, 1.0)
+    downstream = Config(
+        thickness_A=nuisance.thickness_A,
+        thickness_model=nuisance.thickness_model,
+        thickness_grad_frac=nuisance.thickness_grad_frac,
+    )
+
+    assert nuisance.thickness_grad_frac == 1.0
+    assert downstream.thickness_grad_frac == 1.0
