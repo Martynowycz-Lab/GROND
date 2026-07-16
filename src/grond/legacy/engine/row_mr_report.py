@@ -262,21 +262,39 @@ def table_rows(summary: dict) -> list[dict]:
     return out
 
 
-def dmin_for_rows(rows: list[dict]) -> float:
+def row_d_spacing(row: dict, model: dict | None = None) -> float:
+    """Return d(hkl), preferring the shared reporting-model cell when supplied."""
+
+    if model is not None:
+        try:
+            cell = gemmi.UnitCell(*[float(value) for value in model["cell"]])
+            hkl = [int(float(row[key])) for key in ("h", "k", "l")]
+            value = float(cell.calculate_d(hkl))
+            return value if math.isfinite(value) and value > 0.0 else float("nan")
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return float("nan")
+    return safe_float(row.get("d_A"))
+
+
+def dmin_for_rows(rows: list[dict], model: dict | None = None) -> float:
     """Return the highest-resolution d spacing represented by these rows."""
 
-    dvals = np.asarray([safe_float(r.get("d_A")) for r in rows], dtype=float)
+    dvals = np.asarray([row_d_spacing(row, model) for row in rows], dtype=float)
     finite = dvals[np.isfinite(dvals) & (dvals > 0.0)]
     return float(np.min(finite)) if len(finite) else float("nan")
 
 
-def rows_at_or_below_resolution(rows: list[dict], dmin: float) -> list[dict]:
+def rows_at_or_below_resolution(
+    rows: list[dict],
+    dmin: float,
+    model: dict | None = None,
+) -> list[dict]:
     """Return rows retained by a d-spacing cutoff."""
 
     cutoff = safe_float(dmin)
     if not math.isfinite(cutoff) or cutoff <= 0.0:
         return list(rows)
-    return [r for r in rows if safe_float(r.get("d_A")) >= cutoff - 1e-12]
+    return [row for row in rows if row_d_spacing(row, model) >= cutoff - 1e-12]
 
 
 def scale_param_count(scale_payloads: list[dict], compact: bool) -> int | None:
@@ -285,7 +303,10 @@ def scale_param_count(scale_payloads: list[dict], compact: bool) -> int | None:
     total = 0
     found = False
     for payload in scale_payloads:
-        source = (payload.get("selected") or payload.get("selected_output") or {}) if compact else (payload.get("baseline") or {})
+        # ``selected_output`` is the candidate whose row table was actually
+        # materialized. ``selected`` may be a smaller strict diagnostic when
+        # the information-criterion branch chose a different output model.
+        source = (payload.get("selected_output") or payload.get("selected") or {}) if compact else (payload.get("baseline") or {})
         value = safe_float(source.get("scale_params"))
         if math.isfinite(value):
             total += int(round(value))
@@ -361,6 +382,10 @@ def endpoint_summary_rows(
     scale_payloads: list[dict],
     resolution_payloads: list[dict],
     instability_u: float = 0.01,
+    *,
+    full_rows: list[dict] | None = None,
+    requested_min_d_spacing: float = 0.0,
+    selected_scale_contract: str = "",
 ) -> tuple[list[dict], dict]:
     """Build the three user-facing endpoint summaries requested by auto mode.
 
@@ -372,19 +397,32 @@ def endpoint_summary_rows(
 
     endpoint_rows: list[dict] = []
     compact_rows, compact_sources = load_compact_rows(scale_payloads)
-    requested_dmin = dmin_for_rows(requested_rows)
+    explicit_requested_dmin = safe_float(requested_min_d_spacing)
+    selected_contract = str(selected_scale_contract).strip().lower()
+    explicit_multi_contract = selected_contract in {"full", "compact_bic", "compact_min_strict"}
+    resolution_model = (
+        model
+        if explicit_multi_contract
+        or (math.isfinite(explicit_requested_dmin) and explicit_requested_dmin > 0.0)
+        else None
+    )
+    requested_dmin = (
+        explicit_requested_dmin
+        if math.isfinite(explicit_requested_dmin) and explicit_requested_dmin > 0.0
+        else dmin_for_rows(requested_rows, resolution_model)
+    )
     suggested_dmin = suggested_resolution_dmin(resolution_payloads)
     if not math.isfinite(suggested_dmin):
         suggested_dmin = requested_dmin
 
     def append(label: str, rows: list[dict], dmin: float, scale_model: str, scale_params: str, status: str = "ok") -> None:
-        kept = rows_at_or_below_resolution(rows, dmin)
+        kept = rows_at_or_below_resolution(rows, dmin, resolution_model)
         summary = compute_row_mr_summary(kept, model, instability_u=instability_u) if kept else {}
         endpoint_rows.append(
             {
                 "label": label,
                 "status": status,
-                "dmin_A": dmin_for_rows(kept) if kept else safe_float(dmin),
+                "dmin_A": dmin_for_rows(kept, resolution_model) if kept else safe_float(dmin),
                 "requested_cutoff_A": safe_float(dmin),
                 "row_count": len(kept),
                 "scale_model": scale_model,
@@ -393,14 +431,45 @@ def endpoint_summary_rows(
             }
         )
 
+    full_control_rows = list(full_rows) if full_rows else list(requested_rows)
     append(
         "requested_resolution_full_scales",
-        requested_rows,
+        full_control_rows,
         requested_dmin,
         "full fitted scale curve",
         scale_param_label(scale_payloads, compact=False),
     )
-    if compact_rows:
+    if explicit_multi_contract and selected_contract.startswith("compact_"):
+        append(
+            "requested_resolution_compact_scales",
+            requested_rows,
+            requested_dmin,
+            selected_contract,
+            scale_param_label(scale_payloads, compact=True),
+        )
+        append(
+            "suggested_resolution_compact_scales",
+            requested_rows,
+            suggested_dmin,
+            selected_contract,
+            scale_param_label(scale_payloads, compact=True),
+        )
+    elif explicit_multi_contract:
+        append(
+            "requested_resolution_selected_full_scales",
+            requested_rows,
+            requested_dmin,
+            "selected full fitted scale curve",
+            scale_param_label(scale_payloads, compact=False),
+        )
+        append(
+            "suggested_resolution_selected_full_scales",
+            requested_rows,
+            suggested_dmin,
+            "selected full fitted scale curve",
+            scale_param_label(scale_payloads, compact=False),
+        )
+    elif compact_rows:
         append(
             "requested_resolution_compact_scales",
             compact_rows,
@@ -440,6 +509,9 @@ def endpoint_summary_rows(
         "requested_dmin_A": requested_dmin,
         "suggested_dmin_A": suggested_dmin,
         "compact_sources": compact_sources,
+        "full_control_rows_supplied": bool(full_rows),
+        "selected_scale_contract": selected_contract or "legacy_unspecified",
+        "d_spacing_source": "shared reporting-model cell",
         "resolution_limit_summary": (choose_resolution_limit_payload(resolution_payloads).get("summary_path") if resolution_payloads else ""),
     }
     return endpoint_rows, metadata
@@ -494,9 +566,9 @@ def scale_polish_table_rows(scale_payloads: list[dict]) -> list[dict]:
     rows = []
     for payload in scale_payloads:
         baseline = payload.get("baseline") or {}
-        selected = payload.get("selected") or payload.get("selected_output") or {}
+        selected = payload.get("selected_output") or payload.get("selected") or {}
         delta = selected.get("delta_vs_baseline") or {}
-        status = "accepted" if payload.get("selected") else "diagnostic"
+        status = "accepted" if payload.get("selected_output") or payload.get("selected") else "diagnostic"
         if not selected:
             status = "not available"
         rows.append(
@@ -841,6 +913,7 @@ def build_pdf(tex_path: Path) -> dict:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--run", action="append", default=[], help="Dataset run as name=/path/to/run_dir, or just /path/to/run_dir.")
+    ap.add_argument("--full-run", action="append", default=[], help="Matched full-scale control run as name=/path/to/run_dir for multi-dataset endpoint accounting.")
     ap.add_argument("--row-table", action="append", default=[], help="Row table as name=/path/to/native_dyn_calc.csv, or just a path.")
     ap.add_argument("--res", required=True)
     ap.add_argument("--out-dir", required=True)
@@ -850,7 +923,17 @@ def main() -> None:
     ap.add_argument("--include-completeness-only", action="store_true", help="Include rows marked dataset_role=completeness_only in GROND row/MR row metrics.")
     ap.add_argument("--scale-polish", action="append", default=[], help="Scale-polish summary as name=/path/to/scale_compression_summary.json or name=/path/to/scale_polish_dir.")
     ap.add_argument("--resolution-limit", action="append", default=[], help="Resolution-limit summary as name=/path/to/summary.json, or a resolution-limit directory.")
+    ap.add_argument("--requested-min-d-spacing", type=float, default=0.0, help="Explicit reporting cutoff calculated from the shared --res cell; zero derives the cutoff from supplied rows.")
+    ap.add_argument("--selected-scale-contract", default="", help="Selected multi-dataset scale contract: full, compact_bic, or compact_min_strict.")
     args = ap.parse_args()
+    if not math.isfinite(float(args.requested_min_d_spacing)) or args.requested_min_d_spacing < 0.0:
+        ap.error("--requested-min-d-spacing must be finite and nonnegative")
+    if args.selected_scale_contract and args.selected_scale_contract not in {
+        "full",
+        "compact_bic",
+        "compact_min_strict",
+    }:
+        ap.error("--selected-scale-contract must be full, compact_bic, or compact_min_strict")
 
     out = Path(args.out_dir).expanduser()
     out.mkdir(parents=True, exist_ok=True)
@@ -867,14 +950,43 @@ def main() -> None:
         name, row_table = parse_named_path(item)
         rows.extend(read_csv_rows(row_table.resolve(), name))
 
+    full_rows: list[dict] = []
+    for item in args.full_run:
+        name, run_dir = parse_named_path(item)
+        full_rows.extend(read_csv_rows(run_dir.resolve() / "native_dyn_calc.csv", name))
+
     if not args.include_completeness_only:
         rows = [r for r in rows if str(r.get("dataset_role", "primary")) not in {"completeness_only", "exclude"}]
+        full_rows = [r for r in full_rows if str(r.get("dataset_role", "primary")) not in {"completeness_only", "exclude"}]
+
+    input_row_count = len(rows)
+    full_input_row_count = len(full_rows)
+    if args.requested_min_d_spacing > 0.0:
+        rows = rows_at_or_below_resolution(rows, args.requested_min_d_spacing, model)
+        full_rows = rows_at_or_below_resolution(full_rows, args.requested_min_d_spacing, model)
 
     if not rows:
         raise SystemExit("No row tables were supplied.")
 
     row_mr_summary = compute_row_mr_summary(rows, model, instability_u=args.instability_u)
     meta = summary_metadata(rows, model, run_summaries)
+    if args.requested_min_d_spacing > 0.0:
+        shared_cell_dmin = dmin_for_rows(rows, model)
+        meta["dmin_A"] = shared_cell_dmin
+        meta["sin_theta_over_lambda_max"] = (
+            0.5 / shared_cell_dmin
+            if math.isfinite(shared_cell_dmin) and shared_cell_dmin > 0.0
+            else float("nan")
+        )
+    meta["reporting_resolution_contract"] = {
+        "requested_min_d_spacing_A": float(args.requested_min_d_spacing),
+        "cell_source": str(Path(args.res).expanduser().resolve()),
+        "d_spacing_source": "shared reporting-model cell",
+        "selected_input_rows": input_row_count,
+        "selected_retained_rows": len(rows),
+        "full_control_input_rows": full_input_row_count,
+        "full_control_retained_rows": len(full_rows),
+    }
     scale_payloads = load_scale_polish_payloads(args.scale_polish)
     resolution_payloads = load_resolution_limit_payloads(args.resolution_limit)
     endpoint_summaries, endpoint_metadata = endpoint_summary_rows(
@@ -883,6 +995,9 @@ def main() -> None:
         scale_payloads,
         resolution_payloads,
         instability_u=args.instability_u,
+        full_rows=full_rows,
+        requested_min_d_spacing=args.requested_min_d_spacing,
+        selected_scale_contract=args.selected_scale_contract,
     )
     payload = {
         "title": args.title,

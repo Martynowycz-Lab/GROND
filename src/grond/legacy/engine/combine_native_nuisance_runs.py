@@ -17,6 +17,7 @@ import math
 import re
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 import numpy as np
@@ -82,6 +83,171 @@ def read_rows(run_dir: Path, name: str) -> list[dict]:
                 r["sigma_eff"] = f"{original_sigma:.17g}"
             rows.append(r)
     return rows
+
+
+def file_provenance(path: Path) -> dict[str, object]:
+    """Return a stable source-artifact identity for a combined endpoint."""
+
+    resolved = path.expanduser().resolve()
+    exists = resolved.is_file()
+    return {
+        "path": str(resolved),
+        "exists": exists,
+        "size_bytes": int(resolved.stat().st_size) if exists else None,
+        "sha256": sha256(resolved) if exists else "",
+    }
+
+
+def scale_contract_provenance(summary: dict, rows: list[dict]) -> dict[str, object]:
+    """Describe the scale table actually materialized in one source run."""
+
+    best_native = summary.get("best_native") or {}
+    nuisance = best_native.get("nuisance") or {}
+    row_model_fields = ("scale_replay_model", "scale_compression_model")
+    model_names: list[str] = []
+    source = ""
+    for field in row_model_fields:
+        values = sorted(
+            {
+                str(row.get(field, "")).strip()
+                for row in rows
+                if str(row.get(field, "")).strip()
+            }
+        )
+        if values:
+            model_names = values
+            source = f"row_table.{field}"
+            break
+
+    if not model_names:
+        replay_candidate = (summary.get("scale_contract_replay") or {}).get("candidate") or {}
+        replay_name = str(replay_candidate.get("name", "")).strip()
+        compression_candidate = (summary.get("scale_compression") or {}).get("selected_output") or {}
+        compression_name = str(compression_candidate.get("name", "")).strip()
+        candidates = (
+            (replay_name, "summary.scale_contract_replay.candidate.name"),
+            (str(nuisance.get("scale_replay_model", "")).strip(), "summary.best_native.nuisance.scale_replay_model"),
+            (compression_name, "summary.scale_compression.selected_output.name"),
+            (str(nuisance.get("scale_compression_model", "")).strip(), "summary.best_native.nuisance.scale_compression_model"),
+        )
+        for candidate, candidate_source in candidates:
+            if candidate:
+                model_names = [candidate]
+                source = candidate_source
+                break
+
+    if not model_names:
+        group_width = safe_float(nuisance.get("group_width_deg"))
+        detector_bins = safe_float(nuisance.get("detector_scale_bins"))
+        if math.isfinite(group_width) or math.isfinite(detector_bins):
+            width_text = f"{group_width:g}" if math.isfinite(group_width) else "unknown"
+            detector_text = str(int(detector_bins)) if math.isfinite(detector_bins) else "unknown"
+            model_names = [f"group_width_{width_text}_deg_det_{detector_text}"]
+            source = "summary.best_native.nuisance"
+
+    count_value = safe_float(best_native.get("scale_count"))
+    count = int(count_value) if math.isfinite(count_value) and count_value >= 0.0 else None
+    return {
+        "model": model_names[0] if len(model_names) == 1 else ("mixed" if model_names else "unknown"),
+        "models": model_names,
+        "model_source": source or "unavailable",
+        "parameter_count": count,
+        "fit_split": str(best_native.get("scale_fit_split", "")) or "unknown",
+    }
+
+
+def d_spacing_from_model(model: dict, h: int, k: int, ell: int) -> float:
+    """Return d(hkl) from the parsed model cell without changing HKL signs."""
+
+    try:
+        a, b, c, alpha_deg, beta_deg, gamma_deg = [float(value) for value in model["cell"]]
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("parsed model does not contain a usable six-value unit cell") from exc
+    alpha, beta, gamma = np.deg2rad([alpha_deg, beta_deg, gamma_deg])
+    direct_metric = np.asarray(
+        [
+            [a * a, a * b * math.cos(gamma), a * c * math.cos(beta)],
+            [a * b * math.cos(gamma), b * b, b * c * math.cos(alpha)],
+            [a * c * math.cos(beta), b * c * math.cos(alpha), c * c],
+        ],
+        dtype=float,
+    )
+    try:
+        reciprocal_metric = np.linalg.inv(direct_metric)
+    except np.linalg.LinAlgError as exc:
+        raise ValueError("parsed model unit cell is singular") from exc
+    hkl = np.asarray([int(h), int(k), int(ell)], dtype=float)
+    inv_d2 = float(hkl @ reciprocal_metric @ hkl)
+    if not math.isfinite(inv_d2) or inv_d2 <= 0.0:
+        raise ValueError(f"cannot calculate a finite d spacing for HKL {(h, k, ell)}")
+    return 1.0 / math.sqrt(inv_d2)
+
+
+def filter_native_rows_by_resolution(rows: list[dict], model: dict, min_d_spacing: float) -> tuple[list[dict], dict]:
+    """Apply a shared-model-cell endpoint/reporting d cutoff to native rows.
+
+    Native tables may carry ``d_A`` calculated from each experiment's fitted
+    cell.  A merged paper endpoint has one structure cell, so its resolution
+    boundary must instead be calculated from signed HKL and that shared cell.
+    """
+
+    cutoff = float(min_d_spacing)
+    kept: list[dict] = []
+    input_d_spacings: list[float] = []
+    retained_d_spacings: list[float] = []
+    stored_membership_disagreements = 0
+    for row in rows:
+        try:
+            h, k, ell = (int(float(row[key])) for key in ("h", "k", "l"))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("resolution filtering needs integer h,k,l in every native row") from exc
+        d_value = d_spacing_from_model(model, h, k, ell)
+        input_d_spacings.append(d_value)
+        stored_d = safe_float(row.get("d_A"))
+        if cutoff > 0.0 and math.isfinite(stored_d) and stored_d > 0.0 and ((stored_d + 1e-12 >= cutoff) != (d_value + 1e-12 >= cutoff)):
+            stored_membership_disagreements += 1
+        if cutoff <= 0.0 or d_value + 1e-12 >= cutoff:
+            kept.append(row)
+            retained_d_spacings.append(d_value)
+    return kept, {
+        "requested_min_d_spacing_A": cutoff,
+        "input_rows": len(rows),
+        "kept_rows": len(kept),
+        "retained_rows": len(kept),
+        "dropped_rows": len(rows) - len(kept),
+        "retained_fraction": float(len(kept) / len(rows)) if rows else float("nan"),
+        "actual_input_min_d_spacing_A": min(input_d_spacings) if input_d_spacings else float("nan"),
+        "actual_retained_min_d_spacing_A": min(retained_d_spacings) if retained_d_spacings else float("nan"),
+        "actual_retained_max_d_spacing_A": max(retained_d_spacings) if retained_d_spacings else float("nan"),
+        "d_spacings_calculated_from_model": len(rows),
+        "stored_d_A_membership_disagreements": stored_membership_disagreements,
+        "cell_A_deg": [float(value) for value in model["cell"]],
+    }
+
+
+def filter_hkl_rows_by_resolution(rows: list[tuple], model: dict, min_d_spacing: float) -> list[tuple]:
+    """Filter a corrected-HKL source with the same crystallographic cutoff."""
+
+    cutoff = float(min_d_spacing)
+    if cutoff <= 0.0:
+        return rows
+    return [
+        row
+        for row in rows
+        if d_spacing_from_model(model, int(row[0]), int(row[1]), int(row[2])) + 1e-12 >= cutoff
+    ]
+
+
+def hkl_resolution_stats(rows: list[tuple], model: dict) -> dict[str, object]:
+    """Report the discrete resolution range represented by HKL rows."""
+
+    spacings = [d_spacing_from_model(model, int(row[0]), int(row[1]), int(row[2])) for row in rows]
+    return {
+        "rows": len(rows),
+        "actual_min_d_spacing_A": min(spacings) if spacings else float("nan"),
+        "actual_max_d_spacing_A": max(spacings) if spacings else float("nan"),
+        "cell_A_deg": [float(value) for value in model["cell"]],
+    }
 
 
 def selected_native_wght(summary: dict) -> tuple[float, float]:
@@ -215,6 +381,17 @@ def split_metrics(rows: list[dict], pred_col: str, wght_a: float, wght_b: float)
         use = rows if split == "all" else [r for r in rows if r.get("split") == split]
         out[split] = metrics(use, pred_col, wght_a, wght_b)
     return out
+
+
+def native_metrics_by_split(rows: list[dict], wght_a: float, wght_b: float) -> dict[str, dict[str, dict]]:
+    """Return native metrics in the single-run summary's split-first shape."""
+
+    dyn = split_metrics(rows, "dyn_scaled", wght_a, wght_b)
+    born = split_metrics(rows, "born_scaled", wght_a, wght_b)
+    return {
+        split: {"dyn": dyn[split], "born": born[split]}
+        for split in ("all", "work", "free")
+    }
 
 
 def read_hkl(path: Path):
@@ -831,6 +1008,7 @@ def endpoint_hkl_path(run: Path, lam: str) -> Path:
 
 
 def main():
+    started_monotonic = time.perf_counter()
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--run", action="append", required=True, help="name=/path/to/native_nuisance_run")
     ap.add_argument("--out-dir", required=True)
@@ -919,6 +1097,17 @@ def main():
     ap.add_argument("--post-bloch-sigma-holdout-fraction", type=float, default=0.20)
     ap.add_argument("--post-bloch-sigma-min-scale", type=float, default=0.25)
     ap.add_argument("--post-bloch-sigma-max-scale", type=float, default=4.0)
+    ap.add_argument(
+        "--min-d-spacing",
+        "--endpoint-min-d-spacing",
+        dest="min_d_spacing",
+        type=float,
+        default=0.0,
+        help=(
+            "Optional reporting/endpoint cutoff applied to existing native row tables before joint metrics, "
+            "sigma calibration, merging, and SHELXL. Zero preserves every row in the supplied runs."
+        ),
+    )
     args = ap.parse_args()
 
     try:
@@ -927,11 +1116,14 @@ def main():
         ap.error(f"--endpoint-lambda must be finite: {exc}")
     if not math.isfinite(endpoint_lambda_value):
         ap.error("--endpoint-lambda must be finite")
+    if not math.isfinite(float(args.min_d_spacing)) or float(args.min_d_spacing) < 0.0:
+        ap.error("--endpoint-min-d-spacing/--min-d-spacing must be finite and nonnegative")
     # Native endpoint directories use ``str(float(lambda))``.  Canonicalizing
     # here keeps values such as ``1`` and ``1.0`` on one artifact identity.
     args.endpoint_lambda = str(endpoint_lambda_value)
 
-    model = parse_model(Path(args.res))
+    structure_path = Path(args.res)
+    model = parse_model(structure_path)
     symmetry_ops = model.get("symmetry_ops", [])
 
     out = Path(args.out_dir)
@@ -948,12 +1140,19 @@ def main():
             raise ValueError("--run must be name=/path")
         name, path_text = item.split("=", 1)
         run = Path(path_text)
-        summary = read_json(run / "summary.json")
+        row_table_path = run / "native_dyn_calc.csv"
+        summary_path = run / "summary.json"
+        summary = read_json(summary_path)
         source_wght_a, source_wght_b = selected_native_wght(summary)
         dataset_wght_a = float(args.wght_a) if args.wght_a is not None else source_wght_a
         dataset_wght_b = float(args.wght_b) if args.wght_b is not None else source_wght_b
         per_dataset_wght[name] = {"a": dataset_wght_a, "b": dataset_wght_b}
-        rows = read_rows(run, name)
+        unfiltered_rows = read_rows(run, name)
+        rows, resolution_filter = filter_native_rows_by_resolution(
+            unfiltered_rows,
+            model,
+            float(args.min_d_spacing),
+        )
         role = str(rows[0].get("dataset_role", "primary")) if rows else "missing"
         raw_weight = safe_float(rows[0].get("raw_row_weight"), 1.0) if rows else float("nan")
         endpoint_weight = safe_float(rows[0].get("endpoint_weight"), raw_weight) if rows else float("nan")
@@ -970,6 +1169,31 @@ def main():
             if str(r.get("dataset_role", "primary")) != "exclude"
             and endpoint_weight > 0.0
         ]
+        source_best_native = summary.get("best_native", {})
+        if not isinstance(source_best_native, dict):
+            source_best_native = {}
+        filtered_native_metrics = native_metrics_by_split(
+            native_rows,
+            dataset_wght_a,
+            dataset_wght_b,
+        )
+        filtered_best_native = dict(source_best_native)
+        filtered_best_native["metrics"] = filtered_native_metrics
+        filtered_best_native["metrics_contract"] = {
+            "scope": "combined_shared_cell_resolution_filtered_rows",
+            "cell_source": "shared_structure_res",
+            "requested_min_d_spacing_A": float(args.min_d_spacing),
+            "input_rows": int(resolution_filter.get("input_rows", 0)),
+            "retained_resolution_rows": len(rows),
+            "rows_used": len(native_rows),
+            "dataset_role": role,
+            "raw_row_weight": raw_weight,
+            "raw_row_weight_applied_to_sigma": bool(
+                native_rows and math.isfinite(raw_weight) and abs(raw_weight - 1.0) > 1e-12
+            ),
+            "native_wght_a": dataset_wght_a,
+            "native_wght_b": dataset_wght_b,
+        }
         all_rows.extend(native_rows)
         exact = {tuple(int(r[x]) for x in ("h", "k", "l")) for r in rows}
         canon = {canonical_model_friedel(*hkl, symmetry_ops) for hkl in exact}
@@ -981,6 +1205,12 @@ def main():
             {
                 "name": name,
                 "run_dir": str(run.resolve()),
+                "source_artifacts": {
+                    "row_table": file_provenance(row_table_path),
+                    "summary": file_provenance(summary_path),
+                },
+                "scale_contract": scale_contract_provenance(summary, unfiltered_rows),
+                "resolution_filter": resolution_filter,
                 "rows": len(rows),
                 "native_rows": len(native_rows),
                 "endpoint_rows": len(endpoint_input_rows),
@@ -992,7 +1222,13 @@ def main():
                 "unique_signed_hkl": len(exact),
                 "unique_symmetry_friedel": len(canon),
                 "unique_p222_friedel": len(canon),
-                "best_native_summary": summary.get("best_native", {}),
+                # Keep the historical field useful to downstream readers, but
+                # project its metrics onto the exact rows used by this combined
+                # run.  The verbatim source block remains available separately
+                # for nuisance-model provenance and before-cutoff comparisons.
+                "best_native_summary": filtered_best_native,
+                "resolution_filtered_native_metrics": filtered_native_metrics,
+                "source_best_native_summary": source_best_native,
                 "basis_size_stats": {
                     "min": int(np.min(basis)) if len(basis) else 0,
                     "median": float(np.median(basis)) if len(basis) else 0.0,
@@ -1006,11 +1242,24 @@ def main():
             }
         )
         if args.endpoint_source == "hkl":
-            hkl_rows = read_hkl(endpoint_hkl_path(run, args.endpoint_lambda))
+            source_hkl_path = endpoint_hkl_path(run, args.endpoint_lambda)
+            hkl_rows = read_hkl(source_hkl_path)
             source_run_text = (summary.get("dataset_policy") or {}).get("run_dir", "")
             source_run = Path(source_run_text) if source_run_text else None
             if not hkl_rows and source_run and source_run.exists():
-                hkl_rows = read_hkl(endpoint_hkl_path(source_run, args.endpoint_lambda))
+                source_hkl_path = endpoint_hkl_path(source_run, args.endpoint_lambda)
+                hkl_rows = read_hkl(source_hkl_path)
+            hkl_input_count = len(hkl_rows)
+            hkl_rows = filter_hkl_rows_by_resolution(hkl_rows, model, float(args.min_d_spacing))
+            dataset_summaries[-1]["source_artifacts"]["endpoint_hkl"] = file_provenance(source_hkl_path)
+            dataset_summaries[-1]["endpoint_hkl_resolution_filter"] = {
+                "requested_min_d_spacing_A": float(args.min_d_spacing),
+                "input_rows": hkl_input_count,
+                "kept_rows": len(hkl_rows),
+                "retained_rows": len(hkl_rows),
+                "dropped_rows": hkl_input_count - len(hkl_rows),
+                **hkl_resolution_stats(hkl_rows, model),
+            }
             endpoint_rows_by_dataset[name] = hkl_rows
             endpoint_corrections_by_dataset[name] = None
         else:
@@ -1157,7 +1406,49 @@ def main():
             "hkl_sha256": sha256(endpoint_hkl) if endpoint_hkl.exists() else "",
         }
 
+    endpoint_resolution = hkl_resolution_stats(merged_endpoint, model)
+    resolution_filters = [dataset["resolution_filter"] for dataset in dataset_summaries]
+    retained_native_minima = [
+        safe_float(item.get("actual_retained_min_d_spacing_A"))
+        for item in resolution_filters
+        if math.isfinite(safe_float(item.get("actual_retained_min_d_spacing_A")))
+    ]
+    source_scale_counts = [
+        dataset.get("scale_contract", {}).get("parameter_count")
+        for dataset in dataset_summaries
+    ]
+    all_scale_counts_known = all(isinstance(value, int) for value in source_scale_counts)
+    resolution_contract = {
+        "requested_min_d_spacing_A": float(args.min_d_spacing),
+        "cell_source": "shared_structure_res",
+        "cell_A_deg": [float(value) for value in model["cell"]],
+        "input_native_rows": int(sum(int(item.get("input_rows", 0)) for item in resolution_filters)),
+        "retained_native_rows": int(sum(int(item.get("kept_rows", 0)) for item in resolution_filters)),
+        "dropped_native_rows": int(sum(int(item.get("dropped_rows", 0)) for item in resolution_filters)),
+        "actual_retained_native_min_d_spacing_A": min(retained_native_minima) if retained_native_minima else float("nan"),
+        "actual_merged_endpoint_min_d_spacing_A": endpoint_resolution["actual_min_d_spacing_A"],
+        "merged_endpoint_rows": endpoint_resolution["rows"],
+    }
+    compute_wall_seconds = float(time.perf_counter() - started_monotonic)
+
     result = {
+        "provenance": {
+            "structure": file_provenance(structure_path),
+            "endpoint_source": args.endpoint_source,
+            "resolution_contract": resolution_contract,
+            "scale_contract": {
+                "per_dataset": {
+                    dataset["name"]: dataset["scale_contract"]
+                    for dataset in dataset_summaries
+                },
+                "total_parameter_count": int(sum(source_scale_counts)) if all_scale_counts_known else None,
+                "all_parameter_counts_known": all_scale_counts_known,
+            },
+        },
+        "timing": {
+            "wall_seconds": compute_wall_seconds,
+            "compute_wall_seconds": compute_wall_seconds,
+        },
         "runs": dataset_summaries,
         "wght": {
             "a": wght_a,
@@ -1177,6 +1468,10 @@ def main():
         "interdataset_scale": {"mode": args.interdataset_scale, **interdataset_scale},
         "combined_endpoint": {
             "lambda_q": args.endpoint_lambda,
+            "min_d_spacing_A": float(args.min_d_spacing),
+            "requested_min_d_spacing_A": float(args.min_d_spacing),
+            "actual_min_d_spacing_A": endpoint_resolution["actual_min_d_spacing_A"],
+            "resolution_contract": resolution_contract,
             "endpoint_b": 0.0,
             "keep_exti": False,
             "merge_key": args.endpoint_merge_key,
@@ -1201,9 +1496,13 @@ def main():
         "# Multi-Crystal Native Nuisance Combination",
         "",
         "The per-dataset nuisance fits are kept separate. This report concatenates signed native rows after each dataset has its own scales/thickness/cell/geometry treatment.",
+        f"An explicit reporting/endpoint resolution cutoff of `d >= {float(args.min_d_spacing):g} A` was applied to every supplied row table." if float(args.min_d_spacing) > 0.0 else "No additional reporting/endpoint resolution cutoff was applied to the supplied row tables.",
+        f"The discrete highest-resolution retained native row is `d={safe_float(resolution_contract.get('actual_retained_native_min_d_spacing_A')):.6f} A`; the merged endpoint reaches `d={safe_float(resolution_contract.get('actual_merged_endpoint_min_d_spacing_A')):.6f} A`. Membership was calculated from the shared structure RES cell, not per-dataset stored d values.",
+        "Per-dataset native metrics below were recalculated from those retained rows with the combined run's dataset-policy and native WGHT contract; they are not copied from the unfiltered source-run summary.",
+        f"Combined-endpoint compute wall time: `{compute_wall_seconds:.3f} s`.",
         "",
-        "| dataset | role | raw/endpoint weight | rows native/endpoint | unique signed | unique model/Friedel | basis median/p95/max | dyn R1 all | dyn wR2 all | born R1 all | born wR2 all | q p05/median/p95 |",
-        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| dataset | role | source rows retained/input | scale model | scale params | raw/endpoint weight | rows native/endpoint | unique signed | unique model/Friedel | basis median/p95/max | dyn R1 all | dyn wR2 all | born R1 all | born wR2 all | q p05/median/p95 |",
+        "|---|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for ds in dataset_summaries:
         bn = ds["best_native_summary"]
@@ -1211,8 +1510,12 @@ def main():
         dyn = ((m.get("all") or {}).get("dyn") or {})
         born = ((m.get("all") or {}).get("born") or {})
         bstats = ds.get("basis_size_stats", {})
+        resolution_filter = ds.get("resolution_filter") or {}
+        scale_contract = ds.get("scale_contract") or {}
         lines.append(
-            f"| {ds['name']} | {ds['dataset_role']} | {safe_float(ds.get('raw_row_weight')):.3f}/{safe_float(ds.get('endpoint_weight')):.3f} | "
+            f"| {ds['name']} | {ds['dataset_role']} | {resolution_filter.get('kept_rows', 0)}/{resolution_filter.get('input_rows', 0)} | "
+            f"`{scale_contract.get('model', 'unknown')}` | {scale_contract.get('parameter_count', 'n/a')} | "
+            f"{safe_float(ds.get('raw_row_weight')):.3f}/{safe_float(ds.get('endpoint_weight')):.3f} | "
             f"{ds['native_rows']}/{ds['endpoint_rows']} | {ds['unique_signed_hkl']} | {ds['unique_symmetry_friedel']} | "
             f"{safe_float(bstats.get('median')):.0f}/{safe_float(bstats.get('p95')):.0f}/{safe_float(bstats.get('max')):.0f} | "
             f"{100*safe_float(dyn.get('R1_all')):.2f} | {100*safe_float(dyn.get('wR2_all')):.2f} | "
@@ -1274,6 +1577,24 @@ def main():
             )
     else:
         lines.append("No endpoint HKL rows were found for the requested lambda.")
+    lines.extend(
+        [
+            "",
+            "## Source Provenance",
+            "",
+            f"Shared structure RES: `{result['provenance']['structure']['path']}`; SHA-256 `{result['provenance']['structure']['sha256']}`.",
+            "",
+            "| dataset | row table SHA-256 | summary SHA-256 | endpoint-source HKL SHA-256 |",
+            "|---|---|---|---|",
+        ]
+    )
+    for dataset in dataset_summaries:
+        sources = dataset.get("source_artifacts") or {}
+        lines.append(
+            f"| {dataset['name']} | `{(sources.get('row_table') or {}).get('sha256', '')}` | "
+            f"`{(sources.get('summary') or {}).get('sha256', '')}` | "
+            f"`{(sources.get('endpoint_hkl') or {}).get('sha256', '')}` |"
+        )
     (out / "REPORT.md").write_text("\n".join(lines) + "\n")
     print(json.dumps({"out_dir": str(out.resolve()), "report": str((out / "REPORT.md").resolve()), "native_wR2_all": native["dyn"]["all"]["wR2_all"], "endpoint": shelxl}, indent=2, allow_nan=True))
 

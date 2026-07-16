@@ -10,6 +10,7 @@ scale model can be while staying close to the current full-scale result.
 from __future__ import annotations
 
 import argparse
+import copy
 import csv
 import json
 import math
@@ -787,7 +788,6 @@ def main() -> None:
     raw_dyn = col(rows, args.raw_dyn_column)
     raw_born = col(rows, args.raw_born_column)
     base_dyn = col(rows, args.baseline_dyn_column)
-    base_born = col(rows, args.baseline_born_column)
     groups0 = col(rows, "group").astype(int)
     det0 = col(rows, "detector_bin").astype(int)
     masks = split_masks(rows)
@@ -831,7 +831,6 @@ def main() -> None:
     n_source_groups = int(len(set(groups0[fit_good0].astype(int)))) if np.count_nonzero(fit_good0) else int(len(set(groups0.astype(int))))
     adaptive_counts = parse_adaptive_counts(args.adaptive_frame_counts, n_source_groups) if "adaptive" in frame_models else []
     candidates: list[dict] = [baseline]
-    best_arrays: dict[str, np.ndarray] = {"dyn": base_dyn, "born": base_born}
 
     def evaluate_grouping(
         *,
@@ -938,82 +937,104 @@ def main() -> None:
     selected_widest = max(strict, key=lambda c: (safe_float(c.get("window_deg"), -1.0), c["group_stride"], -c["scale_params"], -c["wRall"])) if strict else None
     selected_widest_r_only = max(r_only, key=lambda c: (safe_float(c.get("window_deg"), -1.0), c["group_stride"], -c["scale_params"], -c["wRall"])) if r_only else None
     selected_for_output = selected_information or selected or selected_r_only or min(non_baseline, key=lambda c: (max(0.0, c["delta_vs_baseline"]["Rall"]), c["scale_params"]))
-    if selected_for_output.get("frame_model") == "adaptive":
-        selected_groups, _ = adaptive_segment_groups(
-            groups0,
-            baseline_log_scale,
-            fit_good0,
-            int(selected_for_output.get("adaptive_segments") or selected_for_output.get("group_scale_params") or 1),
-        )
-    else:
-        selected_groups = coarsen_groups(groups0, int(selected_for_output["group_stride"]), int(selected_for_output.get("group_offset", 0)))
-    selected_det_target = int(selected_for_output["detector_bins"])
-    if selected_det_target <= 1:
-        born_for_output, _ = fit_group_scales(obs, sig, raw_born, selected_groups, fit_mask, args.scale_objective, native_wght_a, native_wght_b, args.instability_u)
-    else:
-        selected_det = coarsen_detector(det0, detector_base, selected_det_target)
-        born_for_output, _, _ = fit_group_detector_scales(obs, sig, raw_born, selected_groups, selected_det, fit_mask, args.scale_objective, native_wght_a, native_wght_b, args.instability_u)
-    best_arrays = {"dyn": selected_for_output["arrays"]["dyn"], "born": born_for_output}
-
     candidate_rows = [candidate_row(c) for c in sorted(candidates, key=lambda c: (c["scale_params"], c["wRall"], c["Rall"]))]
     candidate_csv = out / "scale_compression_candidates.csv"
     write_rows(candidate_csv, candidate_rows, list(candidate_rows[0].keys()))
 
-    selected_dir = out / "selected_compact_run"
-    selected_dir.mkdir(parents=True, exist_ok=True)
-    updated_rows: list[dict[str, object]] = []
-    for i, row in enumerate(rows):
-        new = dict(row)
-        new["dyn_full_scaled"] = row.get(args.baseline_dyn_column, "")
-        new["born_full_scaled"] = row.get(args.baseline_born_column, "")
-        new["dyn_scaled"] = f"{best_arrays['dyn'][i]:.17g}" if np.isfinite(best_arrays["dyn"][i]) else "nan"
-        new["born_scaled"] = f"{best_arrays['born'][i]:.17g}" if np.isfinite(best_arrays["born"][i]) else "nan"
-        new["scale_compression_model"] = selected_for_output["name"]
-        updated_rows.append(new)
-    fieldnames = list(rows[0].keys())
-    for extra in ("dyn_full_scaled", "born_full_scaled", "scale_compression_model"):
-        if extra not in fieldnames:
-            fieldnames.append(extra)
-    write_rows(selected_dir / "native_dyn_calc.csv", updated_rows, fieldnames)
+    def arrays_for_candidate(candidate: dict) -> dict[str, np.ndarray]:
+        if candidate.get("frame_model") == "adaptive":
+            candidate_groups, _ = adaptive_segment_groups(
+                groups0,
+                baseline_log_scale,
+                fit_good0,
+                int(candidate.get("adaptive_segments") or candidate.get("group_scale_params") or 1),
+            )
+        else:
+            candidate_groups = coarsen_groups(
+                groups0,
+                int(candidate["group_stride"]),
+                int(candidate.get("group_offset", 0)),
+            )
+        detector_target = int(candidate["detector_bins"])
+        if detector_target <= 1:
+            born, _ = fit_group_scales(
+                obs, sig, raw_born, candidate_groups, fit_mask, args.scale_objective,
+                native_wght_a, native_wght_b, args.instability_u,
+            )
+        else:
+            candidate_detector = coarsen_detector(det0, detector_base, detector_target)
+            born, _, _ = fit_group_detector_scales(
+                obs, sig, raw_born, candidate_groups, candidate_detector, fit_mask,
+                args.scale_objective, native_wght_a, native_wght_b, args.instability_u,
+            )
+        return {"dyn": candidate["arrays"]["dyn"], "born": born}
 
-    compact_summary = dict(source_summary)
-    compact_summary["scale_compression"] = {
-        "source_row_table": str(row_table),
-        "source_summary": str(summary_path),
-        "objective": args.scale_objective,
-        "fit_split": fit_split,
-        "tolerance": float(args.tolerance),
-        "selection_metrics": selection_metrics,
-        "frame_models": frame_models,
-        "adaptive_frame_counts": adaptive_counts,
-        "window_scan": window_scan,
-        "scan_offsets": bool(args.scan_offsets),
-        "baseline": {k: v for k, v in baseline.items() if k not in {"arrays", "frame_scales", "detector_scales"}},
-        "selected_strict": {k: v for k, v in (selected or {}).items() if k not in {"arrays", "frame_scales", "detector_scales"}} if selected else None,
-        "selected_information": {k: v for k, v in (selected_information or {}).items() if k not in {"arrays", "frame_scales", "detector_scales"}} if selected_information else None,
-        "selected_r_only": {k: v for k, v in (selected_r_only or {}).items() if k not in {"arrays", "frame_scales", "detector_scales"}} if selected_r_only else None,
-        "selected_widest_strict": {k: v for k, v in (selected_widest or {}).items() if k not in {"arrays", "frame_scales", "detector_scales"}} if selected_widest else None,
-        "selected_widest_r_only": {k: v for k, v in (selected_widest_r_only or {}).items() if k not in {"arrays", "frame_scales", "detector_scales"}} if selected_widest_r_only else None,
-        "selected_output": {k: v for k, v in selected_for_output.items() if k not in {"arrays", "frame_scales", "detector_scales"}},
-        "candidate_csv": str(candidate_csv),
-    }
-    compact_summary.setdefault("best_native", {})
-    compact_summary["best_native"]["scale_count"] = int(selected_for_output["scale_params"])
-    compact_summary["best_native"]["scale_fit_split"] = fit_split
-    compact_summary["best_native"]["metrics"] = {
-        "all": {
-            "dyn": selected_for_output["native"],
-            "born": native_metrics(obs, sig, best_arrays["born"], masks["all"], native_wght_a, native_wght_b, n_params=int(selected_for_output["total_params"])),
+    def materialize_candidate_run(run_dir: Path, candidate: dict) -> None:
+        arrays = arrays_for_candidate(candidate)
+        run_dir.mkdir(parents=True, exist_ok=True)
+        updated_rows: list[dict[str, object]] = []
+        for i, row in enumerate(rows):
+            new = dict(row)
+            new["dyn_full_scaled"] = row.get(args.baseline_dyn_column, "")
+            new["born_full_scaled"] = row.get(args.baseline_born_column, "")
+            new["dyn_scaled"] = f"{arrays['dyn'][i]:.17g}" if np.isfinite(arrays["dyn"][i]) else "nan"
+            new["born_scaled"] = f"{arrays['born'][i]:.17g}" if np.isfinite(arrays["born"][i]) else "nan"
+            new["scale_compression_model"] = candidate["name"]
+            updated_rows.append(new)
+        fieldnames = list(rows[0].keys())
+        for extra in ("dyn_full_scaled", "born_full_scaled", "scale_compression_model"):
+            if extra not in fieldnames:
+                fieldnames.append(extra)
+        write_rows(run_dir / "native_dyn_calc.csv", updated_rows, fieldnames)
+
+        compact_summary = copy.deepcopy(source_summary)
+        compact_summary["scale_compression"] = {
+            "source_row_table": str(row_table),
+            "source_summary": str(summary_path),
+            "objective": args.scale_objective,
+            "fit_split": fit_split,
+            "tolerance": float(args.tolerance),
+            "selection_metrics": selection_metrics,
+            "frame_models": frame_models,
+            "adaptive_frame_counts": adaptive_counts,
+            "window_scan": window_scan,
+            "scan_offsets": bool(args.scan_offsets),
+            "baseline": {k: v for k, v in baseline.items() if k not in {"arrays", "frame_scales", "detector_scales"}},
+            "selected_strict": {k: v for k, v in (selected or {}).items() if k not in {"arrays", "frame_scales", "detector_scales"}} if selected else None,
+            "selected_information": {k: v for k, v in (selected_information or {}).items() if k not in {"arrays", "frame_scales", "detector_scales"}} if selected_information else None,
+            "selected_r_only": {k: v for k, v in (selected_r_only or {}).items() if k not in {"arrays", "frame_scales", "detector_scales"}} if selected_r_only else None,
+            "selected_widest_strict": {k: v for k, v in (selected_widest or {}).items() if k not in {"arrays", "frame_scales", "detector_scales"}} if selected_widest else None,
+            "selected_widest_r_only": {k: v for k, v in (selected_widest_r_only or {}).items() if k not in {"arrays", "frame_scales", "detector_scales"}} if selected_widest_r_only else None,
+            "selected_output": {k: v for k, v in candidate.items() if k not in {"arrays", "frame_scales", "detector_scales"}},
+            "candidate_csv": str(candidate_csv),
         }
-    }
-    compact_summary["best_native"]["nuisance"] = {
-        **((source_summary.get("best_native") or {}).get("nuisance") or {}),
-        "scale_compression_model": selected_for_output["name"],
-        "scale_compression_objective": args.scale_objective,
-        "scale_compression_group_stride": int(selected_for_output["group_stride"]),
-        "scale_compression_detector_bins": int(selected_for_output["detector_bins"]),
-    }
-    (selected_dir / "summary.json").write_text(json.dumps(compact_summary, indent=2, allow_nan=True) + "\n")
+        compact_summary.setdefault("best_native", {})
+        compact_summary["best_native"]["scale_count"] = int(candidate["scale_params"])
+        compact_summary["best_native"]["scale_fit_split"] = fit_split
+        compact_summary["best_native"]["metrics"] = {
+            split: {
+                kind: native_metrics(
+                    obs, sig, arrays[kind], masks[split], native_wght_a, native_wght_b,
+                    n_params=int(candidate["total_params"]),
+                )
+                for kind in ("dyn", "born")
+            }
+            for split in ("all", "work", "free")
+        }
+        compact_summary["best_native"]["nuisance"] = {
+            **((source_summary.get("best_native") or {}).get("nuisance") or {}),
+            "scale_compression_model": candidate["name"],
+            "scale_compression_objective": args.scale_objective,
+            "scale_compression_group_stride": int(candidate["group_stride"]),
+            "scale_compression_detector_bins": int(candidate["detector_bins"]),
+        }
+        (run_dir / "summary.json").write_text(json.dumps(compact_summary, indent=2, allow_nan=True) + "\n")
+
+    selected_dir = out / "selected_compact_run"
+    materialize_candidate_run(selected_dir, selected_for_output)
+    selected_strict_dir = out / "selected_strict_run"
+    if selected:
+        materialize_candidate_run(selected_strict_dir, selected)
     if summary_path.exists():
         shutil.copy2(summary_path, out / "source_summary.json")
 
@@ -1023,6 +1044,7 @@ def main() -> None:
         "summary": str(summary_path),
         "candidate_csv": str(candidate_csv),
         "selected_run_dir": str(selected_dir),
+        "selected_strict_run_dir": str(selected_strict_dir) if selected else "",
         "tolerance": float(args.tolerance),
         "selection_metrics": selection_metrics,
         "frame_models": frame_models,
