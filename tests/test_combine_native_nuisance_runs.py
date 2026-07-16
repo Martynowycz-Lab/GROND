@@ -1,3 +1,7 @@
+import csv
+import hashlib
+import json
+import sys
 from pathlib import Path
 
 from grond.legacy.engine import combine_native_nuisance_runs as combine
@@ -9,14 +13,282 @@ from grond.legacy.engine.combine_native_nuisance_runs import (
     endpoint_key_function,
     endpoint_rows_from_native,
     estimate_overlap_scales,
+    file_provenance,
+    filter_hkl_rows_by_resolution,
+    filter_native_rows_by_resolution,
+    hkl_resolution_stats,
     merge_hkl_rows,
     metrics,
     run_shelxl,
     safe_fixed_width_factor,
+    scale_contract_provenance,
     scale_hkl_rows,
     selected_native_wght,
     write_no_exti_ins,
 )
+
+
+def test_resolution_filter_uses_shared_model_cell_not_per_dataset_row_d():
+    model = {"cell": (10.0, 10.0, 10.0, 90.0, 90.0, 90.0)}
+    rows = [
+        {"h": "10", "k": "0", "l": "0", "d_A": "0.5"},
+        {"h": "20", "k": "0", "l": "0", "d_A": "1.0"},
+        {"h": "0", "k": "10", "l": "0", "d_A": ""},
+    ]
+
+    kept, audit = filter_native_rows_by_resolution(rows, model, 0.75)
+
+    assert kept == [rows[0], rows[2]]
+    assert audit == {
+        "requested_min_d_spacing_A": 0.75,
+        "input_rows": 3,
+        "kept_rows": 2,
+        "retained_rows": 2,
+        "dropped_rows": 1,
+        "retained_fraction": 2 / 3,
+        "actual_input_min_d_spacing_A": 0.5,
+        "actual_retained_min_d_spacing_A": 1.0,
+        "actual_retained_max_d_spacing_A": 1.0,
+        "d_spacings_calculated_from_model": 3,
+        "stored_d_A_membership_disagreements": 2,
+        "cell_A_deg": [10.0, 10.0, 10.0, 90.0, 90.0, 90.0],
+    }
+
+
+def test_resolution_filter_applies_to_corrected_hkl_source():
+    model = {"cell": (10.0, 10.0, 10.0, 90.0, 90.0, 90.0)}
+    rows = [(10, 0, 0, 100.0, 5.0), (20, 0, 0, 50.0, 5.0)]
+
+    assert filter_hkl_rows_by_resolution(rows, model, 0.75) == [rows[0]]
+    assert hkl_resolution_stats(rows, model) == {
+        "rows": 2,
+        "actual_min_d_spacing_A": 0.5,
+        "actual_max_d_spacing_A": 1.0,
+        "cell_A_deg": [10.0, 10.0, 10.0, 90.0, 90.0, 90.0],
+    }
+
+
+def test_file_and_scale_contract_provenance_identify_materialized_sources(tmp_path: Path):
+    source = tmp_path / "native_dyn_calc.csv"
+    source.write_bytes(b"exact row source\n")
+    provenance = file_provenance(source)
+
+    assert provenance == {
+        "path": str(source.resolve()),
+        "exists": True,
+        "size_bytes": len(b"exact row source\n"),
+        "sha256": hashlib.sha256(b"exact row source\n").hexdigest(),
+    }
+
+    summary = {
+        "best_native": {
+            "scale_count": 92,
+            "scale_fit_split": "work",
+            "nuisance": {"scale_compression_model": "adaptive_28_det_8"},
+        },
+        "scale_compression": {"selected_output": {"name": "adaptive_28_det_8"}},
+    }
+    rows = [
+        {
+            "scale_compression_model": "adaptive_28_det_8",
+            "scale_replay_model": "stride_6_det_8",
+        }
+    ]
+
+    assert scale_contract_provenance(summary, rows) == {
+        "model": "stride_6_det_8",
+        "models": ["stride_6_det_8"],
+        "model_source": "row_table.scale_replay_model",
+        "parameter_count": 92,
+        "fit_split": "work",
+    }
+
+
+def test_endpoint_cutoff_alias_writes_complete_summary_and_report(tmp_path: Path, monkeypatch):
+    run = tmp_path / "run"
+    run.mkdir()
+    fields = [
+        "h",
+        "k",
+        "l",
+        "d_A",
+        "target_I",
+        "sigma_eff",
+        "dyn_raw",
+        "dyn_scaled",
+        "born_scaled",
+        "q_dyn_over_born",
+        "basis_size",
+        "split",
+        "dataset_role",
+        "raw_row_weight",
+        "endpoint_weight",
+        "scale_replay_model",
+    ]
+    source_rows = [
+        {
+            "h": "10",
+            "k": "0",
+            "l": "0",
+            "d_A": "0.5",
+            "target_I": "100",
+            "sigma_eff": "5",
+            "dyn_raw": "50",
+            "dyn_scaled": "100",
+            "born_scaled": "80",
+            "q_dyn_over_born": "1",
+            "basis_size": "20",
+            "split": "work",
+            "dataset_role": "primary",
+            "raw_row_weight": "1",
+            "endpoint_weight": "1",
+            "scale_replay_model": "adaptive_28_det_8",
+        },
+        {
+            "h": "20",
+            "k": "0",
+            "l": "0",
+            "d_A": "1.0",
+            "target_I": "50",
+            "sigma_eff": "5",
+            "dyn_raw": "25",
+            "dyn_scaled": "50",
+            "born_scaled": "40",
+            "q_dyn_over_born": "1",
+            "basis_size": "20",
+            "split": "free",
+            "dataset_role": "primary",
+            "raw_row_weight": "1",
+            "endpoint_weight": "1",
+            "scale_replay_model": "adaptive_28_det_8",
+        },
+    ]
+    with (run / "native_dyn_calc.csv").open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(source_rows)
+    (run / "summary.json").write_text(
+        json.dumps(
+            {
+                "best_native": {
+                    "scale_count": 92,
+                    "scale_fit_split": "work",
+                    "nuisance": {"scale_replay_model": "adaptive_28_det_8"},
+                    "metrics": {
+                        "all": {
+                            "dyn": {"n": 2, "R1_all": 0.99, "wR2_all": 0.98},
+                            "born": {"n": 2, "R1_all": 0.97, "wR2_all": 0.96},
+                        }
+                    },
+                }
+            }
+        )
+        + "\n"
+    )
+    structure = tmp_path / "model.res"
+    structure.write_text(
+        "\n".join(
+            [
+                "TITL cutoff provenance",
+                "CELL 0.025079 10 10 10 90 90 90",
+                "SFAC C 1 0 1 0 1 0 1 0",
+                "FVAR 1.0",
+                "C1 1 0.1 0.2 0.3 11.0 0.05",
+                "L.S. 1",
+                "HKLF 4",
+                "END",
+            ]
+        )
+        + "\n"
+    )
+    out = tmp_path / "combined"
+    model = {
+        "cell": (10.0, 10.0, 10.0, 90.0, 90.0, 90.0),
+        "symmetry_ops": [{"rot": [[1, 0, 0], [0, 1, 0], [0, 0, 1]]}],
+    }
+    monkeypatch.setattr(combine, "parse_model", lambda _path: model)
+    monkeypatch.setattr(combine, "require_combined_endpoint_shelxl", lambda *_args, **_kwargs: "fake-shelxl")
+    monkeypatch.setattr(
+        combine,
+        "run_shelxl",
+        lambda *_args, **_kwargs: {
+            "status": "ok",
+            "R1_gt": 0.05,
+            "R1_all": 0.06,
+            "wR2_all": 0.10,
+            "GooF": 1.0,
+            "active_wght_a": 0.0,
+            "active_wght_b": 0.0,
+        },
+    )
+    monkeypatch.setattr(combine, "fail_if_shelxl_became_unavailable", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "combine_native_nuisance_runs",
+            "--run",
+            f"biotin={run}",
+            "--out-dir",
+            str(out),
+            "--res",
+            str(structure),
+            "--endpoint-min-d-spacing",
+            "0.75",
+            "--interdataset-scale",
+            "none",
+        ],
+    )
+
+    combine.main()
+
+    result = json.loads((out / "combined_summary.json").read_text())
+    contract = result["provenance"]["resolution_contract"]
+    assert contract["requested_min_d_spacing_A"] == 0.75
+    assert contract["input_native_rows"] == 2
+    assert contract["retained_native_rows"] == 1
+    assert contract["dropped_native_rows"] == 1
+    assert contract["actual_retained_native_min_d_spacing_A"] == 1.0
+    assert contract["actual_merged_endpoint_min_d_spacing_A"] == 1.0
+    assert result["combined_endpoint"]["actual_min_d_spacing_A"] == 1.0
+    assert result["provenance"]["scale_contract"]["total_parameter_count"] == 92
+    assert result["runs"][0]["scale_contract"]["model"] == "adaptive_28_det_8"
+    assert result["runs"][0]["source_artifacts"]["row_table"]["sha256"]
+    assert result["provenance"]["structure"]["sha256"]
+    run_summary = result["runs"][0]
+    filtered = run_summary["resolution_filtered_native_metrics"]
+    assert filtered["all"]["dyn"]["n"] == 1
+    assert filtered["all"]["dyn"]["R1_all"] == 0.0
+    assert filtered["all"]["dyn"]["wR2_all"] == 0.0
+    assert filtered["work"]["dyn"]["n"] == 1
+    assert filtered["free"]["dyn"]["n"] == 0
+    assert filtered["all"]["born"]["n"] == 1
+    assert abs(filtered["all"]["born"]["R1_all"] - (1.0 - 0.8**0.5)) < 1e-12
+    assert run_summary["best_native_summary"]["metrics"] == filtered
+    assert run_summary["best_native_summary"]["metrics_contract"] == {
+        "scope": "combined_shared_cell_resolution_filtered_rows",
+        "cell_source": "shared_structure_res",
+        "requested_min_d_spacing_A": 0.75,
+        "input_rows": 2,
+        "retained_resolution_rows": 1,
+        "rows_used": 1,
+        "dataset_role": "primary",
+        "raw_row_weight": 1.0,
+        "raw_row_weight_applied_to_sigma": False,
+        "native_wght_a": 0.126534,
+        "native_wght_b": 0.0,
+    }
+    assert run_summary["source_best_native_summary"]["metrics"]["all"]["dyn"]["R1_all"] == 0.99
+    assert result["timing"]["compute_wall_seconds"] >= 0.0
+    assert result["timing"]["wall_seconds"] == result["timing"]["compute_wall_seconds"]
+    report = (out / "REPORT.md").read_text()
+    assert "d=1.000000 A" in report
+    assert "adaptive_28_det_8" in report
+    assert "Source Provenance" in report
+    assert "compute wall time" in report
+    assert "not copied from the unfiltered source-run summary" in report
+    assert "| 0.00 | 0.00 | 10.56 |" in report
+    assert "99.00" not in report
 
 
 def test_zero_endpoint_weight_excludes_hkl_source_rows():

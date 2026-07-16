@@ -460,6 +460,9 @@ def build_replay_rows(
         native_wght_b,
         n_params=total_params,
     )
+    born = native_metrics(obs, sig, born_scaled, masks["all"], native_wght_a, native_wght_b, n_params=total_params)
+    born_work = native_metrics(obs, sig, born_scaled, masks["work"], native_wght_a, native_wght_b, n_params=total_params)
+    born_free = native_metrics(obs, sig, born_scaled, masks["free"], native_wght_a, native_wght_b, n_params=total_params)
     candidate = {
         "name": spec["name"],
         "frame_model": str(spec["kind"]),
@@ -481,6 +484,9 @@ def build_replay_rows(
         "native": native,
         "native_work": native_work,
         "native_free": native_free,
+        "born": born,
+        "born_work": born_work,
+        "born_free": born_free,
         "information": information_criteria(native, total_params),
     }
     updated = []
@@ -895,13 +901,29 @@ def main() -> None:
         )
         spec_dir.mkdir(parents=True, exist_ok=True)
         write_rows(spec_dir / "native_dyn_calc.csv", replay_rows, meta["fieldnames"])
-        spec_summary = {
+        candidate = meta["candidate"]
+        spec_summary = dict(summary)
+        best_native = dict(spec_summary.get("best_native") or {})
+        best_native["scale_count"] = int(candidate["scale_params"])
+        best_native["scale_fit_split"] = fit_split
+        best_native["metrics"] = {
+            "all": {"dyn": candidate["native"], "born": candidate["born"]},
+            "work": {"dyn": candidate["native_work"], "born": candidate["born_work"]},
+            "free": {"dyn": candidate["native_free"], "born": candidate["born_free"]},
+        }
+        best_native["nuisance"] = {
+            **(best_native.get("nuisance") or {}),
+            "scale_replay_model": str(candidate["name"]),
+            "scale_replay_fit_split": fit_split,
+        }
+        spec_summary["best_native"] = best_native
+        spec_summary["scale_contract_replay"] = {
             "source_row_table": str(row_table),
             "source_summary": str(summary_path),
             "source_res": str(res_path),
             "fit_split": fit_split,
             "spec": spec,
-            **meta["candidate"],
+            "candidate": candidate,
         }
         (spec_dir / "summary.json").write_text(json.dumps(spec_summary, indent=2, allow_nan=True) + "\n")
         for wght_mode in wght_modes:

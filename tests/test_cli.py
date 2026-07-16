@@ -2726,6 +2726,8 @@ def test_write_continue_checkpoint_records_multi_dataset_contract(tmp_path):
     assert saved["datasets"][1]["nuisance"]["thickness_A"] == 1200.0
     assert saved["datasets"][1]["final_config"]["topup_d_min"] == 0.7
     assert saved["multi_endpoint_merge_key"] == "model_symmetry"
+    assert not any("reselected after" in note for note in saved["notes"])
+    assert any("does not automatically rerun compact scale selection" in note for note in saved["notes"])
 
 
 def test_push_endpoint_dry_run_accepts_continue_checkpoint(tmp_path):
@@ -2847,6 +2849,22 @@ def test_push_endpoint_dry_run_accepts_multi_continue_checkpoint(tmp_path):
     assert plan["multi_endpoint_merge_key"] == "model_symmetry"
     assert [row["name"] for row in plan["datasets"]] == ["a", "b"]
     assert "GROND-side corrected-HKL merge" in plan["shared_loop"]
+    assert plan["compact_scale_reselection_performed"] is False
+
+
+def test_multi_push_report_states_compact_reselection_is_separate(tmp_path: Path):
+    summary_dir = tmp_path / "runs" / "shared_shelxl_feedback"
+    summary_dir.mkdir(parents=True)
+    (summary_dir / "multi_shelxl_feedback_loop_summary.json").write_text(
+        json.dumps({"status": "ok", "cycles": []}) + "\n"
+    )
+
+    report = cli.write_multi_push_endpoint_report(tmp_path, best_cycle_tolerance=0.001)
+
+    assert report == tmp_path / "MULTI_ENDPOINT_PUSH_REPORT.md"
+    decision = json.loads((tmp_path / "multi_endpoint_push_decision.json").read_text())
+    assert decision["compact_scale_reselection_performed"] is False
+    assert "not performed inside" in report.read_text()
 
 
 def test_write_push_endpoint_report_handles_missing_output_model(tmp_path):
@@ -3739,6 +3757,67 @@ def test_combine_cmd_forwards_promoted_multi_dataset_sigma_policies(tmp_path: Pa
     assert "--dataset-sigma-holdout-floor" in cmd
 
 
+def test_combine_cmd_forwards_explicit_endpoint_resolution_cutoff(tmp_path: Path):
+    args = build_parser().parse_args(
+        [
+            "auto",
+            "--out-dir",
+            "out",
+            "--xds-dir",
+            "xds",
+            "--structure",
+            "model.res",
+            "--endpoint-min-d-spacing",
+            "0.75",
+        ]
+    )
+
+    cmd = combine_cmd(
+        "python",
+        {"a": tmp_path / "run_a", "b": tmp_path / "run_b"},
+        "model.res",
+        tmp_path / "combined",
+        args,
+    )
+
+    assert cmd[cmd.index("--min-d-spacing") + 1] == "0.75"
+
+
+def test_multi_checkpoint_push_overrides_dataset_resolution_cutoff():
+    checkpoint = {
+        "datasets": [
+            {"name": "a", "hkl": "/tmp/a.hkl", "min_d_spacing": 0.70, "nuisance": {"thickness_A": 1200}},
+            {"name": "b", "hkl": "/tmp/b.hkl", "min_d_spacing": 0.70, "nuisance": {"thickness_A": 1300}},
+        ]
+    }
+
+    prep, _nuisance = cli.prep_from_multi_checkpoint(checkpoint, "/tmp/model.res", min_d_spacing=0.75)
+
+    assert [dataset.min_d_spacing for dataset in prep.datasets] == [0.75, 0.75]
+
+
+def test_pinned_sg_jitter_gets_explicit_no_jitter_fallback(tmp_path: Path):
+    args = build_parser().parse_args(
+        ["run", "--out-dir", "out", "--hkl", "rows.hkl", "--structure", "model.res"]
+    )
+    dataset = DatasetSpec(name="sample", hkl="rows.hkl")
+    cmd = cli.native_stage_cmd(
+        "python",
+        dataset,
+        "model.res",
+        "baseline.hkl",
+        tmp_path / "run",
+        args,
+        n_basis=20,
+        n_points=5,
+        stage="multi_ls1_cycle_01",
+        pinned={"sg_jitter_mode": "gaussian", "sg_jitter_sigma0": 0.0015},
+        endpoint=False,
+    )
+
+    assert cmd[cmd.index("--sg-jitter-mode-grid") + 1] == "gaussian,none"
+
+
 @pytest.mark.parametrize(
     ("stage", "endpoint", "expected_skip"),
     [
@@ -4057,6 +4136,37 @@ def test_publication_report_includes_scale_polish_and_resolution_summaries(tmp_p
     resolution_index = cmd.index("--resolution-limit")
     assert cmd[resolution_index + 1].endswith("/resolution_limits/111/summary.json")
     assert cmd[resolution_index + 1].startswith("111=")
+
+
+def test_multi_publication_report_separates_selected_and_full_scale_rows(tmp_path: Path):
+    prep = PrepConfig(
+        structure=str(tmp_path / "model.res"),
+        datasets=[DatasetSpec(name="a", hkl="a.hkl"), DatasetSpec(name="b", hkl="b.hkl")],
+    )
+    combined = tmp_path / "runs" / "combined"
+    combined.mkdir(parents=True)
+    (combined / "combined_summary.json").write_text(
+        json.dumps({"combined_endpoint": {"requested_min_d_spacing_A": 0.75}}) + "\n"
+    )
+    result = {
+        "combined": str(combined),
+        "model": prep.structure,
+        "publication_runs": {"a": "/selected/a", "b": "/selected/b"},
+        "publication_full_runs": {"a": "/full/a", "b": "/full/b"},
+        "scale_contract_selection": {
+            "selected_contract": "compact_min_strict",
+            "publication_scale_polish_summaries": {},
+        },
+    }
+
+    cmd = publication_report_cmd("python", prep, result, tmp_path / "tables", "table")
+
+    selected_values = [cmd[index + 1] for index, value in enumerate(cmd) if value == "--run"]
+    full_values = [cmd[index + 1] for index, value in enumerate(cmd) if value == "--full-run"]
+    assert selected_values == ["a=/selected/a", "b=/selected/b"]
+    assert full_values == ["a=/full/a", "b=/full/b"]
+    assert cmd[cmd.index("--selected-scale-contract") + 1] == "compact_min_strict"
+    assert cmd[cmd.index("--requested-min-d-spacing") + 1] == "0.75"
 
 
 def test_transform_scout_outer_jobs_account_for_workers_per_job():
