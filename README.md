@@ -84,7 +84,9 @@ Use `--fast` to check a new integration, indexing choice, or environment before 
 
 ## Read the result
 
-Open `FINAL_SUMMARY.md` first. It names the selected model, reflection file, endpoint listing, hand decision, indexing transform, row statistics, endpoint statistics, and the checks that affected promotion. `QUICK_STATS.md` contains the compact audit table, while the JSON and CSV files retain the exact machine-readable values.
+Open the root-level `TABLE1_FINAL_STATISTICS.md` first for the publication-facing numbers. Its two panels deliberately keep SHELXL endpoint statistics (`R1gt`, `R1all`, `wR2all`, and GooF) separate from GROND-computed JANA/PETS-style row statistics (`Robs`, `Rall`, `wRall`, `MRobs`, `MRall`, and `MwRall`). The table compares the conventional kinematical, matched Born, and Bloch dynamical models wherever those quantities were actually calculated; an unavailable cross-family comparison is printed as `n/a`, never inferred from an unrelated residual.
+
+`JANA_ROW_STATISTICS.md` and `.json` retain the canonical unmerged and post-symmetry-merged row factors, and `JANA_ROW_STATISTICS_PER_DATASET.*` gives the same factors per crystal when dataset labels are available. Born and Bloch use one common finite observation support; the reports expose input, matched, excluded, and merge-excluded counts and record the actual JANA/PETS instability factor `u`. `FINAL_SUMMARY.md` then names the selected model, reflection file, hand decision, indexing transform, and promotion checks. `QUICK_STATS.md` remains the compact audit report. Internal native-objective residuals may appear there for optimization diagnostics, but they are not publication SHELXL or JANA/PETS factors.
 
 An interrupted run can be resumed by repeating the same command with the same output directory. GROND records completed stages and their commands in `grond_progress.json` and `logs/commands.jsonl`. To rebuild final summaries and maps from a completed calculation without rerunning the physics, use:
 

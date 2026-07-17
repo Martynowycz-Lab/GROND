@@ -998,7 +998,7 @@ def test_finish_does_not_promote_calibration_when_chooser_rejects_all(tmp_path: 
     assert payload["publication_endpoint"]["R1all"] is None
     assert payload["files"]["publication_res"] == ""
     text = (run / "FINAL_SUMMARY.md").read_text()
-    assert "publication corrected-HKL endpoint | merged SHELXL endpoint (F/F^2) | `n/a`" in text
+    assert "GROND Bloch dynamical publication endpoint | not available" in text
 
 
 def test_terminal_finish_summary_is_human_readable():
@@ -1091,6 +1091,88 @@ def test_terminal_finish_summary_is_human_readable():
     assert "Change: R(I)all -0.83 pp, wR(I)all -10.31 pp" in text
     assert "Direct LS1 corrected-HKL candidate: R1(F)gt 11.00%, R1(F)all 16.00%, wR2(F^2)all 22.00%, GooF 0.950" in text
     assert "Publication endpoint: R1(F)gt 14.46%, R1(F)all 17.85%, wR2(F^2)all 25.72%, GooF 1.036" in text
+
+
+def test_terminal_finish_summary_prefers_jana_pets_rows_and_links_table1():
+    payload = {
+        "status": "ok",
+        "out_dir": "/tmp/grond",
+        "table1": "/tmp/grond/TABLE1_FINAL_STATISTICS.md",
+        "table1_json": "/tmp/grond/TABLE1_FINAL_STATISTICS.json",
+        "input_model": {"row_R1all": 0.99, "row_wR2all": 0.98},
+        "final_row_model": {"row_R1all": 0.97, "row_wR2all": 0.96},
+        "jana_pets_row_statistics": {
+            "born": {
+                "Nobs": 20,
+                "Nall": 30,
+                "Robs": 0.12,
+                "Rall": 0.14,
+                "wRall": 0.16,
+                "MNobs": 18,
+                "MNall": 25,
+                "MRobs": 0.10,
+                "MRall": 0.11,
+                "MwRall": 0.13,
+            },
+            "dynamic": {
+                "Nobs": 20,
+                "Nall": 30,
+                "Robs": 0.07,
+                "Rall": 0.08,
+                "wRall": 0.09,
+                "MNobs": 18,
+                "MNall": 25,
+                "MRobs": 0.05,
+                "MRall": 0.06,
+                "MwRall": 0.07,
+            },
+        },
+        "publication_endpoint": {},
+        "input_shelxl": {},
+        "finished": {"completed_stages": 0, "cumulative_stage_elapsed_seconds": 0},
+        "files": {},
+    }
+
+    text = cli._format_terminal_finish_summary(payload)
+
+    assert "Final JANA/PETS-style row statistics (computed by GROND)" in text
+    assert "Matched Born: Nobs/Nall 20/30, Robs 12.00%, Rall 14.00%, wRall 16.00%" in text
+    assert "Bloch dynamical: Nobs/Nall 20/30, Robs 7.00%, Rall 8.00%, wRall 9.00%" in text
+    assert "Legacy native-objective row diagnostics" not in text
+    assert "No corrected endpoint passed" in text
+    assert "Canonical Table 1: /tmp/grond/TABLE1_FINAL_STATISTICS.md" in text
+
+
+def test_jana_legacy_fallback_requires_complete_core_and_does_not_invent_counts():
+    assert cli._quick_final_jana_row_summary({"row_mr": {"dynamic": {"Rall": 0.1}}}) == {}
+
+    legacy = {
+        "Nobs": 4,
+        "Nall": 10,
+        "MNobs": 3,
+        "MNall": 7,
+        "Robs": 0.09,
+        "Rall": 0.10,
+        "wRall": 0.11,
+        "MRobs": 0.07,
+        "MRall": 0.08,
+        "MwRall": 0.09,
+    }
+    summary = cli._quick_final_jana_row_summary(
+        {"row_mr": {"definition": {"instability_u": 0.01}, "dynamic": legacy}}
+    )
+    record = cli._table1_jana_record("legacy", "row", summary["dynamic"], "legacy row_mr")
+
+    assert record["status"] == "available"
+    assert record["Ninput"] is None
+    assert record["Nexcluded"] is None
+    assert record["Nmatched"] is None
+    assert record["Nmerge_used"] is None
+    assert record["Nmerge_excluded"] is None
+
+    incomplete = cli._table1_jana_record("partial", "row", {"Rall": 0.1}, "legacy row_mr")
+    assert incomplete["status"] == "not_available"
+    assert "incomplete core JANA/PETS factor family" in incomplete["status_reason"]
 
 
 def test_terminal_finish_summary_does_not_treat_legacy_stage_sum_as_wall_time():
@@ -2919,6 +3001,45 @@ def test_write_quick_stats_summarizes_row_and_endpoint_tables(tmp_path):
                     "absorption_mode": "midgley_like",
                     "sg_jitter_mode": "gaussian",
                 },
+                "row_mr": {
+                    "definition": {"instability_u": 0.02},
+                    "dynamic": {
+                        "Ninput": 10,
+                        "Nmatched": 10,
+                        "Nexcluded": 0,
+                        "Nobs": 4,
+                        "Nall": 10,
+                        "Nmerge_input": 10,
+                        "Nmerge_used": 9,
+                        "Nmerge_excluded": 1,
+                        "MNobs": 3,
+                        "MNall": 7,
+                        "Robs": 0.09,
+                        "Rall": 0.10,
+                        "wRall": 0.11,
+                        "MRobs": 0.07,
+                        "MRall": 0.08,
+                        "MwRall": 0.09,
+                    },
+                    "born": {
+                        "Ninput": 10,
+                        "Nmatched": 10,
+                        "Nexcluded": 0,
+                        "Nobs": 4,
+                        "Nall": 10,
+                        "Nmerge_input": 10,
+                        "Nmerge_used": 9,
+                        "Nmerge_excluded": 1,
+                        "MNobs": 3,
+                        "MNall": 7,
+                        "Robs": 0.19,
+                        "Rall": 0.20,
+                        "wRall": 0.21,
+                        "MRobs": 0.17,
+                        "MRall": 0.18,
+                        "MwRall": 0.19,
+                    },
+                },
                 "resolution_scale_endpoints": {
                     "endpoints": [
                         {
@@ -3156,14 +3277,41 @@ def test_write_quick_stats_summarizes_row_and_endpoint_tables(tmp_path):
     assert "not a calibrated normal Z score" in text
     assert "free-row I residual Z | n `2`; RMSZ `1.581`" in text
     assert "thickness | `110.00 nm mean (1100.0 A); uniform-gradient support 0.00-220.00 nm`" in text
-    assert "Master Comparison Matrix" in text
+    assert "Legacy Native-Objective Audit Matrix (Not Table 1)" in text
     assert "raw signed rows (I), Bloch dynamical" in text
     assert "merged SHELXL endpoint (F/F^2)" in text
-    assert "Master Delta Matrix" in text
+    assert "Legacy Native-Objective Delta Matrix (Not Table 1)" in text
     assert "final dynamical rows minus final matched Born rows" in text
     assert "Row Intensity R-Factor Definitions" in text
     assert "Raw signed-row intensity `wR(I)all` is `sqrt(sum_r w_r (Iobs_r - Icalc_r)^2 / sum_r w_r Iobs_r^2)`" in text
-    assert "Completeness, Integration, And Row/MR Statistics" in text
+    assert "JANA/PETS-Style Row And Post-Refinement Merged Statistics By Resolution/Scale Contract" in text
+    assert "Canonical Final Statistics" in text
+    assert (out_dir / "TABLE1_FINAL_STATISTICS.md").exists()
+    table1 = json.loads((out_dir / "TABLE1_FINAL_STATISTICS.json").read_text())
+    assert table1["schema"] == "grond.table1_final_statistics.v1"
+    assert table1["reporting_contract"]["row_instability_u"] == pytest.approx(0.02)
+    assert table1["jana_pets_rows"][0]["status"] == "not_available"
+    assert table1["jana_pets_rows"][1]["model"].startswith("GROND Born")
+    assert table1["jana_pets_rows"][1]["Ninput"] == 10
+    assert table1["jana_pets_rows"][1]["Nmerge_used"] == 9
+    assert table1["jana_pets_rows"][1]["Nmerge_excluded"] == 1
+    assert table1["shelxl_endpoints"][1]["status"] == "not_available"
+    assert table1["shelxl_endpoints"][1]["WGHT"] is None
+    assert table1["shelxl_endpoints"][1]["EXTI"] is None
+    table1_text = (out_dir / "TABLE1_FINAL_STATISTICS.md").read_text()
+    assert "instability factor `u=0.02`" in table1_text
+    assert "GROND Born corrected-HKL endpoint | not available | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a" in table1_text
+    endpoint_header = (out_dir / "TABLE1_SHELXL_ENDPOINTS.csv").read_text().splitlines()[0]
+    row_header = (out_dir / "TABLE1_JANA_ROWS.csv").read_text().splitlines()[0]
+    assert "R1gt" in endpoint_header and "wR2all" in endpoint_header
+    assert "Robs" not in endpoint_header and "MRall" not in endpoint_header
+    assert "Robs" in row_header and "MRall" in row_header and "MwRall" in row_header
+    assert "R1gt" not in row_header and "wR2all" not in row_header and "GooF" not in row_header
+    final_text = (out_dir / "FINAL_SUMMARY.md").read_text()
+    assert "### A. SHELXL Endpoint Statistics" in final_text
+    assert "### B. JANA/PETS-Style Row And Post-Refinement Merged Statistics" in final_text
+    assert "Nmerge used/excluded" in final_text
+    assert "free/held-out weighted R" not in final_text
     assert "Bloch matrix and row-contract diagnostics" in text
     bloch_diagnostics = out_dir / "BLOCH_DIAGNOSTICS.md"
     assert bloch_diagnostics.exists()
@@ -4062,8 +4210,9 @@ def test_full_fast_parser_exposes_middle_profile():
     assert args.full_fast_structure_max_nfev == 0
 
 
-def test_auto_parser_exposes_endpoint_instability_guard():
-    args = build_parser().parse_args(
+def test_auto_parser_exposes_jana_row_weight_instability_factor():
+    parser = build_parser()
+    args = parser.parse_args(
         [
             "auto",
             "--out-dir",
@@ -4078,6 +4227,10 @@ def test_auto_parser_exposes_endpoint_instability_guard():
     )
     assert args.command == "auto"
     assert args.instability_u == 0.02
+    subparsers = next(action for action in parser._actions if isinstance(action, argparse._SubParsersAction))
+    auto_parser = subparsers.choices["auto"]
+    instability_action = next(action for action in auto_parser._actions if action.dest == "instability_u")
+    assert "JANA/PETS-style row-weight instability factor" in instability_action.help
 
 
 def test_full_fast_profile_pins_cheap_automatic_work():
@@ -4128,7 +4281,14 @@ def test_publication_report_includes_scale_polish_and_resolution_summaries(tmp_p
         "resolution_limits": {"111": {"artifacts": {"summary": str(tmp_path / "resolution_limits" / "111" / "summary.json")}}},
     }
 
-    cmd = publication_report_cmd("python", prep, result, tmp_path / "tables", "table")
+    cmd = publication_report_cmd(
+        "python",
+        prep,
+        result,
+        tmp_path / "tables",
+        "table",
+        instability_u=0.02,
+    )
 
     scale_index = cmd.index("--scale-polish")
     assert cmd[scale_index + 1].endswith("/scale_polish/111/scale_compression_summary.json")
@@ -4136,6 +4296,7 @@ def test_publication_report_includes_scale_polish_and_resolution_summaries(tmp_p
     resolution_index = cmd.index("--resolution-limit")
     assert cmd[resolution_index + 1].endswith("/resolution_limits/111/summary.json")
     assert cmd[resolution_index + 1].startswith("111=")
+    assert cmd[cmd.index("--instability-u") + 1] == "0.02"
 
 
 def test_multi_publication_report_separates_selected_and_full_scale_rows(tmp_path: Path):

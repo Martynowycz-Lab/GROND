@@ -20,7 +20,14 @@ import numpy as np
 
 if __package__:
     from ...forensics.resolution import promote_resolution_limit
-    from .row_mr_report import canonical_hkl, compute_model_metrics, parse_model, read_csv_rows, safe_float
+    from .row_mr_report import (
+        canonical_hkl,
+        compute_model_metrics,
+        compute_row_mr_summary,
+        parse_model,
+        read_csv_rows,
+        safe_float,
+    )
 else:  # pragma: no cover - direct script execution
     import sys
 
@@ -28,7 +35,14 @@ else:  # pragma: no cover - direct script execution
     if str(src_root) not in sys.path:
         sys.path.insert(0, str(src_root))
 
-    from row_mr_report import canonical_hkl, compute_model_metrics, parse_model, read_csv_rows, safe_float
+    from row_mr_report import (
+        canonical_hkl,
+        compute_model_metrics,
+        compute_row_mr_summary,
+        parse_model,
+        read_csv_rows,
+        safe_float,
+    )
 
     from grond.forensics.resolution import promote_resolution_limit
 
@@ -152,6 +166,29 @@ def metrics_or_empty(rows: list[dict], model: dict, calc_column: str) -> dict:
     return compute_model_metrics(rows, model, calc_column)
 
 
+def matched_metrics_or_empty(rows: list[dict], model: dict) -> tuple[dict, dict, dict]:
+    """Return dynamic/Born metrics on one common finite support plus its audit counts."""
+
+    if not rows:
+        empty = {
+            "Ninput": 0,
+            "Nmatched": 0,
+            "Nexcluded": 0,
+            "Nall": 0,
+            "Nobs": 0,
+            "Rall": float("nan"),
+            "wRall": float("nan"),
+            "MRall": float("nan"),
+            "MwRall": float("nan"),
+            "Nmerge_input": 0,
+            "Nmerge_used": 0,
+            "Nmerge_excluded": 0,
+        }
+        return dict(empty), dict(empty), {"Ninput": 0, "Nmatched": 0, "Nexcluded": 0, "status": "empty_matched_support"}
+    summary = compute_row_mr_summary(rows, model)
+    return summary["dynamic"], summary["born"], summary["support"]
+
+
 def shell_record(shell_no: int, rows: list[dict], cumulative_rows: list[dict], model: dict, *, min_common_pairs: int) -> dict:
     """Calculate one shell record including cumulative GROND row/MR metrics."""
 
@@ -162,10 +199,8 @@ def shell_record(shell_no: int, rows: list[dict], cumulative_rows: list[dict], m
     isigi = obs[valid] / np.maximum(sig[valid], 1e-12) if np.any(valid) else np.asarray([], dtype=float)
     strong = (obs > 3.0 * sig) & valid
     split_common, split_cc = merged_obs_by_split(rows, model)
-    dyn = metrics_or_empty(rows, model, "dyn_scaled")
-    born = metrics_or_empty(rows, model, "born_scaled")
-    cum_dyn = metrics_or_empty(cumulative_rows, model, "dyn_scaled")
-    cum_born = metrics_or_empty(cumulative_rows, model, "born_scaled")
+    dyn, born, support = matched_metrics_or_empty(rows, model)
+    cum_dyn, cum_born, cumulative_support = matched_metrics_or_empty(cumulative_rows, model)
     work = [r for r in rows if str(r.get("split", "")).lower() == "work"]
     free = [r for r in rows if str(r.get("split", "")).lower() == "free"]
     work_dyn = metrics_or_empty(work, model, "dyn_scaled")
@@ -187,6 +222,11 @@ def shell_record(shell_no: int, rows: list[dict], cumulative_rows: list[dict], m
         "split_common": int(split_common),
         "split_cc": float(split_cc),
         "stability_mode": stability_mode,
+        "matched_Ninput": int(support.get("Ninput", 0)),
+        "matched_Nall": int(support.get("Nmatched", 0)),
+        "matched_Nexcluded": int(support.get("Nexcluded", 0)),
+        "dynamic_Nmerge_excluded": int(dyn.get("Nmerge_excluded", 0)),
+        "kinematic_Nmerge_excluded": int(born.get("Nmerge_excluded", 0)),
         "dynamic_Rall": dyn.get("Rall", float("nan")),
         "dynamic_wRall": dyn.get("wRall", float("nan")),
         "dynamic_MRall": dyn.get("MRall", float("nan")),
@@ -196,6 +236,8 @@ def shell_record(shell_no: int, rows: list[dict], cumulative_rows: list[dict], m
         "kinematic_MRall": born.get("MRall", float("nan")),
         "kinematic_MwRall": born.get("MwRall", float("nan")),
         "cumulative_rows": int(cum_dyn.get("Nall", 0)),
+        "cumulative_matched_Ninput": int(cumulative_support.get("Ninput", 0)),
+        "cumulative_matched_Nexcluded": int(cumulative_support.get("Nexcluded", 0)),
         "cumulative_dynamic_Rall": cum_dyn.get("Rall", float("nan")),
         "cumulative_dynamic_wRall": cum_dyn.get("wRall", float("nan")),
         "cumulative_dynamic_MRall": cum_dyn.get("MRall", float("nan")),
@@ -251,13 +293,16 @@ def write_report(path: Path, title: str, payload: dict) -> None:
         "",
         "## Shells",
         "",
-        "| shell | d range A | rows | I/sigma mean | split CC | dyn MRall | dyn MwRall | cumulative MwRall | kept |",
-        "|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+        "Born and Bloch shell factors use one common finite row support. `matched/excluded` reports supported rows versus supplied rows removed before both calculations; `merge excluded` reports matched rows whose HKL indices cannot enter symmetry merging.",
+        "",
+        "| shell | d range A | matched/excluded | merge excluded | I/sigma mean | split CC | dyn MRall | dyn MwRall | cumulative MwRall | kept |",
+        "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
     for row in shells:
         kept = "promoted" if row.get("inside_promoted_limit") else ("exploratory" if row.get("inside_exploratory_limit") else "rejected")
         lines.append(
-            f"| {row['shell']} | {fmt(row['d_high'])}-{fmt(row['d_low'])} | {row['n_rows']} | "
+            f"| {row['shell']} | {fmt(row['d_high'])}-{fmt(row['d_low'])} | "
+            f"{row['matched_Nall']}/{row['matched_Nexcluded']} | {row['dynamic_Nmerge_excluded']} | "
             f"{fmt(row['mean_I_over_sigma'])} | {fmt(row['split_cc'])} | {pct(row['dynamic_MRall'])} | "
             f"{pct(row['dynamic_MwRall'])} | {pct(row['cumulative_dynamic_MwRall'])} | {kept} |"
         )
@@ -317,8 +362,7 @@ def main() -> None:
     )
     decision_dict = decision.to_dict()
     shells = add_decision_flags(shells, decision.promoted_last_shell, decision.exploratory_last_shell)
-    overall_dynamic = metrics_or_empty(rows, model, "dyn_scaled")
-    overall_kinematic = metrics_or_empty(rows, model, "born_scaled")
+    overall_dynamic, overall_kinematic, overall_support = matched_metrics_or_empty(rows, model)
     payload = {
         "status": "ok",
         "title": args.title,
@@ -327,7 +371,11 @@ def main() -> None:
         "row_count": len(rows),
         "datasets": sorted(set(str(r.get("dataset", "")) for r in rows if r.get("dataset", ""))),
         "decision": decision_dict,
-        "overall": {"dynamic": overall_dynamic, "kinematic": overall_kinematic},
+        "overall": {
+            "support": overall_support,
+            "dynamic": overall_dynamic,
+            "kinematic": overall_kinematic,
+        },
         "shells": shells,
         "thresholds": {
             "strict_split_cc": args.strict_split_cc,
