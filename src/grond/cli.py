@@ -14091,6 +14091,16 @@ def write_multi_push_endpoint_report(out_dir: Path, *, best_cycle_tolerance: flo
     if not summary_path.exists():
         return None
     summary = read_json(summary_path)
+    compact_scale_specs = summary.get("dataset_scale_specs")
+    compact_scale_specs = compact_scale_specs if isinstance(compact_scale_specs, Mapping) else {}
+    compact_scale_replayed = bool(compact_scale_specs)
+    scale_contract_note = (
+        "Each cycle replays the declared compact per-dataset scale topology after fresh Bloch prediction and before "
+        "the shared endpoint. The topology is frozen; this continuation does not select a new scale model."
+        if compact_scale_replayed
+        else "These cycles refit the pinned full scale grouping. Compact scale reselection is not performed inside "
+        "`push-endpoint`; run it separately on the selected safe cycle before calling it the most compact publication endpoint."
+    )
     rows = []
     for record in summary.get("cycles", []):
         combined = Path(str(record.get("combined") or ""))
@@ -14159,10 +14169,9 @@ def write_multi_push_endpoint_report(out_dir: Path, *, best_cycle_tolerance: flo
         "summary": str(summary_path),
         "best_cycle_tolerance": best_cycle_tolerance,
         "compact_scale_reselection_performed": False,
-        "scale_contract_note": (
-            "Endpoint push refits the pinned full scale grouping. Run compact-scale selection separately "
-            "on the selected safe cycle before calling it the most compact publication endpoint."
-        ),
+        "compact_scale_contract_replayed": compact_scale_replayed,
+        "dataset_scale_specs": dict(compact_scale_specs),
+        "scale_contract_note": scale_contract_note,
         "best_native_cycle": best,
         "selected_cycle": selected,
         "selected_status": selection_status,
@@ -14179,10 +14188,7 @@ def write_multi_push_endpoint_report(out_dir: Path, *, best_cycle_tolerance: flo
             "Each cycle recomputes Bloch rows for every dataset from the same edited model, merges corrected endpoint observations, "
             "runs one shared SHELXL LS step, and sends the updated shared model back to all datasets.\n\n"
         )
-        handle.write(
-            "These cycles refit the pinned full scale grouping. Compact scale reselection is not performed inside "
-            "`push-endpoint`; run it separately on the selected safe cycle before promoting a smallest-scale publication endpoint.\n\n"
-        )
+        handle.write(scale_contract_note + "\n\n")
         handle.write("| cycle | merge key | unmerged rows | merged rows | row dyn R(I)all | row dyn wR(I)all | row Born R(I)all | row Born wR(I)all | endpoint R1(F)all | endpoint wR2(F^2)all | GooF | NPD | split | sigma scale | model |\n")
         handle.write("|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|\n")
         for row in rows:
@@ -14291,8 +14297,11 @@ def cmd_push_endpoint_multi(
         "dataset_scale_specs": dict(args.dataset_scale_specs),
         "structure_dataset_policy": dict(policy),
         "compact_scale_reselection_performed": False,
+        "compact_scale_contract_replayed": bool(args.dataset_scale_specs),
         "scale_contract_note": (
-            "The push refit the pinned full grouping. Run compact-scale selection separately on the selected safe cycle."
+            "The push replays the declared compact scale topology after each Bloch calculation; it does not select a new topology."
+            if args.dataset_scale_specs
+            else "The push refit the pinned full grouping. Run compact-scale selection separately on the selected safe cycle."
         ),
     }
     (out_dir / "push_endpoint_summary.json").write_text(json.dumps(result, indent=2, allow_nan=True) + "\n")
