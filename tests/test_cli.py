@@ -4093,6 +4093,52 @@ def test_multi_push_row_contracts_are_complete_and_forwarded(tmp_path: Path):
     ]
 
 
+def test_multi_push_scale_specs_are_complete():
+    datasets = [DatasetSpec(name="one", hkl="one.hkl"), DatasetSpec(name="two", hkl="two.hkl")]
+    specs = cli.resolve_dataset_scale_specs(
+        ["one=adaptive:28:det8", "two=stride:6:det8"],
+        datasets,
+    )
+    assert specs == {"one": "adaptive:28:det8", "two": "stride:6:det8"}
+    with pytest.raises(SystemExit, match="missing: two"):
+        cli.resolve_dataset_scale_specs(["one=adaptive:28:det8"], datasets)
+    with pytest.raises(SystemExit, match="empty compact scale specification"):
+        cli.resolve_dataset_scale_specs(["one=", "two=stride:6:det8"], datasets)
+
+
+def test_materialize_dataset_scale_contract_uses_endpoint_free_replay(tmp_path: Path, monkeypatch):
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    (raw / "native_dyn_calc.csv").write_text("h,k,l\n0,0,1\n")
+    (raw / "summary.json").write_text("{}\n")
+    captured = []
+
+    def fake_run_logged(command, _logs, label, **_kwargs):
+        captured.extend([command, label])
+        out_dir = Path(command[command.index("--out-dir") + 1])
+        materialized = out_dir / "adaptive_2_det_8"
+        materialized.mkdir(parents=True)
+        (materialized / "native_dyn_calc.csv").write_text("h,k,l\n0,0,1\n")
+        (materialized / "summary.json").write_text("{}\n")
+        (out_dir / "summary.json").write_text(
+            json.dumps({"materialized_runs": {"adaptive_2_det_8": str(materialized)}}) + "\n"
+        )
+
+    monkeypatch.setattr(cli, "run_logged", fake_run_logged)
+    selected = cli.materialize_dataset_scale_contract(
+        "python",
+        raw,
+        argparse.Namespace(dataset_scale_specs={"a": "adaptive:2:det8"}),
+        "a",
+        tmp_path / "logs",
+        label="cycle_01",
+    )
+
+    assert selected == raw / "scale_contract_replay" / "adaptive_2_det_8"
+    assert "--skip-endpoint-refinement" in captured[0]
+    assert captured[1] == "a_cycle_01_scale_contract"
+
+
 def test_pinned_sg_jitter_gets_explicit_no_jitter_fallback(tmp_path: Path):
     args = build_parser().parse_args(
         ["run", "--out-dir", "out", "--hkl", "rows.hkl", "--structure", "model.res"]

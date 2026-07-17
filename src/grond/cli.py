@@ -2374,6 +2374,65 @@ def native_stage_cmd(
     return cmd
 
 
+def materialize_scale_contract_cmd(
+    python: str,
+    raw_run_dir: Path,
+    out_dir: Path,
+    spec: str,
+) -> list[str]:
+    """Build the endpoint-free compact scale replay for a frozen native row table."""
+
+    return [
+        python,
+        str(engine_script("scale_contract_replay.py")),
+        "--row-table",
+        str(raw_run_dir / "native_dyn_calc.csv"),
+        "--summary",
+        str(raw_run_dir / "summary.json"),
+        "--out-dir",
+        str(out_dir),
+        "--specs",
+        str(spec),
+        "--skip-endpoint-refinement",
+    ]
+
+
+def materialize_dataset_scale_contract(
+    python: str,
+    raw_run_dir: Path,
+    args: argparse.Namespace,
+    dataset_name: str,
+    logs: Path,
+    *,
+    label: str,
+) -> Path:
+    """Return raw rows or their explicitly requested compact-scale replay."""
+
+    specifications = getattr(args, "dataset_scale_specs", {})
+    specifications = specifications if isinstance(specifications, Mapping) else {}
+    spec = str(specifications.get(dataset_name, "")).strip()
+    if not spec:
+        return raw_run_dir
+    out_dir = raw_run_dir / "scale_contract_replay"
+    run_logged(
+        materialize_scale_contract_cmd(python, raw_run_dir, out_dir, spec),
+        logs,
+        f"{dataset_name}_{label}_scale_contract",
+        dry_run=False,
+    )
+    payload = try_read_json(out_dir / "summary.json")
+    materialized = payload.get("materialized_runs") if isinstance(payload, Mapping) else {}
+    selected = ""
+    if isinstance(materialized, Mapping) and len(materialized) == 1:
+        selected = str(next(iter(materialized.values()))).strip()
+    run_dir = Path(selected) if selected else None
+    if run_dir is None or not (run_dir / "native_dyn_calc.csv").is_file() or not (run_dir / "summary.json").is_file():
+        raise RuntimeError(
+            f"{dataset_name} scale contract {spec!r} did not materialize a complete row-table run under {out_dir}"
+        )
+    return run_dir
+
+
 def continuous_thickness_cmd(
     python: str,
     ds: DatasetSpec,
@@ -4209,6 +4268,7 @@ def run_multi_final_row_recompute(
 
     final_root = root / "runs" / "shared_shelxl_feedback" / "final_row_recompute"
     raw_runs: dict[str, Path] = {}
+    scale_contract_runs: dict[str, Path] = {}
     for ds in prep.datasets:
         run_dir = final_root / ds.name
         n_basis = resolve_final_n_basis(
@@ -4234,12 +4294,20 @@ def run_multi_final_row_recompute(
             dry_run=False,
         )
         raw_runs[ds.name] = run_dir
+        scale_contract_runs[ds.name] = materialize_dataset_scale_contract(
+            python,
+            run_dir,
+            args,
+            ds.name,
+            logs,
+            label="final_row_recompute",
+        )
     if structure_dataset_policy.get("status") in {"disabled", "single_dataset", "dry_run", "missing_row_table"}:
-        active_runs = raw_runs
-        weighted_runs = raw_runs
+        active_runs = scale_contract_runs
+        weighted_runs = scale_contract_runs
     else:
         weighted_runs = write_policy_weighted_runs(
-            raw_runs,
+            scale_contract_runs,
             structure_dataset_policy,
             final_root / "weighted_runs",
             include_endpoint_only=False,
@@ -4250,7 +4318,8 @@ def run_multi_final_row_recompute(
         "status": "ok",
         "model": str(model),
         "definition": "fixed-nuisance Bloch rows for the accepted shared SHELXL output model; no additional LS1 step",
-        "runs": {name: str(path) for name, path in raw_runs.items()},
+        "raw_runs": {name: str(path) for name, path in raw_runs.items()},
+        "runs": {name: str(path) for name, path in scale_contract_runs.items()},
         "weighted_runs": {name: str(path) for name, path in weighted_runs.items()},
         "active_runs": {name: str(path) for name, path in active_runs.items()},
     }
@@ -4281,6 +4350,8 @@ def run_multi_shelxl_feedback_loop(
         }
         for name, path in row_contracts.items()
     }
+    scale_specs = getattr(args, "dataset_scale_specs", {})
+    scale_specs = scale_specs if isinstance(scale_specs, Mapping) else {}
     summary: dict = {
         "status": "not_run" if cycles_requested <= 0 else "running",
         "strategy": "shelxl_feedback",
@@ -4289,6 +4360,7 @@ def run_multi_shelxl_feedback_loop(
         "cycles_requested": cycles_requested,
         "shelxl_iterations_per_cycle": int(getattr(args, "shelxl_feedback_shelxl_iterations", 1) or 1),
         "dataset_row_contracts": row_contract_provenance,
+        "dataset_scale_specs": dict(scale_specs),
         "cycles": [],
     }
     if cycles_requested <= 0:
@@ -4328,6 +4400,7 @@ def run_multi_shelxl_feedback_loop(
     for cycle in range(1, cycles_requested + 1):
         cycle_label = f"multi_ls1_cycle_{cycle:02d}"
         cycle_dir = feedback_root / f"cycle_{cycle:02d}"
+        raw_cycle_runs: dict[str, Path] = {}
         cycle_runs: dict[str, Path] = {}
         nuisance_revalidations: list[dict[str, object]] = []
         for ds in prep.datasets:
@@ -4352,7 +4425,15 @@ def run_multi_shelxl_feedback_loop(
                 f"{ds.name}_{cycle_label}",
                 dry_run=False,
             )
-            cycle_runs[ds.name] = run_dir
+            raw_cycle_runs[ds.name] = run_dir
+            cycle_runs[ds.name] = materialize_dataset_scale_contract(
+                python,
+                run_dir,
+                args,
+                ds.name,
+                logs,
+                label=cycle_label,
+            )
             selected_nuisance = ((try_read_json(run_dir / "summary.json").get("best_native") or {}).get("nuisance") or {})
             requested_mode = str((nuisance.get(ds.name) or {}).get("sg_jitter_mode", "none"))
             selected_mode = str(selected_nuisance.get("sg_jitter_mode", requested_mode))
@@ -4434,6 +4515,7 @@ def run_multi_shelxl_feedback_loop(
                 ),
             },
             "combined": str(combined_dir),
+            "raw_runs": {name: str(path) for name, path in raw_cycle_runs.items()},
             "runs": {name: str(path) for name, path in cycle_runs.items()},
             "combined_input_runs": {name: str(path) for name, path in cycle_input_runs.items()},
             "nuisance_revalidations": nuisance_revalidations,
@@ -13863,6 +13945,42 @@ def resolve_dataset_row_contracts(
     return resolved
 
 
+def resolve_dataset_scale_specs(
+    specifications: list[str] | tuple[str, ...] | None,
+    datasets: list[DatasetSpec],
+) -> dict[str, str]:
+    """Parse all-or-none ``DATASET=compact-scale-spec`` bindings."""
+
+    raw = list(specifications or [])
+    if not raw:
+        return {}
+    names = {dataset.name for dataset in datasets}
+    resolved: dict[str, str] = {}
+    for value in raw:
+        text = str(value).strip()
+        if "=" not in text:
+            raise SystemExit("--dataset-scale-spec must be DATASET=SPEC, for example timepix4_01=adaptive:28:det8")
+        name, spec = text.split("=", 1)
+        name = name.strip()
+        spec = spec.strip()
+        if name not in names:
+            raise SystemExit(
+                f"--dataset-scale-spec names unknown dataset {name!r}; expected: {', '.join(sorted(names))}"
+            )
+        if not spec:
+            raise SystemExit(f"--dataset-scale-spec for {name!r} has an empty compact scale specification")
+        if name in resolved:
+            raise SystemExit(f"--dataset-scale-spec was supplied more than once for {name!r}")
+        resolved[name] = spec
+    missing = sorted(names - set(resolved))
+    if missing:
+        raise SystemExit(
+            "compact multi-dataset continuation requires one --dataset-scale-spec for every dataset; "
+            f"missing: {', '.join(missing)}"
+        )
+    return resolved
+
+
 def dataset_policy_from_row_contracts(
     contracts: Mapping[str, str],
     datasets: list[DatasetSpec],
@@ -14113,6 +14231,9 @@ def cmd_push_endpoint_multi(
     args.dataset_row_contracts = resolve_dataset_row_contracts(
         getattr(args, "dataset_row_contract", None), prep.datasets
     )
+    args.dataset_scale_specs = resolve_dataset_scale_specs(
+        getattr(args, "dataset_scale_spec", None), prep.datasets
+    )
     row_contract_policy = (
         dataset_policy_from_row_contracts(args.dataset_row_contracts, prep.datasets)
         if args.dataset_row_contracts
@@ -14137,6 +14258,7 @@ def cmd_push_endpoint_multi(
             "datasets": [asdict(ds) for ds in prep.datasets],
             "nuisance_datasets": sorted(nuisance),
             "dataset_row_contracts": dict(args.dataset_row_contracts),
+            "dataset_scale_specs": dict(args.dataset_scale_specs),
             "structure_dataset_policy_source": "immutable_row_contract" if row_contract_policy else "checkpoint",
             "multi_endpoint_merge_key": args.multi_endpoint_merge_key,
             "shared_loop": "per-dataset Bloch rows -> GROND-side corrected-HKL merge -> one shared SHELXL LS step -> repeat",
@@ -14166,6 +14288,7 @@ def cmd_push_endpoint_multi(
         "model": final_model,
         "structure_feedback": feedback,
         "dataset_row_contracts": dict(args.dataset_row_contracts),
+        "dataset_scale_specs": dict(args.dataset_scale_specs),
         "structure_dataset_policy": dict(policy),
         "compact_scale_reselection_performed": False,
         "scale_contract_note": (
@@ -16599,6 +16722,16 @@ def build_parser() -> argparse.ArgumentParser:
             "membership. Supply once for every checkpoint dataset; GROND verifies row_index/HKL/target/sigma/d-spacing "
             "before calculation, reuses its dataset-role/raw/endpoint policy annotations, and refuses to rebuild "
             "membership from raw XDS filters."
+        ),
+    )
+    p_push.add_argument(
+        "--dataset-scale-spec",
+        action="append",
+        default=[],
+        metavar="DATASET=SPEC",
+        help=(
+            "Multi-dataset only: replay this compact scale topology after each fresh Bloch row calculation and before "
+            "the shared endpoint. Supply once for every dataset; examples are adaptive:28:det8 or stride:6:det8."
         ),
     )
     p_push.add_argument("--post-bloch-sigma-policy", choices=["none", "uniform_z_rms"], default="none")

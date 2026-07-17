@@ -823,6 +823,14 @@ def main() -> None:
     ap.add_argument("--summary", default="")
     ap.add_argument("--res", default="")
     ap.add_argument("--out-dir", required=True)
+    ap.add_argument(
+        "--skip-endpoint-refinement",
+        action="store_true",
+        help=(
+            "Materialize the requested compact row-scale contract(s) only. "
+            "No corrected-HKL export or SHELXL call is made."
+        ),
+    )
     ap.add_argument("--specs", default="baseline,adaptive:293:det8,adaptive:200:det8,window:1.0:det8,window:1.5:det8,window:3.0:det8,window:5.0:det8")
     ap.add_argument("--fit-split", default="")
     ap.add_argument(
@@ -885,8 +893,10 @@ def main() -> None:
     detector_base = infer_detector_base(col(rows, "detector_bin").astype(int))
     native_wght_a, native_wght_b = native_weight_from_summary(summary, args.native_wght_a, args.native_wght_b)
     wght_modes = [m.strip() for m in str(args.wght_modes).split(",") if m.strip()]
-    require_scale_replay_shelxl(args.shelxl, wght_modes)
+    if not args.skip_endpoint_refinement:
+        require_scale_replay_shelxl(args.shelxl, wght_modes)
     rows_out = []
+    materialized_runs: dict[str, str] = {}
     for spec in specs:
         spec_dir = out / re.sub(r"[^A-Za-z0-9_.-]+", "_", str(spec["name"]))
         replay_rows, meta = build_replay_rows(
@@ -926,6 +936,9 @@ def main() -> None:
             "candidate": candidate,
         }
         (spec_dir / "summary.json").write_text(json.dumps(spec_summary, indent=2, allow_nan=True) + "\n")
+        materialized_runs[str(spec["name"])] = str(spec_dir.resolve())
+        if args.skip_endpoint_refinement:
+            continue
         for wght_mode in wght_modes:
             endpoint_dir = spec_dir / f"endpoint_{wght_mode}"
             manifest = endpoint_from_row_table(
@@ -1010,20 +1023,36 @@ def main() -> None:
     fieldnames = list(rows_out[0].keys()) if rows_out else []
     write_rows(out / "scale_contract_endpoint_replay.csv", rows_out, fieldnames)
     elapsed = float(__import__("time").perf_counter() - t0)
-    selection = choose_publication_endpoint(
-        rows_out,
-        goof_min=float(args.publication_goof_min),
-        goof_max=float(args.publication_goof_max),
-        max_r1_cost=float(args.publication_max_r1_cost),
-        free_wr2_tolerance=float(args.publication_free_wr2_tolerance),
-        prefer_wght_mode=str(args.publication_prefer_wght_mode),
-        selection_policy=str(args.publication_selection_policy),
-        information_criterion=str(args.publication_information_criterion),
-        allow_npd=bool(args.publication_allow_npd),
-        max_modulation_p95=float(args.publication_max_modulation_p95),
+    selection = (
+        {
+            "status": "not_evaluated_skip_endpoint_refinement",
+            "reason": "compact row-scale contracts were materialized without a corrected-HKL/SHELXL endpoint",
+        }
+        if args.skip_endpoint_refinement
+        else choose_publication_endpoint(
+            rows_out,
+            goof_min=float(args.publication_goof_min),
+            goof_max=float(args.publication_goof_max),
+            max_r1_cost=float(args.publication_max_r1_cost),
+            free_wr2_tolerance=float(args.publication_free_wr2_tolerance),
+            prefer_wght_mode=str(args.publication_prefer_wght_mode),
+            selection_policy=str(args.publication_selection_policy),
+            information_criterion=str(args.publication_information_criterion),
+            allow_npd=bool(args.publication_allow_npd),
+            max_modulation_p95=float(args.publication_max_modulation_p95),
+        )
     )
     summary_out = {
         "rows": rows_out,
+        "materialized_runs": materialized_runs,
+        "endpoint_refinement": {
+            "enabled": not bool(args.skip_endpoint_refinement),
+            "definition": (
+                "per-dataset scale-contract materialization only; shared endpoint refinement is performed separately"
+                if args.skip_endpoint_refinement
+                else "per-spec corrected-HKL/SHELXL endpoint replay"
+            ),
+        },
         "publication_selection": selection,
         "wall_seconds": elapsed,
     }
