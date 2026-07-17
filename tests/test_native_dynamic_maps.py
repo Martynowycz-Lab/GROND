@@ -4,9 +4,16 @@ import math
 from pathlib import Path
 
 import gemmi
+import numpy as np
 import pytest
 
 from grond.maps.native_dynamic import NativeDynamicMapOptions, write_native_dynamic_map_package
+
+
+def _periodic_fractional_distance(a, b) -> float:
+    delta = np.asarray(a, dtype=float) - np.asarray(b, dtype=float)
+    delta -= np.rint(delta)
+    return float(np.linalg.norm(delta))
 
 
 def test_native_dynamic_map_package_uses_row_level_dynamical_coefficients(tmp_path: Path):
@@ -68,6 +75,99 @@ def test_native_dynamic_map_package_uses_row_level_dynamical_coefficients(tmp_pa
     assert ccp4.grid.nu > 0
     saved = json.loads((out / "native_dynamic_maps_manifest.json").read_text())
     assert saved["outputs"]["dynamic_cif"] == manifest["outputs"]["dynamic_cif"]
+
+
+def test_native_dynamic_fo_map_peaks_at_model_atom_not_inverted_hand(tmp_path: Path):
+    model = tmp_path / "off_origin_atom.res"
+    atom_frac = np.asarray([0.20, 0.30, 0.40], dtype=float)
+    model.write_text(
+        "TITL native map Fourier-sign regression\n"
+        "CELL 0.025079 10 10 10 90 90 90\n"
+        "LATT -1\n"
+        "SFAC C 1 0 0 0 0 0 0 0 0\n"
+        "UNIT 1\n"
+        "C1 1 0.20 0.30 0.40 1 0.0\n"
+        "HKLF 4\n"
+        "END\n"
+    )
+    rows = tmp_path / "native_dyn_calc.csv"
+    records = ["h,k,l,d_A,target_I,sigma_eff,dyn_scaled,split"]
+    for h in range(-4, 5):
+        for k in range(-4, 5):
+            for ell in range(-4, 5):
+                if h == k == ell == 0:
+                    continue
+                records.append(f"{h},{k},{ell},1.0,1.0,0.1,1.0,work")
+    rows.write_text("\n".join(records) + "\n")
+
+    manifest = write_native_dynamic_map_package(
+        row_table=rows,
+        model_path=model,
+        out_dir=tmp_path / "native_maps",
+        options=NativeDynamicMapOptions(grid_spacing_A=0.5),
+    )
+
+    ccp4 = gemmi.read_ccp4_map(manifest["maps"]["fo"]["map"])
+    ccp4.setup(float("nan"))
+    data = np.asarray(ccp4.grid, dtype=np.float64)
+    peak_index = np.asarray(np.unravel_index(int(np.nanargmax(data)), data.shape), dtype=float)
+    peak_frac = peak_index / np.asarray(data.shape, dtype=float)
+    inverted_frac = (-atom_frac) % 1.0
+
+    assert _periodic_fractional_distance(peak_frac, atom_frac) < 0.08
+    assert _periodic_fractional_distance(peak_frac, atom_frac) < _periodic_fractional_distance(peak_frac, inverted_frac)
+    assert manifest["maps"]["fo"]["normalization"] == ("sum(F exp(-2*pi*i*h.x)) / cell_volume via numpy fftn")
+
+
+def test_native_dynamic_map_merges_model_symmetry_and_projects_friedel_pairs(tmp_path: Path):
+    """A real map retains dynamical Friedel information until Hermitian projection."""
+
+    model = tmp_path / "p212121.res"
+    model.write_text(
+        "TITL native map symmetry regression\n"
+        "CELL 0.025079 10 11 12 90 90 90\n"
+        "LATT -1\n"
+        "SYMM 0.5-X,-Y,0.5+Z\n"
+        "SYMM -X,0.5+Y,0.5-Z\n"
+        "SYMM 0.5+X,0.5-Y,-Z\n"
+        "SFAC C 1 0 0 0 0 0 0 0 0\n"
+        "UNIT 1\n"
+        "C1 1 0.17 0.29 0.41 1 0.02\n"
+        "HKLF 4\n"
+        "END\n"
+    )
+    rows = tmp_path / "native_dyn_calc.csv"
+    rows.write_text(
+        "\n".join(
+            [
+                "h,k,l,d_A,target_I,sigma_eff,dyn_scaled,split",
+                # The first two rows are P212121 equivalents.  The third is
+                # their independent Friedel mate with deliberately different
+                # observed intensity, as dynamical scattering permits.
+                "1,2,3,1.0,4.0,0.5,4.0,work",
+                "-1,-2,3,1.0,9.0,0.5,4.0,work",
+                "-1,-2,-3,1.0,6.0,0.5,4.0,free",
+            ]
+        )
+        + "\n"
+    )
+
+    manifest = write_native_dynamic_map_package(
+        row_table=rows,
+        model_path=model,
+        out_dir=tmp_path / "native_maps",
+        options=NativeDynamicMapOptions(grid_spacing_A=0.5),
+    )
+
+    summary = manifest["summary"]
+    map_meta = manifest["maps"]["fo"]
+    assert summary["exact_signed_reflections_before_symmetry_merge"] == 3
+    assert summary["model_symmetry_orbits_after_merge"] == 2
+    assert summary["signed_reflections_collapsed_by_model_symmetry"] == 1
+    assert summary["independent_friedel_pairs_retained"] == 1
+    assert map_meta["independent_friedel_coefficient_pairs_projected"] >= 1
+    assert map_meta["friedel_preprojection_absolute_rms"] > 0.0
+    assert map_meta["imaginary_rms_before_real_projection"] < 1e-10
 
 
 def test_native_dynamic_cif_normalizes_placeholder_wavelength(tmp_path: Path):

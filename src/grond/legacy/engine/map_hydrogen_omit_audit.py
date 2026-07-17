@@ -72,7 +72,10 @@ def hydrogen_sites(ref_model: dict) -> list[dict]:
 
 def nearest_grid_value(arr: np.ndarray, frac) -> float:
     shape = np.asarray(arr.shape, dtype=int)
-    ijk = np.floor(np.asarray(frac, dtype=float) * shape).astype(int) % shape
+    # CCP4/Gemmi grid samples lie at fractional coordinates ijk/shape, not at
+    # cell centres.  Round to the nearest periodic sample rather than taking
+    # the lower voxel corner.
+    ijk = np.rint(np.asarray(frac, dtype=float) * shape).astype(int) % shape
     return float(arr[tuple(ijk)])
 
 
@@ -82,12 +85,12 @@ def grid_points_near(arr: np.ndarray, cell: gemmi.UnitCell, frac, radius_A: floa
     # Conservative index half-width from the shortest cell dimension.
     min_dim = max(min(cell.a / shape[0], cell.b / shape[1], cell.c / shape[2]), 1e-6)
     half = int(math.ceil(float(radius_A) / min_dim)) + 2
-    center = np.floor(frac * shape).astype(int)
+    center = np.rint(frac * shape).astype(int)
     for di in range(-half, half + 1):
         for dj in range(-half, half + 1):
             for dk in range(-half, half + 1):
                 ijk = (center + np.asarray([di, dj, dk], dtype=int)) % shape
-                grid_frac = (ijk + 0.5) / shape
+                grid_frac = ijk / shape
                 dist = periodic_distance_A(cell, frac, grid_frac)
                 if dist <= float(radius_A):
                     yield int(ijk[0]), int(ijk[1]), int(ijk[2]), grid_frac, dist
@@ -101,11 +104,21 @@ def audit_map(name: str, path: Path, sites: list[dict], ref_cell: gemmi.UnitCell
     zarr = (arr - mean) / max(std, 1e-12)
     rows = []
     for site in sites:
-        best = {"z": -float("inf"), "value": float("nan"), "dist_A": float("nan"), "frac": [float(x) for x in site["frac"]]}
+        best = {
+            "z": -float("inf"),
+            "value": float("nan"),
+            "dist_A": float("nan"),
+            "frac": [float(x) for x in site["frac"]],
+        }
         for i, j, k, grid_frac, dist in grid_points_near(arr, cell, site["frac"], radius_A):
             z = float(zarr[i, j, k])
             if z > best["z"]:
-                best = {"z": z, "value": float(arr[i, j, k]), "dist_A": float(dist), "frac": [float(x) for x in grid_frac]}
+                best = {
+                    "z": z,
+                    "value": float(arr[i, j, k]),
+                    "dist_A": float(dist),
+                    "frac": [float(x) for x in grid_frac],
+                }
         direct_value = nearest_grid_value(arr, site["frac"])
         rows.append(
             {

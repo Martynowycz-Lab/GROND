@@ -20,6 +20,15 @@ from typing import Any
 
 KEY_COLUMNS = ("row_index", "h", "k", "l")
 REQUIRED_COLUMNS = (*KEY_COLUMNS, "dyn_residual_over_sigma")
+ADJUSTED_HAND_COLUMNS = ("target_I", "dyn_scaled", "sigma_eff")
+KLAR_PALATINUS_REFERENCE = {
+    "citation": (
+        "Klar, P. B. et al. Accurate structure models and absolute configuration determination using "
+        "dynamical effects in continuous-rotation 3D electron diffraction data. Nature Chemistry 15, "
+        "848-855 (2023)."
+    ),
+    "doi": "10.1038/s41557-023-01186-1",
+}
 
 
 def finite_float(value: object) -> float:
@@ -74,6 +83,154 @@ def duplicate_count(rows: list[dict[str, str]]) -> int:
     return int(sum(count - 1 for count in counts.values() if count > 1))
 
 
+def normal_cdf(value: float) -> float:
+    """Return the standard-normal cumulative distribution function."""
+
+    return float(0.5 * math.erfc(-value / math.sqrt(2.0)))
+
+
+def same_observation(left: float, right: float) -> bool:
+    """Return whether two branch tables carry the same observation metadata."""
+
+    return math.isclose(left, right, rel_tol=1e-10, abs_tol=1e-12)
+
+
+def adjusted_hand_missing_columns(best_fields: list[str], other_fields: list[str]) -> dict[str, list[str]]:
+    """Return columns missing for the adjusted hand-Z diagnostic."""
+
+    return {
+        "selected": [name for name in ADJUSTED_HAND_COLUMNS if name not in set(best_fields)],
+        "other": [name for name in ADJUSTED_HAND_COLUMNS if name not in set(other_fields)],
+    }
+
+
+def klar_palatinus_adjusted_hand_z(
+    rows: list[tuple[dict[str, str], dict[str, str]]],
+    missing: dict[str, list[str]],
+) -> dict[str, Any]:
+    """Compute the adjusted reflection-count hand Z on matched native rows.
+
+    The selected (``best``) and other-hand tables must carry identical observed
+    intensities and effective sigmas.  Branch-specific ``dyn_scaled`` values are
+    then compared on exactly the joined signed observations.  Rows with invalid
+    numbers, non-positive sigmas, or inconsistent observation metadata are
+    excluded explicitly rather than silently borrowing values across branches.
+    """
+
+    base: dict[str, Any] = {
+        "method": "klar_palatinus_adjusted_reflection_count_hand_z",
+        "n_joined_candidates": int(len(rows)),
+        "required_columns": list(ADJUSTED_HAND_COLUMNS),
+    }
+    if missing["selected"] or missing["other"]:
+        return {
+            **base,
+            "status": "missing_required_columns",
+            "missing_columns": missing,
+            "n": 0,
+        }
+
+    valid: list[tuple[float, float, float, float]] = []
+    invalid_numeric = 0
+    nonpositive_sigma = 0
+    observation_mismatch = 0
+    sigma_mismatch = 0
+    dataset_mismatch = 0
+    datasets: set[str] = set()
+    for selected, other in rows:
+        target_selected = finite_float(selected.get("target_I"))
+        target_other = finite_float(other.get("target_I"))
+        calc_selected = finite_float(selected.get("dyn_scaled"))
+        calc_other = finite_float(other.get("dyn_scaled"))
+        sigma_selected = finite_float(selected.get("sigma_eff"))
+        sigma_other = finite_float(other.get("sigma_eff"))
+        values = (target_selected, target_other, calc_selected, calc_other, sigma_selected, sigma_other)
+        if not all(math.isfinite(value) for value in values):
+            invalid_numeric += 1
+            continue
+        if sigma_selected <= 0.0 or sigma_other <= 0.0:
+            nonpositive_sigma += 1
+            continue
+        if not same_observation(target_selected, target_other):
+            observation_mismatch += 1
+            continue
+        if not same_observation(sigma_selected, sigma_other):
+            sigma_mismatch += 1
+            continue
+        selected_dataset = str(selected.get("dataset", "")).strip()
+        other_dataset = str(other.get("dataset", "")).strip()
+        if selected_dataset and other_dataset and selected_dataset != other_dataset:
+            dataset_mismatch += 1
+            continue
+        dataset = selected_dataset or other_dataset
+        if dataset:
+            datasets.add(dataset)
+        valid.append((target_selected, calc_selected, calc_other, sigma_selected))
+
+    exclusions = {
+        "invalid_numeric": int(invalid_numeric),
+        "nonpositive_sigma": int(nonpositive_sigma),
+        "target_I_mismatch_between_hands": int(observation_mismatch),
+        "sigma_eff_mismatch_between_hands": int(sigma_mismatch),
+        "dataset_label_mismatch_between_hands": int(dataset_mismatch),
+    }
+    if len(datasets) > 1:
+        return {
+            **base,
+            "status": "multiple_datasets_not_pooled",
+            "n": 0,
+            "dataset_labels": sorted(datasets),
+            "exclusions": exclusions,
+            "combination_policy": (
+                "No pooled multi-dataset Z is computed implicitly. Compute one adjusted Z per physical dataset, "
+                "then combine only with a declared independent-dataset method."
+            ),
+        }
+
+    n = len(valid)
+    if n == 0:
+        return {
+            **base,
+            "status": "no_valid_rows",
+            "n": 0,
+            "dataset_labels": sorted(datasets),
+            "dataset_scope": "single_labeled_dataset" if datasets else "unlabeled_table",
+            "exclusions": exclusions,
+        }
+
+    k = 0
+    tied = 0
+    w = 0.0
+    for target, calc_selected, calc_other, sigma in valid:
+        residual_selected = abs(target - calc_selected)
+        residual_other = abs(target - calc_other)
+        if residual_selected < residual_other:
+            k += 1
+        elif residual_selected == residual_other:
+            tied += 1
+        separation = abs(calc_selected - calc_other) / (2.0 * sigma)
+        w += 1.0 - normal_cdf(separation)
+
+    denominator_variance = float(n - w)
+    z = float((2 * k - n) / math.sqrt(denominator_variance))
+    probability = normal_cdf(z)
+    return {
+        **base,
+        "status": "ok",
+        "n": int(n),
+        "k_selected_lower_abs_intensity_residual": int(k),
+        "n_tied_abs_intensity_residual": int(tied),
+        "w": float(w),
+        "n_minus_w": denominator_variance,
+        "z": z,
+        "probability_phi_z": probability,
+        "probability_one_sided_other_hand": float(normal_cdf(-z)),
+        "dataset_labels": sorted(datasets),
+        "dataset_scope": "single_labeled_dataset" if datasets else "unlabeled_table",
+        "exclusions": exclusions,
+    }
+
+
 def joined_rows(best: list[dict[str, str]], other: list[dict[str, str]]) -> list[tuple[dict[str, str], dict[str, str]]]:
     """Return one-to-one joined rows shared by both tables."""
 
@@ -83,9 +240,14 @@ def joined_rows(best: list[dict[str, str]], other: list[dict[str, str]]) -> list
     return [(best_by_key[key], other_by_key[key]) for key in keys]
 
 
-def block(label: str, rows: list[tuple[dict[str, str], dict[str, str]]]) -> dict[str, Any]:
+def block(
+    label: str,
+    rows: list[tuple[dict[str, str], dict[str, str]]],
+    adjusted_missing: dict[str, list[str]],
+) -> dict[str, Any]:
     """Compute paired row-level contrast statistics."""
 
+    adjusted = klar_palatinus_adjusted_hand_z(rows, adjusted_missing)
     rb: list[float] = []
     ro: list[float] = []
     for best, other in rows:
@@ -96,7 +258,7 @@ def block(label: str, rows: list[tuple[dict[str, str], dict[str, str]]]) -> dict
             ro.append(o)
     n = len(rb)
     if n == 0:
-        return {"label": label, "n": 0}
+        return {"label": label, "n": 0, "klar_palatinus_adjusted_hand_z": adjusted}
     d = [o * o - b * b for b, o in zip(rb, ro, strict=True)]
     delta_chi2 = float(sum(d))
     mean_d = float(delta_chi2 / n)
@@ -120,6 +282,7 @@ def block(label: str, rows: list[tuple[dict[str, str], dict[str, str]]]) -> dict
         ),
         "best_lower_abs_residual_fraction": float(sum(abs(b) < abs(o) for b, o in zip(rb, ro, strict=True)) / n),
         "best_lower_squared_residual_fraction": float(sum(x > 0.0 for x in d) / n),
+        "klar_palatinus_adjusted_hand_z": adjusted,
     }
 
 
@@ -154,9 +317,21 @@ def main() -> None:
                 "diagnostic": "row-level alternate-hand check was skipped because one or more native row CSV files were absent",
                 "recommendation": "Treat this as an incomplete diagnostic artifact, not as evidence for either hand.",
             },
-            "all": {"label": "all", "n": 0},
-            "work": {"label": "work", "n": 0},
-            "free": {"label": "free", "n": 0},
+            "all": {
+                "label": "all",
+                "n": 0,
+                "klar_palatinus_adjusted_hand_z": {"status": "missing_input_files", "n": 0},
+            },
+            "work": {
+                "label": "work",
+                "n": 0,
+                "klar_palatinus_adjusted_hand_z": {"status": "missing_input_files", "n": 0},
+            },
+            "free": {
+                "label": "free",
+                "n": 0,
+                "klar_palatinus_adjusted_hand_z": {"status": "missing_input_files", "n": 0},
+            },
         }
         out_path.write_text(json.dumps(out, indent=2, allow_nan=True) + "\n")
         return
@@ -164,6 +339,7 @@ def main() -> None:
     best_rows, best_fields = read_rows(best_path)
     other_rows, other_fields = read_rows(other_path)
     missing = {"best": missing_columns(best_fields), "other": missing_columns(other_fields)}
+    adjusted_missing = adjusted_hand_missing_columns(best_fields, other_fields)
     if missing["best"] or missing["other"]:
         joined: list[tuple[dict[str, str], dict[str, str]]] = []
         status = "missing_required_columns"
@@ -185,16 +361,35 @@ def main() -> None:
             "duplicate_keys_best": duplicate_count(best_rows),
             "duplicate_keys_other": duplicate_count(other_rows),
             "missing_columns": missing,
+            "klar_palatinus_adjusted_hand_z_missing_columns": adjusted_missing,
         },
         "interpretation": {
             "diagnostic": "row-level alternate-hand check; not a Flack parameter and not a merged absolute-structure statistic",
             "delta_chi2": "sum((other residual/sigma)^2 - (best residual/sigma)^2); positive favors best",
             "paired_row_t": "paired t-style contrast of per-row delta_chi2 values",
             "sqrt_positive_delta_chi2": "square root of positive delta_chi2; a scale indicator, not a probability or hand-assignment score",
+            "klar_palatinus_adjusted_hand_z": {
+                "label": "adjusted reflection-count absolute-structure Z; positive favors the selected/best hand",
+                "row_support": (
+                    "exact one-to-one joined signed observations identified by row_index,h,k,l and duplicate occurrence"
+                ),
+                "k": "number of joined valid rows where |target_I-dyn_scaled_selected| is strictly smaller than |target_I-dyn_scaled_other|",
+                "w": "sum(1-Phi(|dyn_scaled_selected-dyn_scaled_other|/(2*sigma_eff)))",
+                "z": "(2*k-N)/sqrt(N-w)",
+                "probability": "Phi(z), reported as probability_phi_z; this is distinct from paired_row_t_delta_chi2",
+                "ties": "an exact equal absolute intensity residual is not counted in k but remains in N, following the strict lower-residual definition",
+                "sigma_contract": (
+                    "target_I and positive sigma_eff must match between hand tables; invalid or mismatched rows are excluded and counted"
+                ),
+                "multi_dataset_policy": (
+                    "multiple dataset labels are not silently row-pooled; compute per-dataset Z values before any explicitly declared combination"
+                ),
+                "reference": KLAR_PALATINUS_REFERENCE,
+            },
         },
-        "all": block("all", joined),
-        "work": block("work", work),
-        "free": block("free", free),
+        "all": block("all", joined, adjusted_missing),
+        "work": block("work", work, adjusted_missing),
+        "free": block("free", free, adjusted_missing),
     }
     out_path.write_text(json.dumps(out, indent=2, allow_nan=True) + "\n")
 
