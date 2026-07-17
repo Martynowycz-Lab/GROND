@@ -34,6 +34,7 @@ def write_intensity_rows(
     predictions: list[float],
     sigmas: list[float],
     *,
+    born_predictions: list[float] | None = None,
     splits: list[str] | None = None,
     datasets: list[str] | None = None,
 ) -> None:
@@ -46,6 +47,7 @@ def write_intensity_rows(
         "dyn_residual_over_sigma",
         "target_I",
         "dyn_scaled",
+        "born_scaled",
         "sigma_eff",
         "dataset",
     ]
@@ -63,15 +65,27 @@ def write_intensity_rows(
                     "dyn_residual_over_sigma": (target - prediction) / sigma,
                     "target_I": target,
                     "dyn_scaled": prediction,
+                    "born_scaled": born_predictions[idx] if born_predictions is not None else prediction,
                     "sigma_eff": sigma,
                     "dataset": datasets[idx] if datasets is not None else "crystal_1",
                 }
             )
 
 
-def run_diagnostic(best: Path, other: Path, out: Path) -> dict:
+def run_diagnostic(best: Path, other: Path, out: Path, *, prediction_column: str = "dyn_scaled") -> dict:
     subprocess.run(
-        [sys.executable, str(SCRIPT), "--best", str(best), "--other", str(other), "--out", str(out)],
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--best",
+            str(best),
+            "--other",
+            str(other),
+            "--out",
+            str(out),
+            "--prediction-column",
+            prediction_column,
+        ],
         check=True,
     )
     return json.loads(out.read_text())
@@ -235,3 +249,23 @@ def test_klar_palatinus_adjusted_hand_z_does_not_silently_pool_datasets(tmp_path
     assert adjusted["status"] == "multiple_datasets_not_pooled"
     assert adjusted["n"] == 0
     assert adjusted["dataset_labels"] == datasets
+
+
+def test_absolute_structure_diagnostic_selects_matched_born_control(tmp_path: Path):
+    best = tmp_path / "best.csv"
+    other = tmp_path / "other.csv"
+    targets = [0.0, 0.0]
+    sigmas = [1.0, 1.0]
+    write_intensity_rows(best, targets, [0.0, 0.0], sigmas, born_predictions=[1.0, 1.0])
+    write_intensity_rows(other, targets, [1.0, 1.0], sigmas, born_predictions=[0.0, 0.0])
+
+    dynamical = run_diagnostic(best, other, tmp_path / "dynamical.json")
+    born = run_diagnostic(best, other, tmp_path / "born.json", prediction_column="born_scaled")
+
+    assert dynamical["interpretation"]["prediction_column"] == "dyn_scaled"
+    assert dynamical["all"]["klar_palatinus_adjusted_hand_z"]["z"] > 0.0
+    assert dynamical["all"]["delta_chi2_other_minus_best"] > 0.0
+    assert born["interpretation"]["prediction_column"] == "born_scaled"
+    assert born["all"]["klar_palatinus_adjusted_hand_z"]["prediction_column"] == "born_scaled"
+    assert born["all"]["klar_palatinus_adjusted_hand_z"]["z"] < 0.0
+    assert born["all"]["delta_chi2_other_minus_best"] < 0.0

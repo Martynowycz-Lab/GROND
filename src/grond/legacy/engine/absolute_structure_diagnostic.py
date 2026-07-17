@@ -3,9 +3,10 @@
 
 This is intentionally row-level. It does not pretend to be a SHELXL Flack
 parameter or a merged absolute-structure statistic. It asks whether the same
-signed observations have a lower scaled-residual sum for one native Bloch
+signed observations have a lower scaled-residual sum for one selected native
 prediction than for the alternate-hand check after each branch has had its
-declared nuisance scales applied.
+declared nuisance scales applied.  The default is the Bloch prediction;
+``--prediction-column born_scaled`` provides the matched Born control.
 """
 
 from __future__ import annotations
@@ -19,8 +20,9 @@ from pathlib import Path
 from typing import Any
 
 KEY_COLUMNS = ("row_index", "h", "k", "l")
-REQUIRED_COLUMNS = (*KEY_COLUMNS, "dyn_residual_over_sigma")
-ADJUSTED_HAND_COLUMNS = ("target_I", "dyn_scaled", "sigma_eff")
+REQUIRED_COLUMNS = KEY_COLUMNS
+BASE_PREDICTION_COLUMNS = ("target_I", "sigma_eff")
+SUPPORTED_PREDICTION_COLUMNS = ("dyn_scaled", "born_scaled")
 KLAR_PALATINUS_REFERENCE = {
     "citation": (
         "Klar, P. B. et al. Accurate structure models and absolute configuration determination using "
@@ -50,9 +52,17 @@ def read_rows(path: Path) -> tuple[list[dict[str, str]], list[str]]:
         return list(reader), fields
 
 
-def missing_columns(fields: list[str]) -> list[str]:
-    """Return required columns absent from a CSV header."""
+def missing_columns(fields: list[str], prediction_column: str) -> list[str]:
+    """Return key columns absent from a CSV header.
 
+    Legacy dynamic residual tables may contain ``dyn_residual_over_sigma`` but
+    not the intensity columns needed for the adjusted hand statistic.  Those
+    remain useful for the paired residual diagnostic, so do not reject their
+    row join here.  The adjusted diagnostic reports its own explicit missing
+    intensity-column contract below.
+    """
+
+    del prediction_column
     present = set(fields)
     return [name for name in REQUIRED_COLUMNS if name not in present]
 
@@ -95,32 +105,40 @@ def same_observation(left: float, right: float) -> bool:
     return math.isclose(left, right, rel_tol=1e-10, abs_tol=1e-12)
 
 
-def adjusted_hand_missing_columns(best_fields: list[str], other_fields: list[str]) -> dict[str, list[str]]:
+def adjusted_hand_missing_columns(
+    best_fields: list[str],
+    other_fields: list[str],
+    prediction_column: str,
+) -> dict[str, list[str]]:
     """Return columns missing for the adjusted hand-Z diagnostic."""
 
+    required = (*BASE_PREDICTION_COLUMNS, prediction_column)
     return {
-        "selected": [name for name in ADJUSTED_HAND_COLUMNS if name not in set(best_fields)],
-        "other": [name for name in ADJUSTED_HAND_COLUMNS if name not in set(other_fields)],
+        "selected": [name for name in required if name not in set(best_fields)],
+        "other": [name for name in required if name not in set(other_fields)],
     }
 
 
 def klar_palatinus_adjusted_hand_z(
     rows: list[tuple[dict[str, str], dict[str, str]]],
     missing: dict[str, list[str]],
+    prediction_column: str,
 ) -> dict[str, Any]:
     """Compute the adjusted reflection-count hand Z on matched native rows.
 
     The selected (``best``) and other-hand tables must carry identical observed
-    intensities and effective sigmas.  Branch-specific ``dyn_scaled`` values are
-    then compared on exactly the joined signed observations.  Rows with invalid
-    numbers, non-positive sigmas, or inconsistent observation metadata are
-    excluded explicitly rather than silently borrowing values across branches.
+    intensities and effective sigmas.  Branch-specific values from the selected
+    prediction column are then compared on exactly the joined signed
+    observations.  Rows with invalid numbers, non-positive sigmas, or
+    inconsistent observation metadata are excluded explicitly rather than
+    silently borrowing values across branches.
     """
 
     base: dict[str, Any] = {
         "method": "klar_palatinus_adjusted_reflection_count_hand_z",
         "n_joined_candidates": int(len(rows)),
-        "required_columns": list(ADJUSTED_HAND_COLUMNS),
+        "prediction_column": prediction_column,
+        "required_columns": [*BASE_PREDICTION_COLUMNS, prediction_column],
     }
     if missing["selected"] or missing["other"]:
         return {
@@ -140,8 +158,8 @@ def klar_palatinus_adjusted_hand_z(
     for selected, other in rows:
         target_selected = finite_float(selected.get("target_I"))
         target_other = finite_float(other.get("target_I"))
-        calc_selected = finite_float(selected.get("dyn_scaled"))
-        calc_other = finite_float(other.get("dyn_scaled"))
+        calc_selected = finite_float(selected.get(prediction_column))
+        calc_other = finite_float(other.get(prediction_column))
         sigma_selected = finite_float(selected.get("sigma_eff"))
         sigma_other = finite_float(other.get("sigma_eff"))
         values = (target_selected, target_other, calc_selected, calc_other, sigma_selected, sigma_other)
@@ -244,18 +262,44 @@ def block(
     label: str,
     rows: list[tuple[dict[str, str], dict[str, str]]],
     adjusted_missing: dict[str, list[str]],
+    prediction_column: str,
 ) -> dict[str, Any]:
     """Compute paired row-level contrast statistics."""
 
-    adjusted = klar_palatinus_adjusted_hand_z(rows, adjusted_missing)
+    adjusted = klar_palatinus_adjusted_hand_z(rows, adjusted_missing, prediction_column)
     rb: list[float] = []
     ro: list[float] = []
     for best, other in rows:
-        b = finite_float(best.get("dyn_residual_over_sigma"))
-        o = finite_float(other.get("dyn_residual_over_sigma"))
-        if math.isfinite(b) and math.isfinite(o):
+        target_best = finite_float(best.get("target_I"))
+        target_other = finite_float(other.get("target_I"))
+        calc_best = finite_float(best.get(prediction_column))
+        calc_other = finite_float(other.get(prediction_column))
+        sigma_best = finite_float(best.get("sigma_eff"))
+        sigma_other = finite_float(other.get("sigma_eff"))
+        if (
+            math.isfinite(target_best)
+            and math.isfinite(target_other)
+            and math.isfinite(calc_best)
+            and math.isfinite(calc_other)
+            and math.isfinite(sigma_best)
+            and math.isfinite(sigma_other)
+            and sigma_best > 0.0
+            and sigma_other > 0.0
+        ):
+            b = (target_best - calc_best) / sigma_best
+            o = (target_other - calc_other) / sigma_other
             rb.append(b)
             ro.append(o)
+        elif prediction_column == "dyn_scaled":
+            # Backwards-compatible support for legacy row tables that store
+            # only the already-standardized dynamical residual.  This fallback
+            # is deliberately unavailable to the Born control because a
+            # dynamical residual must never be relabelled as Born evidence.
+            b = finite_float(best.get("dyn_residual_over_sigma"))
+            o = finite_float(other.get("dyn_residual_over_sigma"))
+            if math.isfinite(b) and math.isfinite(o):
+                rb.append(b)
+                ro.append(o)
     n = len(rb)
     if n == 0:
         return {"label": label, "n": 0, "klar_palatinus_adjusted_hand_z": adjusted}
@@ -291,6 +335,12 @@ def main() -> None:
     ap.add_argument("--best", required=True, help="Native row CSV for the active/best hand assignment.")
     ap.add_argument("--other", required=True, help="Native row CSV for the alternate-hand comparison.")
     ap.add_argument("--out", required=True, help="Output JSON path.")
+    ap.add_argument(
+        "--prediction-column",
+        choices=SUPPORTED_PREDICTION_COLUMNS,
+        default="dyn_scaled",
+        help="Branch prediction to compare; dyn_scaled is the Bloch default and born_scaled is the matched Born control.",
+    )
     args = ap.parse_args()
 
     best_path = Path(args.best)
@@ -338,8 +388,11 @@ def main() -> None:
 
     best_rows, best_fields = read_rows(best_path)
     other_rows, other_fields = read_rows(other_path)
-    missing = {"best": missing_columns(best_fields), "other": missing_columns(other_fields)}
-    adjusted_missing = adjusted_hand_missing_columns(best_fields, other_fields)
+    missing = {
+        "best": missing_columns(best_fields, args.prediction_column),
+        "other": missing_columns(other_fields, args.prediction_column),
+    }
+    adjusted_missing = adjusted_hand_missing_columns(best_fields, other_fields, args.prediction_column)
     if missing["best"] or missing["other"]:
         joined: list[tuple[dict[str, str], dict[str, str]]] = []
         status = "missing_required_columns"
@@ -365,6 +418,7 @@ def main() -> None:
         },
         "interpretation": {
             "diagnostic": "row-level alternate-hand check; not a Flack parameter and not a merged absolute-structure statistic",
+            "prediction_column": args.prediction_column,
             "delta_chi2": "sum((other residual/sigma)^2 - (best residual/sigma)^2); positive favors best",
             "paired_row_t": "paired t-style contrast of per-row delta_chi2 values",
             "sqrt_positive_delta_chi2": "square root of positive delta_chi2; a scale indicator, not a probability or hand-assignment score",
@@ -373,8 +427,11 @@ def main() -> None:
                 "row_support": (
                     "exact one-to-one joined signed observations identified by row_index,h,k,l and duplicate occurrence"
                 ),
-                "k": "number of joined valid rows where |target_I-dyn_scaled_selected| is strictly smaller than |target_I-dyn_scaled_other|",
-                "w": "sum(1-Phi(|dyn_scaled_selected-dyn_scaled_other|/(2*sigma_eff)))",
+                "k": (
+                    "number of joined valid rows where |target_I-prediction_selected| is strictly smaller "
+                    "than |target_I-prediction_other| for prediction_column"
+                ),
+                "w": "sum(1-Phi(|prediction_selected-prediction_other|/(2*sigma_eff)))",
                 "z": "(2*k-N)/sqrt(N-w)",
                 "probability": "Phi(z), reported as probability_phi_z; this is distinct from paired_row_t_delta_chi2",
                 "ties": "an exact equal absolute intensity residual is not counted in k but remains in N, following the strict lower-residual definition",
@@ -387,9 +444,9 @@ def main() -> None:
                 "reference": KLAR_PALATINUS_REFERENCE,
             },
         },
-        "all": block("all", joined, adjusted_missing),
-        "work": block("work", work, adjusted_missing),
-        "free": block("free", free, adjusted_missing),
+        "all": block("all", joined, adjusted_missing, args.prediction_column),
+        "work": block("work", work, adjusted_missing, args.prediction_column),
+        "free": block("free", free, adjusted_missing, args.prediction_column),
     }
     out_path.write_text(json.dumps(out, indent=2, allow_nan=True) + "\n")
 
