@@ -1489,6 +1489,123 @@ def row_selection(data: XDSData, target, positive_only: bool, min_d: float, min_
     return idx
 
 
+def row_contract_selection(data: XDSData, target, path: Path) -> tuple[np.ndarray, dict]:
+    """Load one immutable row-membership contract and verify it against XDS.
+
+    Continuation jobs normally rebuild their eligible observations from the raw
+    XDS file. That is unsafe after a multi-dataset policy/scale promotion: the
+    promoted result may intentionally retain a strict subset of otherwise
+    eligible rows. A contract therefore selects *only* its recorded row
+    indices and fails closed if it no longer describes the supplied XDS input.
+
+    The source is a GROND ``native_dyn_calc.csv`` (policy annotations are
+    allowed). ``row_index,h,k,l,target_I,xds_sigma,d_A`` bind both row identity
+    and the raw observation rather than merely trusting a list of integers.
+    """
+
+    contract = Path(path).expanduser().resolve()
+    if not contract.is_file():
+        raise ValueError(f"row contract is missing: {contract}")
+    required = ("row_index", "h", "k", "l", "target_I", "xds_sigma", "d_A")
+    with contract.open(newline="") as handle:
+        reader = csv.DictReader(handle)
+        fields = tuple(reader.fieldnames or ())
+        missing = [field for field in required if field not in fields]
+        if missing:
+            raise ValueError(
+                f"row contract {contract} is missing required column(s): {', '.join(missing)}"
+            )
+        rows = [dict(row) for row in reader]
+    if not rows:
+        raise ValueError(f"row contract {contract} contains no rows")
+
+    seen: set[int] = set()
+    errors: list[str] = []
+    checked_target = checked_sigma = checked_d = 0
+    for ordinal, row in enumerate(rows, start=2):
+        try:
+            idx = int(str(row["row_index"]).strip())
+            hkl = tuple(int(str(row[field]).strip()) for field in ("h", "k", "l"))
+            target_i = float(str(row["target_I"]).strip())
+            xds_sigma = float(str(row["xds_sigma"]).strip())
+            d_expected = float(str(row["d_A"]).strip())
+        except (KeyError, TypeError, ValueError) as exc:
+            errors.append(f"line {ordinal}: invalid row identity/observation: {exc}")
+            if len(errors) >= 10:
+                break
+            continue
+        if idx < 0 or idx >= len(data.hkl):
+            errors.append(f"line {ordinal}: row_index {idx} is outside XDS range [0, {len(data.hkl)})")
+        elif idx in seen:
+            errors.append(f"line {ordinal}: duplicate row_index {idx}")
+        else:
+            seen.add(idx)
+            observed_hkl = tuple(int(value) for value in np.asarray(data.hkl[idx], dtype=int))
+            if observed_hkl != hkl:
+                errors.append(
+                    f"line {ordinal}: row_index {idx} HKL mismatch; contract={hkl}, XDS={observed_hkl}"
+                )
+            else:
+                if not (
+                    math.isfinite(target_i)
+                    and math.isclose(float(target[idx]), target_i, rel_tol=1e-11, abs_tol=1e-10)
+                ):
+                    errors.append(
+                        f"line {ordinal}: row_index {idx} target_I mismatch; "
+                        f"contract={target_i:.17g}, XDS={float(target[idx]):.17g}"
+                    )
+                else:
+                    checked_target += 1
+                if not (
+                    math.isfinite(xds_sigma)
+                    and math.isclose(float(data.sigma[idx]), xds_sigma, rel_tol=1e-11, abs_tol=1e-10)
+                ):
+                    errors.append(
+                        f"line {ordinal}: row_index {idx} xds_sigma mismatch; "
+                        f"contract={xds_sigma:.17g}, XDS={float(data.sigma[idx]):.17g}"
+                    )
+                else:
+                    checked_sigma += 1
+                d_actual = float(data.cell.calculate_d(observed_hkl))
+                if not (
+                    math.isfinite(d_expected)
+                    and math.isclose(d_actual, d_expected, rel_tol=1e-10, abs_tol=1e-10)
+                ):
+                    errors.append(
+                        f"line {ordinal}: row_index {idx} d_A mismatch; "
+                        f"contract={d_expected:.17g}, XDS={d_actual:.17g}"
+                    )
+                else:
+                    checked_d += 1
+        if len(errors) >= 10:
+            break
+    if errors:
+        raise ValueError(
+            "row contract does not bind exactly to the supplied XDS observations; "
+            "refusing to continue with changed row membership:\n- " + "\n- ".join(errors)
+        )
+
+    indices = np.asarray(sorted(seen), dtype=int)
+    if len(indices) != len(rows):
+        raise ValueError(
+            f"row contract {contract} selected {len(indices)} unique indices from {len(rows)} rows"
+        )
+    return indices, {
+        "status": "verified_exact_row_contract",
+        "path": str(contract),
+        "sha256": sha256(contract),
+        "requested_rows": int(len(rows)),
+        "selected_rows": int(len(indices)),
+        "row_index_min": int(indices[0]),
+        "row_index_max": int(indices[-1]),
+        "identity_columns": list(required),
+        "target_rows_verified": int(checked_target),
+        "sigma_rows_verified": int(checked_sigma),
+        "d_spacing_rows_verified": int(checked_d),
+        "selection_rule": "contract row_index membership; no raw-XDS eligibility rows were added or removed",
+    }
+
+
 def parse_lst(path: Path):
     out = {"lst": str(path), "status": "missing"}
     if not path.exists():
@@ -2634,6 +2751,15 @@ def main():
     ap.add_argument("--res", default=str(DEFAULT_RES))
     ap.add_argument("--baseline-hkl", default=str(DEFAULT_BASELINE_HKL))
     ap.add_argument("--hkl-transform", default="identity", help="Signed axis permutation mapping XDS HKLs into the model basis, e.g. 'l,-k,h'.")
+    ap.add_argument(
+        "--row-contract",
+        default="",
+        help=(
+            "Immutable GROND native_dyn_calc.csv row-membership contract. When supplied, select exactly its "
+            "row_index set after verifying HKL, target_I, xds_sigma, and d_A against the XDS input; do not "
+            "rebuild membership from raw eligibility filters."
+        ),
+    )
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--n-basis", type=int, default=20)
     ap.add_argument("--n-points", type=int, default=10)
@@ -2778,25 +2904,43 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     data = XDSData(Path(args.hkl), hkl_transform=args.hkl_transform)
     target, base_sig = target_arrays(data, args.target_mode)
-    base_pre_geom = np.ones(len(target), dtype=bool)
-    if args.positive_only:
-        base_pre_geom &= target > 0.0
-    if args.min_peak > 0:
-        base_pre_geom &= data.peak >= args.min_peak
-    if args.min_d_spacing > 0:
-        dvals_for_geom = np.asarray([data.cell.calculate_d(tuple(int(v) for v in h)) for h in data.hkl], dtype=float)
-        base_pre_geom &= dvals_for_geom >= args.min_d_spacing
-    _geom_keep, geometry_summary = geometry_tail_mask(data, base_pre_geom, args.geometry_percentile)
-    datum_indices = row_selection(
-        data,
-        target,
-        args.positive_only,
-        args.min_d_spacing,
-        args.min_peak,
-        0,
-        args.geometry_percentile,
-    )
-    indices = row_selection(data, target, args.positive_only, args.min_d_spacing, args.min_peak, args.max_rows, args.geometry_percentile)
+    row_contract_summary = {}
+    if str(args.row_contract).strip():
+        if int(args.max_rows) > 0:
+            raise ValueError("--max-rows cannot be combined with --row-contract; membership must remain exact")
+        indices, row_contract_summary = row_contract_selection(data, target, Path(args.row_contract))
+        datum_indices = indices
+        geometry_summary = {
+            "status": "not_reapplied_row_contract_is_authoritative",
+            "percentile": float(args.geometry_percentile),
+            "reason": (
+                "The immutable row contract was already produced under the promoted geometry/quality policy. "
+                "Reapplying a raw XDS filter could silently change membership."
+            ),
+        }
+        (out / "row_contract_verification.json").write_text(
+            json.dumps(row_contract_summary, indent=2, allow_nan=True) + "\n"
+        )
+    else:
+        base_pre_geom = np.ones(len(target), dtype=bool)
+        if args.positive_only:
+            base_pre_geom &= target > 0.0
+        if args.min_peak > 0:
+            base_pre_geom &= data.peak >= args.min_peak
+        if args.min_d_spacing > 0:
+            dvals_for_geom = np.asarray([data.cell.calculate_d(tuple(int(v) for v in h)) for h in data.hkl], dtype=float)
+            base_pre_geom &= dvals_for_geom >= args.min_d_spacing
+        _geom_keep, geometry_summary = geometry_tail_mask(data, base_pre_geom, args.geometry_percentile)
+        datum_indices = row_selection(
+            data,
+            target,
+            args.positive_only,
+            args.min_d_spacing,
+            args.min_peak,
+            0,
+            args.geometry_percentile,
+        )
+        indices = row_selection(data, target, args.positive_only, args.min_d_spacing, args.min_peak, args.max_rows, args.geometry_percentile)
     model = parse_model(Path(args.res))
     masks = split_masks(
         data.hkl,
@@ -3261,6 +3405,7 @@ def main():
             "res_sha256": sha256(Path(args.res)),
             "model_tag": model_tag,
             "baseline_hkl": str(Path(args.baseline_hkl).resolve()) if Path(args.baseline_hkl).exists() else "",
+            "row_contract": row_contract_summary,
         },
         "config": vars(args),
         "resolved_grids": {
@@ -3335,6 +3480,7 @@ def main():
             "work_rows": int(np.count_nonzero(masks["work"])),
             "free_rows": int(np.count_nonzero(masks["free"])),
             "geometry_filter": geometry_summary,
+            "contract": row_contract_summary,
         },
         "best_native": {k: v for k, v in best.items() if k != "arrays"},
         "selection_ranked_best_native": {k: v for k, v in ranked_candidate.items() if k != "arrays"},

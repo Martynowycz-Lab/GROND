@@ -3944,6 +3944,37 @@ def test_multi_checkpoint_push_overrides_dataset_resolution_cutoff():
     assert [dataset.min_d_spacing for dataset in prep.datasets] == [0.75, 0.75]
 
 
+def test_multi_push_row_contracts_are_complete_and_forwarded(tmp_path: Path):
+    datasets = [
+        DatasetSpec(name="one", hkl=str(tmp_path / "one.hkl")),
+        DatasetSpec(name="two", hkl=str(tmp_path / "two.hkl")),
+    ]
+    one = tmp_path / "one_policy.csv"
+    two = tmp_path / "two_policy.csv"
+    contracts = cli.resolve_dataset_row_contracts([f"one={one}", f"two={two}"], datasets)
+    assert contracts == {"one": str(one.resolve()), "two": str(two.resolve())}
+    with pytest.raises(SystemExit, match="missing: two"):
+        cli.resolve_dataset_row_contracts([f"one={one}"], datasets)
+
+    args = build_parser().parse_args(
+        ["run", "--out-dir", "out", "--hkl", "rows.hkl", "--structure", "model.res"]
+    )
+    args.dataset_row_contracts = contracts
+    command = cli.native_stage_cmd(
+        "python",
+        datasets[0],
+        "model.res",
+        "baseline.hkl",
+        tmp_path / "run",
+        args,
+        n_basis=20,
+        n_points=5,
+        stage="multi_ls1_cycle_01",
+        endpoint=False,
+    )
+    assert command[command.index("--row-contract") + 1] == str(one.resolve())
+
+
 def test_pinned_sg_jitter_gets_explicit_no_jitter_fallback(tmp_path: Path):
     args = build_parser().parse_args(
         ["run", "--out-dir", "out", "--hkl", "rows.hkl", "--structure", "model.res"]

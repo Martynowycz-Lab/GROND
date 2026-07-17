@@ -2361,6 +2361,10 @@ def native_stage_cmd(
     max_rows = args.max_rows if max_rows_override is None else max_rows_override
     if max_rows:
         cmd += ["--max-rows", str(max_rows)]
+    row_contracts = getattr(args, "dataset_row_contracts", {})
+    row_contract = row_contracts.get(ds.name, "") if isinstance(row_contracts, Mapping) else ""
+    if row_contract:
+        cmd += ["--row-contract", str(row_contract)]
     if alternate_hand:
         cmd.append("--alternate-hand")
     if make_maps and endpoint_ok:
@@ -4198,6 +4202,15 @@ def run_multi_shelxl_feedback_loop(
 
     feedback_root = root / "runs" / "shared_shelxl_feedback"
     cycles_requested = max(0, int(getattr(args, "shelxl_feedback_cycles", 0) or 0))
+    row_contracts = getattr(args, "dataset_row_contracts", {})
+    row_contracts = row_contracts if isinstance(row_contracts, Mapping) else {}
+    row_contract_provenance = {
+        name: {
+            "path": str(Path(path).expanduser().resolve()),
+            "sha256": sha256_file(path) if Path(path).expanduser().is_file() else "",
+        }
+        for name, path in row_contracts.items()
+    }
     summary: dict = {
         "status": "not_run" if cycles_requested <= 0 else "running",
         "strategy": "shelxl_feedback",
@@ -4205,6 +4218,7 @@ def run_multi_shelxl_feedback_loop(
         "current_model": start_model,
         "cycles_requested": cycles_requested,
         "shelxl_iterations_per_cycle": int(getattr(args, "shelxl_feedback_shelxl_iterations", 1) or 1),
+        "dataset_row_contracts": row_contract_provenance,
         "cycles": [],
     }
     if cycles_requested <= 0:
@@ -13697,6 +13711,42 @@ def hydrate_push_args_for_multi(args: argparse.Namespace) -> argparse.Namespace:
     return args
 
 
+def resolve_dataset_row_contracts(
+    specifications: list[str] | tuple[str, ...] | None,
+    datasets: list[DatasetSpec],
+) -> dict[str, str]:
+    """Parse strict ``dataset=policy-selected-native_dyn_calc.csv`` bindings."""
+
+    raw = list(specifications or [])
+    if not raw:
+        return {}
+    names = {dataset.name for dataset in datasets}
+    resolved: dict[str, str] = {}
+    for spec in raw:
+        text = str(spec).strip()
+        if "=" not in text:
+            raise SystemExit("--dataset-row-contract must be DATASET=/path/to/native_dyn_calc.csv")
+        name, path_text = text.split("=", 1)
+        name = name.strip()
+        path = Path(path_text).expanduser()
+        if name not in names:
+            raise SystemExit(
+                f"--dataset-row-contract names unknown dataset {name!r}; expected: {', '.join(sorted(names))}"
+            )
+        if not str(path_text).strip():
+            raise SystemExit(f"--dataset-row-contract for {name!r} has an empty path")
+        if name in resolved:
+            raise SystemExit(f"--dataset-row-contract was supplied more than once for {name!r}")
+        resolved[name] = str(path.resolve())
+    missing = sorted(names - set(resolved))
+    if missing:
+        raise SystemExit(
+            "immutable multi-dataset continuation requires one --dataset-row-contract for every dataset; "
+            f"missing: {', '.join(missing)}"
+        )
+    return resolved
+
+
 def prep_from_multi_checkpoint(
     checkpoint: Mapping[str, object],
     start_model: Path | str,
@@ -13880,6 +13930,9 @@ def cmd_push_endpoint_multi(
         start_model,
         min_d_spacing=float(getattr(args, "min_d_spacing", 0.0) or 0.0),
     )
+    args.dataset_row_contracts = resolve_dataset_row_contracts(
+        getattr(args, "dataset_row_contract", None), prep.datasets
+    )
     logs = out_dir / "logs"
     logs.mkdir(parents=True, exist_ok=True)
     write_prep(out_dir / "push_prep.json", prep)
@@ -13896,6 +13949,7 @@ def cmd_push_endpoint_multi(
             "cycles": int(args.shelxl_feedback_cycles),
             "datasets": [asdict(ds) for ds in prep.datasets],
             "nuisance_datasets": sorted(nuisance),
+            "dataset_row_contracts": dict(args.dataset_row_contracts),
             "multi_endpoint_merge_key": args.multi_endpoint_merge_key,
             "shared_loop": "per-dataset Bloch rows -> GROND-side corrected-HKL merge -> one shared SHELXL LS step -> repeat",
             "compact_scale_reselection_performed": False,
@@ -13923,6 +13977,7 @@ def cmd_push_endpoint_multi(
         "start_model": str(start_model),
         "model": final_model,
         "structure_feedback": feedback,
+        "dataset_row_contracts": dict(args.dataset_row_contracts),
         "compact_scale_reselection_performed": False,
         "scale_contract_note": (
             "The push refit the pinned full grouping. Run compact-scale selection separately on the selected safe cycle."
@@ -16337,6 +16392,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_push.add_argument("--min-peak", type=float, default=-1.0)
     p_push.add_argument("--geometry-percentile", type=float, default=0.0)
     p_push.add_argument("--max-rows", type=int, default=0)
+    p_push.add_argument(
+        "--dataset-row-contract",
+        action="append",
+        default=[],
+        metavar="DATASET=CSV",
+        help=(
+            "Multi-dataset only: bind a continuation dataset to the exact policy-selected native_dyn_calc.csv "
+            "membership. Supply once for every checkpoint dataset; GROND verifies row_index/HKL/target/sigma/d-spacing "
+            "before calculation and refuses to rebuild row membership from raw XDS filters."
+        ),
+    )
     p_push.add_argument("--post-bloch-sigma-policy", choices=["none", "uniform_z_rms"], default="none")
     p_push.add_argument("--post-bloch-sigma-holdout-fraction", type=float, default=0.20)
     p_push.add_argument("--post-bloch-sigma-min-scale", type=float, default=0.25)
