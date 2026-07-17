@@ -12171,7 +12171,7 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
             "",
             "## Legacy Native-Objective Audit Matrix (Not Table 1)",
             "",
-            "This retained engineering matrix contains GROND's historical native-objective `R1_all`/`wR2_all` diagnostics alongside endpoint diagnostics. Those internal row-objective names are not JANA/PETS publication factors and this matrix is not the manuscript table. Use `TABLE1_FINAL_STATISTICS.md`: its SHELXL and JANA/PETS panels have authoritative labels, targets, and denominators.",
+            "This retained engineering matrix contains GROND's historical native-objective `R1_all`/`wR2_all` diagnostics alongside endpoint diagnostics. Those internal row-objective names are not JANA/PETS publication factors and this matrix is not the canonical final table. Use `TABLE1_FINAL_STATISTICS.md`: its SHELXL and JANA/PETS panels have authoritative labels, targets, and denominators.",
             "",
             "| object | target class | Rgt | Rall | weighted R | free/held-out weighted R | GooF | N/reflections | parameters/scales | source and notes |",
             "|---|---|---:|---:|---:|---:|---:|---:|---|---|",
