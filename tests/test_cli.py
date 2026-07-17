@@ -3721,6 +3721,54 @@ def test_multi_shelxl_feedback_recomputes_rows_for_accepted_output_model(tmp_pat
     assert summary["final_row_recompute"]["status"] == "ok"
 
 
+def test_multi_shelxl_feedback_zero_cycles_can_recompute_rows_without_ls1(tmp_path: Path, monkeypatch):
+    start_model = tmp_path / "start.res"
+    start_model.write_text(valid_shelx_res_text("clean"))
+    labels = []
+    captured = []
+    monkeypatch.setattr(cli, "resolve_final_n_basis", lambda *args, **kwargs: 24)
+    monkeypatch.setattr(
+        cli,
+        "native_stage_cmd",
+        lambda _python, _ds, structure, _baseline, out_dir, _args, **kwargs: captured.append(
+            (str(structure), str(out_dir), kwargs["stage"], kwargs["endpoint"])
+        )
+        or ["native"],
+    )
+    monkeypatch.setattr(cli, "run_logged", lambda _cmd, _logs, label, **_kwargs: labels.append(label))
+    prep = PrepConfig(structure=str(start_model), datasets=[DatasetSpec(name="a", hkl="a.hkl")])
+    args = argparse.Namespace(
+        shelxl_feedback_cycles=0,
+        recompute_final_rows=True,
+        dry_run=False,
+        n_points=10,
+    )
+
+    current_model, summary = cli.run_multi_shelxl_feedback_loop(
+        prep,
+        args,
+        "python",
+        tmp_path / "logs",
+        tmp_path,
+        start_model=str(start_model),
+        nuisance={"a": {}},
+        structure_dataset_policy={"status": "disabled"},
+    )
+
+    assert current_model == str(start_model)
+    assert labels == ["a_final_row_recompute"]
+    assert captured == [
+        (
+            str(start_model),
+            str(tmp_path / "runs" / "shared_shelxl_feedback" / "final_row_recompute" / "a"),
+            "final_row_recompute",
+            False,
+        )
+    ]
+    assert summary["status"] == "ok_recomputed_zero_cycles"
+    assert summary["final_row_recompute"]["model"] == str(start_model)
+
+
 @pytest.mark.parametrize("modulation_p95", [None, 20.1])
 def test_multi_shelxl_feedback_rejects_missing_or_excessive_modulation(
     tmp_path: Path,

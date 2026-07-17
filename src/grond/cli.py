@@ -4271,6 +4271,7 @@ def run_multi_shelxl_feedback_loop(
 
     feedback_root = root / "runs" / "shared_shelxl_feedback"
     cycles_requested = max(0, int(getattr(args, "shelxl_feedback_cycles", 0) or 0))
+    recompute_final_rows = bool(getattr(args, "recompute_final_rows", False))
     row_contracts = getattr(args, "dataset_row_contracts", {})
     row_contracts = row_contracts if isinstance(row_contracts, Mapping) else {}
     row_contract_provenance = {
@@ -4292,6 +4293,29 @@ def run_multi_shelxl_feedback_loop(
     }
     if cycles_requested <= 0:
         summary["status"] = "disabled_zero_cycles"
+        if recompute_final_rows and not args.dry_run:
+            feedback_root.mkdir(parents=True, exist_ok=True)
+            try:
+                summary["final_row_recompute"] = run_multi_final_row_recompute(
+                    prep,
+                    args,
+                    python,
+                    logs,
+                    root,
+                    model=start_model,
+                    nuisance=nuisance,
+                    structure_dataset_policy=structure_dataset_policy,
+                )
+            except Exception as exc:
+                summary["status"] = "failed_final_row_recompute"
+                summary["final_row_recompute"] = {
+                    "status": "failed",
+                    "model": str(start_model),
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+                write_json(feedback_root / "multi_shelxl_feedback_loop_summary.json", summary)
+                raise
+            summary["status"] = "ok_recomputed_zero_cycles"
         write_json(feedback_root / "multi_shelxl_feedback_loop_summary.json", summary)
         return start_model, summary
     if args.dry_run:
@@ -16523,6 +16547,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="For multi-dataset checkpoints, corrected-HKL merge key before each shared SHELXL LS step. Defaults to the checkpoint value or model_symmetry.",
     )
     p_push.add_argument("--cycles", type=int, default=3, help="Additional Bloch/SHELXL macrocycles.")
+    p_push.add_argument(
+        "--recompute-final-rows",
+        action="store_true",
+        help=(
+            "With --cycles 0 on a multi-dataset checkpoint, recompute fixed-nuisance Bloch rows for --start-res "
+            "without a SHELXL step. Use this to make maps/statistics for an already accepted endpoint model."
+        ),
+    )
     p_push.add_argument("--n-basis", type=int, default=108)
     p_push.add_argument("--n-points", type=int, default=20)
     p_push.add_argument("--final-n-basis", type=int, default=0)
