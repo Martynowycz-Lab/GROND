@@ -13747,6 +13747,70 @@ def resolve_dataset_row_contracts(
     return resolved
 
 
+def dataset_policy_from_row_contracts(
+    contracts: Mapping[str, str],
+    datasets: list[DatasetSpec],
+) -> dict:
+    """Recover immutable multi-dataset weights from policy-selected row tables."""
+
+    required = ("dataset", "dataset_role", "raw_row_weight", "endpoint_weight")
+    decisions = []
+    for dataset in datasets:
+        path = Path(contracts[dataset.name]).expanduser()
+        if not path.is_file():
+            raise SystemExit(f"row contract for {dataset.name!r} is missing: {path}")
+        with path.open(newline="") as handle:
+            reader = csv.DictReader(handle)
+            fields = set(reader.fieldnames or [])
+            missing = [field for field in required if field not in fields]
+            if missing:
+                raise SystemExit(
+                    f"row contract {path} lacks policy annotation column(s): {', '.join(missing)}"
+                )
+            rows = list(reader)
+        if not rows:
+            raise SystemExit(f"row contract {path} contains no rows")
+        names = {str(row.get("dataset", "")).strip() for row in rows}
+        roles = {str(row.get("dataset_role", "")).strip() for row in rows}
+        try:
+            raw_weights = {float(str(row["raw_row_weight"]).strip()) for row in rows}
+            endpoint_weights = {float(str(row["endpoint_weight"]).strip()) for row in rows}
+        except (KeyError, TypeError, ValueError) as exc:
+            raise SystemExit(f"row contract {path} has invalid policy weight: {exc}") from exc
+        if names != {dataset.name}:
+            raise SystemExit(
+                f"row contract {path} dataset annotation does not bind to {dataset.name!r}: {sorted(names)}"
+            )
+        if len(roles) != 1 or roles.pop() not in {"primary", "downweight", "completeness_only", "exclude"}:
+            raise SystemExit(f"row contract {path} has inconsistent or invalid dataset_role annotations")
+        role = str(rows[0]["dataset_role"]).strip()
+        if len(raw_weights) != 1 or len(endpoint_weights) != 1:
+            raise SystemExit(f"row contract {path} has inconsistent policy weights across its rows")
+        raw_weight = raw_weights.pop()
+        endpoint_weight = endpoint_weights.pop()
+        if not all(math.isfinite(value) and value >= 0.0 for value in (raw_weight, endpoint_weight)):
+            raise SystemExit(f"row contract {path} has non-finite or negative policy weights")
+        decisions.append(
+            {
+                "name": dataset.name,
+                "run_dir": str(path.parent.resolve()),
+                "action": role,
+                "raw_row_weight": raw_weight,
+                "endpoint_weight": endpoint_weight,
+                "include_in_row_regularization": role in {"primary", "downweight"} and raw_weight > 0.0,
+                "include_in_endpoint": role != "exclude" and endpoint_weight > 0.0,
+                "reasons": ["immutable policy annotation from --dataset-row-contract"],
+                "row_contract": str(path.resolve()),
+                "row_contract_sha256": sha256_file(path),
+            }
+        )
+    return {
+        "status": "immutable_row_contract",
+        "definition": "multi-dataset membership and weights fixed by policy-selected row contracts",
+        "datasets": decisions,
+    }
+
+
 def prep_from_multi_checkpoint(
     checkpoint: Mapping[str, object],
     start_model: Path | str,
@@ -13933,6 +13997,11 @@ def cmd_push_endpoint_multi(
     args.dataset_row_contracts = resolve_dataset_row_contracts(
         getattr(args, "dataset_row_contract", None), prep.datasets
     )
+    row_contract_policy = (
+        dataset_policy_from_row_contracts(args.dataset_row_contracts, prep.datasets)
+        if args.dataset_row_contracts
+        else {}
+    )
     logs = out_dir / "logs"
     logs.mkdir(parents=True, exist_ok=True)
     write_prep(out_dir / "push_prep.json", prep)
@@ -13940,6 +14009,8 @@ def cmd_push_endpoint_multi(
     policy = checkpoint.get("structure_dataset_policy")
     if not isinstance(policy, Mapping) or not policy:
         policy = all_primary_policy({ds.name: Path(str(ds.hkl)).parent for ds in prep.datasets}, status="checkpoint_no_policy")
+    if row_contract_policy:
+        policy = row_contract_policy
     if args.dry_run:
         plan = {
             "mode": "multi_dataset",
@@ -13950,6 +14021,7 @@ def cmd_push_endpoint_multi(
             "datasets": [asdict(ds) for ds in prep.datasets],
             "nuisance_datasets": sorted(nuisance),
             "dataset_row_contracts": dict(args.dataset_row_contracts),
+            "structure_dataset_policy_source": "immutable_row_contract" if row_contract_policy else "checkpoint",
             "multi_endpoint_merge_key": args.multi_endpoint_merge_key,
             "shared_loop": "per-dataset Bloch rows -> GROND-side corrected-HKL merge -> one shared SHELXL LS step -> repeat",
             "compact_scale_reselection_performed": False,
@@ -13978,6 +14050,7 @@ def cmd_push_endpoint_multi(
         "model": final_model,
         "structure_feedback": feedback,
         "dataset_row_contracts": dict(args.dataset_row_contracts),
+        "structure_dataset_policy": dict(policy),
         "compact_scale_reselection_performed": False,
         "scale_contract_note": (
             "The push refit the pinned full grouping. Run compact-scale selection separately on the selected safe cycle."
@@ -16400,7 +16473,8 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Multi-dataset only: bind a continuation dataset to the exact policy-selected native_dyn_calc.csv "
             "membership. Supply once for every checkpoint dataset; GROND verifies row_index/HKL/target/sigma/d-spacing "
-            "before calculation and refuses to rebuild row membership from raw XDS filters."
+            "before calculation, reuses its dataset-role/raw/endpoint policy annotations, and refuses to rebuild "
+            "membership from raw XDS filters."
         ),
     )
     p_push.add_argument("--post-bloch-sigma-policy", choices=["none", "uniform_z_rms"], default="none")

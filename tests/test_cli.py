@@ -3974,6 +3974,22 @@ def test_multi_push_row_contracts_are_complete_and_forwarded(tmp_path: Path):
     )
     assert command[command.index("--row-contract") + 1] == str(one.resolve())
 
+    for path, name, role, raw_weight, endpoint_weight in (
+        (one, "one", "downweight", "0.25", "0.30"),
+        (two, "two", "primary", "1.0", "1.0"),
+    ):
+        path.write_text(
+            "dataset,dataset_role,raw_row_weight,endpoint_weight\n"
+            f"{name},{role},{raw_weight},{endpoint_weight}\n"
+            f"{name},{role},{raw_weight},{endpoint_weight}\n"
+        )
+    policy = cli.dataset_policy_from_row_contracts(contracts, datasets)
+    assert policy["status"] == "immutable_row_contract"
+    assert [(row["action"], row["raw_row_weight"], row["endpoint_weight"]) for row in policy["datasets"]] == [
+        ("downweight", 0.25, 0.30),
+        ("primary", 1.0, 1.0),
+    ]
+
 
 def test_pinned_sg_jitter_gets_explicit_no_jitter_fallback(tmp_path: Path):
     args = build_parser().parse_args(
