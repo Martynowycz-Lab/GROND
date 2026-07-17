@@ -4187,6 +4187,75 @@ def multi_combined_endpoint_shelxl(combined_dir: Path) -> dict[str, object]:
     return dict(shelxl) if isinstance(shelxl, Mapping) else {}
 
 
+def run_multi_final_row_recompute(
+    prep: PrepConfig,
+    args: argparse.Namespace,
+    python: str,
+    logs: Path,
+    root: Path,
+    *,
+    model: str,
+    nuisance: dict[str, dict],
+    structure_dataset_policy: dict,
+) -> dict[str, object]:
+    """Recompute final-model rows without taking an additional LS1 step.
+
+    A feedback cycle's native rows describe its input model, while the shared
+    SHELXL endpoint is its output model.  Publication row statistics and
+    dynamical maps must never pair those two different structural states. This
+    final fixed-nuisance pass produces exactly the rows of the accepted output
+    model and deliberately writes no new corrected-HKL endpoint.
+    """
+
+    final_root = root / "runs" / "shared_shelxl_feedback" / "final_row_recompute"
+    raw_runs: dict[str, Path] = {}
+    for ds in prep.datasets:
+        run_dir = final_root / ds.name
+        n_basis = resolve_final_n_basis(
+            prep, ds, args, python, logs, root, model, "final_row_recompute"
+        )
+        run_logged(
+            native_stage_cmd(
+                python,
+                ds,
+                model,
+                dataset_baseline_hkl(prep, ds),
+                run_dir,
+                args,
+                n_basis=n_basis,
+                n_points=args.n_points,
+                stage="final_row_recompute",
+                pinned=nuisance[ds.name],
+                make_maps=False,
+                endpoint=False,
+            ),
+            logs,
+            f"{ds.name}_final_row_recompute",
+            dry_run=False,
+        )
+        raw_runs[ds.name] = run_dir
+    if structure_dataset_policy.get("status") in {"disabled", "single_dataset", "dry_run", "missing_row_table"}:
+        active_runs = raw_runs
+        weighted_runs = raw_runs
+    else:
+        weighted_runs = write_policy_weighted_runs(
+            raw_runs,
+            structure_dataset_policy,
+            final_root / "weighted_runs",
+            include_endpoint_only=False,
+        )
+        active_runs = policy_active_runs(weighted_runs, structure_dataset_policy)
+        require_policy_active_runs(active_runs, context="final-model row recompute")
+    return {
+        "status": "ok",
+        "model": str(model),
+        "definition": "fixed-nuisance Bloch rows for the accepted shared SHELXL output model; no additional LS1 step",
+        "runs": {name: str(path) for name, path in raw_runs.items()},
+        "weighted_runs": {name: str(path) for name, path in weighted_runs.items()},
+        "active_runs": {name: str(path) for name, path in active_runs.items()},
+    }
+
+
 def run_multi_shelxl_feedback_loop(
     prep: PrepConfig,
     args: argparse.Namespace,
@@ -4397,6 +4466,29 @@ def run_multi_shelxl_feedback_loop(
         current_model = str(output_model)
         summary["current_model"] = current_model
         summary["status"] = "ok"
+        write_json(feedback_root / "multi_shelxl_feedback_loop_summary.json", summary)
+
+    if summary.get("status") == "ok":
+        try:
+            summary["final_row_recompute"] = run_multi_final_row_recompute(
+                prep,
+                args,
+                python,
+                logs,
+                root,
+                model=current_model,
+                nuisance=nuisance,
+                structure_dataset_policy=structure_dataset_policy,
+            )
+        except Exception as exc:
+            summary["status"] = "failed_final_row_recompute"
+            summary["final_row_recompute"] = {
+                "status": "failed",
+                "model": str(current_model),
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+            write_json(feedback_root / "multi_shelxl_feedback_loop_summary.json", summary)
+            raise
         write_json(feedback_root / "multi_shelxl_feedback_loop_summary.json", summary)
 
     return current_model, summary

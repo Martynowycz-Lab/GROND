@@ -3667,6 +3667,60 @@ def test_multi_shelxl_feedback_allows_split_warning_without_npd(tmp_path: Path, 
     assert summary["cycles"][0]["endpoint_res_health"]["split_count"] == 2
 
 
+def test_multi_shelxl_feedback_recomputes_rows_for_accepted_output_model(tmp_path: Path, monkeypatch):
+    start_model = tmp_path / "start.res"
+    start_model.write_text(valid_shelx_res_text("clean"))
+    combined = tmp_path / "runs" / "shared_shelxl_feedback" / "cycle_01" / "combined"
+    output_model = combined / "combined_endpoint_lam_1p0" / "multi_dyn_corrected.res"
+    output_model.parent.mkdir(parents=True)
+    output_model.write_text(valid_shelx_res_text("accepted_output"))
+    (combined / "combined_summary.json").write_text(
+        json.dumps(combined_endpoint_summary(output_model)) + "\n"
+    )
+    labels = []
+    captured = []
+    monkeypatch.setattr(cli, "resolve_final_n_basis", lambda *args, **kwargs: 24)
+    monkeypatch.setattr(
+        cli,
+        "native_stage_cmd",
+        lambda _python, _ds, structure, _baseline, out_dir, _args, **kwargs: captured.append(
+            (str(structure), str(out_dir), kwargs["stage"], kwargs["endpoint"])
+        )
+        or ["native"],
+    )
+    monkeypatch.setattr(cli, "combine_cmd", lambda *args, **kwargs: ["combine"])
+    monkeypatch.setattr(cli, "run_logged", lambda _cmd, _logs, label, **_kwargs: labels.append(label))
+    prep = PrepConfig(structure=str(start_model), datasets=[DatasetSpec(name="a", hkl="a.hkl")])
+    args = argparse.Namespace(
+        shelxl_feedback_cycles=1,
+        shelxl_feedback_shelxl_iterations=1,
+        dry_run=False,
+        n_points=10,
+    )
+
+    current_model, summary = cli.run_multi_shelxl_feedback_loop(
+        prep,
+        args,
+        "python",
+        tmp_path / "logs",
+        tmp_path,
+        start_model=str(start_model),
+        nuisance={"a": {}},
+        structure_dataset_policy={"status": "disabled"},
+    )
+
+    assert current_model == str(output_model)
+    assert labels == ["a_multi_ls1_cycle_01", "multi_ls1_cycle_01_combine", "a_final_row_recompute"]
+    assert captured[-1] == (
+        str(output_model),
+        str(tmp_path / "runs" / "shared_shelxl_feedback" / "final_row_recompute" / "a"),
+        "final_row_recompute",
+        False,
+    )
+    assert summary["final_row_recompute"]["model"] == str(output_model)
+    assert summary["final_row_recompute"]["status"] == "ok"
+
+
 @pytest.mark.parametrize("modulation_p95", [None, 20.1])
 def test_multi_shelxl_feedback_rejects_missing_or_excessive_modulation(
     tmp_path: Path,
