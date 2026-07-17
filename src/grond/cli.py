@@ -3109,7 +3109,15 @@ def combine_cmd(
     return cmd
 
 
-def publication_report_cmd(python: str, prep: PrepConfig, result: dict, out_dir: Path, title: str) -> list[str]:
+def publication_report_cmd(
+    python: str,
+    prep: PrepConfig,
+    result: dict,
+    out_dir: Path,
+    title: str,
+    *,
+    instability_u: float = 0.01,
+) -> list[str]:
     """Build the GROND row/MR publication-table command for final GROND rows."""
 
     cmd = [
@@ -3121,6 +3129,8 @@ def publication_report_cmd(python: str, prep: PrepConfig, result: dict, out_dir:
         str(result.get("model") or prep.structure),
         "--title",
         title,
+        "--instability-u",
+        f"{float(instability_u):g}",
     ]
     if result.get("combined"):
         for name, run in (result.get("publication_runs") or result.get("runs") or {}).items():
@@ -4392,6 +4402,7 @@ def run_publication_report(python: str, prep: PrepConfig, result: dict, args: ar
         result,
         out_dir,
         title=f"GROND regularization summary: {', '.join(ds.name for ds in prep.datasets)}",
+        instability_u=float(getattr(args, "instability_u", 0.01)),
     )
     run_logged(cmd, logs, "publication_row_mr_tables", dry_run=False)
     artifacts_path = out_dir / "publication_artifacts.json"
@@ -10984,6 +10995,383 @@ def _quick_row_weight_definition(
     )
 
 
+def _quick_complete_jana_metrics(metrics: object) -> bool:
+    """Return whether one row block contains the complete core JANA family."""
+
+    if not isinstance(metrics, Mapping):
+        return False
+    nobs = _quick_int(metrics.get("Nobs"))
+    nall = _quick_int(metrics.get("Nall"))
+    mnobs = _quick_int(metrics.get("MNobs"))
+    mnall = _quick_int(metrics.get("MNall"))
+    if None in {nobs, nall, mnobs, mnall}:
+        return False
+    if nobs < 0 or nall <= 0 or nobs > nall or mnobs < 0 or mnall <= 0 or mnobs > mnall:
+        return False
+    if any(_quick_fraction(metrics.get(key)) is None for key in ("Rall", "wRall", "MRall", "MwRall")):
+        return False
+    if nobs > 0 and _quick_fraction(metrics.get("Robs")) is None:
+        return False
+    return not (mnobs > 0 and _quick_fraction(metrics.get("MRobs")) is None)
+
+
+def _quick_final_jana_row_summary(row_metrics: Mapping[str, object]) -> dict[str, object]:
+    """Return the final JANA/PETS-style row block, with legacy fallbacks."""
+
+    direct = row_metrics.get("row_mr")
+    direct_dynamic = direct.get("dynamic") if isinstance(direct, Mapping) else None
+    if _quick_complete_jana_metrics(direct_dynamic):
+        out = dict(direct)
+        out["source"] = "row_mr"
+        return out
+
+    contracts = row_metrics.get("row_resolution_scale_contracts")
+    candidates = contracts.get("contracts") if isinstance(contracts, Mapping) else None
+    if not isinstance(candidates, list):
+        legacy = row_metrics.get("resolution_scale_endpoints")
+        candidates = legacy.get("endpoints") if isinstance(legacy, Mapping) else None
+    if not isinstance(candidates, list):
+        return {}
+    preferred = (
+        "suggested_resolution_compact_scales",
+        "requested_resolution_compact_scales",
+        "requested_resolution_full_scales",
+    )
+    by_label = {str(row.get("label")): row for row in candidates if isinstance(row, Mapping)}
+    for label in preferred:
+        candidate = by_label.get(label)
+        summary = candidate.get("row_mr") if isinstance(candidate, Mapping) else None
+        summary_dynamic = summary.get("dynamic") if isinstance(summary, Mapping) else None
+        if _quick_complete_jana_metrics(summary_dynamic):
+            out = dict(summary)
+            out["source"] = f"row_resolution_scale_contracts:{label}"
+            return out
+    return {}
+
+
+def _table1_jana_record(
+    label: str,
+    role: str,
+    metrics: Mapping[str, object] | None,
+    source: str,
+) -> dict[str, object]:
+    """Normalize one JANA/PETS-style row-statistics record for Table 1."""
+
+    available = _quick_complete_jana_metrics(metrics)
+    row = metrics if isinstance(metrics, Mapping) else {}
+    ninput = _quick_int(row.get("Ninput")) if available else None
+    nexcluded = _quick_int(row.get("Nexcluded")) if available else None
+    unavailable_reason = source
+    if isinstance(metrics, Mapping) and not available:
+        unavailable_reason = f"not available: incomplete core JANA/PETS factor family in {source}"
+    return {
+        "model": label,
+        "role": role,
+        "status": "available" if available else "not_available",
+        "status_reason": "" if available else unavailable_reason,
+        "Ninput": ninput,
+        "Nexcluded": nexcluded,
+        "Nmatched": _quick_int(row.get("Nmatched")) if available else None,
+        "Nobs": _quick_int(row.get("Nobs")) if available else None,
+        "Nall": _quick_int(row.get("Nall")) if available else None,
+        "Robs": _quick_fraction(row.get("Robs")) if available else None,
+        "Rall": _quick_fraction(row.get("Rall")) if available else None,
+        "wRobs": _quick_fraction(row.get("wRobs")) if available else None,
+        "wRall": _quick_fraction(row.get("wRall")) if available else None,
+        "Nmerge_input": _quick_int(row.get("Nmerge_input")) if available else None,
+        "Nmerge_used": _quick_int(row.get("Nmerge_used")) if available else None,
+        "Nmerge_excluded": _quick_int(row.get("Nmerge_excluded")) if available else None,
+        "MNobs": _quick_int(row.get("MNobs")) if available else None,
+        "MNall": _quick_int(row.get("MNall")) if available else None,
+        "MRobs": _quick_fraction(row.get("MRobs")) if available else None,
+        "MRall": _quick_fraction(row.get("MRall")) if available else None,
+        "MwRobs": _quick_fraction(row.get("MwRobs")) if available else None,
+        "MwRall": _quick_fraction(row.get("MwRall")) if available else None,
+        "source": source if available else "",
+    }
+
+
+def _table1_shelxl_record(
+    label: str,
+    role: str,
+    details: Mapping[str, object],
+    controls: Mapping[str, object],
+    *,
+    res: str,
+    hkl: str,
+    lst: str,
+) -> dict[str, object]:
+    """Normalize one SHELXL endpoint record for Table 1."""
+
+    available = _quick_fraction(details.get("R1_all")) is not None
+    return {
+        "model": label,
+        "role": role,
+        "status": "available" if available else "not_available",
+        "status_reason": "" if available else "no authoritative SHELXL listing/statistics file was found",
+        "Ngt": _quick_int(details.get("N_gt")) if available else None,
+        "Nall": _quick_int(details.get("N_all")) if available else None,
+        "R1gt": _quick_fraction(details.get("R1_gt")) if available else None,
+        "R1all": _quick_fraction(details.get("R1_all")) if available else None,
+        "wR2all": _quick_fraction(details.get("wR2_all")) if available else None,
+        "GooF": _quick_fraction(details.get("GooF")) if available else None,
+        "parameters": _quick_int(details.get("parameters")) if available else None,
+        "restraints": _quick_int(details.get("restraints")) if available else None,
+        "WGHT": str(controls.get("wght") or "WGHT n/a") if available else None,
+        "EXTI": str(controls.get("exti") or "EXTI none") if available else None,
+        "NPD": _quick_int(details.get("npd_count")) if available else None,
+        "split": _quick_int(details.get("split_count")) if available else None,
+        "res": res,
+        "hkl": hkl,
+        "lst": lst,
+    }
+
+
+def _table1_pair(row: Mapping[str, object], first: str, second: str) -> str:
+    """Format a count pair from a normalized Table 1 row."""
+
+    a = row.get(first)
+    b = row.get(second)
+    return f"{a}/{b}" if a is not None and b is not None else "n/a"
+
+
+def _write_final_statistics_table1(
+    out_dir: Path,
+    *,
+    row_metrics: Mapping[str, object],
+    row_metrics_path: Path,
+    input_shelxl: Mapping[str, object],
+    publication_shelxl: Mapping[str, object],
+    publication_endpoint: Mapping[str, object],
+    file_block: Mapping[str, object],
+    input_controls: Mapping[str, object],
+    final_row_table: str,
+) -> dict[str, object]:
+    """Write the canonical final statistics Table 1 without mixing metric families."""
+
+    jana = _quick_final_jana_row_summary(row_metrics)
+    dynamic = jana.get("dynamic") if isinstance(jana.get("dynamic"), Mapping) else None
+    born = jana.get("born") if isinstance(jana.get("born"), Mapping) else None
+    if born is None and isinstance(jana.get("kinematic"), Mapping):
+        born = jana.get("kinematic")
+    jana_source = str(jana.get("source") or row_metrics_path)
+    jana_definition = jana.get("definition") if isinstance(jana.get("definition"), Mapping) else {}
+    jana_instability_u = _quick_fraction(jana_definition.get("instability_u"))
+    jana_instability_u_text = (
+        f"{jana_instability_u:g}" if jana_instability_u is not None else "n/a"
+    )
+
+    row_records = [
+        _table1_jana_record(
+            "Conventional kinematic refinement",
+            "merged conventional refinement",
+            None,
+            "not available: no audited matched unmerged prediction/scale contract; use the SHELXL endpoint panel",
+        ),
+        _table1_jana_record(
+            "GROND Born (matched kinematical row control)",
+            "single-scattering control at the final coordinates under the same signed-row contract and scales",
+            born,
+            jana_source,
+        ),
+        _table1_jana_record(
+            "GROND Bloch dynamical",
+            "Bloch multiple-scattering prediction at the final coordinates",
+            dynamic,
+            jana_source,
+        ),
+    ]
+
+    publication_res_text = str(file_block.get("publication_res") or "")
+    publication_res = Path(publication_res_text) if publication_res_text else None
+    publication_controls = _quick_source_shelx_controls(publication_res)
+    conventional_endpoint = _table1_shelxl_record(
+        "Conventional kinematic reference refinement",
+        "starting merged HKLF4 refinement",
+        input_shelxl,
+        input_controls,
+        res=str(input_shelxl.get("res") or ""),
+        hkl=str(input_shelxl.get("hkl") or ""),
+        lst=str(input_shelxl.get("lst") or ""),
+    )
+    born_endpoint = _table1_shelxl_record(
+        "GROND Born corrected-HKL endpoint",
+        "single-scattering endpoint control",
+        {},
+        {},
+        res="",
+        hkl="",
+        lst="",
+    )
+    born_endpoint["status_reason"] = (
+        "not generated: no actual Born-corrected SHELXL endpoint refinement exists for this run"
+    )
+    dynamic_endpoint = _table1_shelxl_record(
+        "GROND dynamical corrected-HKL publication endpoint",
+        "final merged corrected-HKL SHELXL endpoint",
+        publication_shelxl,
+        publication_controls,
+        res=publication_res_text,
+        hkl=str(file_block.get("publication_hkl") or ""),
+        lst=str(file_block.get("publication_lst") or ""),
+    )
+    endpoint_records = [conventional_endpoint, born_endpoint, dynamic_endpoint]
+
+    payload = {
+        "schema": "grond.table1_final_statistics.v1",
+        "title": "Table 1. Final model and refinement statistics",
+        "status": (
+            "available"
+            if any(row["status"] == "available" for row in row_records + endpoint_records)
+            else "not_available"
+        ),
+        "reporting_contract": {
+            "endpoint": "SHELXL style: R1(F)gt, R1(F)all, wR2(F^2)all, GooF, and merged endpoint counts",
+            "row": "JANA/PETS style: Robs, Rall, wRall on unmerged rows and MRobs, MRall, MwRall after post-refinement symmetry merging; wRobs and MwRobs are optional extensions",
+            "separation_rule": "SHELXL endpoint and JANA/PETS row factors have different targets and denominators and are never placed in a shared generic R column.",
+            "born_rule": "Born is a matched kinematical row control, not a separately refined conventional SHELXL endpoint.",
+            "row_sigma_rule": "JANA/PETS-style weights use sigma_eff from the frozen row table. A separate raw_row_weight is not multiplied into the reported R/MR factors unless its effect is already encoded in sigma_eff.",
+            "row_instability_u": jana_instability_u,
+            "matched_support_rule": "Born and Bloch statistics must use one identical finite observation support; Ninput/Nmatched/Nexcluded and merge-HKL exclusions are reported explicitly when known.",
+            "missing_rule": "Unavailable statistics remain explicit null/n/a values and are never inferred from a different target class.",
+            "numeric_units": "fractions in JSON and CSV; percentages in Markdown",
+        },
+        "sources": {
+            "jana_row_metrics": str(row_metrics_path),
+            "final_row_table": final_row_table,
+            "publication_endpoint_selection": str(
+                publication_endpoint.get("selection_source")
+                or publication_endpoint.get("source_kind")
+                or ""
+            ),
+        },
+        "shelxl_endpoints": endpoint_records,
+        "jana_pets_rows": row_records,
+    }
+
+    md_path = out_dir / "TABLE1_FINAL_STATISTICS.md"
+    json_path = out_dir / "TABLE1_FINAL_STATISTICS.json"
+    endpoint_csv = out_dir / "TABLE1_SHELXL_ENDPOINTS.csv"
+    row_csv = out_dir / "TABLE1_JANA_ROWS.csv"
+    alias_md = out_dir / "TABLE_1.md"
+    alias_json = out_dir / "TABLE_1.json"
+
+    lines = [
+        "# Table 1. Final Model And Refinement Statistics",
+        "",
+        "This is the canonical GROND statistics table. Panel A contains only SHELXL endpoint statistics. Panel B contains only JANA/PETS-style signed-row and post-refinement merged-row factors computed by GROND. The two panels have different targets and denominators and must not be collapsed into generic `R` columns.",
+        "",
+        "## A. SHELXL Endpoint Statistics",
+        "",
+        "| model | status | Ngt/Nall | R1(F)gt | R1(F)all | wR2(F^2)all | GooF | parameters/restraints | WGHT | EXTI | NPD/split |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---|---|---:|",
+    ]
+    for row in endpoint_records:
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    str(row["model"]),
+                    str(row["status"]).replace("_", " "),
+                    _table1_pair(row, "Ngt", "Nall"),
+                    _quick_percent(row.get("R1gt")),
+                    _quick_percent(row.get("R1all")),
+                    _quick_percent(row.get("wR2all")),
+                    _quick_number(row.get("GooF"), 3),
+                    _table1_pair(row, "parameters", "restraints"),
+                    str(row.get("WGHT") or "n/a"),
+                    str(row.get("EXTI") or "n/a"),
+                    _table1_pair(row, "NPD", "split"),
+                ]
+            )
+            + " |"
+        )
+    lines.extend(
+        [
+            "",
+            "SHELXL definitions: `R1(F)gt` is the conventional amplitude R factor for SHELXL's observed/greater-than subset; `R1(F)all` uses all endpoint reflections; `wR2(F^2)all` and `GooF` use the endpoint sigma and active `WGHT` contract. `Ngt` is not the JANA/PETS `Nobs` count.",
+            "",
+            "## B. JANA/PETS-Style Row And Post-Refinement Merged Statistics",
+            "",
+            "| model | status | Ninput/excluded | Nmatched | Nobs/Nall | Nmerge used/excluded | MNobs/MNall | Robs | Rall | wRobs | wRall | MRobs | MRall | MwRobs | MwRall |",
+            "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        ]
+    )
+    for row in row_records:
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    str(row["model"]),
+                    str(row["status"]).replace("_", " "),
+                    _table1_pair(row, "Ninput", "Nexcluded"),
+                    str(row.get("Nmatched")) if row.get("Nmatched") is not None else "n/a",
+                    _table1_pair(row, "Nobs", "Nall"),
+                    _table1_pair(row, "Nmerge_used", "Nmerge_excluded"),
+                    _table1_pair(row, "MNobs", "MNall"),
+                    _quick_percent(row.get("Robs")),
+                    _quick_percent(row.get("Rall")),
+                    _quick_percent(row.get("wRobs")),
+                    _quick_percent(row.get("wRall")),
+                    _quick_percent(row.get("MRobs")),
+                    _quick_percent(row.get("MRall")),
+                    _quick_percent(row.get("MwRobs")),
+                    _quick_percent(row.get("MwRall")),
+                ]
+            )
+            + " |"
+        )
+    unavailable = [row for row in row_records + endpoint_records if row.get("status") != "available"]
+    lines.extend(
+        [
+            "",
+            f"Row definitions: `Robs`/`Rall` are R1-form amplitude residuals formed from `sqrt(max(I,0))`; observed subsets satisfy `Iobs > 3 sigma(Iobs)`. `wRall` uses the JANA/PETS weighted intensity-residual form with instability factor `u={jana_instability_u_text}`. Born and Bloch factors use the same finite support. `Nmerge excluded` counts supported rows with missing, non-finite, or non-integral HKL indices. `MR`/`MwR` repeat the calculations after arithmetic merging of valid model-symmetry-related observed and calculated rows with propagated merged sigma. Optional `wRobs`/`MwRobs` apply the weighted form to the observed subsets. Weights use `sigma_eff` from the frozen row table; a separate `raw_row_weight` is not multiplied into the reported factors. Values are computed by GROND and are not parsed from JANA or PETS.",
+            "",
+            "The Born row is the matched single-scattering control under the final GROND row contract. It is not a third SHELXL endpoint.",
+        ]
+    )
+    if unavailable:
+        lines.extend(["", "## Explicitly Unavailable Statistics", ""])
+        for row in unavailable:
+            lines.append(f"- **{row['model']}:** {row.get('status_reason') or 'not available'}.")
+    lines.extend(
+        [
+            "",
+            "## Authoritative Sources",
+            "",
+            f"- JANA/PETS-style row metrics: `{row_metrics_path}`",
+            f"- Final signed row table(s): `{final_row_table}`",
+            f"- Conventional SHELXL listing/statistics: `{input_shelxl.get('lst', '')}`",
+            f"- Publication SHELXL listing: `{file_block.get('publication_lst', '')}`",
+            "",
+        ]
+    )
+
+    json_text = json.dumps(payload, indent=2, allow_nan=False) + "\n"
+    md_text = "\n".join(lines)
+    json_path.write_text(json_text)
+    md_path.write_text(md_text)
+    alias_json.write_text(json_text)
+    alias_md.write_text(md_text)
+
+    for path, records in ((endpoint_csv, endpoint_records), (row_csv, row_records)):
+        with path.open("w", newline="") as stream:
+            writer = csv.DictWriter(stream, fieldnames=list(records[0].keys()))
+            writer.writeheader()
+            writer.writerows(records)
+
+    return {
+        "status": payload["status"],
+        "markdown": str(md_path),
+        "json": str(json_path),
+        "endpoint_csv": str(endpoint_csv),
+        "row_csv": str(row_csv),
+        "short_markdown": str(alias_md),
+        "short_json": str(alias_json),
+        "payload": payload,
+    }
+
+
 def _quick_thickness_text(
     nuisance: Mapping[str, object],
     metadata: Mapping[str, object] | None = None,
@@ -11136,10 +11524,22 @@ def _format_terminal_finish_summary(payload: Mapping[str, object]) -> str:
     input_model = payload.get("input_model") if isinstance(payload.get("input_model"), Mapping) else {}
     input_shelxl = payload.get("input_shelxl") if isinstance(payload.get("input_shelxl"), Mapping) else {}
     final_row = payload.get("final_row_model") if isinstance(payload.get("final_row_model"), Mapping) else {}
+    jana = (
+        payload.get("jana_pets_row_statistics")
+        if isinstance(payload.get("jana_pets_row_statistics"), Mapping)
+        else {}
+    )
+    jana_dynamic = jana.get("dynamic") if isinstance(jana.get("dynamic"), Mapping) else {}
+    jana_born = jana.get("born") if isinstance(jana.get("born"), Mapping) else {}
+    if not _quick_complete_jana_metrics(jana_dynamic):
+        jana_dynamic = {}
+    if not _quick_complete_jana_metrics(jana_born):
+        jana_born = {}
     feedback = payload.get("final_feedback_endpoint") if isinstance(payload.get("final_feedback_endpoint"), Mapping) else {}
     endpoint = payload.get("publication_endpoint") if isinstance(payload.get("publication_endpoint"), Mapping) else {}
     diagnostic = payload.get("diagnostic_endpoint") if isinstance(payload.get("diagnostic_endpoint"), Mapping) else {}
-    endpoint_warning = _quick_goof_warning(endpoint.get("GooF"))
+    endpoint_available = _quick_fraction(endpoint.get("R1all")) is not None
+    endpoint_warning = _quick_goof_warning(endpoint.get("GooF")) if endpoint_available else ""
     files = payload.get("files") if isinstance(payload.get("files"), Mapping) else {}
     finished = payload.get("finished") if isinstance(payload.get("finished"), Mapping) else {}
     timing_context = payload.get("timing_context")
@@ -11231,7 +11631,7 @@ def _format_terminal_finish_summary(payload: Mapping[str, object]) -> str:
         )
     publication_is_direct_ls1 = bool(files.get("publication_res") and files.get("publication_res") == files.get("final_feedback_res"))
     endpoint_lines = ["SHELXL endpoint" if publication_is_direct_ls1 else "SHELXL endpoints"]
-    if not endpoint:
+    if not endpoint_available:
         endpoint_lines.extend(
             [
                 "  No corrected endpoint passed the fresh conventional-baseline no-harm gate.",
@@ -11255,7 +11655,7 @@ def _format_terminal_finish_summary(payload: Mapping[str, object]) -> str:
         endpoint_lines.append(
             f"  Diagnostic endpoint not promoted: {diagnostic.get('source_kind', 'n/a')} R1(F)all {_quick_percent(diagnostic.get('R1all'))}, wR2(F^2)all {_quick_percent(diagnostic.get('wR2all'))}, GooF {_quick_number(diagnostic.get('GooF'), 3)}; reason: {first_reason}"
         )
-    if endpoint:
+    if endpoint_available:
         endpoint_lines.append(
             f"  Endpoint source/scales: {_quick_endpoint_scale_text(endpoint)}, WGHT {endpoint.get('wght_mode', 'n/a')}"
         )
@@ -11285,6 +11685,35 @@ def _format_terminal_finish_summary(payload: Mapping[str, object]) -> str:
             f"{_quick_flat_hand_t_style_text(t_free, t_free_n, t_free_df)}; "
             "positive favors the selected hand; not a calibrated normal Z score)"
         )
+    if jana_dynamic or jana_born:
+        row_stat_lines = [
+            "Final JANA/PETS-style row statistics (computed by GROND)",
+            (
+                "  Matched Born: "
+                f"Nobs/Nall {_quick_count_pair(jana_born)}, "
+                f"Robs {_quick_percent(jana_born.get('Robs'))}, Rall {_quick_percent(jana_born.get('Rall'))}, "
+                f"wRall {_quick_percent(jana_born.get('wRall'))}; "
+                f"MRobs {_quick_percent(jana_born.get('MRobs'))}, MRall {_quick_percent(jana_born.get('MRall'))}, "
+                f"MwRall {_quick_percent(jana_born.get('MwRall'))}"
+            ),
+            (
+                "  Bloch dynamical: "
+                f"Nobs/Nall {_quick_count_pair(jana_dynamic)}, "
+                f"Robs {_quick_percent(jana_dynamic.get('Robs'))}, Rall {_quick_percent(jana_dynamic.get('Rall'))}, "
+                f"wRall {_quick_percent(jana_dynamic.get('wRall'))}; "
+                f"MRobs {_quick_percent(jana_dynamic.get('MRobs'))}, MRall {_quick_percent(jana_dynamic.get('MRall'))}, "
+                f"MwRall {_quick_percent(jana_dynamic.get('MwRall'))}"
+            ),
+        ]
+    else:
+        row_stat_lines = [
+            "Legacy native-objective row diagnostics (not JANA/PETS publication factors)",
+            f"  Input dynamical rows: R(I)all {_quick_percent(input_model.get('row_R1all'))}, wR(I)all {_quick_percent(input_model.get('row_wR2all'))}",
+            f"  Input matched Born rows: R(I)all {_quick_percent(input_model.get('born_R1all'))}, wR(I)all {_quick_percent(input_model.get('born_wR2all'))}",
+            f"  Final dynamical rows: R(I)all {_quick_percent(final_row.get('row_R1all'))}, wR(I)all {_quick_percent(final_row.get('row_wR2all'))}, free wR(I)all {_quick_percent(final_row.get('row_free_wR2all'))}",
+            f"  Final matched Born rows: R(I)all {_quick_percent(final_row.get('born_R1all'))}, wR(I)all {_quick_percent(final_row.get('born_wR2all'))}, free wR(I)all {_quick_percent(final_row.get('born_free_wR2all'))}",
+            f"  Change: R(I)all {_quick_delta_percent(input_model.get('row_R1all'), final_row.get('row_R1all'))}, wR(I)all {_quick_delta_percent(input_model.get('row_wR2all'), final_row.get('row_wR2all'))}",
+        ]
     lines = [
         "",
         headline,
@@ -11300,16 +11729,13 @@ def _format_terminal_finish_summary(payload: Mapping[str, object]) -> str:
         f"  R1(F)gt {_quick_percent(input_shelxl.get('R1gt'))}, R1(F)all {_quick_percent(input_shelxl.get('R1all'))}, wR2(F^2)all {_quick_percent(input_shelxl.get('wR2all'))}, GooF {_quick_number(input_shelxl.get('GooF'), 3)}",
         f"  Parameters/restraints {input_shelxl.get('parameters', 'n/a')} / {input_shelxl.get('restraints', 'n/a')}; NPD {input_shelxl.get('npd_count', 'n/a')}; split {input_shelxl.get('split_count', 'n/a')}",
         "",
-        "Row-level intensity statistics",
-        f"  Input dynamical rows: R(I)all {_quick_percent(input_model.get('row_R1all'))}, wR(I)all {_quick_percent(input_model.get('row_wR2all'))}",
-        f"  Input matched Born rows: R(I)all {_quick_percent(input_model.get('born_R1all'))}, wR(I)all {_quick_percent(input_model.get('born_wR2all'))}",
-        f"  Final dynamical rows: R(I)all {_quick_percent(final_row.get('row_R1all'))}, wR(I)all {_quick_percent(final_row.get('row_wR2all'))}, free wR(I)all {_quick_percent(final_row.get('row_free_wR2all'))}",
-        f"  Final matched Born rows: R(I)all {_quick_percent(final_row.get('born_R1all'))}, wR(I)all {_quick_percent(final_row.get('born_wR2all'))}, free wR(I)all {_quick_percent(final_row.get('born_free_wR2all'))}",
-        f"  Change: R(I)all {_quick_delta_percent(input_model.get('row_R1all'), final_row.get('row_R1all'))}, wR(I)all {_quick_delta_percent(input_model.get('row_wR2all'), final_row.get('row_wR2all'))}",
+        *row_stat_lines,
         "",
         *endpoint_lines,
         "",
         "Open these first",
+        f"  Canonical Table 1: {payload.get('table1', '')}",
+        f"  Table 1 JSON: {payload.get('table1_json', '')}",
         f"  Final summary: {payload.get('final_summary', '')}",
         f"  Quick stats: {payload.get('quick_stats', '')}",
         f"  Full JSON: {payload.get('full_json', '')}",
@@ -11462,6 +11888,13 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
     file_block["baseline_lst"] = str(input_shelxl.get("lst") or "")
     source_structure = Path(prep.structure).expanduser() if prep.structure else None
     source_controls = _quick_source_shelx_controls(source_structure)
+    input_res_text = str(input_shelxl.get("res") or "").strip()
+    input_res = Path(input_res_text).expanduser() if input_res_text else None
+    input_controls = (
+        _quick_source_shelx_controls(input_res)
+        if input_res is not None and input_res.is_file()
+        else source_controls
+    )
     best_endpoint_shelxl = best_endpoint.get("shelxl") if isinstance(best_endpoint.get("shelxl"), Mapping) else {}
     final_feedback_shelxl = _quick_selected_feedback_shelxl(result, final_model, best_endpoint_shelxl)
     publication_shelxl = _quick_shelxl_details(
@@ -11503,12 +11936,16 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
         Path(str(diagnostic_endpoint.get("endpoint_lst"))) if diagnostic_endpoint.get("endpoint_lst") else None,
     )
     endpoints = []
-    resolution_block = row_metrics.get("resolution_scale_endpoints", {})
+    resolution_block = row_metrics.get("row_resolution_scale_contracts")
+    if not isinstance(resolution_block, Mapping) or not isinstance(
+        resolution_block.get("contracts"), list
+    ):
+        resolution_block = row_metrics.get("resolution_scale_endpoints", {})
     if isinstance(resolution_block, Mapping):
-        raw_endpoints = resolution_block.get("endpoints", [])
+        raw_endpoints = resolution_block.get("contracts", resolution_block.get("endpoints", []))
         endpoints = raw_endpoints if isinstance(raw_endpoints, list) else []
     row_count_text = str(metadata.get("row_count", "n/a"))
-    source_control_text = _quick_source_shelx_control_text(source_controls)
+    source_control_text = _quick_source_shelx_control_text(input_controls)
     endpoint_status_text = (
         "corrected endpoint accepted"
         if publication_endpoint
@@ -11525,6 +11962,46 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
         else None
     )
     final_row_table_sources = "; ".join(f"{name}={path}" for name, path in frozen_row_tables)
+    table1 = _write_final_statistics_table1(
+        out_dir,
+        row_metrics=row_metrics,
+        row_metrics_path=row_metrics_path,
+        input_shelxl=input_shelxl,
+        publication_shelxl=publication_shelxl,
+        publication_endpoint=publication_endpoint,
+        file_block=file_block,
+        input_controls=input_controls,
+        final_row_table=frozen_row_console_text,
+    )
+    jana_summary = _quick_final_jana_row_summary(row_metrics)
+    jana_dynamic = jana_summary.get("dynamic") if isinstance(jana_summary.get("dynamic"), Mapping) else {}
+    jana_born = jana_summary.get("born") if isinstance(jana_summary.get("born"), Mapping) else {}
+    if not jana_born and isinstance(jana_summary.get("kinematic"), Mapping):
+        jana_born = jana_summary.get("kinematic", {})
+    if not _quick_complete_jana_metrics(jana_dynamic):
+        jana_dynamic = {}
+    if not _quick_complete_jana_metrics(jana_born):
+        jana_born = {}
+    file_block["table1_markdown"] = str(table1["markdown"])
+    file_block["table1_json"] = str(table1["json"])
+    jana_md_path = row_metrics_path.parent / "JANA_ROW_STATISTICS.md"
+    jana_json_path = row_metrics_path.parent / "JANA_ROW_STATISTICS.json"
+    per_dataset_jana_md_path = row_metrics_path.parent / "JANA_ROW_STATISTICS_PER_DATASET.md"
+    per_dataset_jana_json_path = row_metrics_path.parent / "JANA_ROW_STATISTICS_PER_DATASET.json"
+    file_block["jana_row_statistics"] = str(
+        jana_md_path if jana_md_path.is_file() else table1["markdown"]
+    )
+    file_block["jana_row_statistics_json"] = str(
+        jana_json_path if jana_json_path.is_file() else row_metrics_path
+    )
+    file_block["jana_row_statistics_per_dataset"] = (
+        str(per_dataset_jana_md_path) if per_dataset_jana_md_path.is_file() else "not available for this historical run"
+    )
+    file_block["jana_row_statistics_per_dataset_json"] = (
+        str(per_dataset_jana_json_path)
+        if per_dataset_jana_json_path.is_file()
+        else "not available for this historical run"
+    )
     if result.get("combined"):
         hand_t_report_line = (
             "| final hand paired t-style, all/work/free | "
@@ -11551,6 +12028,14 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
         "# GROND Quick Stats",
         "",
         "This is the short run summary. Use the detailed reports for diagnostics and audit trails.",
+        "",
+        "## Canonical Final Statistics",
+        "",
+        f"- Table 1, human-readable: `{table1['markdown']}`",
+        f"- Table 1, machine-readable: `{table1['json']}`",
+        f"- JANA/PETS-style row report: `{file_block['jana_row_statistics']}`",
+        f"- Per-dataset JANA/PETS-style row report: `{file_block['jana_row_statistics_per_dataset']}`",
+        "- Table 1 panel A contains only SHELXL endpoint statistics. Panel B contains only GROND-computed JANA/PETS-style row and post-refinement merged-row factors. Missing comparator classes remain explicit `n/a`; values are never substituted across panels.",
         "",
         "## Run",
         "",
@@ -11675,9 +12160,18 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
             "|---|---:|---:|---:|---:|---:|",
             f"| input adaptive screen | `{_quick_percent(_quick_dyn_metric(screen_summary, 'all', 'R1_all'))}` | `{_quick_percent(_quick_dyn_metric(screen_summary, 'all', 'wR2_all'))}` | `{_quick_percent(_quick_dyn_metric(screen_summary, 'free', 'wR2_all'))}` | `{_quick_percent(_quick_born_metric(screen_summary, 'all', 'R1_all'))}` | `{_quick_percent(_quick_born_metric(screen_summary, 'all', 'wR2_all'))}` |",
             "",
-            "## Master Comparison Matrix",
+            "## Final JANA/PETS-Style Row Statistics",
             "",
-            "This table separates the objects users need to compare. Rows labeled `raw signed rows (I)` are observation-space intensity residuals on the GROND row contract and should be compared with JANA-style row statistics. Rows labeled `merged SHELXL endpoint (F/F^2)` are conventional corrected-HKL refinement endpoints, where SHELXL reports R1 on F and wR2 on F^2. Do not compare row `wR(I)all` and endpoint `wR2(F^2)all` as if they had one denominator.",
+            "These are the publication-facing row factors computed from the final frozen signed-row tables. `Robs`/`Rall` and `wRobs`/`wRall` are unmerged-row statistics; `MRobs`/`MRall` and `MwRobs`/`MwRall` are recomputed after arithmetic symmetry merging. The observed subset is `Iobs > 3 sigma(Iobs)`. These values are not SHELXL endpoint R factors.",
+            "",
+            "| model | Ninput/excluded | Nobs/Nall | Nmerge used/excluded | MNobs/MNall | Robs | Rall | wRobs | wRall | MRobs | MRall | MwRobs | MwRall |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+            f"| matched Born | {_table1_pair(jana_born, 'Ninput', 'Nexcluded')} | {_quick_count_pair(jana_born)} | {_table1_pair(jana_born, 'Nmerge_used', 'Nmerge_excluded')} | {_table1_pair(jana_born, 'MNobs', 'MNall')} | {_quick_percent(jana_born.get('Robs'))} | {_quick_percent(jana_born.get('Rall'))} | {_quick_percent(jana_born.get('wRobs'))} | {_quick_percent(jana_born.get('wRall'))} | {_quick_percent(jana_born.get('MRobs'))} | {_quick_percent(jana_born.get('MRall'))} | {_quick_percent(jana_born.get('MwRobs'))} | {_quick_percent(jana_born.get('MwRall'))} |",
+            f"| Bloch dynamical | {_table1_pair(jana_dynamic, 'Ninput', 'Nexcluded')} | {_quick_count_pair(jana_dynamic)} | {_table1_pair(jana_dynamic, 'Nmerge_used', 'Nmerge_excluded')} | {_table1_pair(jana_dynamic, 'MNobs', 'MNall')} | {_quick_percent(jana_dynamic.get('Robs'))} | {_quick_percent(jana_dynamic.get('Rall'))} | {_quick_percent(jana_dynamic.get('wRobs'))} | {_quick_percent(jana_dynamic.get('wRall'))} | {_quick_percent(jana_dynamic.get('MRobs'))} | {_quick_percent(jana_dynamic.get('MRall'))} | {_quick_percent(jana_dynamic.get('MwRobs'))} | {_quick_percent(jana_dynamic.get('MwRall'))} |",
+            "",
+            "## Legacy Native-Objective Audit Matrix (Not Table 1)",
+            "",
+            "This retained engineering matrix contains GROND's historical native-objective `R1_all`/`wR2_all` diagnostics alongside endpoint diagnostics. Those internal row-objective names are not JANA/PETS publication factors and this matrix is not the canonical final table. Use `TABLE1_FINAL_STATISTICS.md`: its SHELXL and JANA/PETS panels have authoritative labels, targets, and denominators.",
             "",
             "| object | target class | Rgt | Rall | weighted R | free/held-out weighted R | GooF | N/reflections | parameters/scales | source and notes |",
             "|---|---|---:|---:|---:|---:|---:|---:|---|---|",
@@ -11801,7 +12295,7 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
                     _quick_percent(publication_shelxl.get("R1_gt")),
                     _quick_percent(publication_shelxl.get("R1_all")),
                     _quick_percent(publication_shelxl.get("wR2_all")),
-                    _quick_percent(publication_endpoint.get("native_free_wR2_all")),
+                    "n/a",
                     _quick_number(publication_shelxl.get("GooF"), 3),
                     str(publication_shelxl.get("N_all", "n/a")),
                     f"{publication_endpoint.get('spec') or publication_endpoint.get('source_kind') or 'n/a'}; {publication_endpoint.get('scale_params', 'n/a')} scales; {publication_shelxl.get('parameters', 'n/a')} params",
@@ -11810,7 +12304,7 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
             )
             + " |",
             "",
-            "## Master Delta Matrix",
+            "## Legacy Native-Objective Delta Matrix (Not Table 1)",
             "",
             "Negative values are improvements for R factors. Deltas are only meaningful within the same target class.",
             "",
@@ -11947,9 +12441,9 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
 
     lines.extend(
         [
-            "## Completeness, Integration, And Row/MR Statistics",
+            "## JANA/PETS-Style Row And Post-Refinement Merged Statistics By Resolution/Scale Contract",
             "",
-            "These rows keep integration/completeness-style quantities separate from endpoint refinement. `Nobs/Nall` is the accepted observed-row coverage at that resolution gate; `Rall`, `wRall`, `MRall`, and `MwRall` are intensity-space row/MR diagnostics from the frozen row table, not SHELXL least-squares statistics.",
+            "These GROND-computed factors follow the JANA/PETS row-statistics family and remain separate from endpoint refinement. `Nobs/Nall` is the accepted observed-row coverage at that resolution gate; `Rall` and `wRall` use unmerged signed rows, while `MRall` and `MwRall` are recomputed after post-refinement symmetry merging. They are not SHELXL least-squares statistics.",
             "",
             "| endpoint | dmin A | scales | Nobs/Nall | dyn Rall | dyn wRall | dyn MRall | dyn MwRall | kin Rall | kin wRall |",
             "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
@@ -11961,7 +12455,9 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
                 continue
             row_mr = endpoint.get("row_mr", {}) if isinstance(endpoint.get("row_mr"), Mapping) else {}
             dyn = row_mr.get("dynamic", {}) if isinstance(row_mr.get("dynamic"), Mapping) else {}
-            kin = row_mr.get("kinematic", {}) if isinstance(row_mr.get("kinematic"), Mapping) else {}
+            kin = row_mr.get("born", {}) if isinstance(row_mr.get("born"), Mapping) else {}
+            if not kin and isinstance(row_mr.get("kinematic"), Mapping):
+                kin = row_mr.get("kinematic", {})
             lines.append(
                 "| "
                 + " | ".join(
@@ -12063,6 +12559,10 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
             "",
             "## Files To Open Next",
             "",
+            f"- Canonical final Table 1: `{table1['markdown']}`",
+            f"- Machine-readable final Table 1: `{table1['json']}`",
+            f"- Combined JANA/PETS-style row factors: `{file_block['jana_row_statistics']}`",
+            f"- Per-dataset JANA/PETS-style row factors: `{file_block['jana_row_statistics_per_dataset']}`",
             f"- Fresh conventional baseline RES to retain when no corrected endpoint passes: `{file_block['baseline_res']}`",
             f"- Fresh conventional baseline HKL: `{file_block['baseline_hkl']}`",
             f"- Fresh conventional baseline SHELXL LST: `{file_block['baseline_lst']}`",
@@ -12207,6 +12707,13 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
             "id": diagnostic_endpoint.get("id", ""),
             "rejection_reasons": diagnostic_endpoint.get("rejection_reasons", []),
         },
+        "jana_pets_row_statistics": {
+            "source": jana_summary.get("source", str(row_metrics_path)),
+            "born": dict(jana_born),
+            "dynamic": dict(jana_dynamic),
+        },
+        "table1": str(table1["markdown"]),
+        "table1_json": str(table1["json"]),
         "files": file_block,
     }
     policy = str(console["publication_endpoint"].get("selection_policy") or "").strip()
@@ -12228,6 +12735,10 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
             "are listed in `QUICK_STATS.md` as an audit branch."
         )
     endpoint_warning = _quick_goof_warning(publication_shelxl.get("GooF"))
+    input_endpoint_available = _quick_fraction(input_shelxl.get("R1_all")) is not None
+    publication_endpoint_available = _quick_fraction(publication_shelxl.get("R1_all")) is not None
+    jana_born_available = _quick_complete_jana_metrics(jana_born)
+    jana_dynamic_available = _quick_complete_jana_metrics(jana_dynamic)
 
     if result.get("combined"):
         final_hand_t_line = (
@@ -12259,28 +12770,32 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
         f"| publication endpoint source | `{console['publication_endpoint'].get('source') or 'none'}` / `{console['publication_endpoint'].get('source_kind') or 'no_physical_endpoint'}` |",
         "",
         *_quick_multi_hand_evidence_lines(multi_hand_diagnostic, compact=True),
-        "## Statistics",
+        "## Canonical Statistics",
         "",
-        "Rows labeled `raw signed rows (I)` report signed-row intensity residuals. Endpoint rows report merged corrected-HKL SHELXL refinement statistics, with R1 on F and wR2 on F^2. Read `QUICK_STATS.md` for the full definition, denominator, and delta matrix.",
+        f"The authoritative human-readable separation is in `{table1['markdown']}` and the machine-readable form is `{table1['json']}`. SHELXL endpoint factors and JANA/PETS-style row factors are never combined into generic R columns.",
         "",
-        "| state | target class | Rgt | Rall | weighted R | free/held-out weighted R | GooF | parameters | NPD/split |",
+        "### A. SHELXL Endpoint Statistics",
+        "",
+        "| model | status | Ngt/Nall | R1(F)gt | R1(F)all | wR2(F^2)all | GooF | parameters/restraints | NPD/split |",
         "|---|---|---:|---:|---:|---:|---:|---:|---:|",
-        f"| input conventional SHELXL | merged SHELXL endpoint (F/F^2) | `{_quick_percent(input_shelxl.get('R1_gt'))}` | `{_quick_percent(input_shelxl.get('R1_all'))}` | `{_quick_percent(input_shelxl.get('wR2_all'))}` | n/a | `{_quick_number(input_shelxl.get('GooF'), 3)}` | `{input_shelxl.get('parameters', 'n/a')}` | `{input_shelxl.get('npd_count', 'n/a')}` / `{input_shelxl.get('split_count', 'n/a')}` |",
-        f"| input dynamical rows | raw signed rows (I) | n/a | `{_quick_percent(input_row_r1)}` | `{_quick_percent(input_row_wr2)}` | `{_quick_percent(_quick_dyn_metric(screen_summary, 'free', 'wR2_all'))}` | n/a | n/a | n/a |",
-        f"| input matched Born rows | raw signed rows (I) | n/a | `{_quick_percent(_quick_born_metric(screen_summary, 'all', 'R1_all'))}` | `{_quick_percent(_quick_born_metric(screen_summary, 'all', 'wR2_all'))}` | `{_quick_percent(_quick_born_metric(screen_summary, 'free', 'wR2_all'))}` | n/a | n/a | n/a |",
-        f"| final dynamical rows | raw signed rows (I) | n/a | `{_quick_percent(final_row_r1)}` | `{_quick_percent(final_row_wr2)}` | `{_quick_percent(final_free_wr2)}` | n/a | n/a | n/a |",
-        f"| final matched Born rows | raw signed rows (I) | n/a | `{_quick_percent(_quick_metric(native_metrics, 'all', 'born', 'R1_all'))}` | `{_quick_percent(_quick_metric(native_metrics, 'all', 'born', 'wR2_all'))}` | `{_quick_percent(_quick_metric(native_metrics, 'free', 'born', 'wR2_all'))}` | n/a | n/a | n/a |",
-        f"| direct LS1 corrected-HKL candidate | merged SHELXL endpoint (F/F^2) | `{_quick_percent(final_feedback_shelxl.get('R1_gt'))}` | `{_quick_percent(final_feedback_shelxl.get('R1_all'))}` | `{_quick_percent(final_feedback_shelxl.get('wR2_all'))}` | n/a | `{_quick_number(final_feedback_shelxl.get('GooF'), 3)}` | `{final_feedback_shelxl.get('parameters', 'n/a')}` | `{final_feedback_shelxl.get('npd_count', 'n/a')}` / `{final_feedback_shelxl.get('split_count', 'n/a')}` |",
-        f"| best diagnostic endpoint, not promoted | merged SHELXL endpoint (F/F^2) | `{_quick_percent(diagnostic_shelxl.get('R1_gt'))}` | `{_quick_percent(diagnostic_shelxl.get('R1_all'))}` | `{_quick_percent(diagnostic_shelxl.get('wR2_all'))}` | n/a | `{_quick_number(diagnostic_shelxl.get('GooF'), 3)}` | `{diagnostic_shelxl.get('parameters', 'n/a')}` | `{diagnostic_shelxl.get('npd_count', 'n/a')}` / `{diagnostic_shelxl.get('split_count', 'n/a')}` |" if diagnostic_endpoint else "",
-        f"| publication corrected-HKL endpoint | merged SHELXL endpoint (F/F^2) | `{_quick_percent(publication_shelxl.get('R1_gt'))}` | `{_quick_percent(publication_shelxl.get('R1_all'))}` | `{_quick_percent(publication_shelxl.get('wR2_all'))}` | `{_quick_percent(selected_row.get('native_free_wR2_all'))}` | `{_quick_number(publication_shelxl.get('GooF'), 3)}` | `{publication_shelxl.get('parameters', 'n/a')}` | `{publication_shelxl.get('npd_count', 'n/a')}` / `{publication_shelxl.get('split_count', 'n/a')}` |",
+        f"| conventional kinematic reference | {'available' if input_endpoint_available else 'not available'} | {_table1_pair({'Ngt': input_shelxl.get('N_gt'), 'Nall': input_shelxl.get('N_all')}, 'Ngt', 'Nall')} | {_quick_percent(input_shelxl.get('R1_gt'))} | {_quick_percent(input_shelxl.get('R1_all'))} | {_quick_percent(input_shelxl.get('wR2_all'))} | {_quick_number(input_shelxl.get('GooF'), 3)} | {_table1_pair({'parameters': input_shelxl.get('parameters'), 'restraints': input_shelxl.get('restraints')}, 'parameters', 'restraints')} | {_table1_pair({'NPD': input_shelxl.get('npd_count'), 'split': input_shelxl.get('split_count')}, 'NPD', 'split')} |",
+        "| GROND Born corrected-HKL endpoint | not available | n/a | n/a | n/a | n/a | n/a | n/a | n/a |",
+        f"| GROND Bloch dynamical publication endpoint | {'available' if publication_endpoint_available else 'not available'} | {_table1_pair({'Ngt': publication_shelxl.get('N_gt'), 'Nall': publication_shelxl.get('N_all')}, 'Ngt', 'Nall')} | {_quick_percent(publication_shelxl.get('R1_gt'))} | {_quick_percent(publication_shelxl.get('R1_all'))} | {_quick_percent(publication_shelxl.get('wR2_all'))} | {_quick_number(publication_shelxl.get('GooF'), 3)} | {_table1_pair({'parameters': publication_shelxl.get('parameters'), 'restraints': publication_shelxl.get('restraints')}, 'parameters', 'restraints')} | {_table1_pair({'NPD': publication_shelxl.get('npd_count'), 'split': publication_shelxl.get('split_count')}, 'NPD', 'split')} |",
         "",
-        "## Deltas",
+        "### B. JANA/PETS-Style Row And Post-Refinement Merged Statistics",
         "",
-        "| comparison | target class | dRall | d weighted R | d free/held-out weighted R |",
-        "|---|---|---:|---:|---:|",
-        f"| final dynamical rows minus final matched Born rows | raw signed rows (I) | `{_quick_delta_percent(_quick_metric(native_metrics, 'all', 'born', 'R1_all'), _quick_metric(native_metrics, 'all', 'dyn', 'R1_all'))}` | `{_quick_delta_percent(_quick_metric(native_metrics, 'all', 'born', 'wR2_all'), _quick_metric(native_metrics, 'all', 'dyn', 'wR2_all'))}` | `{_quick_delta_percent(_quick_metric(native_metrics, 'free', 'born', 'wR2_all'), _quick_metric(native_metrics, 'free', 'dyn', 'wR2_all'))}` |",
-        f"| final dynamical rows minus input dynamical rows | raw signed rows (I) | `{_quick_delta_percent(input_row_r1, final_row_r1)}` | `{_quick_delta_percent(input_row_wr2, final_row_wr2)}` | `{_quick_delta_percent(_quick_dyn_metric(screen_summary, 'free', 'wR2_all'), final_free_wr2)}` |",
-        f"| publication endpoint minus input conventional SHELXL | merged SHELXL endpoint (F/F^2) | `{_quick_delta_percent(input_shelxl.get('R1_all'), publication_shelxl.get('R1_all'))}` | `{_quick_delta_percent(input_shelxl.get('wR2_all'), publication_shelxl.get('wR2_all'))}` | n/a |",
+        "| model | status | Ninput/excluded | Nobs/Nall | Nmerge used/excluded | MNobs/MNall | Robs | Rall | wRall | MRobs | MRall | MwRall |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| conventional kinematic refinement | not available | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a |",
+        f"| GROND matched Born | {'available' if jana_born_available else 'not available'} | {_table1_pair(jana_born, 'Ninput', 'Nexcluded')} | {_quick_count_pair(jana_born)} | {_table1_pair(jana_born, 'Nmerge_used', 'Nmerge_excluded')} | {_table1_pair(jana_born, 'MNobs', 'MNall')} | {_quick_percent(jana_born.get('Robs'))} | {_quick_percent(jana_born.get('Rall'))} | {_quick_percent(jana_born.get('wRall'))} | {_quick_percent(jana_born.get('MRobs'))} | {_quick_percent(jana_born.get('MRall'))} | {_quick_percent(jana_born.get('MwRall'))} |",
+        f"| GROND Bloch dynamical | {'available' if jana_dynamic_available else 'not available'} | {_table1_pair(jana_dynamic, 'Ninput', 'Nexcluded')} | {_quick_count_pair(jana_dynamic)} | {_table1_pair(jana_dynamic, 'Nmerge_used', 'Nmerge_excluded')} | {_table1_pair(jana_dynamic, 'MNobs', 'MNall')} | {_quick_percent(jana_dynamic.get('Robs'))} | {_quick_percent(jana_dynamic.get('Rall'))} | {_quick_percent(jana_dynamic.get('wRall'))} | {_quick_percent(jana_dynamic.get('MRobs'))} | {_quick_percent(jana_dynamic.get('MRall'))} | {_quick_percent(jana_dynamic.get('MwRall'))} |",
+        "",
+        "## Within-Family Deltas",
+        "",
+        "| comparison | dRall | d weighted R | dMRall | dMwRall |",
+        "|---|---:|---:|---:|---:|",
+        f"| Bloch minus matched Born, JANA/PETS-style rows | {_quick_delta_percent(jana_born.get('Rall'), jana_dynamic.get('Rall'))} | {_quick_delta_percent(jana_born.get('wRall'), jana_dynamic.get('wRall'))} | {_quick_delta_percent(jana_born.get('MRall'), jana_dynamic.get('MRall'))} | {_quick_delta_percent(jana_born.get('MwRall'), jana_dynamic.get('MwRall'))} |",
+        f"| GROND publication minus conventional reference, SHELXL endpoints | {_quick_delta_percent(input_shelxl.get('R1_all'), publication_shelxl.get('R1_all'))} | {_quick_delta_percent(input_shelxl.get('wR2_all'), publication_shelxl.get('wR2_all'))} | n/a | n/a |",
         "",
         f"**Endpoint warning:** {endpoint_warning}." if endpoint_warning else "",
         "",
@@ -12288,6 +12803,10 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
         "",
         "## Files",
         "",
+        f"- Canonical final Table 1: `{table1['markdown']}`",
+        f"- Machine-readable final Table 1: `{table1['json']}`",
+        f"- Combined JANA/PETS-style row report: `{file_block['jana_row_statistics']}`",
+        f"- Per-dataset JANA/PETS-style row report: `{file_block['jana_row_statistics_per_dataset']}`",
         f"- Open this publication endpoint model: `{file_block['publication_res']}`",
         f"- Use this corrected HKL with that model: `{file_block['publication_hkl']}`",
         f"- The endpoint statistics above come from: `{file_block['publication_lst']}`",
@@ -15167,7 +15686,12 @@ def add_common_run_args(ap: argparse.ArgumentParser, *, expose_lambda_controls: 
     ap.add_argument("--endpoint-calibration-sigma-min-scale", type=float, default=0.05)
     ap.add_argument("--endpoint-calibration-sigma-max-scale", type=float, default=4.0)
     ap.add_argument("--endpoint-calibration-shelxl-iterations", type=int, default=3, help="External one-cycle SHELXL calls for the final fixed-weight endpoint replay. This does not change LS1 feedback; it stabilizes the openable presentation endpoint.")
-    ap.add_argument("--instability-u", type=float, default=0.01, help="Minimum positive Ueq used by endpoint replays to flag unstable ADPs.")
+    ap.add_argument(
+        "--instability-u",
+        type=float,
+        default=0.01,
+        help="JANA/PETS-style row-weight instability factor u used by wR/MwR reporting and row-scale diagnostics.",
+    )
     ap.add_argument("--scale-polish", choices=["auto", "on", "off"], default="auto", help="Run a post-hoc scale-window compression gate after the final Bloch row table.")
     ap.add_argument("--scale-polish-window-deg", type=float, default=5.0, help="Maximum physical frame-window width tested by the scale-polish gate.")
     ap.add_argument("--scale-polish-frame-models", default="adaptive,fixed", help="Frame-scale compression models tested by the scale-polish gate.")

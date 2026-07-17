@@ -220,6 +220,55 @@ def solve_scale(x: np.ndarray, y: np.ndarray, weight: np.ndarray) -> float:
     return max(float(np.sum(weight * x * y) / max(np.sum(weight * x * x), 1e-30)), 0.0)
 
 
+def fit_global_scale(
+    obs: np.ndarray,
+    sig: np.ndarray,
+    raw: np.ndarray,
+    fit_mask: np.ndarray,
+    objective: str,
+    native_wght_a: float,
+    native_wght_b: float,
+    instability_u: float,
+    n_iter: int,
+) -> float:
+    """Fit the shared fallback scale without consulting held-out rows."""
+
+    fit = fit_mask & np.isfinite(obs) & np.isfinite(sig) & np.isfinite(raw) & (sig > 0) & (raw > 0)
+    if np.count_nonzero(fit) < 2:
+        raise ValueError("at least two scale-fit rows with positive sigma and prediction are required")
+    x = raw[fit]
+    y = obs[fit]
+    s = sig[fit]
+    weight = 1.0 / np.maximum(s * s, 1e-30)
+    scale = max(solve_scale(x, y, weight), 1e-30)
+    for _ in range(int(n_iter)):
+        pred_scaled = scale * x
+        weight = objective_weights(y, s, pred_scaled, objective, native_wght_a, native_wght_b, instability_u)
+        new_scale = max(solve_scale(x, y, weight), 1e-30)
+        if abs(new_scale - scale) <= 1e-9 * max(1.0, abs(scale)):
+            return new_scale
+        scale = new_scale
+    return scale
+
+
+def require_scale_coverage(
+    raw: np.ndarray,
+    scaled: np.ndarray,
+    *topology: np.ndarray,
+) -> None:
+    """Fail closed if scale replay loses any valid raw prediction."""
+
+    expected = np.isfinite(raw) & (raw > 0)
+    missing = expected & (~np.isfinite(scaled) | (scaled <= 0))
+    for values in topology:
+        missing |= expected & ~np.isfinite(values)
+    if np.any(missing):
+        raise ValueError(
+            "scale fit did not cover "
+            f"{int(np.count_nonzero(missing))} valid raw prediction(s); refusing a partial row contract"
+        )
+
+
 def fit_group_scales(
     obs: np.ndarray,
     sig: np.ndarray,
@@ -235,10 +284,24 @@ def fit_group_scales(
     scaled = np.full_like(raw, np.nan, dtype=float)
     scales: dict[str, float] = {}
     good0 = fit_mask & np.isfinite(obs) & np.isfinite(sig) & np.isfinite(raw) & (sig > 0) & (raw > 0)
-    for group in sorted(set(groups[good0].astype(int))):
+    global_scale = fit_global_scale(
+        obs,
+        sig,
+        raw,
+        fit_mask,
+        objective,
+        native_wght_a,
+        native_wght_b,
+        instability_u,
+        n_iter,
+    )
+    finite_groups = np.isfinite(groups)
+    for group in sorted(set(groups[finite_groups].astype(int))):
         fit = good0 & (groups == group)
-        apply = np.isfinite(raw) & (groups == group)
+        apply = np.isfinite(raw) & finite_groups & (groups == group)
         if np.count_nonzero(fit) < 2:
+            scales[str(int(group))] = float(global_scale)
+            scaled[apply] = raw[apply] * global_scale
             continue
         x = raw[fit]
         y = obs[fit]
@@ -255,6 +318,7 @@ def fit_group_scales(
             scale = new_scale
         scales[str(int(group))] = float(scale)
         scaled[apply] = raw[apply] * scale
+    require_scale_coverage(raw, scaled, groups)
     return scaled, scales
 
 
@@ -273,17 +337,28 @@ def fit_group_detector_scales(
 ) -> tuple[np.ndarray, dict[str, float], dict[str, float]]:
     scaled = np.full_like(raw, np.nan, dtype=float)
     good = fit_mask & np.isfinite(obs) & np.isfinite(sig) & np.isfinite(raw) & (sig > 0) & (raw > 0) & np.isfinite(groups) & np.isfinite(det_bins)
-    unique_groups = np.asarray(sorted(set(groups[good].astype(int))), dtype=int)
-    unique_det = np.asarray(sorted(set(det_bins[good].astype(int))), dtype=int)
+    unique_groups = np.asarray(sorted(set(groups[np.isfinite(groups)].astype(int))), dtype=int)
+    unique_det = np.asarray(sorted(set(det_bins[np.isfinite(det_bins)].astype(int))), dtype=int)
     if len(unique_groups) == 0 or len(unique_det) == 0:
+        require_scale_coverage(raw, scaled, groups, det_bins)
         return scaled, {}, {}
     gmap = {int(g): i for i, g in enumerate(unique_groups)}
     dmap = {int(d): i for i, d in enumerate(unique_det)}
     gi = np.asarray([gmap.get(int(g), -1) if np.isfinite(g) else -1 for g in groups], dtype=int)
     di = np.asarray([dmap.get(int(d), -1) if np.isfinite(d) else -1 for d in det_bins], dtype=int)
-    frame = np.ones(len(unique_groups), dtype=float)
+    global_scale = fit_global_scale(
+        obs,
+        sig,
+        raw,
+        fit_mask,
+        objective,
+        native_wght_a,
+        native_wght_b,
+        instability_u,
+        n_iter,
+    )
+    frame = np.full(len(unique_groups), global_scale, dtype=float)
     det = np.ones(len(unique_det), dtype=float)
-    frame[:] = max(float(np.sum(raw[good] * obs[good]) / max(np.sum(raw[good] * raw[good]), 1e-30)), 1e-30)
     for _ in range(int(n_iter)):
         base = raw * det[np.maximum(di, 0)]
         for j in range(len(unique_groups)):
@@ -309,6 +384,7 @@ def fit_group_detector_scales(
                 frame *= median_det
     apply = np.isfinite(raw) & (gi >= 0) & (di >= 0)
     scaled[apply] = raw[apply] * frame[gi[apply]] * det[di[apply]]
+    require_scale_coverage(raw, scaled, groups, det_bins)
     frame_scales = {str(int(g)): float(frame[j]) for j, g in enumerate(unique_groups)}
     det_scales = {str(int(d)): float(det[j]) for j, d in enumerate(unique_det)}
     return scaled, frame_scales, det_scales

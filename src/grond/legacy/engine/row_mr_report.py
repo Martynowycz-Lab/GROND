@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""Write publication tables with GROND row and MR factors.
+"""Write publication tables with JANA/PETS-style row and MR factors.
 
 The input is one or more GROND ``native_dyn_calc.csv`` row tables.  The
-unmerged R factors are calculated on the row observations.  The MR factors are
-calculated after arithmetic merging of symmetry-related rows from the supplied
-model symmetry, with merged sigmas propagated as sqrt(sum(sigma^2)) / n.
+unmerged ``Robs``, ``Rall``, and ``wRall`` factors are calculated on individual
+row observations.  ``MRobs``, ``MRall``, and ``MwRall`` are calculated after
+arithmetic merging of symmetry-related rows from the supplied model symmetry,
+with merged sigmas propagated as sqrt(sum(sigma^2)) / n.  These are
+GROND-computed values using the JANA/PETS dynamical-refinement reporting family;
+they are not output parsed from JANA or PETS.
 """
 
 from __future__ import annotations
@@ -34,11 +37,26 @@ def safe_float(value, default=float("nan")) -> float:
         return float(default)
 
 
+def standard_json_data(value):
+    """Return recursively JSON-safe data, mapping non-finite numbers to null."""
+
+    if isinstance(value, dict):
+        return {str(key): standard_json_data(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [standard_json_data(item) for item in value]
+    if isinstance(value, np.generic):
+        value = value.item()
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return value
+
+
 def read_csv_rows(path: Path, dataset: str) -> list[dict]:
     with path.open(newline="") as f:
         rows = [dict(r) for r in csv.DictReader(f)]
     for row in rows:
-        row.setdefault("dataset", dataset)
+        if not str(row.get("dataset") or "").strip():
+            row["dataset"] = dataset
     return rows
 
 
@@ -130,7 +148,14 @@ def row_mr_r_factors(obs, sigma, calc, instability_u: float = 0.01, observed_sig
     sigma = sigma[mask]
     calc = calc[mask]
     if len(obs) == 0:
-        return {"Nall": 0, "Nobs": 0, "Robs": float("nan"), "Rall": float("nan"), "wRall": float("nan")}
+        return {
+            "Nall": 0,
+            "Nobs": 0,
+            "Robs": float("nan"),
+            "Rall": float("nan"),
+            "wRobs": float("nan"),
+            "wRall": float("nan"),
+        }
 
     obs_pos = np.maximum(obs, 0.0)
     calc_pos = np.maximum(calc, 0.0)
@@ -145,13 +170,23 @@ def row_mr_r_factors(obs, sigma, calc, instability_u: float = 0.01, observed_sig
 
     weights = row_sqrt_weights(obs, sigma, instability_u=instability_u)
     residual = obs - calc
-    wr = float(np.sqrt(np.sum((weights * np.abs(residual)) ** 2) / max(np.sum((weights * obs) ** 2), 1e-30)))
+
+    def wr_factor(use):
+        if not np.any(use):
+            return float("nan")
+        return float(
+            np.sqrt(
+                np.sum((weights[use] * np.abs(residual[use])) ** 2) / max(np.sum((weights[use] * obs[use]) ** 2), 1e-30)
+            )
+        )
+
     return {
         "Nall": int(len(obs)),
         "Nobs": int(np.count_nonzero(observed)),
         "Robs": r_factor(observed),
         "Rall": r_factor(np.ones_like(observed, dtype=bool)),
-        "wRall": wr,
+        "wRobs": wr_factor(observed),
+        "wRall": wr_factor(np.ones_like(observed, dtype=bool)),
     }
 
 
@@ -187,18 +222,40 @@ def merged_arrays(hkl, obs, sigma, calc, symmetry_ops: list[dict]):
 
 
 def compute_model_metrics(rows: list[dict], model: dict, calc_column: str, instability_u: float = 0.01) -> dict:
-    hkl = np.asarray([[safe_float(r.get("h")), safe_float(r.get("k")), safe_float(r.get("l"))] for r in rows], dtype=int)
+    hkl_float = np.asarray(
+        [[safe_float(r.get("h")), safe_float(r.get("k")), safe_float(r.get("l"))] for r in rows],
+        dtype=float,
+    )
     obs = np.asarray([safe_float(r.get("target_I")) for r in rows], dtype=float)
     sigma = np.asarray([safe_float(r.get("sigma_eff")) for r in rows], dtype=float)
     calc = np.asarray([safe_float(r.get(calc_column)) for r in rows], dtype=float)
     base = row_mr_r_factors(obs, sigma, calc, instability_u=instability_u)
-    merged = merged_arrays(hkl, obs, sigma, calc, model.get("symmetry_ops", []))
+    finite_row = np.isfinite(obs) & np.isfinite(sigma) & np.isfinite(calc) & (sigma > 0)
+    rounded_hkl = np.rint(hkl_float)
+    valid_hkl = np.all(np.isfinite(hkl_float), axis=1) & np.all(
+        np.isclose(hkl_float, rounded_hkl, rtol=0.0, atol=1e-6),
+        axis=1,
+    )
+    merge_support = finite_row & valid_hkl
+    merged = merged_arrays(
+        rounded_hkl[merge_support].astype(int),
+        obs[merge_support],
+        sigma[merge_support],
+        calc[merge_support],
+        model.get("symmetry_ops", []),
+    )
     mr = row_mr_r_factors(merged["obs"], merged["sigma"], merged["calc"], instability_u=instability_u)
     mult = merged["multiplicity"]
     return {
         **base,
+        "Ninput": int(len(rows)),
+        "Nexcluded": int(len(rows) - base["Nall"]),
+        "Nmerge_input": int(base["Nall"]),
+        "Nmerge_used": int(np.count_nonzero(merge_support)),
+        "Nmerge_excluded": int(base["Nall"] - np.count_nonzero(merge_support)),
         "MRobs": mr["Robs"],
         "MRall": mr["Rall"],
+        "MwRobs": mr["wRobs"],
         "MwRall": mr["wRall"],
         "MNobs": mr["Nobs"],
         "MNall": mr["Nall"],
@@ -209,16 +266,75 @@ def compute_model_metrics(rows: list[dict], model: dict, calc_column: str, insta
 
 
 def compute_row_mr_summary(rows: list[dict], model: dict, instability_u: float = 0.01) -> dict:
+    """Calculate Born and Bloch factors on one explicitly matched row support."""
+
+    obs = np.asarray([safe_float(row.get("target_I")) for row in rows], dtype=float)
+    sigma = np.asarray([safe_float(row.get("sigma_eff")) for row in rows], dtype=float)
+    dynamic_calc = np.asarray([safe_float(row.get("dyn_scaled")) for row in rows], dtype=float)
+    born_calc = np.asarray([safe_float(row.get("born_scaled")) for row in rows], dtype=float)
+    matched_support = (
+        np.isfinite(obs)
+        & np.isfinite(sigma)
+        & (sigma > 0)
+        & np.isfinite(dynamic_calc)
+        & np.isfinite(born_calc)
+    )
+    matched_rows = [row for row, keep in zip(rows, matched_support, strict=True) if keep]
+    n_input = int(len(rows))
+    n_matched = int(np.count_nonzero(matched_support))
+    n_excluded = int(n_input - n_matched)
+
+    born = compute_model_metrics(matched_rows, model, "born_scaled", instability_u=instability_u)
+    dynamic = compute_model_metrics(matched_rows, model, "dyn_scaled", instability_u=instability_u)
+    for metrics in (born, dynamic):
+        metrics["Ninput"] = n_input
+        metrics["Nexcluded"] = n_excluded
+        metrics["Nmatched"] = n_matched
     return {
         "definition": {
-            "style": "GROND row/MR intensity residuals",
-            "observed_cutoff": "Iobs > 3 sigma(Iobs), used only for Robs and MRobs",
+            "style": "JANA/PETS-style dynamical-refinement row and merged-row residual factors (GROND implementation)",
+            "provenance": "computed by GROND from its final signed row table; not emitted by JANA or PETS",
+            "matched_support": "Born and Bloch factors use the identical intersection of rows with finite Iobs, positive finite sigma_eff, finite born_scaled, and finite dyn_scaled",
+            "matched_support_counts": "Ninput is the supplied row count; Nmatched/Nall is the common finite Born/Bloch support; Nexcluded is Ninput-Nmatched",
+            "unmerged_metrics": "Nobs, Nall, Robs, Rall, wRobs, and wRall use individual observations from the matched row support",
+            "merged_metrics": "MNobs, MNall, MRobs, MRall, MwRobs, and MwRall use post-refinement model-symmetry groups; Nmerge_excluded counts matched rows with missing, non-finite, or non-integral HKL indices",
+            "observed_cutoff": "Iobs > 3 sigma(Iobs), used for Robs, wRobs, MRobs, and MwRobs",
             "all_reflection_metrics": "Rall, wRall, MRall, and MwRall use all finite observations after row or merged-row grouping.",
+            "observed_weighted_metrics": "wRobs and MwRobs are optional extensions that apply the same weighted residual formula to the Iobs > 3 sigma(Iobs) subsets; the conventional core reporting family is Robs, Rall, wRall, MRobs, MRall, and MwRall.",
+            "R_formula": "sum(abs(sqrt(max(Iobs,0)) - sqrt(max(Icalc,0)))) / sum(sqrt(max(Iobs,0)))",
+            "wR_formula": "sqrt(sum((w * abs(Iobs-Icalc))^2) / sum((w * Iobs)^2))",
+            "nonpositive_intensity_policy": "R factors map nonpositive intensities to zero amplitude; weighted factors retain signed Iobs and Icalc residuals",
+            "weight_formula": "w = (sigma(sqrt(Iobs))^2 + (u*sqrt(max(Iobs,0)))^2)^(-1/2)",
+            "sigma_sqrt_formula": "sigma(sqrt(Iobs)) = sigma_eff / max(2*sqrt(max(Iobs,0)), 1e-6)",
             "instability_u": float(instability_u),
             "merge": "arithmetic means over model-symmetry-related rows; sigma_M = sqrt(sum sigma_i^2) / n",
+            "sigma_source": "sigma_eff from the supplied GROND row table; raw_row_weight is not separately folded into these JANA/PETS-style factors",
+            "dataset_policy_note": "Any sigma transformation already present in sigma_eff is honored. A separate dataset-policy raw_row_weight affects fitting/inclusion but is not multiplied into the reported JANA/PETS-style R/MR formula.",
+            "friedel_policy": "Friedel opposites remain separate in acentric groups unless they are related by an explicit model-symmetry rotation.",
+            "compatibility_alias": "row_mr.kinematic is a deprecated byte-for-byte alias of row_mr.born; it is not a conventional merged-refinement result.",
+            "endpoint_exclusion": "SHELXL R1(F), wR2(F^2), GooF, and endpoint reflection counts are intentionally not part of this row-statistics block.",
         },
-        "dynamic": compute_model_metrics(rows, model, "dyn_scaled", instability_u=instability_u),
-        "kinematic": compute_model_metrics(rows, model, "born_scaled", instability_u=instability_u),
+        "support": {
+            "Ninput": n_input,
+            "Nmatched": n_matched,
+            "Nexcluded": n_excluded,
+            "status": "matched" if n_matched > 0 else "empty_matched_support",
+        },
+        "dynamic": dynamic,
+        "born": born,
+        "kinematic": born,
+    }
+
+
+def compute_per_dataset_row_mr(rows: list[dict], model: dict, instability_u: float = 0.01) -> dict[str, dict]:
+    """Return the same JANA/PETS-style factors separately for each dataset."""
+
+    grouped: dict[str, list[dict]] = defaultdict(list)
+    for row in rows:
+        grouped[str(row.get("dataset") or "dataset")].append(row)
+    return {
+        dataset: compute_row_mr_summary(dataset_rows, model, instability_u=instability_u)
+        for dataset, dataset_rows in sorted(grouped.items())
     }
 
 
@@ -243,6 +359,8 @@ def fmt_int_pair(a, b) -> str:
 
 
 def table_rows(summary: dict) -> list[dict]:
+    """Return the historical table shape retained for API compatibility."""
+
     out = []
     for label, key in (("dynamical", "dynamic"), ("kinematical", "kinematic")):
         m = summary[key]
@@ -259,6 +377,44 @@ def table_rows(summary: dict) -> list[dict]:
                 "MwRall": fmt_float(m["MwRall"]),
             }
         )
+    return out
+
+
+def jana_table_rows(summary: dict) -> list[dict]:
+    """Return the explicit JANA/PETS-style presentation table."""
+
+    out = []
+    for label, key in (
+        ("Bloch dynamical", "dynamic"),
+        ("matched Born (kinematical control)", "born"),
+    ):
+        m = summary[key]
+        out.append(
+            {
+                "Row model": label,
+                "Nobs, Nall": fmt_int_pair(m["Nobs"], m["Nall"]),
+                "Nmerge used, excluded": fmt_int_pair(m["Nmerge_used"], m["Nmerge_excluded"]),
+                "MNobs, MNall": fmt_int_pair(m["MNobs"], m["MNall"]),
+                "Robs": fmt_float(m["Robs"]),
+                "Rall": fmt_float(m["Rall"]),
+                "wRobs": fmt_float(m["wRobs"]),
+                "wRall": fmt_float(m["wRall"]),
+                "MRobs": fmt_float(m["MRobs"]),
+                "MRall": fmt_float(m["MRall"]),
+                "MwRobs": fmt_float(m["MwRobs"]),
+                "MwRall": fmt_float(m["MwRall"]),
+            }
+        )
+    return out
+
+
+def per_dataset_table_rows(summaries: dict[str, dict]) -> list[dict]:
+    """Format per-dataset JANA/PETS-style factors for CSV/Markdown audit tables."""
+
+    out: list[dict] = []
+    for dataset, summary in summaries.items():
+        for row in jana_table_rows(summary):
+            out.append({"Dataset": dataset, **row})
     return out
 
 
@@ -306,7 +462,11 @@ def scale_param_count(scale_payloads: list[dict], compact: bool) -> int | None:
         # ``selected_output`` is the candidate whose row table was actually
         # materialized. ``selected`` may be a smaller strict diagnostic when
         # the information-criterion branch chose a different output model.
-        source = (payload.get("selected_output") or payload.get("selected") or {}) if compact else (payload.get("baseline") or {})
+        source = (
+            (payload.get("selected_output") or payload.get("selected") or {})
+            if compact
+            else (payload.get("baseline") or {})
+        )
         value = safe_float(source.get("scale_params"))
         if math.isfinite(value):
             total += int(round(value))
@@ -402,8 +562,7 @@ def endpoint_summary_rows(
     explicit_multi_contract = selected_contract in {"full", "compact_bic", "compact_min_strict"}
     resolution_model = (
         model
-        if explicit_multi_contract
-        or (math.isfinite(explicit_requested_dmin) and explicit_requested_dmin > 0.0)
+        if explicit_multi_contract or (math.isfinite(explicit_requested_dmin) and explicit_requested_dmin > 0.0)
         else None
     )
     requested_dmin = (
@@ -415,7 +574,9 @@ def endpoint_summary_rows(
     if not math.isfinite(suggested_dmin):
         suggested_dmin = requested_dmin
 
-    def append(label: str, rows: list[dict], dmin: float, scale_model: str, scale_params: str, status: str = "ok") -> None:
+    def append(
+        label: str, rows: list[dict], dmin: float, scale_model: str, scale_params: str, status: str = "ok"
+    ) -> None:
         kept = rows_at_or_below_resolution(rows, dmin, resolution_model)
         summary = compute_row_mr_summary(kept, model, instability_u=instability_u) if kept else {}
         endpoint_rows.append(
@@ -512,13 +673,20 @@ def endpoint_summary_rows(
         "full_control_rows_supplied": bool(full_rows),
         "selected_scale_contract": selected_contract or "legacy_unspecified",
         "d_spacing_source": "shared reporting-model cell",
-        "resolution_limit_summary": (choose_resolution_limit_payload(resolution_payloads).get("summary_path") if resolution_payloads else ""),
+        "resolution_limit_summary": (
+            choose_resolution_limit_payload(resolution_payloads).get("summary_path") if resolution_payloads else ""
+        ),
     }
     return endpoint_rows, metadata
 
 
 def endpoint_table_rows(endpoint_rows: list[dict]) -> list[dict]:
-    """Format endpoint summaries for Markdown/LaTeX tables."""
+    """Return the historical endpoint-table shape for API compatibility.
+
+    The historical function and payload names retain ``endpoint`` for backward
+    compatibility.  These rows contain JANA/PETS-style row factors, not SHELXL
+    corrected-HKL endpoint statistics.
+    """
 
     rows = []
     for item in endpoint_rows:
@@ -535,6 +703,37 @@ def endpoint_table_rows(endpoint_rows: list[dict]) -> list[dict]:
                 "wRall": fmt_float(dyn.get("wRall")),
                 "MRobs": fmt_float(dyn.get("MRobs")),
                 "MRall": fmt_float(dyn.get("MRall")),
+                "MwRall": fmt_float(dyn.get("MwRall")),
+            }
+        )
+    return rows
+
+
+def row_contract_table_rows(endpoint_rows: list[dict]) -> list[dict]:
+    """Format explicit JANA/PETS-style resolution/scale row contracts."""
+
+    rows = []
+    for item in endpoint_rows:
+        dyn = (item.get("row_mr") or {}).get("dynamic") or {}
+        rows.append(
+            {
+                "Row contract": item.get("label", ""),
+                "Status": item.get("status", "ok"),
+                "dmin A": fmt_float(item.get("dmin_A")),
+                "Scale params": item.get("scale_params", "n/a"),
+                "Nobs, Nall": fmt_int_pair(dyn.get("Nobs", 0), dyn.get("Nall", 0)) if dyn else "n/a",
+                "Nmerge used, excluded": (
+                    fmt_int_pair(dyn["Nmerge_used"], dyn["Nmerge_excluded"])
+                    if dyn.get("Nmerge_used") is not None and dyn.get("Nmerge_excluded") is not None
+                    else "n/a"
+                ),
+                "Robs": fmt_float(dyn.get("Robs")),
+                "Rall": fmt_float(dyn.get("Rall")),
+                "wRobs": fmt_float(dyn.get("wRobs")),
+                "wRall": fmt_float(dyn.get("wRall")),
+                "MRobs": fmt_float(dyn.get("MRobs")),
+                "MRall": fmt_float(dyn.get("MRall")),
+                "MwRobs": fmt_float(dyn.get("MwRobs")),
                 "MwRall": fmt_float(dyn.get("MwRall")),
             }
         )
@@ -675,6 +874,7 @@ def summary_metadata(rows: list[dict], model: dict, run_summaries: list[dict]) -
         ):
             if key in best:
                 target.append(str(best.get(key)))
+
     def uniq_text(values, digits=3):
         if not values:
             return "n/a"
@@ -720,14 +920,27 @@ def write_markdown(
     row_mr_summary: dict,
     scale_payloads: list[dict] | None = None,
     endpoint_summaries: list[dict] | None = None,
+    *,
+    canonical: bool = False,
 ) -> None:
     cell = meta["cell"]
     scale_rows = scale_polish_table_rows(scale_payloads or [])
-    endpoint_rows = endpoint_table_rows(endpoint_summaries or [])
+    row_rows = jana_table_rows(row_mr_summary) if canonical else table_rows(row_mr_summary)
+    endpoint_rows = (
+        row_contract_table_rows(endpoint_summaries or [])
+        if canonical
+        else endpoint_table_rows(endpoint_summaries or [])
+    )
+    row_heading = "## JANA/PETS-Style Row And MR Factors" if canonical else "## GROND Row/MR R And MR Factors"
+    endpoint_heading = (
+        "## Resolution And Scale Row-Contract Summary" if canonical else "## Resolution And Scale Endpoint Summary"
+    )
+    instability_u = safe_float((row_mr_summary.get("definition") or {}).get("instability_u"))
+    instability_u_text = f"{instability_u:g}" if math.isfinite(instability_u) else "n/a"
     lines = [
         f"# {title}",
         "",
-        "This table reports GROND row/MR residual factors from the final GROND row table. `Robs`, `Rall`, and `wRall` are calculated on unmerged rows. `MRobs`, `MRall`, and `MwRall` are calculated after arithmetic merging of model-symmetry-related observations and predictions.",
+        "This table reports JANA/PETS-style row and post-refinement merged-row residual factors computed by GROND. `Robs`, `Rall`, and `wRall` are calculated on unmerged rows. `MRobs`, `MRall`, and `MwRall` are calculated after arithmetic merging of model-symmetry-related observations and predictions. These are not SHELXL endpoint statistics.",
         "",
         "## Measurement And Model",
         "",
@@ -749,19 +962,19 @@ def write_markdown(
         f"Raw-row resolution-envelope B values: `{meta['row_resolution_b_values']}`.",
         f"dmin: `{fmt_float(meta['dmin_A'], 3)} A`; sin(theta_max)/lambda: `{fmt_float(meta['sin_theta_over_lambda_max'], 3)} A^-1`.",
         "",
-        "## GROND Row/MR R And MR Factors",
+        row_heading,
         "",
-        *markdown_table(table_rows(row_mr_summary)),
+        *markdown_table(row_rows),
         "",
-        "Definitions: `Robs` and `MRobs` use only observed reflections satisfying `Iobs > 3 sigma(Iobs)`. `Rall`, `wRall`, `MRall`, and `MwRall` use all finite rows or merged rows. The instability factor is `u = 0.01`. Weights use `w = [sigma(sqrt(Iobs))^2 + (u sqrt(Iobs))^2]^(-1/2)` and `wR = sqrt(sum((w |Iobs - Icalc|)^2) / sum((w Iobs)^2))`.",
+        f"Definitions: `Robs`, optional `wRobs`, `MRobs`, and optional `MwRobs` use only observed reflections satisfying `Iobs > 3 sigma(Iobs)`. `Rall`, `wRall`, `MRall`, and `MwRall` use all finite rows or merged rows. Born and Bloch use one common finite row support. `Nmerge excluded` counts supported rows whose HKL indices cannot enter symmetry merging. The conventional core family is `Robs/Rall/wRall/MRobs/MRall/MwRall`. The instability factor is `u = {instability_u_text}`. Weights use `w = [sigma(sqrt(Iobs))^2 + (u sqrt(Iobs))^2]^(-1/2)` and `wR = sqrt(sum((w |Iobs - Icalc|)^2) / sum((w Iobs)^2))`.",
         "",
     ]
     if endpoint_rows:
         lines.extend(
             [
-                "## Resolution And Scale Endpoint Summary",
+                endpoint_heading,
                 "",
-                "Auto mode reports three endpoint statistics: the requested resolution with the full fitted scale curve, the requested resolution with compact scale parameters, and the final suggested endpoint using the promoted resolution limit with the suggested compact scale model.",
+                "Auto mode reports the requested resolution with full scales, the requested resolution with compact scales, and the suggested final row contract. These are JANA/PETS-style row statistics, not SHELXL endpoint statistics.",
                 "",
                 *markdown_table(endpoint_rows),
                 "",
@@ -788,10 +1001,18 @@ def write_latex(
     row_mr_summary: dict,
     scale_payloads: list[dict] | None = None,
     endpoint_summaries: list[dict] | None = None,
+    *,
+    canonical: bool = False,
 ) -> None:
-    rows = table_rows(row_mr_summary)
+    rows = jana_table_rows(row_mr_summary) if canonical else table_rows(row_mr_summary)
     scale_rows = scale_polish_table_rows(scale_payloads or [])
-    endpoint_rows = endpoint_table_rows(endpoint_summaries or [])
+    endpoint_rows = (
+        row_contract_table_rows(endpoint_summaries or [])
+        if canonical
+        else endpoint_table_rows(endpoint_summaries or [])
+    )
+    instability_u = safe_float((row_mr_summary.get("definition") or {}).get("instability_u"))
+    instability_u_text = f"{instability_u:g}" if math.isfinite(instability_u) else "n/a"
     cell = meta["cell"]
     body = [
         r"\documentclass[10pt]{article}",
@@ -801,7 +1022,7 @@ def write_latex(
         r"\usepackage[T1]{fontenc}",
         r"\begin{document}",
         rf"\section*{{{tex_escape(title)}}}",
-        r"\noindent This table reports GROND row/MR row-space residual factors from the final GROND regularization. Unmerged factors use final rows directly; MR factors use arithmetic means of model-symmetry-related observations and predictions.",
+        r"\noindent This table reports JANA/PETS-style row and post-refinement merged-row residual factors computed by GROND. Unmerged factors use final rows directly; MR factors use arithmetic means of model-symmetry-related observations and predictions. These are not SHELXL endpoint statistics.",
         "",
         r"\subsection*{Measurement and model}",
         r"\begin{tabular}{@{}ll@{}}\toprule",
@@ -827,40 +1048,81 @@ def write_latex(
         rf"Raw-row resolution-envelope B values & {tex_escape(meta['row_resolution_b_values'])} \\",
         r"\bottomrule\end{tabular}",
         "",
-        r"\subsection*{GROND row and MR factors}",
-        r"\begin{tabular}{@{}lrrrrrrrr@{}}\toprule",
-        r"Regularization & Nobs,Nall & MNobs,MNall & Robs & Rall & wRall & MRobs & MRall & MwRall \\ \midrule",
     ]
-    for row in rows:
-        body.append(
-            rf"{tex_escape(row['Regularization'])} & {tex_escape(row['Nobs, Nall'])} & {tex_escape(row['MNobs, MNall'])} & "
-            rf"{row['Robs']} & {row['Rall']} & {row['wRall']} & {row['MRobs']} & {row['MRall']} & {row['MwRall']} \\"
+    if canonical:
+        body.extend(
+            [
+                r"\subsection*{JANA/PETS-style row and MR factors}",
+                r"\begin{tabular}{@{}lrrrrrrrrrrr@{}}\toprule",
+                r"Row model & Nobs,Nall & Nmerge used,excluded & MNobs,MNall & Robs & Rall & wRobs & wRall & MRobs & MRall & MwRobs & MwRall \\ \midrule",
+            ]
         )
+        for row in rows:
+            body.append(
+                rf"{tex_escape(row['Row model'])} & {tex_escape(row['Nobs, Nall'])} & {tex_escape(row['Nmerge used, excluded'])} & {tex_escape(row['MNobs, MNall'])} & "
+                rf"{row['Robs']} & {row['Rall']} & {row['wRobs']} & {row['wRall']} & {row['MRobs']} & {row['MRall']} & {row['MwRobs']} & {row['MwRall']} \\"
+            )
+    else:
+        body.extend(
+            [
+                r"\subsection*{GROND row and MR factors}",
+                r"\begin{tabular}{@{}lrrrrrrrr@{}}\toprule",
+                r"Regularization & Nobs,Nall & MNobs,MNall & Robs & Rall & wRall & MRobs & MRall & MwRall \\ \midrule",
+            ]
+        )
+        for row in rows:
+            body.append(
+                rf"{tex_escape(row['Regularization'])} & {tex_escape(row['Nobs, Nall'])} & {tex_escape(row['MNobs, MNall'])} & "
+                rf"{row['Robs']} & {row['Rall']} & {row['wRall']} & {row['MRobs']} & {row['MRall']} & {row['MwRall']} \\"
+            )
     body.extend(
         [
             r"\bottomrule\end{tabular}",
             "",
             r"\bigskip",
-            r"\noindent $R_{obs}$ and $MR_{obs}$ use only observed reflections satisfying $I_{obs} > 3\sigma(I_{obs})$. $R_{all}$, $wR_{all}$, $MR_{all}$, and $MwR_{all}$ use all finite rows or merged rows. The instability factor is $u=0.01$. Weights use $w=[\sigma(\sqrt{I_{obs}})^2+(u\sqrt{I_{obs}})^2]^{-1/2}$.",
+            rf"\noindent $R_{{obs}}$, optional $wR_{{obs}}$, $MR_{{obs}}$, and optional $MwR_{{obs}}$ use reflections satisfying $I_{{obs}} > 3\sigma(I_{{obs}})$. $R_{{all}}$, $wR_{{all}}$, $MR_{{all}}$, and $MwR_{{all}}$ use all finite rows or merged rows. Born and Bloch use one common finite row support; Nmerge excluded counts supported rows whose HKL indices cannot enter symmetry merging. The conventional core family is $R_{{obs}}/R_{{all}}/wR_{{all}}/MR_{{obs}}/MR_{{all}}/MwR_{{all}}$. The instability factor is $u={tex_escape(instability_u_text)}$.",
         ]
     )
     if endpoint_rows:
+        endpoint_subheading = (
+            r"\subsection*{Resolution and scale row-contract summary}"
+            if canonical
+            else r"\subsection*{Resolution and scale endpoint summary}"
+        )
         body.extend(
             [
                 "",
-                r"\subsection*{Resolution and scale endpoint summary}",
-                r"\noindent Auto mode reports the requested resolution with full scales, the requested resolution with compact scales, and the final suggested endpoint using the promoted resolution limit with the suggested compact scale model.",
+                endpoint_subheading,
+                r"\noindent Auto mode reports the requested resolution with full scales, the requested resolution with compact scales, and the final suggested row contract. These are not SHELXL endpoint statistics.",
                 "",
-                r"\begin{tabular}{@{}llrrrrrrrrr@{}}\toprule",
-                r"Endpoint & Status & $d_{min}$ & Scale params & Nobs,Nall & Robs & Rall & wRall & MRobs & MRall & MwRall \\ \midrule",
             ]
         )
-        for row in endpoint_rows:
-            body.append(
-                rf"{tex_escape(row['Endpoint'])} & {tex_escape(row['Status'])} & {tex_escape(row['dmin A'])} & "
-                rf"{tex_escape(row['Scale params'])} & {tex_escape(row['Nobs, Nall'])} & {row['Robs']} & {row['Rall']} & "
-                rf"{row['wRall']} & {row['MRobs']} & {row['MRall']} & {row['MwRall']} \\"
+        if canonical:
+            body.extend(
+                [
+                    r"\begin{tabular}{@{}llrrrrrrrrrrrr@{}}\toprule",
+                    r"Row contract & Status & $d_{min}$ & Scale params & Nobs,Nall & Nmerge used,excluded & Robs & Rall & wRobs & wRall & MRobs & MRall & MwRobs & MwRall \\ \midrule",
+                ]
             )
+            for row in endpoint_rows:
+                body.append(
+                    rf"{tex_escape(row['Row contract'])} & {tex_escape(row['Status'])} & {tex_escape(row['dmin A'])} & "
+                    rf"{tex_escape(row['Scale params'])} & {tex_escape(row['Nobs, Nall'])} & {tex_escape(row['Nmerge used, excluded'])} & {row['Robs']} & {row['Rall']} & "
+                    rf"{row['wRobs']} & {row['wRall']} & {row['MRobs']} & {row['MRall']} & {row['MwRobs']} & {row['MwRall']} \\"
+                )
+        else:
+            body.extend(
+                [
+                    r"\begin{tabular}{@{}llrrrrrrrrr@{}}\toprule",
+                    r"Endpoint & Status & $d_{min}$ & Scale params & Nobs,Nall & Robs & Rall & wRall & MRobs & MRall & MwRall \\ \midrule",
+                ]
+            )
+            for row in endpoint_rows:
+                body.append(
+                    rf"{tex_escape(row['Endpoint'])} & {tex_escape(row['Status'])} & {tex_escape(row['dmin A'])} & "
+                    rf"{tex_escape(row['Scale params'])} & {tex_escape(row['Nobs, Nall'])} & {row['Robs']} & {row['Rall']} & "
+                    rf"{row['wRall']} & {row['MRobs']} & {row['MRall']} & {row['MwRall']} \\"
+                )
         body.extend([r"\bottomrule\end{tabular}", ""])
     if scale_rows:
         body.extend(
@@ -912,20 +1174,62 @@ def build_pdf(tex_path: Path) -> dict:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--run", action="append", default=[], help="Dataset run as name=/path/to/run_dir, or just /path/to/run_dir.")
-    ap.add_argument("--full-run", action="append", default=[], help="Matched full-scale control run as name=/path/to/run_dir for multi-dataset endpoint accounting.")
-    ap.add_argument("--row-table", action="append", default=[], help="Row table as name=/path/to/native_dyn_calc.csv, or just a path.")
+    ap.add_argument(
+        "--run", action="append", default=[], help="Dataset run as name=/path/to/run_dir, or just /path/to/run_dir."
+    )
+    ap.add_argument(
+        "--full-run",
+        action="append",
+        default=[],
+        help="Matched full-scale control run as name=/path/to/run_dir for multi-dataset endpoint accounting.",
+    )
+    ap.add_argument(
+        "--row-table",
+        action="append",
+        default=[],
+        help="Row table as name=/path/to/native_dyn_calc.csv, or just a path.",
+    )
     ap.add_argument("--res", required=True)
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--title", default="GROND Publication Table")
-    ap.add_argument("--instability-u", type=float, default=0.01)
+    ap.add_argument(
+        "--instability-u",
+        type=float,
+        default=0.01,
+        help="JANA/PETS-style row-weight instability factor u used by wR and MwR.",
+    )
     ap.add_argument("--no-pdf", action="store_true")
-    ap.add_argument("--include-completeness-only", action="store_true", help="Include rows marked dataset_role=completeness_only in GROND row/MR row metrics.")
-    ap.add_argument("--scale-polish", action="append", default=[], help="Scale-polish summary as name=/path/to/scale_compression_summary.json or name=/path/to/scale_polish_dir.")
-    ap.add_argument("--resolution-limit", action="append", default=[], help="Resolution-limit summary as name=/path/to/summary.json, or a resolution-limit directory.")
-    ap.add_argument("--requested-min-d-spacing", type=float, default=0.0, help="Explicit reporting cutoff calculated from the shared --res cell; zero derives the cutoff from supplied rows.")
-    ap.add_argument("--selected-scale-contract", default="", help="Selected multi-dataset scale contract: full, compact_bic, or compact_min_strict.")
+    ap.add_argument(
+        "--include-completeness-only",
+        action="store_true",
+        help="Include rows marked dataset_role=completeness_only in GROND row/MR row metrics.",
+    )
+    ap.add_argument(
+        "--scale-polish",
+        action="append",
+        default=[],
+        help="Scale-polish summary as name=/path/to/scale_compression_summary.json or name=/path/to/scale_polish_dir.",
+    )
+    ap.add_argument(
+        "--resolution-limit",
+        action="append",
+        default=[],
+        help="Resolution-limit summary as name=/path/to/summary.json, or a resolution-limit directory.",
+    )
+    ap.add_argument(
+        "--requested-min-d-spacing",
+        type=float,
+        default=0.0,
+        help="Explicit reporting cutoff calculated from the shared --res cell; zero derives the cutoff from supplied rows.",
+    )
+    ap.add_argument(
+        "--selected-scale-contract",
+        default="",
+        help="Selected multi-dataset scale contract: full, compact_bic, or compact_min_strict.",
+    )
     args = ap.parse_args()
+    if not math.isfinite(float(args.instability_u)) or args.instability_u < 0.0:
+        ap.error("--instability-u must be finite and nonnegative")
     if not math.isfinite(float(args.requested_min_d_spacing)) or args.requested_min_d_spacing < 0.0:
         ap.error("--requested-min-d-spacing must be finite and nonnegative")
     if args.selected_scale_contract and args.selected_scale_contract not in {
@@ -957,7 +1261,9 @@ def main() -> None:
 
     if not args.include_completeness_only:
         rows = [r for r in rows if str(r.get("dataset_role", "primary")) not in {"completeness_only", "exclude"}]
-        full_rows = [r for r in full_rows if str(r.get("dataset_role", "primary")) not in {"completeness_only", "exclude"}]
+        full_rows = [
+            r for r in full_rows if str(r.get("dataset_role", "primary")) not in {"completeness_only", "exclude"}
+        ]
 
     input_row_count = len(rows)
     full_input_row_count = len(full_rows)
@@ -969,14 +1275,14 @@ def main() -> None:
         raise SystemExit("No row tables were supplied.")
 
     row_mr_summary = compute_row_mr_summary(rows, model, instability_u=args.instability_u)
+    per_dataset_summary = compute_per_dataset_row_mr(rows, model, instability_u=args.instability_u)
+    per_dataset_rows = per_dataset_table_rows(per_dataset_summary)
     meta = summary_metadata(rows, model, run_summaries)
     if args.requested_min_d_spacing > 0.0:
         shared_cell_dmin = dmin_for_rows(rows, model)
         meta["dmin_A"] = shared_cell_dmin
         meta["sin_theta_over_lambda_max"] = (
-            0.5 / shared_cell_dmin
-            if math.isfinite(shared_cell_dmin) and shared_cell_dmin > 0.0
-            else float("nan")
+            0.5 / shared_cell_dmin if math.isfinite(shared_cell_dmin) and shared_cell_dmin > 0.0 else float("nan")
         )
     meta["reporting_resolution_contract"] = {
         "requested_min_d_spacing_A": float(args.requested_min_d_spacing),
@@ -1000,12 +1306,28 @@ def main() -> None:
         selected_scale_contract=args.selected_scale_contract,
     )
     payload = {
+        "schema": "grond.jana_row_statistics.v1",
+        "numeric_units": "fractions",
         "title": args.title,
         "model": str(Path(args.res).expanduser().resolve()),
+        "reporting_contract": {
+            "statistics_family": "JANA/PETS-style row and post-refinement merged-row residual factors",
+            "calculated_by": "GROND",
+            "not_endpoint_statistics": True,
+            "shelxl_endpoint_statistics_location": "run-root TABLE1_FINAL_STATISTICS.md and authoritative endpoint .lst",
+            "compatibility_note": "The historical resolution_scale_endpoints key and publication_table filenames are retained for readers of older GROND outputs.",
+        },
         "metadata": meta,
         "row_mr": row_mr_summary,
+        "per_dataset_row_mr": per_dataset_summary,
+        "row_resolution_scale_contracts": {
+            "definition": "requested full-scale, requested compact-scale, and promoted suggested compact-scale JANA/PETS-style row statistics",
+            "metadata": endpoint_metadata,
+            "contracts": endpoint_summaries,
+            "table_rows": row_contract_table_rows(endpoint_summaries),
+        },
         "resolution_scale_endpoints": {
-            "definition": "requested full-scale, requested compact-scale, and promoted suggested compact-scale endpoint statistics",
+            "definition": "backward-compatible alias for row_resolution_scale_contracts; contains row/MR statistics, not SHELXL endpoint statistics",
             "metadata": endpoint_metadata,
             "endpoints": endpoint_summaries,
             "table_rows": endpoint_table_rows(endpoint_summaries),
@@ -1022,16 +1344,92 @@ def main() -> None:
     json_path.write_text(json.dumps(payload, indent=2, allow_nan=True) + "\n")
     write_markdown(md_path, args.title, meta, row_mr_summary, scale_payloads, endpoint_summaries)
     write_latex(tex_path, args.title, meta, row_mr_summary, scale_payloads, endpoint_summaries)
+    canonical_json_path = out / "JANA_ROW_STATISTICS.json"
+    canonical_md_path = out / "JANA_ROW_STATISTICS.md"
+    canonical_tex_path = out / "JANA_ROW_STATISTICS.tex"
+    canonical_csv_path = out / "JANA_ROW_STATISTICS.csv"
+    per_dataset_json_path = out / "JANA_ROW_STATISTICS_PER_DATASET.json"
+    per_dataset_md_path = out / "JANA_ROW_STATISTICS_PER_DATASET.md"
+    per_dataset_csv_path = out / "JANA_ROW_STATISTICS_PER_DATASET.csv"
+    canonical_json_path.write_text(json.dumps(standard_json_data(payload), indent=2, allow_nan=False) + "\n")
+    write_markdown(
+        canonical_md_path,
+        args.title,
+        meta,
+        row_mr_summary,
+        scale_payloads,
+        endpoint_summaries,
+        canonical=True,
+    )
+    write_latex(
+        canonical_tex_path,
+        args.title,
+        meta,
+        row_mr_summary,
+        scale_payloads,
+        endpoint_summaries,
+        canonical=True,
+    )
+    with canonical_csv_path.open("w", newline="") as stream:
+        combined_rows = jana_table_rows(row_mr_summary)
+        writer = csv.DictWriter(stream, fieldnames=list(combined_rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(combined_rows)
+    per_dataset_json_path.write_text(
+        json.dumps(
+            standard_json_data(
+                {
+                    "schema": "grond.jana_row_statistics_per_dataset.v1",
+                    "numeric_units": "fractions",
+                    "definition": row_mr_summary["definition"],
+                    "datasets": per_dataset_summary,
+                    "table_rows": per_dataset_rows,
+                }
+            ),
+            indent=2,
+            allow_nan=False,
+        )
+        + "\n"
+    )
+    per_dataset_md_path.write_text(
+        "\n".join(
+            [
+                f"# {args.title}: Per-Dataset JANA/PETS-Style Row Statistics",
+                "",
+                f"Residual factors are fractions (`0.146` means `14.6%`). Each dataset uses the same matched-support JANA/PETS-style GROND implementation with row-weight instability factor `u={args.instability_u:g}` and keeps unmerged row factors separate from post-refinement merged factors. `Nmerge excluded` surfaces supported rows whose HKL indices cannot enter symmetry merging.",
+                "",
+                *markdown_table(per_dataset_rows),
+                "",
+            ]
+        )
+    )
+    with per_dataset_csv_path.open("w", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=list(per_dataset_rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(per_dataset_rows)
     pdf_status = {"built": False, "reason": "disabled"}
+    canonical_pdf_status = {"built": False, "reason": "disabled"}
     if not args.no_pdf:
         pdf_status = build_pdf(tex_path)
+        canonical_pdf_status = build_pdf(canonical_tex_path)
     result = {
         "summary": str(json_path.resolve()),
         "markdown": str(md_path.resolve()),
         "latex": str(tex_path.resolve()),
+        "canonical_jana_json": str(canonical_json_path.resolve()),
+        "canonical_jana_markdown": str(canonical_md_path.resolve()),
+        "canonical_jana_latex": str(canonical_tex_path.resolve()),
+        "canonical_jana_csv": str(canonical_csv_path.resolve()),
+        "canonical_jana_pdf": canonical_pdf_status,
+        "per_dataset_jana_json": str(per_dataset_json_path.resolve()),
+        "per_dataset_jana_markdown": str(per_dataset_md_path.resolve()),
+        "per_dataset_jana_csv": str(per_dataset_csv_path.resolve()),
         "pdf": pdf_status,
         "dynamic": row_mr_summary["dynamic"],
+        "born": row_mr_summary["born"],
         "kinematic": row_mr_summary["kinematic"],
+        "per_dataset": per_dataset_summary,
+        "row_resolution_scale_contracts": payload["row_resolution_scale_contracts"],
         "resolution_scale_endpoints": payload["resolution_scale_endpoints"],
         "scale_polish": payload["scale_polish"],
     }

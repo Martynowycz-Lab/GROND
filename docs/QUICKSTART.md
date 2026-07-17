@@ -83,7 +83,9 @@ GROND auto \
 
 Fast mode intentionally skips the expensive final polish decisions. Use it to catch wrong paths, wrong transforms, bad integrations, or implausible thickness/hand quickly; use the plain `GROND auto` command for the final answer.
 
-After a completed run, open `FINAL_SUMMARY.md` first. It names the final hand, the paired t-style row contrast with its sample count and `df=n-1`, input and final row-level statistics, promoted endpoint R values, and the exact `.res`, `.hkl`, and `.lst` files to inspect. The paired contrast is diagnostic support, not a calibrated normal Z score or confidence. `QUICK_STATS.md` keeps the fuller audit table. To regenerate those files later without rerunning the physics stages, run:
+After a completed run, open the root-level `TABLE1_FINAL_STATISTICS.md` first for statistics. Its SHELXL endpoint panel reports conventional and promoted corrected-HKL `R1gt`, `R1all`, `wR2all`, GooF, and associated counts. Its separate JANA/PETS-style row panel reports matched Born and Bloch dynamical `Robs`, `Rall`, `wRall`, `MRobs`, `MRall`, and `MwRall`, with optional observed-subset weighted factors. `MR` values are formed after model-symmetry merging; they are not endpoint SHELXL values. When a model/statistic combination was not calculated, Table 1 says `n/a` instead of substituting a different residual family.
+
+Use `JANA_ROW_STATISTICS.md` or `.json` for the canonical pooled row table and `JANA_ROW_STATISTICS_PER_DATASET.*` for individual-crystal values. `FINAL_SUMMARY.md` names the final hand, paired t-style row contrast with `n` and `df=n-1`, selected files, and promotion decision. The paired contrast is diagnostic support, not a calibrated normal Z score or confidence. `QUICK_STATS.md` keeps the fuller audit trail; any internal native-objective residuals there are optimizer diagnostics rather than publication factors. To regenerate these files later without rerunning the physics stages, run:
 
 ```bash
 GROND finish --run-dir grond_out
@@ -135,4 +137,4 @@ Multi-dataset runs keep nuisance models per dataset and refine one shared struct
 
 If a run is interrupted, rerun the identical command. GROND records completed stages in `grond_progress.json` and keeps per-stage commands and timings in `logs/commands.jsonl`.
 
-A completed run prints `GROND finished successfully` followed by the final hand call, input-versus-final row statistics, publication endpoint R values/GooF, total completed stage time, and the main files to open. The step counter during the run is an estimate; optional gates can make the final completed count smaller than the early denominator. For scripting, add `--json` to print the compact machine-readable payload instead of the human final panel.
+A completed run prints `GROND finished successfully` followed by the final hand call, JANA/PETS-style Born and dynamical row factors, SHELXL publication endpoint factors, total completed stage time, and the main files to open. The step counter during the run is an estimate; optional gates can make the final completed count smaller than the early denominator. For scripting, add `--json` to print the compact machine-readable payload instead of the human final panel.
