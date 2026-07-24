@@ -3794,7 +3794,13 @@ class XDSBlochPort:
             )
         results = [self.finish_row_prediction_plan(plan, dyn_profile_vals[pos]) for pos, plan in enumerate(plans)]
         out = self.pack_prediction_results(indices, results)
-        out["seconds"] = time.perf_counter() - t0_all
+        elapsed = time.perf_counter() - t0_all
+        out["seconds"] = elapsed
+        print(
+            f"predicted {len(indices)}/{len(indices)} rows | "
+            f"wall={elapsed:.2f}s | rate={len(indices) / max(elapsed, 1e-12):.2f}/s",
+            flush=True,
+        )
         return out
 
     def predict_rows_with_row_cache(self, indices, workers=1, chunksize=8):
@@ -3829,24 +3835,12 @@ class XDSBlochPort:
             return ["fork", "forkserver", "spawn"]
 
         results = [None] * len(indices)
-        completed = 0
         parallel_errors: list[str] = []
 
         def commit_attempt(attempt_results):
-            nonlocal completed
             ordered = _ordered_prediction_attempt(indices, attempt_results)
             for pos, r in enumerate(ordered):
                 results[pos] = r
-                completed += 1
-                if completed % 500 == 0 or completed == len(indices):
-                    elapsed = time.perf_counter() - t0
-                    rate = completed / max(elapsed, 1e-12)
-                    eta = (len(indices) - completed) / max(rate, 1e-12)
-                    print(
-                        f"cached predicted {completed}/{len(indices)} rows | "
-                        f"rate={rate:.2f}/s | ETA={eta/60:.1f}m",
-                        flush=True,
-                    )
 
         try:
             if int(workers) > 1 and len(indices) > 1:
@@ -3902,7 +3896,13 @@ class XDSBlochPort:
             self._active_unique_ug = None
 
         out = self.pack_prediction_results(indices, results)
-        out["seconds"] = time.perf_counter() - t0
+        elapsed = time.perf_counter() - t0
+        out["seconds"] = elapsed
+        print(
+            f"cached predicted {len(indices)}/{len(indices)} rows | "
+            f"wall={elapsed:.2f}s | rate={len(indices) / max(elapsed, 1e-12):.2f}/s",
+            flush=True,
+        )
         out["row_plan_cache_status"] = cache.get("status", {})
         if parallel_errors:
             out["row_plan_cache_status"] = dict(out["row_plan_cache_status"], parallel_errors=parallel_errors[:3])
@@ -3954,10 +3954,8 @@ class XDSBlochPort:
         sg_profile_same_branch_continuation_segments = np.ones(len(indices), dtype=int)
         support_hkls = [None] * len(indices)
         position = {int(idx): int(pos) for pos, idx in enumerate(indices)}
-        completed = 0
 
         def accept_result(idx, r):
-            nonlocal completed
             n = position[int(idx)]
             dyn[n] = r["dyn"]
             born[n] = r["born"]
@@ -3985,14 +3983,7 @@ class XDSBlochPort:
                 r["sg_profile_same_branch_continuation_segments"]
             )
             support_hkls[n] = r["support_hkls"]
-            completed += 1
-            if completed % 500 == 0 or completed == len(indices):
-                elapsed = time.perf_counter() - t0
-                rate = completed / max(elapsed, 1e-12)
-                eta = (len(indices) - completed) / max(rate, 1e-12)
-                print(f"predicted {completed}/{len(indices)} rows | rate={rate:.2f}/s | ETA={eta/60:.1f}m", flush=True)
 
-        t0 = time.perf_counter()
         for idx, r in zip(indices, results, strict=True):
             accept_result(int(idx), r)
 
@@ -4020,7 +4011,7 @@ class XDSBlochPort:
             "sg_profile_weight_sum": sg_profile_weight_sum,
             "sg_profile_same_branch_continuation_used": sg_profile_same_branch_continuation_used,
             "sg_profile_same_branch_continuation_segments": sg_profile_same_branch_continuation_segments,
-            "seconds": time.perf_counter() - t0,
+            "seconds": 0.0,
         }
 
     def predict_rows(self, indices=None, workers=1, chunksize=8):
@@ -4079,7 +4070,13 @@ class XDSBlochPort:
             ]
             results = _ordered_prediction_attempt(indices, serial_attempt)
         out = self.pack_prediction_results(indices, results)
-        out["seconds"] = time.perf_counter() - t0
+        elapsed = time.perf_counter() - t0
+        out["seconds"] = elapsed
+        print(
+            f"predicted {len(indices)}/{len(indices)} rows | "
+            f"wall={elapsed:.2f}s | rate={len(indices) / max(elapsed, 1e-12):.2f}/s",
+            flush=True,
+        )
         return out
 
 
