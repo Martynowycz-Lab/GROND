@@ -490,9 +490,10 @@ def test_model_symmetry_merge_preserves_friedel_opposites_until_requested():
 
 def test_safe_fixed_width_factor_keeps_shelxl_fields_in_range():
     assert safe_fixed_width_factor([(1, 0, 0, 100.0, 5.0)]) == 1.0
-    factor = safe_fixed_width_factor([(1, 0, 0, 12000.0, 5.0)])
-    assert 0.0 < factor < 1.0
-    assert abs(12000.0 * factor - 9000.0) < 1e-9
+    positive_factor = safe_fixed_width_factor([(1, 0, 0, 120000.0, 5.0)])
+    negative_factor = safe_fixed_width_factor([(1, 0, 0, -12000.0, 5.0)])
+    assert abs(120000.0 * positive_factor - 90000.0) < 1e-9
+    assert abs(-12000.0 * negative_factor - -9000.0) < 1e-9
 
 
 def test_combined_endpoint_writer_forces_zero_wght_and_ls1(tmp_path: Path):

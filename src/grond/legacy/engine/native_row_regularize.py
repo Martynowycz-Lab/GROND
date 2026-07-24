@@ -63,6 +63,7 @@ try:  # Package import.
     from .endpoint_modulation import modulation_manifest_fields
     from .post_bloch_sigma import fit_uniform_z_rms_sigma_scale, scale_row_sigmas
     from .shelx_diagnostics import parse_shelx_lst_pathologies, shelx_pathology_safe_for_feedback
+    from .shelx_hkl import safe_fixed_width_factor, write_fixed_width_hkl
 except ImportError:  # Direct script execution from this directory.
     from bloch_engine import (
         Config,
@@ -78,6 +79,7 @@ except ImportError:  # Direct script execution from this directory.
     from endpoint_modulation import modulation_manifest_fields
     from post_bloch_sigma import fit_uniform_z_rms_sigma_scale, scale_row_sigmas
     from shelx_diagnostics import parse_shelx_lst_pathologies, shelx_pathology_safe_for_feedback
+    from shelx_hkl import safe_fixed_width_factor, write_fixed_width_hkl
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -506,7 +508,8 @@ def write_hkl(path: Path, rows, float_format: str = "shelx_fixed") -> None:
     if float_format == "wide":
         fmt = "{h:4d}{k:4d}{l:4d}{I:14.4f}{sig:14.4f}\n"
     elif float_format == "shelx_fixed":
-        fmt = "{h:4d}{k:4d}{l:4d}{I:8.2f}{sig:8.2f}\n"
+        write_fixed_width_hkl(path, rows)
+        return
     else:
         raise ValueError(f"unknown hkl format {float_format!r}")
     with path.open("w") as f:
@@ -2096,16 +2099,6 @@ def run_maps(work_dir: Path, stem: str):
                 actual = work_dir / m.group(1)
         maps[label] = {"map": str(actual), "requested_map": str(out_map), "returncode": proc.returncode, "exists": actual.exists()}
     return maps
-
-
-def safe_fixed_width_factor(rows, limit: float = 90000.0) -> float:
-    """Return a global scale that keeps HKLF4 fixed fields from overflowing."""
-    max_abs = 0.0
-    for _h, _k, _l, I, sig in rows:
-        max_abs = max(max_abs, abs(float(I)), abs(float(sig)))
-    if max_abs <= 0.0 or max_abs <= float(limit):
-        return 1.0
-    return float(limit) / max_abs
 
 
 def endpoint_resolution_modulation(data: XDSData, valid, endpoint_b: float):

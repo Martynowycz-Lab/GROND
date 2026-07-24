@@ -37,6 +37,7 @@ try:  # Package import.
         write_endpoint_ins,
     )
     from .post_bloch_sigma import fit_uniform_z_rms_sigma_scale, scale_row_sigmas
+    from .shelx_hkl import safe_fixed_width_factor, write_fixed_width_hkl
 except ImportError:  # Direct script execution from this directory.
     from bloch_engine import parse_model, sha256
     from endpoint_modulation import modulation_manifest_fields
@@ -52,6 +53,7 @@ except ImportError:  # Direct script execution from this directory.
         write_endpoint_ins,
     )
     from post_bloch_sigma import fit_uniform_z_rms_sigma_scale, scale_row_sigmas
+    from shelx_hkl import safe_fixed_width_factor, write_fixed_width_hkl
 
 
 def read_json(path: Path) -> dict:
@@ -417,25 +419,7 @@ def read_hkl(path: Path):
 
 
 def write_hkl(path: Path, rows):
-    max_abs = max((max(abs(float(intensity)), abs(float(sig))) for _, _, _, intensity, sig in rows), default=0.0)
-    if max_abs >= 9999.995:
-        raise ValueError(
-            f"{path} would overflow SHELXL HKLF4 8.2 intensity fields; "
-            "normalize endpoint HKLs before combination"
-        )
-    with path.open("w") as f:
-        for h, k, ell, intensity, sig in rows:
-            f.write(f"{int(h):4d}{int(k):4d}{int(ell):4d}{float(intensity):8.2f}{float(sig):8.2f}\n")
-        f.write(f"{0:4d}{0:4d}{0:4d}{0.0:8.2f}{0.0:8.2f}\n")
-
-
-def safe_fixed_width_factor(rows) -> float:
-    """Return a common multiplier that keeps HKLF4 8.2 fields in range."""
-
-    max_abs = max((max(abs(float(intensity)), abs(float(sig))) for _, _, _, intensity, sig in rows), default=0.0)
-    if max_abs <= 0.0 or max_abs < 9999.995:
-        return 1.0
-    return 9000.0 / max_abs
+    write_fixed_width_hkl(path, rows)
 
 
 def endpoint_rows_and_corrections_from_native(rows: list[dict], lambda_q: float):

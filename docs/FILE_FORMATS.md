@@ -211,6 +211,15 @@ GROND records how the corrected file was produced, including the selected hand,
 thickness band, transform, geometry policy, basis size, and accepted nuisance
 terms.
 
+SHELXL `HKLF 4` endpoints use fixed-width `F8.2` intensity and uncertainty
+fields. GROND applies one common multiplier to both values only when needed to
+fit those fields, and records it as `hkl_safe_factor`. This is a serialization
+scale, not a physical correction: it preserves every I/sigma ratio and, with
+the production `WGHT 0 0` contract, leaves the conventional residuals
+invariant. The formatter validates the asymmetric numeric limits explicitly:
+positive fields may contain one more digit than negative fields because the
+minus sign occupies a character.
+
 The endpoint `manifest.json` also records any post-Bloch uncertainty policy.
 For the default final endpoint this is usually a `post_bloch_sigma` block with
 `policy=uniform_z_rms`, one fitted `sigma_scale`, and train, held-out, and
