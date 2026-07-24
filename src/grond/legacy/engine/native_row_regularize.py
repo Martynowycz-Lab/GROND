@@ -98,7 +98,7 @@ TARGET_MODE_LABELS = {
     "recorded_proxy": "IOBS*PEAK/(100*RLP)",
 }
 DEFAULT_ELECTRON_WAVELENGTH_A = 0.025079
-PREDICTION_CACHE_SCHEMA = 4
+PREDICTION_CACHE_SCHEMA = 5
 
 
 def configure_shelxl_executable(executable: str) -> str:
@@ -1145,6 +1145,38 @@ def prediction_cache_validation_errors(pred: dict, payload: dict, indices) -> li
         basis_size = np.asarray(pred["basis_size"])
         if basis_size.shape != (len(expected_indices),) or np.any(basis_size < 2):
             errors.append("basis_size is incomplete or invalid")
+    if int(payload.get("cache_schema", -1)) >= 5:
+        continuation_used = np.asarray(
+            pred.get("sg_profile_same_branch_continuation_used", [])
+        )
+        continuation_segments = np.asarray(
+            pred.get("sg_profile_same_branch_continuation_segments", [])
+        )
+        if continuation_used.shape != (len(expected_indices),):
+            errors.append("profile continuation usage provenance is incomplete")
+        elif (
+            not np.all(np.isfinite(continuation_used))
+            or np.any(~np.isin(continuation_used, (False, True)))
+        ):
+            errors.append("profile continuation usage provenance is invalid")
+        if continuation_segments.shape != (len(expected_indices),):
+            errors.append("profile continuation segment provenance is incomplete")
+        elif (
+            not np.all(np.isfinite(continuation_segments))
+            or np.any(continuation_segments < 1)
+            or np.any(continuation_segments != np.floor(continuation_segments))
+        ):
+            errors.append("profile continuation segment provenance is invalid")
+        if (
+            continuation_used.shape == (len(expected_indices),)
+            and continuation_segments.shape == (len(expected_indices),)
+        ):
+            continuation_used = continuation_used.astype(bool)
+            continuation_segments = continuation_segments.astype(np.int64)
+            if np.any(continuation_used & (continuation_segments < 2)):
+                errors.append("continued profile rows must record at least two local segments")
+            if np.any(~continuation_used & (continuation_segments != 1)):
+                errors.append("direct profile rows must record exactly one local segment")
     return errors
 
 
@@ -1293,6 +1325,16 @@ def evaluate_trial(data, target, base_sig, pred, indices, masks, nui: Nuisance, 
         "sg_jitter_kernel_points": expand_pred_array("sg_jitter_kernel_points", dtype=int, default=1),
         "sg_profile_points_total": expand_pred_array("sg_profile_points_total", dtype=int, default=0),
         "sg_profile_weight_sum": expand_pred_array("sg_profile_weight_sum"),
+        "sg_profile_same_branch_continuation_used": expand_pred_array(
+            "sg_profile_same_branch_continuation_used",
+            dtype=bool,
+            default=False,
+        ),
+        "sg_profile_same_branch_continuation_segments": expand_pred_array(
+            "sg_profile_same_branch_continuation_segments",
+            dtype=int,
+            default=1,
+        ),
         "sg_residual": expand_pred_array("sg_residual"),
     }
     groups = group_indices(data, nui.group_width_deg, nui.frame_offset)
@@ -2334,7 +2376,10 @@ def write_row_table(path: Path, data: XDSData, target, best_eval, masks):
             "sg_window_inv_A", "sg_window_raw_inv_A", "sg_window_half_frames", "sg_window_clipped",
             "sg_dSg_domega_inv_A_per_deg", "sg_dSg_dframe_inv_A", "sg_jitter_sigma_inv_A",
             "sg_jitter_d_inv_A", "sg_jitter_frame_fraction", "sg_jitter_kernel_points",
-            "sg_profile_points_total", "sg_profile_weight_sum", "max_sg_solve_residual",
+            "sg_profile_points_total", "sg_profile_weight_sum",
+            "sg_profile_same_branch_continuation_used",
+            "sg_profile_same_branch_continuation_segments",
+            "max_sg_solve_residual",
             "split", "row_resolution_factor", "dyn_raw_unmodulated", "dyn_raw", "born_raw", "q_dyn_over_born", "dyn_scaled", "born_scaled",
             "dyn_residual_over_sigma", "born_residual_over_sigma",
         ]
@@ -2342,6 +2387,7 @@ def write_row_table(path: Path, data: XDSData, target, best_eval, masks):
         w.writeheader()
         default_float = np.full(len(target), np.nan, dtype=float)
         default_int = np.zeros(len(target), dtype=int)
+        default_one_int = np.ones(len(target), dtype=int)
         default_bool = np.zeros(len(target), dtype=bool)
         for i in np.where(arrays["valid"])[0]:
             split = "free" if masks["free"][i] else "work"
@@ -2374,6 +2420,12 @@ def write_row_table(path: Path, data: XDSData, target, best_eval, masks):
                 "sg_jitter_kernel_points": int(arrays.get("sg_jitter_kernel_points", default_int)[i]),
                 "sg_profile_points_total": int(arrays.get("sg_profile_points_total", default_int)[i]),
                 "sg_profile_weight_sum": float(arrays.get("sg_profile_weight_sum", default_float)[i]),
+                "sg_profile_same_branch_continuation_used": int(
+                    bool(arrays.get("sg_profile_same_branch_continuation_used", default_bool)[i])
+                ),
+                "sg_profile_same_branch_continuation_segments": int(
+                    arrays.get("sg_profile_same_branch_continuation_segments", default_one_int)[i]
+                ),
                 "max_sg_solve_residual": float(arrays.get("sg_residual", default_float)[i]),
                 "split": split,
                 "row_resolution_factor": float(arrays.get("row_resolution_factor", np.ones(len(target), dtype=float))[i]),
@@ -3413,6 +3465,41 @@ def main():
             "recommendation": "use the neutral B=0 no-EXTI endpoint as final; nonzero endpoint-B branches are diagnostic only because they can improve R factors while distorting ADPs and maps" if neutral_sh else "nonzero endpoint-B was explicitly requested without a neutral B=0 endpoint; treat this output as diagnostic unless independently justified",
         }
     kernel_variance = kernel_variance_terms(best["nuisance"])
+    continuation_used = np.asarray(
+        best["arrays"].get(
+            "sg_profile_same_branch_continuation_used",
+            np.zeros(len(target), dtype=bool),
+        ),
+        dtype=bool,
+    )
+    continuation_segments = np.asarray(
+        best["arrays"].get(
+            "sg_profile_same_branch_continuation_segments",
+            np.ones(len(target), dtype=int),
+        ),
+        dtype=int,
+    )
+    predicted_mask = np.isfinite(np.asarray(best["arrays"].get("dyn_raw", np.full(len(target), np.nan))))
+    valid_continuation_mask = np.asarray(best["arrays"]["valid"], dtype=bool) & continuation_used
+    profile_root_solver_audit = {
+        "contract": "strict_bragg_same_branch_base_profile_v1",
+        "bragg_crossing": "strict_local_bound",
+        "base_profile": "exact_target_strict_step_continuation_on_one_derivative_sign_certified_branch",
+        "active_jitter": "strict_local_bound_or_reject_candidate",
+        "prediction_cache_schema": PREDICTION_CACHE_SCHEMA,
+        "predicted_rows": int(np.count_nonzero(predicted_mask)),
+        "predicted_rows_using_same_branch_continuation": int(
+            np.count_nonzero(predicted_mask & continuation_used)
+        ),
+        "valid_output_rows_using_same_branch_continuation": int(
+            np.count_nonzero(valid_continuation_mask)
+        ),
+        "maximum_strict_local_segments_used": int(
+            np.max(continuation_segments[continuation_used])
+        )
+        if np.any(continuation_used)
+        else 1,
+    }
     summary = {
         "artifacts": native_row_artifact,
         "inputs": {
@@ -3511,6 +3598,7 @@ def main():
                 row_plan_cache=args.row_plan_cache,
             )
         ),
+        "profile_root_solver": profile_root_solver_audit,
         "row_selection": {
             "selected_rows": int(len(indices)),
             "work_rows": int(np.count_nonzero(masks["work"])),

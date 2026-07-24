@@ -90,7 +90,7 @@ COMPUTE_BACKENDS = [
     "jax_mps_real_expm_padded",
 ]
 COMPUTE_BACKEND_HELP = ", ".join(COMPUTE_BACKENDS)
-ROW_PLAN_CACHE_SCHEMA = 2
+ROW_PLAN_CACHE_SCHEMA = 3
 UG_CACHE_SCHEMA = 2
 ELECTRON_COMPTON_WAVELENGTH_A = 0.024263102
 DEFAULT_MAX_DENSE_UG_GIB = 2.0
@@ -528,6 +528,39 @@ def _predict_row_cache_worker(pos):
     return _WORKER_PORT.row_prediction_from_active_cache(int(pos))
 
 
+def _ordered_prediction_attempt(indices, attempt_results):
+    """Validate one complete backend attempt before exposing any row results.
+
+    Multiprocessing iterators can yield valid rows before a worker or context
+    fails.  Keeping those rows would make a later context retry or serial
+    fallback count and apply some rows twice.  This helper is the transaction
+    boundary: an attempt is committed only when it returned every requested row
+    exactly once.
+    """
+
+    requested = np.asarray(indices, dtype=int)
+    position = {int(idx): int(pos) for pos, idx in enumerate(requested)}
+    if len(position) != len(requested):
+        raise ValueError("prediction row indices must be unique")
+    ordered = [None] * len(requested)
+    for idx, result in attempt_results:
+        idx = int(idx)
+        pos = position.get(idx)
+        if pos is None:
+            raise RuntimeError(f"prediction returned unexpected row index {idx}")
+        if ordered[pos] is not None:
+            raise RuntimeError(f"prediction returned duplicate row index {idx}")
+        ordered[pos] = result
+    missing = [int(requested[pos]) for pos, result in enumerate(ordered) if result is None]
+    if missing:
+        preview = ", ".join(str(idx) for idx in missing[:8])
+        raise RuntimeError(
+            f"prediction attempt returned {len(requested) - len(missing)}/{len(requested)} rows; "
+            f"missing row indices: {preview}"
+        )
+    return ordered
+
+
 def row_plan_cache_validation_errors(cache: dict, indices, expected_key: str, expected_meta: dict) -> list[str]:
     """Return reasons a row-plan cache payload cannot be trusted."""
 
@@ -559,6 +592,8 @@ def row_plan_cache_validation_errors(cache: dict, indices, expected_key: str, ex
         "sg_jitter_kernel_points",
         "sg_profile_points_total",
         "sg_profile_weight_sum",
+        "sg_profile_same_branch_continuation_used",
+        "sg_profile_same_branch_continuation_segments",
         "sg_residual_max",
         "dose_delta_b",
     }
@@ -697,6 +732,8 @@ def row_plan_cache_validation_errors(cache: dict, indices, expected_key: str, ex
         "sg_jitter_kernel_points",
         "sg_profile_points_total",
         "sg_profile_weight_sum",
+        "sg_profile_same_branch_continuation_used",
+        "sg_profile_same_branch_continuation_segments",
         "sg_residual_max",
         "dose_delta_b",
     )
@@ -706,6 +743,21 @@ def row_plan_cache_validation_errors(cache: dict, indices, expected_key: str, ex
         values = np.asarray(cache[name])
         if values.shape != (len(indices),) or not np.all(np.isfinite(values)):
             errors.append(f"{name} is incomplete or non-finite")
+    if all(
+        name in cache
+        for name in (
+            "sg_profile_same_branch_continuation_used",
+            "sg_profile_same_branch_continuation_segments",
+        )
+    ):
+        continuation_used = np.asarray(cache["sg_profile_same_branch_continuation_used"], dtype=bool)
+        continuation_segments = np.asarray(cache["sg_profile_same_branch_continuation_segments"], dtype=np.int64)
+        if np.any(continuation_segments < 1):
+            errors.append("profile continuation segment counts must be positive")
+        if np.any(continuation_used & (continuation_segments < 2)):
+            errors.append("profile continuation rows must record at least two strict local segments")
+        if np.any(~continuation_used & (continuation_segments != 1)):
+            errors.append("direct profile rows must record exactly one local segment")
     if "profile_offsets" in cache:
         offsets = np.asarray(cache["profile_offsets"], dtype=np.int64)
         if (
@@ -1743,6 +1795,9 @@ def frozen_kernel_contract(cfg: Config | None = None):
             "profile_width_mode": "fixed unless cfg.sg_window_mode explicitly requests an auditable XDS metadata-derived per-row width",
             "orientation_distribution": "optional target-Sg jitter convolution after the base uniform-Sg grid; disabled by default",
             "basis_sg_recompute": "all basis Sg recomputed at every solved target-Sg angle",
+            "bragg_root_search": "strict local angular bound around the recorded row geometry",
+            "base_profile_root_search": "exact target-Sg continuation through strict local steps on one derivative-sign-certified Ewald branch",
+            "jitter_root_search": "active optional jitter targets retain the strict single local angular bound and reject the candidate if unreachable",
         },
         "hamiltonian": {
             "matrix_convention": convention,
@@ -2509,13 +2564,193 @@ class XDSBlochPort:
             mode = str(jitter_meta.get("sg_jitter_mode", "none") or "none").lower()
             sigma = float(jitter_meta.get("sg_jitter_sigma_inv_A", 0.0) or 0.0)
             if mode == "none" or sigma <= 0.0:
-                raise
+                omega, segments = self.solve_same_branch_sg_profile_target(
+                    hkl,
+                    omega_center,
+                    target_sg,
+                    initial_error=exc,
+                )
+                jitter_meta["sg_profile_same_branch_continuation_used"] = True
+                jitter_meta["sg_profile_same_branch_continuation_segments"] = max(
+                    int(jitter_meta.get("sg_profile_same_branch_continuation_segments", 1)),
+                    int(segments),
+                )
+                return omega
             raise InfeasibleSgJitterProfileError(
                 "infeasible Sg-jitter quadrature target for "
                 f"row {int(row_idx)}, HKL {tuple(int(v) for v in hkl)}: "
                 f"mode={mode}, sigma={sigma:.6g} 1/A, target Sg={float(target_sg):.6g} 1/A; "
                 f"{exc}. Reject this nuisance candidate; the local root-search bound is unchanged."
             ) from exc
+
+    def solve_same_branch_sg_profile_target(
+        self,
+        hkl,
+        omega_center,
+        target_sg,
+        *,
+        initial_error,
+    ):
+        """Continue a required base-profile target along one monotonic Ewald branch.
+
+        ``solve_omega_for_sg`` intentionally keeps a short angular bound because
+        it is also used to validate the Bragg crossing assigned to an observed
+        row.  A configured base Sg profile is different: its exact support can
+        legitimately extend farther in angle when ``dSg/domega`` is small.  We
+        reach that support through strict local solves for successively closer
+        Sg targets, and reject any path that reverses angle or crosses a
+        stationary point.  Active jitter remains subject to the single local
+        bound in ``solve_sg_profile_target`` because it is an optional nuisance
+        candidate rather than required base-profile support.
+        """
+
+        hkl_array = np.asarray([hkl], dtype=int)
+        omega_center = float(omega_center)
+        target_sg = float(target_sg)
+        center_sg = float(self.sg_for_hkls(hkl_array, omega_center)[0])
+        target_delta = target_sg - center_sg
+        derivative0 = float(self.sg_derivative_per_deg(hkl, omega_center))
+        derivative_tol = 1e-12
+        if (
+            not math.isfinite(center_sg)
+            or not math.isfinite(target_delta)
+            or not math.isfinite(derivative0)
+            or abs(derivative0) <= derivative_tol
+        ):
+            raise LocalSgCrossingError(
+                f"cannot continue Sg={target_sg:.6g} for HKL {tuple(int(v) for v in hkl)} "
+                f"from omega={omega_center:.6g}: the local Ewald branch has "
+                f"dSg/domega={derivative0:.6g} 1/A/degree"
+            ) from initial_error
+
+        expected_angle_direction = math.copysign(1.0, target_delta / derivative0)
+        oscillation = abs(float(self.data.oscillation_range))
+        strict_local_bound = max(2.0 * oscillation, min(2.0, 10.0 * oscillation))
+        max_segments = 8
+        max_total_delta_deg = max_segments * strict_local_bound
+        last_reason = str(initial_error)
+        for segments in (2, 4, max_segments):
+            omega = omega_center
+            branch_ok = True
+            for step_index in range(1, segments + 1):
+                intermediate_target = center_sg + target_delta * (step_index / segments)
+                try:
+                    solved = self.solve_omega_for_sg(hkl, omega, intermediate_target)
+                except LocalSgCrossingError as exc:
+                    last_reason = str(exc)
+                    branch_ok = False
+                    break
+                angle_step = float(solved - omega)
+                derivative = float(self.sg_derivative_per_deg(hkl, solved))
+                total_angle_delta = abs(float(solved - omega_center))
+                if (
+                    not math.isfinite(derivative)
+                    or abs(derivative) <= derivative_tol
+                    or derivative * derivative0 <= 0.0
+                    or angle_step * expected_angle_direction < -1e-10
+                    or total_angle_delta > max_total_delta_deg + 1e-10
+                ):
+                    last_reason = (
+                        "continuation would leave the monotonic local Ewald branch: "
+                        f"omega={solved:.6g}, dSg/domega={derivative:.6g} 1/A/degree"
+                    )
+                    branch_ok = False
+                    break
+                interval_error = self.same_branch_interval_error(
+                    hkl,
+                    omega,
+                    solved,
+                    derivative0,
+                    strict_local_bound,
+                )
+                if interval_error:
+                    last_reason = interval_error
+                    branch_ok = False
+                    break
+                omega = float(solved)
+            if branch_ok:
+                final_residual = float(self.sg_for_hkls(hkl_array, omega)[0]) - target_sg
+                if abs(final_residual) <= 1e-9:
+                    return omega, segments
+                last_reason = f"final continuation residual was {final_residual:.6g} 1/A"
+
+        raise LocalSgCrossingError(
+            f"no same-branch Sg={target_sg:.6g} continuation for HKL "
+            f"{tuple(int(v) for v in hkl)} from omega={omega_center:.6g} after "
+            f"up to {max_segments} strict local segments and "
+            f"{max_total_delta_deg:.6g} degrees total; {last_reason}"
+        ) from initial_error
+
+    def same_branch_interval_error(
+        self,
+        hkl,
+        omega_a,
+        omega_b,
+        reference_derivative,
+        strict_local_bound,
+    ):
+        """Return an explanation if one continuation interval is not monotonic.
+
+        Endpoint derivative checks alone can miss a reversal and a second turn
+        inside one successful root bracket.  Sample no more coarsely than the
+        strict solver's 65-point grid, insert every DIALS scan-matrix boundary,
+        and require both finite-difference slopes and midpoint derivatives to
+        retain the reference branch sign.
+        """
+
+        omega_a = float(omega_a)
+        omega_b = float(omega_b)
+        if abs(omega_b - omega_a) <= 1e-12:
+            return None
+        grid_step = 2.0 * float(strict_local_bound) / 64.0
+        sample_count = max(2, int(math.ceil(abs(omega_b - omega_a) / grid_step)) + 1)
+        samples = list(np.linspace(min(omega_a, omega_b), max(omega_a, omega_b), sample_count))
+        scan_matrices = getattr(self.data, "A_at_scan_points", None)
+        starting_angle = getattr(self.data, "starting_angle", None)
+        oscillation = getattr(self.data, "oscillation_range", None)
+        if scan_matrices is not None and starting_angle is not None and oscillation is not None:
+            for index in range(len(scan_matrices)):
+                boundary = float(starting_angle) + index * float(oscillation)
+                if samples[0] < boundary < samples[-1]:
+                    samples.append(boundary)
+        samples = np.asarray(sorted(set(samples)), dtype=float)
+        hkl_array = np.asarray([hkl], dtype=int)
+        values = np.asarray(
+            [float(self.sg_for_hkls(hkl_array, omega)[0]) for omega in samples],
+            dtype=float,
+        )
+        if not np.all(np.isfinite(values)):
+            return "continuation encountered a non-finite Sg value inside a local segment"
+        reference_sign = math.copysign(1.0, float(reference_derivative))
+        slopes = np.diff(values) / np.diff(samples)
+        slope_tol = 1e-12
+        if np.any(~np.isfinite(slopes)) or np.any(reference_sign * slopes <= slope_tol):
+            bad = int(np.where((~np.isfinite(slopes)) | (reference_sign * slopes <= slope_tol))[0][0])
+            return (
+                "continuation reverses or stalls inside a local segment: "
+                f"omega interval {samples[bad]:.6g}..{samples[bad + 1]:.6g}, "
+                f"finite-difference dSg/domega={slopes[bad]:.6g} 1/A/degree"
+            )
+        midpoints = 0.5 * (samples[:-1] + samples[1:])
+        midpoint_derivatives = np.asarray(
+            [float(self.sg_derivative_per_deg(hkl, omega)) for omega in midpoints],
+            dtype=float,
+        )
+        if np.any(~np.isfinite(midpoint_derivatives)) or np.any(
+            reference_sign * midpoint_derivatives <= slope_tol
+        ):
+            bad = int(
+                np.where(
+                    (~np.isfinite(midpoint_derivatives))
+                    | (reference_sign * midpoint_derivatives <= slope_tol)
+                )[0][0]
+            )
+            return (
+                "continuation derivative reverses or stalls inside a local segment: "
+                f"omega={midpoints[bad]:.6g}, "
+                f"dSg/domega={midpoint_derivatives[bad]:.6g} 1/A/degree"
+            )
+        return None
 
     def sg_derivative_per_deg(self, hkl, omega_deg):
         step = 1e-4
@@ -2645,6 +2880,8 @@ class XDSBlochPort:
         if accumulation == "mean":
             base_w = base_w / max(float(np.sum(base_w)), 1e-30)
         sigma, meta = self.row_sg_jitter_sigma(row_idx, hkl)
+        meta["sg_profile_same_branch_continuation_used"] = False
+        meta["sg_profile_same_branch_continuation_segments"] = 1
         mode = str(meta["sg_jitter_mode"]).lower()
         if mode == "none" or sigma <= 0.0:
             meta.update(
@@ -3175,6 +3412,8 @@ class XDSBlochPort:
         sg_jitter_kernel_points = []
         sg_profile_points_total = []
         sg_profile_weight_sum = []
+        sg_profile_same_branch_continuation_used = []
+        sg_profile_same_branch_continuation_segments = []
         sg_residual_max = []
         dose_delta_b = []
         convention = str(getattr(self.cfg, "matrix_convention", "j_minus_i") or "j_minus_i")
@@ -3257,6 +3496,12 @@ class XDSBlochPort:
             sg_jitter_kernel_points.append(int(jitter_meta["sg_jitter_kernel_points"]))
             sg_profile_points_total.append(int(jitter_meta["sg_profile_points_total"]))
             sg_profile_weight_sum.append(float(jitter_meta["sg_profile_weight_sum"]))
+            sg_profile_same_branch_continuation_used.append(
+                bool(jitter_meta["sg_profile_same_branch_continuation_used"])
+            )
+            sg_profile_same_branch_continuation_segments.append(
+                int(jitter_meta["sg_profile_same_branch_continuation_segments"])
+            )
             sg_residual_max.append(float(np.max(np.abs(sg_resid))) if len(sg_resid) else 0.0)
             dose_delta_b.append(float(self.row_delta_b(row_idx)))
             if (pos + 1) % 500 == 0 or pos + 1 == len(indices):
@@ -3296,6 +3541,14 @@ class XDSBlochPort:
             "sg_jitter_kernel_points": np.asarray(sg_jitter_kernel_points, dtype=np.int32),
             "sg_profile_points_total": np.asarray(sg_profile_points_total, dtype=np.int32),
             "sg_profile_weight_sum": np.asarray(sg_profile_weight_sum, dtype=float),
+            "sg_profile_same_branch_continuation_used": np.asarray(
+                sg_profile_same_branch_continuation_used,
+                dtype=bool,
+            ),
+            "sg_profile_same_branch_continuation_segments": np.asarray(
+                sg_profile_same_branch_continuation_segments,
+                dtype=np.int32,
+            ),
             "sg_residual_max": np.asarray(sg_residual_max, dtype=float),
             "dose_delta_b": np.asarray(dose_delta_b, dtype=float),
         }
@@ -3455,6 +3708,12 @@ class XDSBlochPort:
             "sg_jitter_kernel_points": int(cache["sg_jitter_kernel_points"][pos]),
             "sg_profile_points_total": int(cache["sg_profile_points_total"][pos]),
             "sg_profile_weight_sum": float(cache["sg_profile_weight_sum"][pos]),
+            "sg_profile_same_branch_continuation_used": bool(
+                cache["sg_profile_same_branch_continuation_used"][pos]
+            ),
+            "sg_profile_same_branch_continuation_segments": int(
+                cache["sg_profile_same_branch_continuation_segments"][pos]
+            ),
             "dose_delta_b_A2": float(cache["dose_delta_b"][pos]),
             "thickness_model": str(getattr(self.cfg, "thickness_model", "uniform_gradient")),
             "thickness_sigma_frac": float(getattr(self.cfg, "thickness_sigma_frac", 0.0)),
@@ -3570,22 +3829,24 @@ class XDSBlochPort:
             return ["fork", "forkserver", "spawn"]
 
         results = [None] * len(indices)
-        position = {int(idx): int(pos) for pos, idx in enumerate(indices)}
         completed = 0
         parallel_errors: list[str] = []
 
-        def accept(idx, r):
+        def commit_attempt(attempt_results):
             nonlocal completed
-            pos = position.get(int(idx))
-            if pos is None:
-                raise RuntimeError(f"cached prediction returned unexpected row index {idx}")
-            results[pos] = r
-            completed += 1
-            if completed % 500 == 0 or completed == len(indices):
-                elapsed = time.perf_counter() - t0
-                rate = completed / max(elapsed, 1e-12)
-                eta = (len(indices) - completed) / max(rate, 1e-12)
-                print(f"cached predicted {completed}/{len(indices)} rows | rate={rate:.2f}/s | ETA={eta/60:.1f}m", flush=True)
+            ordered = _ordered_prediction_attempt(indices, attempt_results)
+            for pos, r in enumerate(ordered):
+                results[pos] = r
+                completed += 1
+                if completed % 500 == 0 or completed == len(indices):
+                    elapsed = time.perf_counter() - t0
+                    rate = completed / max(elapsed, 1e-12)
+                    eta = (len(indices) - completed) / max(rate, 1e-12)
+                    print(
+                        f"cached predicted {completed}/{len(indices)} rows | "
+                        f"rate={rate:.2f}/s | ETA={eta/60:.1f}m",
+                        flush=True,
+                    )
 
         try:
             if int(workers) > 1 and len(indices) > 1:
@@ -3602,14 +3863,18 @@ class XDSBlochPort:
                             initializer=_init_prediction_worker,
                             initargs=(self,),
                         ) as pool:
-                            for idx, r in pool.imap_unordered(
-                                _predict_row_cache_worker,
-                                list(range(len(indices))),
-                                chunksize=max(1, int(chunksize)),
-                            ):
-                                accept(idx, r)
+                            attempt_results = list(
+                                pool.imap_unordered(
+                                    _predict_row_cache_worker,
+                                    list(range(len(indices))),
+                                    chunksize=max(1, int(chunksize)),
+                                )
+                            )
+                        commit_attempt(attempt_results)
                         ran_parallel = True
                         break
+                    except (LocalSgCrossingError, InfeasibleSgJitterProfileError):
+                        raise
                     except Exception as exc:
                         parallel_errors.append(f"{context_name}: {type(exc).__name__}: {str(exc)[:160]}")
                         ran_parallel = False
@@ -3621,13 +3886,17 @@ class XDSBlochPort:
                             + " | ".join(parallel_errors[:3]),
                             flush=True,
                         )
-                    for pos in range(len(indices)):
-                        idx, r = self.row_prediction_from_cache(cache, pos, unique_ug)
-                        accept(idx, r)
+                    attempt_results = [
+                        self.row_prediction_from_cache(cache, pos, unique_ug)
+                        for pos in range(len(indices))
+                    ]
+                    commit_attempt(attempt_results)
             else:
-                for pos in range(len(indices)):
-                    idx, r = self.row_prediction_from_cache(cache, pos, unique_ug)
-                    accept(idx, r)
+                attempt_results = [
+                    self.row_prediction_from_cache(cache, pos, unique_ug)
+                    for pos in range(len(indices))
+                ]
+                commit_attempt(attempt_results)
         finally:
             self._active_row_plan_cache = None
             self._active_unique_ug = None
@@ -3681,6 +3950,8 @@ class XDSBlochPort:
         sg_jitter_kernel_points = np.ones(len(indices), dtype=int)
         sg_profile_points_total = np.zeros(len(indices), dtype=int)
         sg_profile_weight_sum = np.zeros(len(indices), dtype=float)
+        sg_profile_same_branch_continuation_used = np.zeros(len(indices), dtype=bool)
+        sg_profile_same_branch_continuation_segments = np.ones(len(indices), dtype=int)
         support_hkls = [None] * len(indices)
         position = {int(idx): int(pos) for pos, idx in enumerate(indices)}
         completed = 0
@@ -3707,6 +3978,12 @@ class XDSBlochPort:
             sg_jitter_kernel_points[n] = int(r["sg_jitter_kernel_points"])
             sg_profile_points_total[n] = int(r["sg_profile_points_total"])
             sg_profile_weight_sum[n] = float(r["sg_profile_weight_sum"])
+            sg_profile_same_branch_continuation_used[n] = bool(
+                r["sg_profile_same_branch_continuation_used"]
+            )
+            sg_profile_same_branch_continuation_segments[n] = int(
+                r["sg_profile_same_branch_continuation_segments"]
+            )
             support_hkls[n] = r["support_hkls"]
             completed += 1
             if completed % 500 == 0 or completed == len(indices):
@@ -3741,6 +4018,8 @@ class XDSBlochPort:
             "sg_jitter_kernel_points": sg_jitter_kernel_points,
             "sg_profile_points_total": sg_profile_points_total,
             "sg_profile_weight_sum": sg_profile_weight_sum,
+            "sg_profile_same_branch_continuation_used": sg_profile_same_branch_continuation_used,
+            "sg_profile_same_branch_continuation_segments": sg_profile_same_branch_continuation_segments,
             "seconds": time.perf_counter() - t0,
         }
 
@@ -3755,59 +4034,7 @@ class XDSBlochPort:
             if int(workers) > 1:
                 print("JAX backend requested; ignoring multiprocessing workers and batching in one process.", flush=True)
             return self.predict_rows_jax_batched(indices, chunksize=chunksize)
-        dyn = np.zeros(len(indices), dtype=float)
-        born = np.zeros(len(indices), dtype=float)
-        basis_size = np.zeros(len(indices), dtype=int)
-        sg_resid = np.zeros(len(indices), dtype=float)
-        center_sg = np.zeros(len(indices), dtype=float)
-        omega_bragg = np.zeros(len(indices), dtype=float)
-        omega_delta = np.zeros(len(indices), dtype=float)
-        sg_window = np.zeros(len(indices), dtype=float)
-        sg_domega = np.zeros(len(indices), dtype=float)
-        sg_dframe = np.zeros(len(indices), dtype=float)
-        sg_window_raw = np.zeros(len(indices), dtype=float)
-        sg_window_half_frames = np.full(len(indices), np.nan, dtype=float)
-        sg_window_clipped = np.zeros(len(indices), dtype=bool)
-        sg_jitter_sigma = np.zeros(len(indices), dtype=float)
-        sg_jitter_d_inv = np.full(len(indices), np.nan, dtype=float)
-        sg_jitter_frame_fraction = np.full(len(indices), np.nan, dtype=float)
-        sg_jitter_kernel_points = np.ones(len(indices), dtype=int)
-        sg_profile_points_total = np.zeros(len(indices), dtype=int)
-        sg_profile_weight_sum = np.zeros(len(indices), dtype=float)
         t0 = time.perf_counter()
-        support_hkls = [None] * len(indices)
-        position = {int(idx): int(pos) for pos, idx in enumerate(indices)}
-        completed = 0
-
-        def accept_result(idx, r):
-            nonlocal completed
-            n = position[int(idx)]
-            dyn[n] = r["dyn"]
-            born[n] = r["born"]
-            basis_size[n] = r["basis_size"]
-            sg_resid[n] = r["max_sg_solve_residual"]
-            center_sg[n] = r["center_sg_inv_A"]
-            omega_bragg[n] = r["omega_bragg_deg"]
-            omega_delta[n] = r["omega_bragg_minus_center_deg"]
-            sg_window[n] = r["sg_window_inv_A"]
-            sg_domega[n] = r["sg_dSg_domega_inv_A_per_deg"]
-            sg_dframe[n] = r["sg_dSg_dframe_inv_A"]
-            sg_window_raw[n] = r["sg_window_raw_inv_A"]
-            sg_window_half_frames[n] = r["sg_window_half_frames"]
-            sg_window_clipped[n] = bool(r["sg_window_clipped"])
-            sg_jitter_sigma[n] = r["sg_jitter_sigma_inv_A"]
-            sg_jitter_d_inv[n] = r["sg_jitter_d_inv_A"]
-            sg_jitter_frame_fraction[n] = r["sg_jitter_frame_fraction"]
-            sg_jitter_kernel_points[n] = int(r["sg_jitter_kernel_points"])
-            sg_profile_points_total[n] = int(r["sg_profile_points_total"])
-            sg_profile_weight_sum[n] = float(r["sg_profile_weight_sum"])
-            support_hkls[n] = r["support_hkls"]
-            completed += 1
-            if completed % 500 == 0 or completed == len(indices):
-                elapsed = time.perf_counter() - t0
-                rate = completed / max(elapsed, 1e-12)
-                eta = (len(indices) - completed) / max(rate, 1e-12)
-                print(f"predicted {completed}/{len(indices)} rows | rate={rate:.2f}/s | ETA={eta/60:.1f}m", flush=True)
 
         def pool_context_names():
             import platform
@@ -3819,12 +4046,8 @@ class XDSBlochPort:
             # repeated Bloch predictions on large servers.
             return ["fork", "forkserver", "spawn"]
 
-        def run_serial():
-            for idx in indices:
-                accept_result(int(idx), self.row_prediction(int(idx)))
-
+        results = None
         if int(workers) > 1 and len(indices) > 1:
-            ran_parallel = False
             for context_name in pool_context_names():
                 try:
                     ctx = multiprocessing.get_context(context_name)
@@ -3836,47 +4059,28 @@ class XDSBlochPort:
                         initializer=_init_prediction_worker,
                         initargs=(self,),
                     ) as pool:
-                        for idx, r in pool.imap_unordered(
-                            _predict_row_worker,
-                            [int(v) for v in indices],
-                            chunksize=max(1, int(chunksize)),
-                        ):
-                            accept_result(idx, r)
-                    ran_parallel = True
+                        attempt_results = list(
+                            pool.imap_unordered(
+                                _predict_row_worker,
+                                [int(v) for v in indices],
+                                chunksize=max(1, int(chunksize)),
+                            )
+                        )
+                    results = _ordered_prediction_attempt(indices, attempt_results)
                     break
-                except InfeasibleSgJitterProfileError:
+                except (LocalSgCrossingError, InfeasibleSgJitterProfileError):
                     raise
                 except Exception:
-                    ran_parallel = False
                     continue
-            if not ran_parallel:
-                run_serial()
-        else:
-            run_serial()
-        return {
-            "indices": np.asarray(indices, dtype=int),
-            "dyn": dyn,
-            "born": born,
-            "basis_size": basis_size,
-            "sg_residual": sg_resid,
-            "center_sg": center_sg,
-            "omega_bragg": omega_bragg,
-            "omega_delta": omega_delta,
-            "sg_window": sg_window,
-            "sg_dSg_domega": sg_domega,
-            "sg_dSg_dframe": sg_dframe,
-            "sg_window_raw": sg_window_raw,
-            "sg_window_half_frames": sg_window_half_frames,
-            "sg_window_clipped": sg_window_clipped,
-            "sg_jitter_sigma": sg_jitter_sigma,
-            "sg_jitter_d_inv": sg_jitter_d_inv,
-            "sg_jitter_frame_fraction": sg_jitter_frame_fraction,
-            "sg_jitter_kernel_points": sg_jitter_kernel_points,
-            "sg_profile_points_total": sg_profile_points_total,
-            "sg_profile_weight_sum": sg_profile_weight_sum,
-            "support_hkls": support_hkls,
-            "seconds": time.perf_counter() - t0,
-        }
+        if results is None:
+            serial_attempt = [
+                (int(idx), self.row_prediction(int(idx)))
+                for idx in indices
+            ]
+            results = _ordered_prediction_attempt(indices, serial_attempt)
+        out = self.pack_prediction_results(indices, results)
+        out["seconds"] = time.perf_counter() - t0
+        return out
 
 
 def effective_sigma(data: XDSData, cfg: Config):
@@ -4669,6 +4873,8 @@ def main():
     full_sg_jitter_kernel_points = np.zeros(len(data_all.iobs), dtype=int)
     full_sg_profile_points_total = np.zeros(len(data_all.iobs), dtype=int)
     full_sg_profile_weight_sum = np.full(len(data_all.iobs), np.nan, dtype=float)
+    full_sg_profile_same_branch_continuation_used = np.zeros(len(data_all.iobs), dtype=bool)
+    full_sg_profile_same_branch_continuation_segments = np.ones(len(data_all.iobs), dtype=int)
     full_dyn[pred_subset["indices"]] = pred_subset["dyn"]
     full_born[pred_subset["indices"]] = pred_subset["born"]
     full_basis_size[pred_subset["indices"]] = pred_subset["basis_size"]
@@ -4688,6 +4894,12 @@ def main():
     full_sg_jitter_kernel_points[pred_subset["indices"]] = pred_subset["sg_jitter_kernel_points"]
     full_sg_profile_points_total[pred_subset["indices"]] = pred_subset["sg_profile_points_total"]
     full_sg_profile_weight_sum[pred_subset["indices"]] = pred_subset["sg_profile_weight_sum"]
+    full_sg_profile_same_branch_continuation_used[pred_subset["indices"]] = pred_subset[
+        "sg_profile_same_branch_continuation_used"
+    ]
+    full_sg_profile_same_branch_continuation_segments[pred_subset["indices"]] = pred_subset[
+        "sg_profile_same_branch_continuation_segments"
+    ]
     support_by_idx = {
         int(idx): basis
         for idx, basis in zip(pred_subset["indices"], pred_subset["support_hkls"], strict=True)
@@ -4753,6 +4965,8 @@ def main():
                     "sg_jitter_kernel_points",
                     "sg_profile_points_total",
                     "sg_profile_weight_sum",
+                    "sg_profile_same_branch_continuation_used",
+                    "sg_profile_same_branch_continuation_segments",
                     "group",
                     "basis_size",
                     "support_hkls_json",
@@ -4808,6 +5022,8 @@ def main():
                         int(full_sg_jitter_kernel_points[idx]),
                         int(full_sg_profile_points_total[idx]),
                         float(full_sg_profile_weight_sum[idx]),
+                        int(full_sg_profile_same_branch_continuation_used[idx]),
+                        int(full_sg_profile_same_branch_continuation_segments[idx]),
                         g,
                         int(full_basis_size[idx]),
                         json.dumps(support_by_idx.get(int(idx), []), separators=(",", ":")),
@@ -4882,6 +5098,20 @@ def main():
             "sg_jitter_sigma_max_used": float(np.nanmax(pred_subset["sg_jitter_sigma"])) if len(indices) else float("nan"),
             "sg_profile_points_median_total": float(np.median(pred_subset["sg_profile_points_total"])) if len(indices) else 0.0,
             "sg_profile_weight_sum_median": float(np.nanmedian(pred_subset["sg_profile_weight_sum"])) if len(indices) else 0.0,
+            "sg_profile_same_branch_continuation_rows": int(
+                np.count_nonzero(pred_subset["sg_profile_same_branch_continuation_used"])
+            )
+            if len(indices)
+            else 0,
+            "sg_profile_same_branch_continuation_max_segments": int(
+                np.max(
+                    pred_subset["sg_profile_same_branch_continuation_segments"][
+                        pred_subset["sg_profile_same_branch_continuation_used"]
+                    ]
+                )
+            )
+            if len(indices) and np.any(pred_subset["sg_profile_same_branch_continuation_used"])
+            else 1,
             "median_abs_dSg_dframe": float(np.nanmedian(np.abs(pred_subset["sg_dSg_dframe"]))) if len(indices) else float("nan"),
             "median_dyn_over_born": float(np.nanmedian(full_dyn[valid] / np.clip(full_born[valid], 1e-30, None))) if np.any(valid) else float("nan"),
         },

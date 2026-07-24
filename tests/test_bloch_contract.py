@@ -507,6 +507,8 @@ def test_row_plan_cache_validation_rejects_stale_metadata():
         "sg_jitter_kernel_points": np.ones(3, dtype=np.int32),
         "sg_profile_points_total": np.ones(3, dtype=np.int32),
         "sg_profile_weight_sum": np.ones(3, dtype=float),
+        "sg_profile_same_branch_continuation_used": np.asarray([False, True, False]),
+        "sg_profile_same_branch_continuation_segments": np.asarray([1, 2, 1], dtype=np.int32),
         "sg_residual_max": np.zeros(3, dtype=float),
         "dose_delta_b": np.zeros(3, dtype=float),
     }
@@ -539,6 +541,11 @@ def test_row_plan_cache_validation_rejects_stale_metadata():
     wrong_diff_shape["diff_offsets"] = np.asarray([0, 5, 9, 12], dtype=np.int64)
     errors = row_plan_cache_validation_errors(wrong_diff_shape, indices, "expected", meta)
     assert "difference offsets do not contain one index per basis-matrix entry" in errors
+
+    invalid_continuation = dict(valid_cache)
+    invalid_continuation["sg_profile_same_branch_continuation_segments"] = np.ones(3, dtype=np.int32)
+    errors = row_plan_cache_validation_errors(invalid_continuation, indices, "expected", meta)
+    assert "profile continuation rows must record at least two strict local segments" in errors
 
 
 def test_cached_static_hamiltonian_uses_frozen_dose_delta_b():
