@@ -251,6 +251,75 @@ def test_scan_varying_a_matrices_are_indexed_relative_to_starting_frame(tmp_path
     np.testing.assert_allclose(data.A_for_omega(data.starting_angle + data.oscillation_range), second)
 
 
+def test_relative_scan_varying_a_sidecar_cannot_be_hijacked_by_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    rows_path, metadata_path = write_template(tmp_path / "rows.csv", tmp_path / "rows_metadata.json")
+    rows = read_row_table(rows_path)
+    metadata = load_row_metadata(metadata_path)
+    expected = np.diag([0.10, 0.11, 0.12])
+    metadata["geometry"]["A_scan_points"] = [expected.tolist()]
+    hkl = write_xds_compatibility_dir(rows, metadata, tmp_path / "dataset")
+
+    hostile_cwd = tmp_path / "hostile_cwd"
+    hostile_cwd.mkdir()
+    (hostile_cwd / "GROND_A_AT_SCAN_POINTS.txt").write_text(
+        "0.2 0 0 0 0.2 0 0 0 0.2\n"
+    )
+    monkeypatch.chdir(hostile_cwd)
+
+    data = XDSData(hkl)
+
+    assert data.a_scan_points_path == (hkl.parent / "GROND_A_AT_SCAN_POINTS.txt").resolve()
+    np.testing.assert_allclose(data.A_at_scan_points, expected[None, :, :])
+
+
+def test_missing_relative_scan_varying_a_sidecar_does_not_fall_back_to_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    rows_path, metadata_path = write_template(tmp_path / "rows.csv", tmp_path / "rows_metadata.json")
+    rows = read_row_table(rows_path)
+    metadata = load_row_metadata(metadata_path)
+    metadata["geometry"]["A_scan_points"] = [np.eye(3).tolist()]
+    hkl = write_xds_compatibility_dir(rows, metadata, tmp_path / "dataset")
+    (hkl.parent / "GROND_A_AT_SCAN_POINTS.txt").unlink()
+
+    hostile_cwd = tmp_path / "hostile_cwd"
+    hostile_cwd.mkdir()
+    (hostile_cwd / "GROND_A_AT_SCAN_POINTS.txt").write_text(
+        "0.2 0 0 0 0.2 0 0 0 0.2\n"
+    )
+    monkeypatch.chdir(hostile_cwd)
+
+    with pytest.raises(FileNotFoundError) as exc_info:
+        XDSData(hkl)
+
+    assert exc_info.value.filename == str(hkl.parent / "GROND_A_AT_SCAN_POINTS.txt")
+
+
+def test_absolute_scan_varying_a_sidecar_is_preserved(tmp_path: Path):
+    rows_path, metadata_path = write_template(tmp_path / "rows.csv", tmp_path / "rows_metadata.json")
+    rows = read_row_table(rows_path)
+    metadata = load_row_metadata(metadata_path)
+    metadata["geometry"]["A_scan_points"] = [np.eye(3).tolist()]
+    hkl = write_xds_compatibility_dir(rows, metadata, tmp_path / "dataset")
+    external_sidecar = tmp_path / "external" / "absolute_scan_points.txt"
+    external_sidecar.parent.mkdir()
+    expected = np.diag([0.20, 0.21, 0.22])
+    external_sidecar.write_text(" ".join(str(value) for value in expected.reshape(-1)) + "\n")
+    hkl.write_text(
+        hkl.read_text().replace(
+            "!DIALS_A_AT_SCAN_POINTS_FILE= GROND_A_AT_SCAN_POINTS.txt",
+            f"!DIALS_A_AT_SCAN_POINTS_FILE= {external_sidecar}",
+        )
+    )
+
+    data = XDSData(hkl)
+
+    assert data.a_scan_points_path == external_sidecar.resolve()
+    np.testing.assert_allclose(data.A_at_scan_points, expected[None, :, :])
+
+
 @pytest.mark.parametrize(
     ("contents", "message"),
     [

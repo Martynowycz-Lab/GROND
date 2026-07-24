@@ -2028,7 +2028,7 @@ class XDSData:
         scan_a_file = self.header.get("DIALS_A_AT_SCAN_POINTS_FILE", "").split()
         if scan_a_file:
             p = Path(scan_a_file[0])
-            if not p.exists() and not p.is_absolute():
+            if not p.is_absolute():
                 p = self.path.parent / p
             self.a_scan_points_path = p.resolve()
             mats = []
