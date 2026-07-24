@@ -803,9 +803,19 @@ def test_multi_post_feedback_hand_diagnostic_pins_final_contract_and_warns_witho
             stats = {
                 "status": "ok",
                 "row_join": {"n_best": 4, "n_other": 4, "n_joined": 4},
-                "all": {"n": 4, "delta_chi2_other_minus_best": sign * 25.0, "paired_row_t_delta_chi2": sign * 5.0},
+                "all": {
+                    "n": 4,
+                    "delta_chi2_other_minus_best": sign * 25.0,
+                    "paired_row_t_delta_chi2": sign * 5.0,
+                    "klar_palatinus_adjusted_hand_z": {"z": -sign * 999.0},
+                },
                 "work": {"n": 2, "delta_chi2_other_minus_best": sign * 16.0, "paired_row_t_delta_chi2": sign * 4.0},
-                "free": {"n": 2, "delta_chi2_other_minus_best": sign * 9.0, "paired_row_t_delta_chi2": sign * 3.0},
+                "free": {
+                    "n": 2,
+                    "delta_chi2_other_minus_best": sign * 9.0,
+                    "paired_row_t_delta_chi2": sign * 3.0,
+                    "klar_palatinus_adjusted_hand_z": {"z": -sign * 999.0},
+                },
             }
             out.parent.mkdir(parents=True, exist_ok=True)
             out.write_text(json.dumps(stats) + "\n")

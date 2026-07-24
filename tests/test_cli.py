@@ -2162,8 +2162,16 @@ def test_post_feedback_hand_diagnostic_gate_requires_signed_support():
     args = argparse.Namespace(hand_min_z_all=2.0, hand_min_z_free=0.5, hand_min_free_rows=10)
     ok, reasons = cli.hand_diagnostic_supports_other(
         {
-            "all": {"n": 100, "paired_row_t_delta_chi2": -2.4},
-            "free": {"n": 10, "paired_row_t_delta_chi2": -0.8},
+            "all": {
+                "n": 100,
+                "paired_row_t_delta_chi2": -2.4,
+                "klar_palatinus_adjusted_hand_z": {"z": 999.0},
+            },
+            "free": {
+                "n": 10,
+                "paired_row_t_delta_chi2": -0.8,
+                "klar_palatinus_adjusted_hand_z": {"z": 999.0},
+            },
         },
         args,
     )
@@ -2172,8 +2180,16 @@ def test_post_feedback_hand_diagnostic_gate_requires_signed_support():
 
     weak, weak_reasons = cli.hand_diagnostic_supports_other(
         {
-            "all": {"n": 100, "paired_row_t_delta_chi2": -0.1},
-            "free": {"n": 10, "paired_row_t_delta_chi2": 0.2},
+            "all": {
+                "n": 100,
+                "paired_row_t_delta_chi2": -0.1,
+                "klar_palatinus_adjusted_hand_z": {"z": -999.0},
+            },
+            "free": {
+                "n": 10,
+                "paired_row_t_delta_chi2": 0.2,
+                "klar_palatinus_adjusted_hand_z": {"z": -999.0},
+            },
         },
         args,
     )

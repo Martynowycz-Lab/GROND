@@ -170,9 +170,13 @@ def test_klar_palatinus_adjusted_hand_z_has_expected_sign_and_split_scope(tmp_pa
 
     assert all_z["status"] == "ok"
     assert all_z["n"] == 4
+    assert all_z["method_version"] == "2"
+    assert all_z["tie_policy"] == "neutral_half_credit_v1"
     assert all_z["k_selected_lower_abs_intensity_residual"] == 3
+    assert all_z["k_effective_selected_wins_plus_half_ties"] == 3.0
     assert math.isclose(all_z["w"], expected_w)
     assert math.isclose(all_z["z"], expected_z)
+    assert math.isclose(all_z["z_legacy_strict"], expected_z)
     assert all_z["probability_phi_z"] > 0.5
     assert work_z["n"] == 2
     assert work_z["z"] > 0.0
@@ -197,7 +201,70 @@ def test_klar_palatinus_adjusted_hand_z_reports_exact_residual_ties(tmp_path: Pa
     assert adjusted["n"] == 1
     assert adjusted["k_selected_lower_abs_intensity_residual"] == 0
     assert adjusted["n_tied_abs_intensity_residual"] == 1
-    assert adjusted["z"] < 0.0
+    assert adjusted["k_effective_selected_wins_plus_half_ties"] == 0.5
+    assert adjusted["z"] == 0.0
+    assert adjusted["probability_phi_z"] == 0.5
+    assert adjusted["z_legacy_strict"] < 0.0
+
+
+def test_klar_palatinus_exact_ties_are_neutral_and_swap_antisymmetric(tmp_path: Path):
+    best = tmp_path / "best.csv"
+    other = tmp_path / "other.csv"
+    targets = [0.0, 0.0, 0.0, 0.0, 0.0]
+    best_predictions = [0.0, 0.0, 2.0, 1.0, -1.0]
+    other_predictions = [2.0, 2.0, 0.0, -1.0, 1.0]
+    sigmas = [1.0] * 5
+    write_intensity_rows(best, targets, best_predictions, sigmas)
+    write_intensity_rows(other, targets, other_predictions, sigmas)
+
+    selected = run_diagnostic(best, other, tmp_path / "selected.json")
+    swapped = run_diagnostic(other, best, tmp_path / "swapped.json")
+    selected_z = selected["all"]["klar_palatinus_adjusted_hand_z"]
+    swapped_z = swapped["all"]["klar_palatinus_adjusted_hand_z"]
+
+    assert selected_z["n_tied_abs_intensity_residual"] == 2
+    assert selected_z["k_selected_lower_abs_intensity_residual"] == 2
+    assert selected_z["k_effective_selected_wins_plus_half_ties"] == 3.0
+    assert selected_z["z"] > 0.0
+    assert math.isclose(swapped_z["z"], -selected_z["z"])
+    assert swapped_z["probability_phi_z"] == selected_z["probability_one_sided_other_hand"]
+    assert selected_z["z_legacy_strict"] < 0.0
+    assert swapped_z["z_legacy_strict"] < 0.0
+
+
+def test_klar_palatinus_all_ties_and_born_ties_are_neutral(tmp_path: Path):
+    best = tmp_path / "best.csv"
+    other = tmp_path / "other.csv"
+    targets = [0.0, 0.0, 0.0]
+    sigmas = [1.0, 1.0, 1.0]
+    write_intensity_rows(
+        best,
+        targets,
+        [1.0, -1.0, 2.0],
+        sigmas,
+        born_predictions=[3.0, -3.0, 4.0],
+    )
+    write_intensity_rows(
+        other,
+        targets,
+        [-1.0, 1.0, -2.0],
+        sigmas,
+        born_predictions=[-3.0, 3.0, -4.0],
+    )
+
+    for prediction_column in ("dyn_scaled", "born_scaled"):
+        payload = run_diagnostic(
+            best,
+            other,
+            tmp_path / f"{prediction_column}.json",
+            prediction_column=prediction_column,
+        )
+        adjusted = payload["all"]["klar_palatinus_adjusted_hand_z"]
+        assert adjusted["n_tied_abs_intensity_residual"] == 3
+        assert adjusted["k_effective_selected_wins_plus_half_ties"] == 1.5
+        assert adjusted["z"] == 0.0
+        assert adjusted["probability_phi_z"] == 0.5
+        assert adjusted["z_legacy_strict"] < 0.0
 
 
 def test_klar_palatinus_adjusted_hand_z_sigma_adjustment_follows_declared_formula(tmp_path: Path):

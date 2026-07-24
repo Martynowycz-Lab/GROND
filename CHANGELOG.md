@@ -4,6 +4,8 @@ This file records user-visible changes to the installable package. Version `0.2.
 
 ## 0.2.2 (unreleased)
 
+The Klar--Palatinus adjusted reflection-count hand diagnostic now treats exact equal-residual rows as neutral half wins. This versioned finite-precision extension restores exact sign antisymmetry when the selected and other hand are swapped. Diagnostic JSON retains the former strict-lower-residual statistic and probabilities as explicitly labeled legacy fields. Automatic hand promotion remains controlled only by the separately reported paired-row t-style contrast and is unchanged.
+
 Multi-dataset `push-endpoint` can now take one immutable policy-selected `native_dyn_calc.csv` contract per dataset. The continuation verifies every recorded row index, transformed HKL, target intensity, raw XDS sigma, and d spacing against the live XDS input, then restores the table's declared dataset role plus raw-row and endpoint weights rather than falling back to an older checkpoint policy. It records content hashes in each cycle and refuses partial mappings, stale input, duplicate rows, inconsistent policy annotations, or a `max-rows` truncation. This preserves a promoted multi-dataset support exactly through later Bloch/LS1 controls instead of silently recreating membership from raw eligibility filters; compact-scale selection remains a separate explicit replay after the selected safe model.
 
 Every successful multi-dataset Bloch/LS1 continuation now finishes with one fixed-nuisance, no-extra-LS1 Bloch row recomputation from the accepted shared endpoint model. Final row metrics, maps, and compact-scale replays therefore no longer risk pairing a cycle's input-model predictions with the coordinate/ADP-updated SHELXL output model.

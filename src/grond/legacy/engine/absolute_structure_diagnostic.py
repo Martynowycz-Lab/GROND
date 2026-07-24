@@ -23,6 +23,10 @@ KEY_COLUMNS = ("row_index", "h", "k", "l")
 REQUIRED_COLUMNS = KEY_COLUMNS
 BASE_PREDICTION_COLUMNS = ("target_I", "sigma_eff")
 SUPPORTED_PREDICTION_COLUMNS = ("dyn_scaled", "born_scaled")
+ADJUSTED_HAND_METHOD = "klar_palatinus_adjusted_reflection_count_hand_z"
+ADJUSTED_HAND_METHOD_VERSION = "2"
+ADJUSTED_HAND_TIE_POLICY = "neutral_half_credit_v1"
+ADJUSTED_HAND_LEGACY_TIE_POLICY = "strict_lower_residual_v0"
 KLAR_PALATINUS_REFERENCE = {
     "citation": (
         "Klar, P. B. et al. Accurate structure models and absolute configuration determination using "
@@ -31,6 +35,18 @@ KLAR_PALATINUS_REFERENCE = {
     ),
     "doi": "10.1038/s41557-023-01186-1",
 }
+
+
+def adjusted_hand_method_metadata(prediction_column: str) -> dict[str, str]:
+    """Return versioned adjusted-hand method and exact-tie semantics."""
+
+    return {
+        "method": ADJUSTED_HAND_METHOD,
+        "method_version": ADJUSTED_HAND_METHOD_VERSION,
+        "tie_policy": ADJUSTED_HAND_TIE_POLICY,
+        "legacy_tie_policy": ADJUSTED_HAND_LEGACY_TIE_POLICY,
+        "prediction_column": prediction_column,
+    }
 
 
 def finite_float(value: object) -> float:
@@ -135,9 +151,8 @@ def klar_palatinus_adjusted_hand_z(
     """
 
     base: dict[str, Any] = {
-        "method": "klar_palatinus_adjusted_reflection_count_hand_z",
+        **adjusted_hand_method_metadata(prediction_column),
         "n_joined_candidates": int(len(rows)),
-        "prediction_column": prediction_column,
         "required_columns": [*BASE_PREDICTION_COLUMNS, prediction_column],
     }
     if missing["selected"] or missing["other"]:
@@ -230,19 +245,28 @@ def klar_palatinus_adjusted_hand_z(
         w += 1.0 - normal_cdf(separation)
 
     denominator_variance = float(n - w)
-    z = float((2 * k - n) / math.sqrt(denominator_variance))
+    k_effective = float(k + 0.5 * tied)
+    z = float((2.0 * k_effective - n) / math.sqrt(denominator_variance))
+    z_legacy_strict = float((2 * k - n) / math.sqrt(denominator_variance))
     probability = normal_cdf(z)
+    probability_legacy_strict = normal_cdf(z_legacy_strict)
     return {
         **base,
         "status": "ok",
         "n": int(n),
         "k_selected_lower_abs_intensity_residual": int(k),
         "n_tied_abs_intensity_residual": int(tied),
+        "k_effective_selected_wins_plus_half_ties": k_effective,
         "w": float(w),
         "n_minus_w": denominator_variance,
         "z": z,
         "probability_phi_z": probability,
         "probability_one_sided_other_hand": float(normal_cdf(-z)),
+        "z_legacy_strict": z_legacy_strict,
+        "probability_phi_z_legacy_strict": probability_legacy_strict,
+        "probability_one_sided_other_hand_legacy_strict": float(
+            normal_cdf(-z_legacy_strict)
+        ),
         "dataset_labels": sorted(datasets),
         "dataset_scope": "single_labeled_dataset" if datasets else "unlabeled_table",
         "exclusions": exclusions,
@@ -370,17 +394,29 @@ def main() -> None:
             "all": {
                 "label": "all",
                 "n": 0,
-                "klar_palatinus_adjusted_hand_z": {"status": "missing_input_files", "n": 0},
+                "klar_palatinus_adjusted_hand_z": {
+                    **adjusted_hand_method_metadata(args.prediction_column),
+                    "status": "missing_input_files",
+                    "n": 0,
+                },
             },
             "work": {
                 "label": "work",
                 "n": 0,
-                "klar_palatinus_adjusted_hand_z": {"status": "missing_input_files", "n": 0},
+                "klar_palatinus_adjusted_hand_z": {
+                    **adjusted_hand_method_metadata(args.prediction_column),
+                    "status": "missing_input_files",
+                    "n": 0,
+                },
             },
             "free": {
                 "label": "free",
                 "n": 0,
-                "klar_palatinus_adjusted_hand_z": {"status": "missing_input_files", "n": 0},
+                "klar_palatinus_adjusted_hand_z": {
+                    **adjusted_hand_method_metadata(args.prediction_column),
+                    "status": "missing_input_files",
+                    "n": 0,
+                },
             },
         }
         out_path.write_text(json.dumps(out, indent=2, allow_nan=True) + "\n")
@@ -431,10 +467,17 @@ def main() -> None:
                     "number of joined valid rows where |target_I-prediction_selected| is strictly smaller "
                     "than |target_I-prediction_other| for prediction_column"
                 ),
+                "k_effective": "k + 0.5 times the number of exact residual ties",
                 "w": "sum(1-Phi(|prediction_selected-prediction_other|/(2*sigma_eff)))",
-                "z": "(2*k-N)/sqrt(N-w)",
+                "z": "(2*k_effective-N)/sqrt(N-w)",
+                "z_legacy_strict": "(2*k-N)/sqrt(N-w)",
                 "probability": "Phi(z), reported as probability_phi_z; this is distinct from paired_row_t_delta_chi2",
-                "ties": "an exact equal absolute intensity residual is not counted in k but remains in N, following the strict lower-residual definition",
+                "ties": (
+                    "an exact equal absolute intensity residual receives half credit in the version-2 primary statistic, "
+                    "restoring hand-swap antisymmetry; z_legacy_strict preserves the earlier literal strict-lower-residual result"
+                ),
+                "tie_policy": ADJUSTED_HAND_TIE_POLICY,
+                "legacy_tie_policy": ADJUSTED_HAND_LEGACY_TIE_POLICY,
                 "sigma_contract": (
                     "target_I and positive sigma_eff must match between hand tables; invalid or mismatched rows are excluded and counted"
                 ),
