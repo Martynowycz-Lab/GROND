@@ -98,6 +98,76 @@ def test_response_cache_matches_core_forward_model_with_frame_offset(tmp_path: P
     assert cached["born"][0] == pytest.approx(direct["born"], rel=1e-12, abs=1e-14)
 
 
+def test_proper_sign_transform_native_smoke_has_no_cell_precision_score_drift(
+    tmp_path: Path,
+):
+    hkl_path, model_path = _write_single_row_inputs(tmp_path)
+    hkl_path.write_text(
+        hkl_path.read_text()
+        .replace(
+            "!UNIT_CELL_A-AXIS= 10.0 0.0 0.0",
+            "!UNIT_CELL_A-AXIS= 10.0004 0.0 0.0",
+        )
+        .replace(
+            "!UNIT_CELL_B-AXIS= 0.0 10.0 0.0",
+            "!UNIT_CELL_B-AXIS= 0.0 10.0004 0.0",
+        )
+        .replace(
+            "!UNIT_CELL_C-AXIS= 0.0 0.0 10.0",
+            "!UNIT_CELL_C-AXIS= 0.0 0.0 10.0004",
+        )
+    )
+    model = parse_model(model_path)
+    cfg = Config(
+        n_basis=6,
+        n_points=3,
+        sg_window=0.0001,
+        sg_window_min=0.0001,
+        sg_window_max=0.0001,
+        topup_d_min=2.0,
+        ug_d_min=2.0,
+        thickness_A=75.0,
+        thickness_model="uniform_gradient",
+        thickness_grad_frac=0.2,
+        thickness_points=3,
+        frame_offset=0.2,
+        group_width_deg=1.0,
+    )
+
+    predictions = {}
+    physical_support = {}
+    for transform in ("identity", "-h,-k,l", "-h,k,-l", "h,-k,-l"):
+        data = XDSData(hkl_path, hkl_transform=transform)
+        port = XDSBlochPort(
+            data,
+            model,
+            cfg,
+            cache_dir=None,
+            res_hash=sha256(model_path),
+        )
+        prediction = port.row_prediction(0)
+        predictions[transform] = np.asarray(
+            [prediction["dyn"], prediction["born"]],
+            dtype=float,
+        )
+        support_hkl = np.asarray(prediction["support_hkls"], dtype=int)
+        physical_support[transform] = sorted(
+            tuple(float(value) for value in row)
+            for row in np.round((data.A @ support_hkl.T).T, decimals=12)
+        )
+
+    reference = predictions["identity"]
+    reference_support = physical_support["identity"]
+    for transform in ("-h,-k,l", "-h,k,-l", "h,-k,-l"):
+        np.testing.assert_allclose(
+            predictions[transform],
+            reference,
+            rtol=2e-15,
+            atol=2e-18,
+        )
+        assert physical_support[transform] == reference_support
+
+
 def test_response_cache_uses_direct_exponential_for_defective_absorptive_matrix():
     hamiltonian = np.asarray(
         [[0.0, 0.0], [1.0 + 0.2j, 0.0]],

@@ -15,6 +15,8 @@ from grond.io.row_contract import (
     write_xds_compatibility_dir,
 )
 from grond.legacy.engine.bloch_engine import XDSBlochPort, XDSData
+from grond.legacy.engine.native_row_regularize import row_selection
+from grond.workflows.decision import ALL_PROPER_SIGNED_PERMUTATIONS
 
 
 def test_row_contract_template_validates_and_writes_xds_compat(tmp_path: Path):
@@ -212,6 +214,187 @@ def test_xds_reader_preserves_invalid_sigma_sign(tmp_path: Path):
     data = XDSData(hkl)
 
     assert data.sigma[0] == -42.1
+
+
+def _write_independently_rounded_cell_xds(tmp_path: Path) -> Path:
+    """Write XDS-like geometry whose cell and axes round independently."""
+
+    real = np.asarray(
+        [
+            [-3.968, -4.940, -9.948],
+            [-0.477, 7.859, -13.704],
+            [3.367, -4.667, -13.384],
+        ],
+        dtype=float,
+    )
+    source_a = np.linalg.inv(real).T
+    scan_path = tmp_path / "DIALS_A_AT_SCAN_POINTS.txt"
+    scan_path.write_text(
+        "\n".join(
+            " ".join(f"{float(value):.16g}" for value in matrix.reshape(-1))
+            for matrix in (source_a, source_a * 1.0001)
+        )
+        + "\n"
+    )
+    hkl = tmp_path / "INTEGRATE.HKL"
+    rows = [
+        (-1, 1, 1),
+        (1, 0, 0),
+        (0, 1, 0),
+    ]
+    lines = [
+        "!X-RAY_WAVELENGTH= 0.025079",
+        "!STARTING_FRAME= 1.0",
+        "!STARTING_ANGLE= 0.0",
+        "!OSCILLATION_RANGE= 1.0",
+        "!ROTATION_AXIS= 0.0 1.0 0.0",
+        "!INCIDENT_BEAM_DIRECTION= 0.0 0.0 1.0",
+        "!UNIT_CELL_CONSTANTS= 5.226 10.390 21.585 89.002 89.520 89.855",
+        "!UNIT_CELL_A-AXIS= -3.968 -0.477 3.367",
+        "!UNIT_CELL_B-AXIS= -4.940 7.859 -4.667",
+        "!UNIT_CELL_C-AXIS= -9.948 -13.704 -13.384",
+        f"!DIALS_A_AT_SCAN_POINTS_FILE= {scan_path.name}",
+    ]
+    for ordinal, (h, k, ell) in enumerate(rows, start=1):
+        lines.append(
+            f"{h} {k} {ell} {100.0 + ordinal} 2.0 "
+            f"100.0 200.0 {float(ordinal):.1f} 0.1 95.0 100.0 "
+            f"100.0 100.0 200.0 {float(ordinal):.1f} "
+            "0.0 0.0 0.0 0.0 0.0 0"
+        )
+    hkl.write_text("\n".join(lines) + "\n")
+    return hkl
+
+
+def _cell_parameters(cell) -> np.ndarray:
+    return np.asarray(
+        [cell.a, cell.b, cell.c, cell.alpha, cell.beta, cell.gamma],
+        dtype=float,
+    )
+
+
+def test_working_cell_uses_axis_metric_for_identity_and_every_proper_transform(
+    tmp_path: Path,
+):
+    hkl = _write_independently_rounded_cell_xds(tmp_path)
+    identity = XDSData(hkl, hkl_transform="identity")
+    raw_hkl = identity.raw_hkl.copy()
+    raw_cell_parameters = np.asarray(
+        [5.226, 10.390, 21.585, 89.002, 89.520, 89.855],
+        dtype=float,
+    )
+
+    np.testing.assert_allclose(
+        _cell_parameters(identity.raw_cell),
+        raw_cell_parameters,
+        rtol=0.0,
+        atol=1e-12,
+    )
+    np.testing.assert_allclose(
+        _cell_parameters(identity.cell),
+        _cell_parameters(identity.axis_derived_source_cell),
+        rtol=0.0,
+        atol=1e-12,
+    )
+    assert not np.allclose(
+        _cell_parameters(identity.raw_cell),
+        _cell_parameters(identity.axis_derived_source_cell),
+        rtol=0.0,
+        atol=1e-8,
+    )
+    assert identity.axis_derived_source_cell_basis == "UNIT_CELL_[ABC]-AXIS"
+    assert identity.working_cell_basis == "axis_derived_oriented_model_basis"
+    assert identity.header["HKL_TRANSFORM_TO_MODEL_BASIS"] == "identity"
+
+    threshold_hkl = tuple(int(value) for value in raw_hkl[0])
+    d_from_header = float(identity.raw_cell.calculate_d(threshold_hkl))
+    d_from_axes = float(identity.cell.calculate_d(threshold_hkl))
+    cutoff = 0.5 * (d_from_header + d_from_axes)
+    assert d_from_header > cutoff > d_from_axes
+    reference_d = np.asarray(
+        [
+            identity.cell.calculate_d(tuple(int(value) for value in row))
+            for row in identity.hkl
+        ],
+        dtype=float,
+    )
+    reference_selection = row_selection(
+        identity,
+        identity.iobs,
+        positive_only=True,
+        min_d=cutoff,
+        min_peak=90.0,
+        geometry_percentile=100.0,
+    )
+    assert 0 not in reference_selection
+
+    for transform in ALL_PROPER_SIGNED_PERMUTATIONS:
+        transformed = XDSData(hkl, hkl_transform=transform)
+        transformed_d = np.asarray(
+            [
+                transformed.cell.calculate_d(tuple(int(value) for value in row))
+                for row in transformed.hkl
+            ],
+            dtype=float,
+        )
+        np.testing.assert_allclose(
+            _cell_parameters(transformed.raw_cell),
+            raw_cell_parameters,
+            rtol=0.0,
+            atol=1e-12,
+        )
+        np.testing.assert_allclose(
+            _cell_parameters(transformed.axis_derived_source_cell),
+            _cell_parameters(identity.axis_derived_source_cell),
+            rtol=0.0,
+            atol=1e-12,
+        )
+        np.testing.assert_allclose(transformed_d, reference_d, rtol=2e-15, atol=2e-15)
+        assert transformed.cell.volume == pytest.approx(
+            identity.cell.volume,
+            rel=2e-15,
+            abs=2e-12,
+        )
+        np.testing.assert_allclose(
+            (transformed.A @ transformed.hkl.T).T,
+            (identity.A @ raw_hkl.T).T,
+            rtol=2e-15,
+            atol=2e-15,
+        )
+        for scan_index in range(len(identity.A_at_scan_points)):
+            np.testing.assert_allclose(
+                (transformed.A_at_scan_points[scan_index] @ transformed.hkl.T).T,
+                (identity.A_at_scan_points[scan_index] @ raw_hkl.T).T,
+                rtol=2e-15,
+                atol=2e-15,
+            )
+        selected = row_selection(
+            transformed,
+            transformed.iobs,
+            positive_only=True,
+            min_d=cutoff,
+            min_peak=90.0,
+            geometry_percentile=100.0,
+        )
+        np.testing.assert_array_equal(selected, reference_selection)
+        assert transformed.header["HKL_TRANSFORM_TO_MODEL_BASIS"] == (
+            "identity" if transform == "identity" else transform
+        )
+        materialized_cell = np.asarray(
+            [
+                float(value)
+                for value in transformed.header[
+                    "UNIT_CELL_CONSTANTS_MODEL_BASIS"
+                ].split()
+            ],
+            dtype=float,
+        )
+        np.testing.assert_allclose(
+            materialized_cell,
+            _cell_parameters(transformed.cell),
+            rtol=0.0,
+            atol=5e-7,
+        )
 
 
 def test_xds_reader_rejects_fractional_miller_indices(tmp_path: Path):

@@ -3284,7 +3284,17 @@ def main():
             "born_CC": float(best["metrics"]["all"]["born"]["CC"]),
             "hkl_transform": data.hkl_transform_spec,
             "raw_xds_cell": [data.raw_cell.a, data.raw_cell.b, data.raw_cell.c, data.raw_cell.alpha, data.raw_cell.beta, data.raw_cell.gamma],
+            "axis_derived_source_cell": [
+                data.axis_derived_source_cell.a,
+                data.axis_derived_source_cell.b,
+                data.axis_derived_source_cell.c,
+                data.axis_derived_source_cell.alpha,
+                data.axis_derived_source_cell.beta,
+                data.axis_derived_source_cell.gamma,
+            ],
+            "axis_derived_source_cell_basis": data.axis_derived_source_cell_basis,
             "simulation_cell": [data.cell.a, data.cell.b, data.cell.c, data.cell.alpha, data.cell.beta, data.cell.gamma],
+            "simulation_cell_basis": data.working_cell_basis,
         }
         (out / "gate_failure.json").write_text(json.dumps(failure, indent=2, allow_nan=True) + "\n")
         raise RuntimeError(
@@ -3514,6 +3524,15 @@ def main():
                 data.raw_cell.beta,
                 data.raw_cell.gamma,
             ],
+            "axis_derived_source_cell": [
+                data.axis_derived_source_cell.a,
+                data.axis_derived_source_cell.b,
+                data.axis_derived_source_cell.c,
+                data.axis_derived_source_cell.alpha,
+                data.axis_derived_source_cell.beta,
+                data.axis_derived_source_cell.gamma,
+            ],
+            "axis_derived_source_cell_basis": data.axis_derived_source_cell_basis,
             "simulation_cell": [
                 data.cell.a,
                 data.cell.b,
@@ -3522,6 +3541,7 @@ def main():
                 data.cell.beta,
                 data.cell.gamma,
             ],
+            "simulation_cell_basis": data.working_cell_basis,
             "res": str(Path(args.res).resolve()),
             "res_sha256": sha256(Path(args.res)),
             "model_tag": model_tag,

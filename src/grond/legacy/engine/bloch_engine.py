@@ -90,8 +90,8 @@ COMPUTE_BACKENDS = [
     "jax_mps_real_expm_padded",
 ]
 COMPUTE_BACKEND_HELP = ", ".join(COMPUTE_BACKENDS)
-ROW_PLAN_CACHE_SCHEMA = 3
-UG_CACHE_SCHEMA = 2
+ROW_PLAN_CACHE_SCHEMA = 4
+UG_CACHE_SCHEMA = 3
 ELECTRON_COMPTON_WAVELENGTH_A = 0.024263102
 DEFAULT_MAX_DENSE_UG_GIB = 2.0
 # The final complex128 cube is 16 bytes per voxel. Construction also holds
@@ -2120,16 +2120,34 @@ class XDSData:
         self.raw_hkl = self.hkl.copy()
         self.raw_A = np.asarray(self.A, dtype=float).copy()
         self.raw_real_matrix = np.asarray(self.real_matrix, dtype=float).copy()
-        self.raw_cell = gemmi.UnitCell(self.cell.a, self.cell.b, self.cell.c, self.cell.alpha, self.cell.beta, self.cell.gamma)
-        if canonical == "identity":
-            return
-        inv_t = np.linalg.inv(T).astype(float)
-        self.hkl = (self.hkl @ T.T).astype(int)
-        self.A = np.asarray(self.A, dtype=float) @ inv_t
-        self.real_matrix = np.linalg.inv(self.A.T)
+        self.raw_cell = gemmi.UnitCell(
+            self.cell.a,
+            self.cell.b,
+            self.cell.c,
+            self.cell.alpha,
+            self.cell.beta,
+            self.cell.gamma,
+        )
+        self.axis_derived_source_cell = cell_from_real_matrix(self.raw_real_matrix)
+        self.axis_derived_source_cell_basis = "UNIT_CELL_[ABC]-AXIS"
+        self.working_cell_basis = "axis_derived_oriented_model_basis"
+        # T is an exact signed permutation, so T^-1 = T.T.  Apply that
+        # algebra directly rather than introducing avoidable floating matrix
+        # inversions.  UNIT_CELL_CONSTANTS and the oriented axes are rounded
+        # independently by XDS-like writers; the Ewald geometry uses A, so the
+        # working cell for every candidate must come from those same axes.
+        # raw_cell remains the unedited UNIT_CELL_CONSTANTS provenance.
+        inv_t = T.T.astype(float)
+        self.hkl = (self.raw_hkl @ T.T).astype(int)
+        self.A = self.raw_A @ inv_t
+        self.real_matrix = self.raw_real_matrix @ inv_t
         self.cell = cell_from_real_matrix(self.real_matrix)
         if self.A_at_scan_points is not None:
-            self.A_at_scan_points = np.einsum("nij,jk->nik", np.asarray(self.A_at_scan_points, dtype=float), inv_t)
+            self.A_at_scan_points = np.einsum(
+                "nij,jk->nik",
+                np.asarray(self.A_at_scan_points, dtype=float),
+                inv_t,
+            )
         self.header["HKL_TRANSFORM_TO_MODEL_BASIS"] = canonical
         self.header["UNIT_CELL_CONSTANTS_MODEL_BASIS"] = (
             f"{self.cell.a:.6f} {self.cell.b:.6f} {self.cell.c:.6f} "
@@ -4266,6 +4284,16 @@ def metric_filter_signed_axis_transforms(
         "source_model": str(model_path),
         "source_model_sha256": sha256(model_path),
         "source_cell": [float(value) for value in source_cell],
+        "source_cell_basis": "raw_UNIT_CELL_CONSTANTS",
+        "axis_derived_source_cell": [
+            data.axis_derived_source_cell.a,
+            data.axis_derived_source_cell.b,
+            data.axis_derived_source_cell.c,
+            data.axis_derived_source_cell.alpha,
+            data.axis_derived_source_cell.beta,
+            data.axis_derived_source_cell.gamma,
+        ],
+        "axis_derived_source_cell_basis": data.axis_derived_source_cell_basis,
         "model_cell": [float(value) for value in model_cell],
         "source_reciprocal_metric": source_metric.tolist(),
         "model_reciprocal_metric": model_metric.tolist(),
@@ -5048,6 +5076,15 @@ def main():
                 data_all.raw_cell.beta,
                 data_all.raw_cell.gamma,
             ],
+            "axis_derived_source_cell": [
+                data_all.axis_derived_source_cell.a,
+                data_all.axis_derived_source_cell.b,
+                data_all.axis_derived_source_cell.c,
+                data_all.axis_derived_source_cell.alpha,
+                data_all.axis_derived_source_cell.beta,
+                data_all.axis_derived_source_cell.gamma,
+            ],
+            "axis_derived_source_cell_basis": data_all.axis_derived_source_cell_basis,
             "simulation_cell": [
                 data_all.cell.a,
                 data_all.cell.b,
@@ -5056,6 +5093,7 @@ def main():
                 data_all.cell.beta,
                 data_all.cell.gamma,
             ],
+            "simulation_cell_basis": data_all.working_cell_basis,
             "res": str(Path(args.res).resolve()),
             "res_sha256": res_hash,
         },
