@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import compileall
 import csv
+import hashlib
 import json
 import math
 import os
@@ -21,6 +22,12 @@ from pathlib import Path
 
 from . import __version__
 from .accelerators import probe_accelerators, probe_bloch_ops
+from .hkl_transform import (
+    absolute_configuration_claim_contract,
+    parse_hkl_transform_info,
+    source_orientation_contract,
+    validate_external_parity_calibration,
+)
 from .io.config import (
     DatasetSpec,
     PrepConfig,
@@ -69,12 +76,14 @@ from .workflows.dataset_policy import (
     write_policy_weighted_runs,
 )
 from .workflows.decision import (
+    ALL_PROPER_SIGNED_PERMUTATIONS,
     apply_preflight,
     expand_transform_candidates,
     preflight_dataset,
     safe_float,
     safe_label,
     score_native_summary,
+    score_transform_summary,
     should_stop_for_bad_data,
     thickness_polish_nuisance,
     write_json,
@@ -84,6 +93,11 @@ from .workflows.endpoint_chooser import (
     endpoint_lst_metric_consistency,
     endpoint_promotion_field_contract,
     write_publication_endpoint_choice,
+)
+from .workflows.parity_evidence import (
+    build_common_sigma_hand_evidence,
+    replay_transform_work_born,
+    select_branch_symmetric_nuisance,
 )
 from .workflows.scale_contract_selector import select_multi_scale_contract
 from .workflows.transform_metadata import metadata_prefilter_transforms
@@ -300,14 +314,20 @@ def estimate_run_steps(prep: PrepConfig, args: argparse.Namespace) -> int:
     total = 1 if _publication_baseline_hkl(prep) else 0
     for ds in prep.datasets:
         if getattr(args, "auto_decide", True) and not getattr(args, "trust_hkl_transform", False):
-            transform_candidates = expand_transform_candidates(ds.hkl_transform, args.transform_candidates)
+            transform_candidates = expand_transform_candidates(
+                ds.hkl_transform,
+                args.transform_candidates,
+                parity_policy=getattr(args, "transform_parity_policy", "proper-only"),
+            )
             total += len(transform_candidates)
             rerank_top = max(0, int(getattr(args, "transform_rerank_top", 0)))
             if len(transform_candidates) > 1 and rerank_top > 0:
                 total += min(rerank_top, len(transform_candidates))
         total += 1
         if getattr(args, "auto_decide", True) and getattr(args, "hand_control", True):
-            total += 2
+            # Two label-symmetric nuisance-grid evaluations followed by two
+            # singleton evidence replays at the selected common nuisance.
+            total += 4
         if not getattr(args, "fast", False):
             total += 1
             if continuous_thickness_enabled(args):
@@ -470,6 +490,24 @@ def try_read_json(path: Path) -> dict:
         return read_json(path)
     except Exception:
         return {}
+
+
+def _json_contract_equal(left: object, right: object) -> bool:
+    """Compare replay contracts deterministically, including NaN sentinels."""
+
+    return json.dumps(
+        left,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=True,
+    ) == json.dumps(
+        right,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=True,
+    )
 
 
 def transform_scout_worker_count(args: argparse.Namespace) -> int:
@@ -1876,6 +1914,57 @@ def compact_base_nuisance(args: argparse.Namespace) -> dict:
     }
 
 
+def transform_scout_nuisance(args: argparse.Namespace) -> dict:
+    """Return a single frozen nuisance contract for hand-invariant scouting.
+
+    Transform ranking must not inherit a dynamical best-of-grid nuisance
+    choice that can move when the input coordinates are inverted.
+    """
+
+    def first_numeric(value: object, fallback: float) -> str:
+        for token in str(value or "").replace(",", " ").split():
+            try:
+                parsed = float(token)
+            except ValueError:
+                continue
+            if math.isfinite(parsed):
+                return f"{parsed:.15g}"
+        return f"{float(fallback):.15g}"
+
+    base = compact_base_nuisance(args)
+    # Every field that expands into an engine product grid is explicitly one
+    # value.  In particular, "auto" is never allowed to survive for frame
+    # offset or grouping because it would create a hand-sensitive best-of-grid
+    # dynamical preselection before the matched-Born transform score is read.
+    return {
+        "thickness_A": first_numeric(base.get("thickness_A"), 1200.0),
+        "thickness_model": "uniform_gradient",
+        "thickness_grad_frac": first_numeric(
+            base.get("thickness_grad_frac"), 0.0
+        ),
+        "thickness_sigma_frac": "0.0",
+        "frame_offset": "0.0",
+        "group_width_deg": "frame",
+        "detector_scale_bins": "0",
+        "sigma_a": "0.0",
+        "sigma_b_corr": "0.0",
+        "sigma_c_peak": "0.0",
+        "sg_jitter_mode": "none",
+        "sg_jitter_sigma0": "0.0",
+        "sg_jitter_sigma_d_inv": "0.0",
+        "sg_jitter_sigma_frame": "0.0",
+        "absorption_mode": "none",
+        "absorption_mu": "0.0",
+        "absorption_frac": "0.0",
+        "absorption_mu_g2": "0.0",
+        "absorption_mu_theta2": "0.0",
+        "absorption_tds_b": "0.0",
+        "dose_b_mode": "none",
+        "dose_b_per_frame": "0.0",
+        "row_resolution_b": "0.0",
+    }
+
+
 def apply_speed_profile(args: argparse.Namespace, structure: str | None = None) -> dict[str, object]:
     """Apply named run profiles after parsing and return a provenance record."""
 
@@ -2137,6 +2226,7 @@ def native_stage_cmd(
     scale_fit_split_override: str | None = None,
     selection_metric_override: str | None = None,
     strict_pinned_contract: bool = False,
+    allow_pinned_jitter_fallback: bool = True,
     promotion_baseline: Mapping[str, object] | None = None,
 ) -> list[str]:
     """Build one native nuisance-regularization command for the vendored engine."""
@@ -2166,6 +2256,7 @@ def native_stage_cmd(
     jitter_mode_grid = pinned_jitter_mode if pinned else ("none" if fast else args.sg_jitter_mode_grid)
     if (
         pinned
+        and allow_pinned_jitter_fallback
         and str(getattr(args, "pinned_sg_jitter_fallback", "none")) == "none"
         and pinned_jitter_mode.strip().lower() != "none"
     ):
@@ -2365,6 +2456,8 @@ def native_stage_cmd(
     row_contract = row_contracts.get(ds.name, "") if isinstance(row_contracts, Mapping) else ""
     if row_contract:
         cmd += ["--row-contract", str(row_contract)]
+    if ds.split_contract:
+        cmd += ["--split-contract", str(ds.split_contract)]
     if alternate_hand:
         cmd.append("--alternate-hand")
     if make_maps and endpoint_ok:
@@ -5715,7 +5808,196 @@ def dataset_with_transform(ds: DatasetSpec, transform: str) -> DatasetSpec:
         target_mode=ds.target_mode,
         include_nonpositive=ds.include_nonpositive,
         geometry_percentile=ds.geometry_percentile,
+        split_contract=ds.split_contract,
+        physical_crystal_id=ds.physical_crystal_id,
+        acquisition_fingerprint=ds.acquisition_fingerprint,
     )
+
+
+def dataset_with_split_contract(ds: DatasetSpec, split_contract: str) -> DatasetSpec:
+    """Return a dataset copy bound to one immutable raw-row work/free split."""
+
+    return DatasetSpec(
+        name=ds.name,
+        hkl=ds.hkl,
+        xds_dir=ds.xds_dir,
+        baseline_hkl=ds.baseline_hkl,
+        hkl_transform=ds.hkl_transform,
+        min_d_spacing=ds.min_d_spacing,
+        min_peak=ds.min_peak,
+        target_mode=ds.target_mode,
+        include_nonpositive=ds.include_nonpositive,
+        geometry_percentile=ds.geometry_percentile,
+        split_contract=str(split_contract),
+        physical_crystal_id=ds.physical_crystal_id,
+        acquisition_fingerprint=ds.acquisition_fingerprint,
+    )
+
+
+def _transform_candidate_generation_contract(
+    requested_spec: str,
+    generated_candidates: list[str],
+    retained_candidates: list[str],
+    metric_filter: Mapping[str, object],
+    *,
+    parity_policy: str,
+) -> dict[str, object]:
+    """Describe whether candidate generation is calibration-grade automatic."""
+
+    requested = str(requested_spec or "auto").strip()
+    tokens = [token.strip().lower() for token in requested.split(";") if token.strip()]
+    automatic_only = bool(tokens) and all(token in {"auto", "common"} for token in tokens)
+    canonical_candidates = [
+        parse_hkl_transform_info(candidate).canonical
+        for candidate in generated_candidates
+    ]
+    required = [
+        parse_hkl_transform_info(candidate).canonical
+        for candidate in ALL_PROPER_SIGNED_PERMUTATIONS
+    ]
+    exact_full24_proper_set = bool(
+        len(canonical_candidates) == len(required)
+        and set(canonical_candidates) == set(required)
+    )
+    canonical_retained = [
+        parse_hkl_transform_info(candidate).canonical
+        for candidate in retained_candidates
+    ]
+    metric_filter_valid = bool(
+        metric_filter.get("policy")
+        == "source_model_reciprocal_cell_metric_only_v1"
+        and metric_filter.get("uses_intensities") is False
+        and metric_filter.get("uses_atomic_coordinates_or_hand") is False
+        and metric_filter.get("uses_atom_types_or_known_chemistry") is False
+        and metric_filter.get("uses_known_configuration") is False
+        and list(metric_filter.get("retained_transforms") or [])
+        == canonical_retained
+    )
+    calibration_grade = bool(
+        parity_policy == "proper-only"
+        and automatic_only
+        and exact_full24_proper_set
+        and metric_filter_valid
+        and canonical_retained
+        and all(
+            parse_hkl_transform_info(candidate).proper
+            for candidate in canonical_retained
+        )
+    )
+    return {
+        "policy": (
+            "automatic_full24_proper_metric_filtered_v1"
+            if calibration_grade
+            else "custom_or_restricted_candidates_v1"
+        ),
+        "requested_spec": requested,
+        "automatic_tokens_only": automatic_only,
+        "full_proper_signed_permutation_universe": required,
+        "exact_full24_proper_set": exact_full24_proper_set,
+        "generated_candidates_before_metadata": canonical_candidates,
+        "candidate_count_before_metadata": len(canonical_candidates),
+        "metric_filter": dict(metric_filter),
+        "retained_candidates_after_metric_filter": canonical_retained,
+        "metric_filter_contract_valid": metric_filter_valid,
+        "calibration_grade_candidate_generation": calibration_grade,
+    }
+
+
+def _materialize_transform_hand_split_contract(
+    prep: PrepConfig,
+    ds: DatasetSpec,
+    candidates: list[str],
+    args: argparse.Namespace,
+    root: Path,
+) -> tuple[DatasetSpec, dict[str, object]]:
+    """Write and bind the candidate-union raw-row split used by all scouts."""
+
+    from .legacy.engine.bloch_engine import (
+        build_transform_split_contract,
+        validate_transform_split_contract,
+    )
+
+    path = (
+        root / "decisions" / ds.name / "transform_hand_split_contract.json"
+    ).resolve()
+    payload = build_transform_split_contract(
+        Path(ds.hkl),
+        Path(prep.structure),
+        candidates,
+        dataset=ds.name,
+        free_fraction=float(args.free_fraction),
+        seed=int(args.split_seed),
+        include_friedel=True,
+    )
+    validation = validate_transform_split_contract(
+        payload,
+        source_hkl=Path(ds.hkl),
+        current_transform=candidates[0],
+    )
+    validation.pop("masks", None)
+    write_json(path, payload)
+    binding = {
+        **validation,
+        "path": str(path),
+        "sha256": sha256_file(path),
+    }
+    return dataset_with_split_contract(ds, str(path)), binding
+
+
+def _transform_record_metadata(
+    transform: str,
+    *,
+    source_hkl: str = "",
+) -> dict[str, object]:
+    """Return flat determinant metadata suitable for scout tables."""
+
+    info = parse_hkl_transform_info(transform)
+    record = {
+        "transform": info.canonical,
+        "transform_determinant": info.determinant,
+        "transform_parity": info.parity,
+        "transform_is_proper": info.proper,
+        "sign_paired_transform": info.sign_paired_transform,
+        "proper_canonical_transform": info.proper_canonical_transform,
+        "coordinate_inversion_required_for_proper_canonicalization": (
+            info.coordinate_inversion_required_for_proper_canonicalization
+        ),
+    }
+    if source_hkl:
+        record["source_orientation_contract"] = source_orientation_contract(
+            source_hkl, info.canonical
+        )
+    return record
+
+
+def _selected_transform_claim_contract(
+    transform: str,
+    *,
+    selection_source: str,
+    parity_policy: str,
+    source_hkl: str = "",
+) -> dict[str, object]:
+    """Bind one selected transform to GROND's fail-closed claim policy."""
+
+    contract = absolute_configuration_claim_contract(transform)
+    contract.update(
+        {
+            "selection_source": selection_source,
+            "transform_parity_policy": parity_policy,
+        }
+    )
+    if source_hkl:
+        orientation = source_orientation_contract(source_hkl, transform)
+        contract["source_orientation_contract"] = orientation
+        if not bool(orientation.get("absolute_claim_geometry_ready")):
+            contract["configuration_status"] = "parity_unresolved"
+            contract["absolute_configuration_claim_allowed"] = False
+            contract["reason"] = (
+                f"source orientation contract is {orientation.get('status', 'missing')}; "
+                "a positive right-handed raw real-space axis matrix and positive transformed "
+                "determinant are required before named absolute configuration can be claimed"
+            )
+    return contract
 
 
 def transform_scout_records(
@@ -5734,17 +6016,31 @@ def transform_scout_records(
 ) -> list[dict]:
     """Run one transform-scout stage and return scored decision records."""
 
+    frozen_nuisance = transform_scout_nuisance(args)
+    frozen_nuisance_sha256 = hashlib.sha256(
+        json.dumps(
+            frozen_nuisance,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+
     def run_one(rank: int, transform: str) -> dict:
         cand = dataset_with_transform(ds, transform)
         out_dir = scout_root / safe_label(transform)
         base_record = {
-            "transform": transform,
+            **_transform_record_metadata(transform, source_hkl=ds.hkl),
             "out_dir": str(out_dir),
             "scout_stage": scout_stage,
             "n_basis": int(n_basis),
             "n_points": int(n_points),
             "max_rows": int(max_rows),
             "rank_in": rank,
+            "frozen_nuisance_contract": frozen_nuisance,
+            "frozen_nuisance_contract_sha256": frozen_nuisance_sha256,
+            "engine_trial_selection_metric_requested": "work_born_wR2",
         }
         try:
             cmd = native_stage_cmd(
@@ -5757,11 +6053,13 @@ def transform_scout_records(
                 n_basis=n_basis,
                 n_points=n_points,
                 stage=f"scout_transform_{scout_stage}_{safe_label(transform)}",
-                pinned=compact_base_nuisance(args),
+                pinned=frozen_nuisance,
                 make_maps=False,
                 endpoint=False,
                 max_rows_override=max_rows,
                 workers_override=transform_scout_worker_count(args),
+                scale_fit_split_override="work",
+                selection_metric_override="work_born_wR2",
             )
             if args.dry_run:
                 run_logged(cmd, logs, f"{ds.name}_scout_transform_{scout_stage}_{safe_label(transform)}", dry_run=True)
@@ -5771,9 +6069,40 @@ def transform_scout_records(
                     run_logged(cmd, logs, f"{ds.name}_scout_transform_{scout_stage}_{safe_label(transform)}", dry_run=False)
             if args.dry_run:
                 return {**base_record, "status": "dry_run", "score": float("inf")}
-            summary = read_json(out_dir / "summary.json")
-            score = score_native_summary(summary)
-            return {**base_record, "status": "ok", **score}
+            summary_path = out_dir / "summary.json"
+            summary = read_json(summary_path)
+            summary_score = score_transform_summary(summary)
+            replay = replay_transform_work_born(summary_path)
+            replay_score = float(replay["score"])
+            if not math.isclose(
+                replay_score,
+                float(summary_score["score"]),
+                rel_tol=1e-10,
+                abs_tol=1e-12,
+            ):
+                raise ValueError(
+                    "transform work-Born score does not replay from the bound "
+                    f"row artifact: summary={summary_score['score']}, "
+                    f"replay={replay_score}"
+                )
+            return {
+                **base_record,
+                "status": "ok",
+                **summary_score,
+                "score": replay_score,
+                "artifact_score_replay": replay,
+                "engine_trial_selection_metric": str(
+                    summary.get("selection_metric") or ""
+                ),
+                "nuisance_trial_count": int(
+                    safe_float(summary.get("nuisance_trial_count"), 0.0)
+                ),
+                "prediction_geometry_trial_count": int(
+                    safe_float(
+                        summary.get("prediction_geometry_trial_count"), 0.0
+                    )
+                ),
+            }
         except Exception as exc:
             return {**base_record, "status": "failed", "error": str(exc), "score": float("inf")}
 
@@ -5794,7 +6123,28 @@ def ranked_transform_records(records: list[dict], *, dry_run: bool) -> list[dict
     if dry_run:
         return [r for r in records if r.get("status") == "dry_run"]
     ok = [r for r in records if r.get("status") == "ok" and float(r.get("score", float("inf"))) < float("inf")]
-    return sorted(ok, key=lambda r: float(r["score"]))
+    # Metadata overlap is allowed to affect scheduling only.  Exact scout ties
+    # use a canonical transform spelling, never the metadata-derived input
+    # order, so all-row overlap cannot silently make the selected decision.
+    priority = {
+        parse_hkl_transform_info(candidate).canonical: rank
+        for rank, candidate in enumerate(ALL_PROPER_SIGNED_PERMUTATIONS)
+    }
+    return sorted(
+        ok,
+        key=lambda r: (
+            float(r["score"]),
+            priority.get(
+                parse_hkl_transform_info(
+                    str(r.get("transform") or "identity")
+                ).canonical,
+                len(priority),
+            ),
+            parse_hkl_transform_info(
+                str(r.get("transform") or "identity")
+            ).canonical,
+        ),
+    )
 
 
 def choose_transform_by_scout(
@@ -5809,15 +6159,30 @@ def choose_transform_by_scout(
 ) -> tuple[DatasetSpec, dict]:
     """Choose the HKL alignment using cheap all-candidate scouts, then rerank top hits."""
 
-    candidates = expand_transform_candidates(ds.hkl_transform, args.transform_candidates)
+    parity_policy = str(getattr(args, "transform_parity_policy", "proper-only"))
     if getattr(args, "trust_hkl_transform", False):
-        selected_transform = ds.hkl_transform or "identity"
+        selected_info = parse_hkl_transform_info(ds.hkl_transform or "identity")
+        if not selected_info.proper and parity_policy != "all-diagnostic":
+            raise ValueError(
+                f"trusted transform {selected_info.canonical!r} is improper (determinant -1) "
+                "and cannot be accepted under --transform-parity-policy=proper-only; use "
+                "GROND canonicalize-hand to invert the endpoint model/HKLF4 pair and adopt "
+                f"{selected_info.proper_canonical_transform!r}, or explicitly use "
+                "all-diagnostic mode without a named absolute-configuration claim"
+            )
+        selected_transform = selected_info.canonical
         selected = {
-            "transform": selected_transform,
+            **_transform_record_metadata(selected_transform, source_hkl=ds.hkl),
             "status": "trusted_input",
             "score": None,
             "reason": "user supplied --trust-hkl-transform; transform scouting was skipped",
         }
+        claim_contract = _selected_transform_claim_contract(
+            selected_transform,
+            selection_source="trusted_input",
+            parity_policy=parity_policy,
+            source_hkl=ds.hkl,
+        )
         payload = {
             "records": [],
             "coarse_records": [],
@@ -5826,6 +6191,10 @@ def choose_transform_by_scout(
             "selected": selected,
             "rerank_top": 0,
             "metadata_transform_decision": {},
+            "dataset": ds.name,
+            "input_identity": _dataset_decision_identity(prep, ds),
+            "transform_parity_policy": parity_policy,
+            "selected_transform_claim_contract": claim_contract,
             "scout_parallelism": {
                 "max_concurrent_scout_jobs": 0,
                 "workers_per_scout_job": 0,
@@ -5834,15 +6203,55 @@ def choose_transform_by_scout(
                 "reranked_candidate_count": 0,
                 "reranked_parallel_jobs": 0,
             },
-            "rule": "trusted user-supplied HKL transform; no Bloch transform scout was run",
+            "rule": (
+                "trusted user-supplied HKL transform; no Bloch transform scout was run; "
+                "an improper trusted transform is diagnostic-only and forbids a named "
+                "absolute-configuration claim"
+            ),
+            "selection_target": "trusted_input_no_ranking",
+            "known_configuration_used_for_candidate_generation_or_ranking": False,
+            "metadata_candidate_elimination_used": False,
         }
         write_json(root / "decisions" / ds.name / "transform_decision.json", payload)
         return dataset_with_transform(ds, selected_transform), payload
 
+    candidates = expand_transform_candidates(
+        ds.hkl_transform,
+        args.transform_candidates,
+        parity_policy=parity_policy,
+    )
+    generated_candidates = list(candidates)
+    from .legacy.engine.bloch_engine import metric_filter_signed_axis_transforms
+
+    candidates, metric_filter_contract = metric_filter_signed_axis_transforms(
+        Path(ds.hkl),
+        Path(prep.structure),
+        generated_candidates,
+        relative_tolerance=float(
+            getattr(args, "transform_metric_tolerance", 0.02)
+        ),
+    )
+    candidate_generation = _transform_candidate_generation_contract(
+        str(args.transform_candidates),
+        generated_candidates,
+        candidates,
+        metric_filter_contract,
+        parity_policy=parity_policy,
+    )
+    split_contract: dict[str, object] = {}
+    if not args.dry_run:
+        ds, split_contract = _materialize_transform_hand_split_contract(
+            prep,
+            ds,
+            candidates,
+            args,
+            root,
+        )
     metadata_transform_decision: dict = {}
+    metadata_candidate_elimination_used = False
     baseline_hkl = dataset_baseline_hkl(prep, ds)
     if getattr(args, "transform_metadata_prefilter", "auto") != "off" and baseline_hkl:
-        candidates, metadata_transform_decision = metadata_prefilter_transforms(
+        metadata_candidates, metadata_transform_decision = metadata_prefilter_transforms(
             ds.hkl,
             baseline_hkl,
             candidates,
@@ -5852,6 +6261,31 @@ def choose_transform_by_scout(
             min_correlation=float(getattr(args, "transform_metadata_min_correlation", 0.70)),
             min_correlation_gap=float(getattr(args, "transform_metadata_min_correlation_gap", 0.05)),
             max_rows=int(getattr(args, "transform_metadata_max_rows", 0)),
+        )
+        metadata_mode = str(getattr(args, "transform_metadata_prefilter", "auto"))
+        if metadata_mode == "on":
+            candidates = metadata_candidates
+            metadata_candidate_elimination_used = True
+        else:
+            # Default auto mode may order the expensive proper candidates but
+            # may not eliminate any of them: its all-row overlap is not part
+            # of the held-out-safe transform selection target.
+            ranked_names = [
+                str(record.get("transform"))
+                for record in (metadata_transform_decision.get("records") or [])
+                if isinstance(record, Mapping)
+            ]
+            candidates = [
+                *[name for name in ranked_names if name in candidates],
+                *[name for name in candidates if name not in ranked_names],
+            ]
+            metadata_transform_decision["prefilter_status"] = (
+                metadata_transform_decision.get("status")
+            )
+            metadata_transform_decision["status"] = "diagnostic_order_only"
+            metadata_transform_decision["selected_transforms"] = list(candidates)
+        metadata_transform_decision["candidate_elimination_used"] = (
+            metadata_candidate_elimination_used
         )
     scout_root = root / "decisions" / ds.name / "transform_scout"
     coarse_max_rows = args.scout_max_rows if scout_max_rows is None else scout_max_rows
@@ -5901,6 +6335,13 @@ def choose_transform_by_scout(
             selected = ranked_rerank[0]
 
     records = [*coarse_records, *rerank_records]
+    selected_transform = str(selected["transform"])
+    claim_contract = _selected_transform_claim_contract(
+        selected_transform,
+        selection_source="automatic_transform_scout",
+        parity_policy=parity_policy,
+        source_hkl=ds.hkl,
+    )
     payload = {
         "records": records,
         "coarse_records": coarse_records,
@@ -5909,6 +6350,25 @@ def choose_transform_by_scout(
         "selected": selected,
         "rerank_top": rerank_top,
         "metadata_transform_decision": metadata_transform_decision,
+        "metadata_candidate_elimination_used": metadata_candidate_elimination_used,
+        "transform_parity_policy": parity_policy,
+        "candidate_parity": [
+            _transform_record_metadata(candidate, source_hkl=ds.hkl)
+            for candidate in candidates
+        ],
+        "candidate_generation": candidate_generation,
+        "ranking_tie_break": {
+            "policy": "fixed_full24_proper_priority_then_canonical_v1",
+            "full24_proper_priority": [
+                parse_hkl_transform_info(candidate).canonical
+                for candidate in ALL_PROPER_SIGNED_PERMUTATIONS
+            ],
+            "metadata_order_used_for_ties_or_rerank_admission": False,
+        },
+        "transform_hand_split_contract": split_contract,
+        "dataset": ds.name,
+        "input_identity": _dataset_decision_identity(prep, ds),
+        "selected_transform_claim_contract": claim_contract,
         "scout_parallelism": {
             "max_concurrent_scout_jobs": transform_scout_job_count(args),
             "workers_per_scout_job": transform_scout_worker_count(args),
@@ -5917,7 +6377,16 @@ def choose_transform_by_scout(
             "reranked_candidate_count": len(rerank_records),
             "reranked_parallel_jobs": transform_scout_job_count(args, len(rerank_records)) if rerank_records else 0,
         },
-        "rule": "metadata HKL-overlap prefilter when confident, then coarse transform scan followed by higher N/Q rerank of the top candidates",
+        "rule": (
+            "proper-only metadata/Bloch transform scouting by default, followed by higher N/Q "
+            "rerank of the top candidates; transform rankings use independently scaled matched-Born "
+            "work rows only, reserve free rows, and never use coordinate-hand-sensitive Bloch terms; "
+            "default metadata overlap may order but never eliminate candidates; all-diagnostic is an "
+            "explicit mixed-parity mode that cannot by itself establish named absolute configuration"
+        ),
+        "selection_target": "matched_born_work_only_hand_invariant_v1",
+        "selection_nuisance_contract": transform_scout_nuisance(args),
+        "known_configuration_used_for_candidate_generation_or_ranking": False,
     }
     write_json(root / "decisions" / ds.name / "transform_decision.json", payload)
     return dataset_with_transform(ds, selected["transform"]), payload
@@ -5937,6 +6406,48 @@ def raw_free_dyn_wr2(summary: Mapping[str, object]) -> float:
     return safe_float(dyn.get("wR2_all"), float("nan"))
 
 
+def _dataset_decision_identity(prep: PrepConfig, ds: DatasetSpec) -> dict[str, object]:
+    """Bind transform and hand decisions to one exact dataset/model/split."""
+
+    hkl_path = Path(ds.hkl).expanduser().resolve()
+    model_path = Path(prep.structure).expanduser().resolve()
+    split_path = (
+        Path(ds.split_contract).expanduser().resolve()
+        if ds.split_contract
+        else None
+    )
+    split_payload = (
+        try_read_json(split_path) if split_path is not None and split_path.is_file() else {}
+    )
+    split_payload = split_payload if isinstance(split_payload, Mapping) else {}
+    return {
+        "dataset": ds.name,
+        "setup_id": str(prep.parity_setup_id).strip(),
+        "setup_manifest_sha256": str(
+            prep.parity_setup_manifest_sha256
+        ).strip().lower(),
+        "physical_crystal_id": str(ds.physical_crystal_id).strip(),
+        "acquisition_fingerprint": str(
+            ds.acquisition_fingerprint
+        ).strip().lower(),
+        "source_hkl": str(hkl_path),
+        "source_hkl_sha256": sha256_file(hkl_path) if hkl_path.is_file() else "",
+        "source_model": str(model_path),
+        "source_model_sha256": (
+            sha256_file(model_path) if model_path.is_file() else ""
+        ),
+        "split_contract_path": str(split_path) if split_path is not None else "",
+        "split_contract_sha256": (
+            sha256_file(split_path)
+            if split_path is not None and split_path.is_file()
+            else ""
+        ),
+        "split_membership_sha256": str(
+            split_payload.get("membership_sha256") or ""
+        ),
+    }
+
+
 def choose_hand_by_scout(
     prep: PrepConfig,
     ds: DatasetSpec,
@@ -5950,22 +6461,25 @@ def choose_hand_by_scout(
 ) -> tuple[str, dict, Path]:
     """Compare matched original- and alternate-hand scouts.
 
-    ``active_run`` supplies the production nuisance seed only.  It is not used
-    as the original-hand score because its row count can differ from the
-    bounded hand scout.  Both evidence runs below use the same model, rows,
-    N/Q, nuisance grid, transform, and split seed; only ``--alternate-hand``
-    differs.
+    ``active_run`` is retained only as a production diagnostic.  Nuisance
+    selection is deliberately redone from the exact same predeclared grid for
+    both coordinate hands.  One common nuisance is chosen by a hand-label-
+    invariant paired work-row objective and then replayed in two singleton
+    evidence runs.  Input-coordinate inversion can therefore exchange branch
+    labels but cannot change the nuisance state or physical conclusion.
     """
 
     production_active_summary = read_json(active_run / "summary.json")
     production_active_score = score_native_summary(production_active_summary)
-    nui = best_nuisance(active_run)
     hand_root = root / "decisions" / ds.name
+    original_grid_dir = hand_root / "hand_nuisance_grid_original"
+    alternate_grid_dir = hand_root / "hand_nuisance_grid_alt"
     original_dir = hand_root / "hand_scout_original"
     alternate_dir = hand_root / "hand_scout_alt"
     n_basis = 20 if args.fast else int(args.hand_n_basis)
     n_points = 5 if args.fast else int(args.hand_n_points)
     max_rows = int(args.scout_max_rows if scout_max_rows is None else scout_max_rows)
+    hand_nuisance_grid = compact_base_nuisance(args)
     comparison_contract: dict[str, object] = {
         "dataset": ds.name,
         "structure": prep.structure,
@@ -5977,13 +6491,27 @@ def choose_hand_by_scout(
         "scale_fit_split": "work",
         "production_scale_preference_ignored_for_holdout": bool(args.production_scales),
         "endpoint": False,
-        "pinned_nuisance": nui,
+        "nuisance_selection_rule": (
+            "min_paired_mean_work_dyn_wR2_then_nuisance_sha256_v1"
+        ),
+        "nuisance_selection_hand_label_invariant": True,
+        "nuisance_selection_uses_free_rows": False,
+        "nuisance_selection_uses_known_configuration": False,
+        "predeclared_compact_nuisance_grid": hand_nuisance_grid,
         "only_physical_difference": "alternate-hand inversion",
+        "dataset_identity": _dataset_decision_identity(prep, ds),
+        "transform_claim_contract": _selected_transform_claim_contract(
+            ds.hkl_transform,
+            selection_source="fixed_matched_hand_comparison",
+            parity_policy=str(getattr(args, "transform_parity_policy", "proper-only")),
+            source_hkl=ds.hkl,
+        ),
     }
     original_score: dict = {}
     alternate_score: dict = {}
     original_summary: dict = {}
     alternate_summary: dict = {}
+    symmetric_nuisance_selection: dict[str, object] = {}
     try:
         run_logged(
             native_stage_cmd(
@@ -5991,46 +6519,92 @@ def choose_hand_by_scout(
                 ds,
                 prep.structure,
                 dataset_baseline_hkl(prep, ds),
-                original_dir,
+                original_grid_dir,
                 args,
                 n_basis=n_basis,
                 n_points=n_points,
-                stage="scout_hand_original",
-                pinned=nui,
+                stage="scout_hand_nuisance_grid_original",
+                pinned=hand_nuisance_grid,
                 alternate_hand=False,
                 make_maps=False,
                 endpoint=False,
                 max_rows_override=max_rows,
                 scale_fit_split_override="work",
+                selection_metric_override="work_wR2",
             ),
             logs,
-            f"{ds.name}_scout_hand_original",
+            f"{ds.name}_scout_hand_nuisance_grid_original",
             dry_run=args.dry_run,
         )
-        original_summary = read_json(original_dir / "summary.json")
-        original_score = score_native_summary(original_summary)
         run_logged(
             native_stage_cmd(
                 python,
                 ds,
                 prep.structure,
                 dataset_baseline_hkl(prep, ds),
-                alternate_dir,
+                alternate_grid_dir,
                 args,
                 n_basis=n_basis,
                 n_points=n_points,
-                stage="scout_hand_alternate",
-                pinned=nui,
+                stage="scout_hand_nuisance_grid_alternate",
+                pinned=hand_nuisance_grid,
                 alternate_hand=True,
                 make_maps=False,
                 endpoint=False,
                 max_rows_override=max_rows,
                 scale_fit_split_override="work",
+                selection_metric_override="work_wR2",
             ),
             logs,
-            f"{ds.name}_scout_hand_alt",
+            f"{ds.name}_scout_hand_nuisance_grid_alt",
             dry_run=args.dry_run,
         )
+        symmetric_nuisance_selection = select_branch_symmetric_nuisance(
+            original_grid_dir / "summary.json",
+            alternate_grid_dir / "summary.json",
+        )
+        nui = dict(
+            symmetric_nuisance_selection.get("selected_nuisance") or {}
+        )
+        if not nui:
+            raise ValueError(
+                "branch-symmetric nuisance selection returned no selected state"
+            )
+        comparison_contract["branch_symmetric_nuisance_selection"] = (
+            symmetric_nuisance_selection
+        )
+        comparison_contract["pinned_nuisance"] = nui
+        for alternate_hand, out_dir, label in (
+            (False, original_dir, "original"),
+            (True, alternate_dir, "alt"),
+        ):
+            run_logged(
+                native_stage_cmd(
+                    python,
+                    ds,
+                    prep.structure,
+                    dataset_baseline_hkl(prep, ds),
+                    out_dir,
+                    args,
+                    n_basis=n_basis,
+                    n_points=n_points,
+                    stage=f"scout_hand_{label}",
+                    pinned=nui,
+                    alternate_hand=alternate_hand,
+                    make_maps=False,
+                    endpoint=False,
+                    max_rows_override=max_rows,
+                    scale_fit_split_override="work",
+                    selection_metric_override="work_wR2",
+                    strict_pinned_contract=True,
+                    allow_pinned_jitter_fallback=False,
+                ),
+                logs,
+                f"{ds.name}_scout_hand_{label}",
+                dry_run=args.dry_run,
+            )
+        original_summary = read_json(original_dir / "summary.json")
+        original_score = score_native_summary(original_summary)
         alternate_summary = read_json(alternate_dir / "summary.json")
         alternate_score = score_native_summary(alternate_summary)
     except Exception as exc:
@@ -6048,13 +6622,37 @@ def choose_hand_by_scout(
             "score_delta_original_minus_alternate_hand": float("-inf"),
             "accept_delta": float(args.hand_accept_delta),
             "production_active_run": str(active_run),
+            "original_nuisance_grid_run": str(original_grid_dir),
+            "alternate_nuisance_grid_run": str(alternate_grid_dir),
             "original_run": str(original_dir),
             "alternate_run": str(alternate_dir),
             "comparison_contract": comparison_contract,
+            "transform_claim_contract": comparison_contract["transform_claim_contract"],
             "warning": f"matched hand scout failed: {exc}",
         }
         write_json(root / "decisions" / ds.name / "absolute_structure_decision.json", payload)
         return "original", payload, alternate_dir
+
+    try:
+        common_sigma_evidence = build_common_sigma_hand_evidence(
+            original_dir / "summary.json",
+            alternate_dir / "summary.json",
+            minimum_abs_adjusted_z=float(
+                getattr(args, "hand_min_adjusted_z", 2.0)
+            ),
+        )
+        original_score = dict(common_sigma_evidence["original_score"])
+        alternate_score = dict(common_sigma_evidence["alternate_score"])
+    except Exception as exc:
+        common_sigma_evidence = {
+            "schema_version": 1,
+            "status": "failed",
+            "error": str(exc),
+            "minimum_abs_adjusted_z": float(
+                getattr(args, "hand_min_adjusted_z", 2.0)
+            ),
+            "known_configuration_used": False,
+        }
 
     original_rows = original_summary.get("row_selection")
     original_rows = dict(original_rows) if isinstance(original_rows, Mapping) else {}
@@ -6078,6 +6676,16 @@ def choose_hand_by_scout(
     original_raw_free_wr2 = raw_free_dyn_wr2(original_summary)
     alternate_raw_free_wr2 = raw_free_dyn_wr2(alternate_summary)
     finite_raw_free_metrics = math.isfinite(original_raw_free_wr2) and math.isfinite(alternate_raw_free_wr2)
+    if common_sigma_evidence.get("status") == "replayed":
+        original_raw_free_wr2 = safe_float(
+            original_score.get("free_dyn_wR2_all"), float("nan")
+        )
+        alternate_raw_free_wr2 = safe_float(
+            alternate_score.get("free_dyn_wR2_all"), float("nan")
+        )
+        finite_raw_free_metrics = math.isfinite(
+            original_raw_free_wr2
+        ) and math.isfinite(alternate_raw_free_wr2)
     comparison_contract.update(
         {
             "original_row_selection": {key: original_rows.get(key) for key in row_contract_keys},
@@ -6089,9 +6697,14 @@ def choose_hand_by_scout(
             "original_raw_free_dyn_wR2_all": original_raw_free_wr2 if math.isfinite(original_raw_free_wr2) else None,
             "alternate_raw_free_dyn_wR2_all": alternate_raw_free_wr2 if math.isfinite(alternate_raw_free_wr2) else None,
             "finite_raw_free_metrics": finite_raw_free_metrics,
+            "common_sigma_hand_evidence": common_sigma_evidence,
         }
     )
-    delta = original_score["score"] - alternate_score["score"]
+    delta = (
+        float(common_sigma_evidence["score_delta_original_minus_alternate"])
+        if common_sigma_evidence.get("status") == "replayed"
+        else float(original_score["score"] - alternate_score["score"])
+    )
     scout_selected = "alternate" if delta > float(args.hand_accept_delta) else "original"
     selected = scout_selected
     gate_reasons: list[str] = []
@@ -6101,6 +6714,11 @@ def choose_hand_by_scout(
         gate_reasons.append("matched hand scouts did not report the same positive number of held-out free rows")
     if not finite_raw_free_metrics:
         gate_reasons.append("matched hand scouts did not report finite raw free-row dynamical wR2 metrics")
+    if common_sigma_evidence.get("status") != "replayed":
+        gate_reasons.append(
+            "matched hand scouts could not be replayed with one immutable "
+            "source-sigma vector and scale-design contract"
+        )
     if scout_selected == "alternate":
         max_all = float(getattr(args, "hand_max_wR2_all", 0.45))
         max_free = float(getattr(args, "hand_max_free_wR2_all", 0.50))
@@ -6136,10 +6754,21 @@ def choose_hand_by_scout(
         "hand_max_wR2_all": float(getattr(args, "hand_max_wR2_all", 0.45)),
         "hand_max_free_wR2_all": float(getattr(args, "hand_max_free_wR2_all", 0.50)),
         "hand_min_free_wR2_gain": float(getattr(args, "hand_min_free_wR2_gain", 0.0)),
+        "hand_min_adjusted_z": float(
+            getattr(args, "hand_min_adjusted_z", 2.0)
+        ),
+        "calibration_evidence_status": (
+            "adjusted_z_passed"
+            if common_sigma_evidence.get("adjusted_z_threshold_passed") is True
+            else "residual_preference_only"
+        ),
         "production_active_run": str(active_run),
+        "original_nuisance_grid_run": str(original_grid_dir),
+        "alternate_nuisance_grid_run": str(alternate_grid_dir),
         "original_run": str(original_dir),
         "alternate_run": str(alternate_dir),
         "comparison_contract": comparison_contract,
+        "transform_claim_contract": comparison_contract["transform_claim_contract"],
     }
     write_json(root / "decisions" / ds.name / "absolute_structure_decision.json", payload)
     return selected, payload, alternate_dir
@@ -6481,7 +7110,14 @@ def _pinned_nuisance_mismatches(
     expected: Mapping[str, object],
     actual: Mapping[str, object],
 ) -> list[str]:
-    """Return material differences in a recomputed one-point nuisance contract."""
+    """Return material differences in a recomputed one-point nuisance contract.
+
+    Persisted strict-JSON contracts represent disabled nullable numerical
+    fields with ``null``.  Engine summaries represent the same state with
+    ``NaN``.  Those two spellings are equivalent only for the explicitly
+    nullable fields below; missing keys, infinities, and malformed values still
+    fail closed.
+    """
 
     numeric_keys = (
         "thickness_A",
@@ -6518,11 +7154,40 @@ def _pinned_nuisance_mismatches(
         "dose_b_mode",
         "matrix_convention",
     )
+    nullable_numeric_keys = {
+        "dose_b_ref_frame",
+        "native_wght_a",
+        "native_wght_b",
+    }
+
+    def disabled_nullable(value: object) -> bool:
+        if value is None:
+            return True
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return False
+        return math.isnan(numeric)
+
     mismatches: list[str] = []
     for key in numeric_keys:
         if key not in expected:
             continue
-        if key not in actual or not numeric_nuisance_contract_matches(expected.get(key), actual.get(key)):
+        if key not in actual:
+            mismatches.append(
+                f"{key}: selected={expected.get(key)!r}, "
+                f"opposite={actual.get(key)!r}"
+            )
+            continue
+        if (
+            key in nullable_numeric_keys
+            and disabled_nullable(expected.get(key))
+            and disabled_nullable(actual.get(key))
+        ):
+            continue
+        if not numeric_nuisance_contract_matches(
+            expected.get(key), actual.get(key)
+        ):
             mismatches.append(f"{key}: selected={expected.get(key)!r}, opposite={actual.get(key)!r}")
     for key in categorical_keys:
         if key in expected and str(actual.get(key)) != str(expected.get(key)):
@@ -8158,6 +8823,16 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
         "status": "ok",
         "dataset": ds.name,
         "selected_transform": ds.hkl_transform,
+        "selected_transform_claim_contract": (
+            transform_decision.get("selected_transform_claim_contract")
+            if isinstance(transform_decision, Mapping)
+            else _selected_transform_claim_contract(
+                ds.hkl_transform,
+                selection_source="decision_tree_fallback",
+                parity_policy=str(getattr(args, "transform_parity_policy", "proper-only")),
+                source_hkl=ds.hkl,
+            )
+        ),
         "selected_hand": active_hand,
         "structure_update_strategy": structure_strategy,
         "structure_update_run": str(structure_update_run) if structure_update_run else "",
@@ -8411,6 +9086,8 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
             notes=prep.notes,
             default_hkl_transform=prep.default_hkl_transform,
             geometry_percentile=prep.geometry_percentile,
+            parity_setup_id=prep.parity_setup_id,
+            parity_setup_manifest_sha256=prep.parity_setup_manifest_sha256,
             metadata=prep.metadata,
         )
     screen_runs: dict[str, Path] = {}
@@ -8879,6 +9556,12 @@ def prep_from_args(args: argparse.Namespace) -> PrepConfig:
             baseline_hkl=str(Path(args.baseline_hkl).expanduser().resolve()) if args.baseline_hkl else "",
             default_hkl_transform=args.hkl_transform,
             geometry_percentile=args.geometry_percentile,
+            parity_setup_id=str(
+                getattr(args, "parity_setup_id", "") or ""
+            ).strip(),
+            parity_setup_manifest_sha256=str(
+                getattr(args, "parity_setup_manifest_sha256", "") or ""
+            ).strip(),
             datasets=[
                 DatasetSpec(
                     name=args.dataset_name,
@@ -8890,10 +9573,49 @@ def prep_from_args(args: argparse.Namespace) -> PrepConfig:
                     target_mode=args.target_mode,
                     include_nonpositive=args.include_nonpositive,
                     geometry_percentile=args.geometry_percentile,
+                    physical_crystal_id=str(
+                        getattr(args, "physical_crystal_id", "") or ""
+                    ).strip(),
+                    acquisition_fingerprint=str(
+                        getattr(args, "acquisition_fingerprint", "") or ""
+                    ).strip(),
                 )
             ],
             metadata=prep_metadata,
         )
+    setup_id_override = str(
+        getattr(args, "parity_setup_id", "") or ""
+    ).strip()
+    setup_hash_override = str(
+        getattr(args, "parity_setup_manifest_sha256", "") or ""
+    ).strip()
+    physical_override = str(
+        getattr(args, "physical_crystal_id", "") or ""
+    ).strip()
+    acquisition_override = str(
+        getattr(args, "acquisition_fingerprint", "") or ""
+    ).strip()
+    if setup_id_override:
+        prep.parity_setup_id = setup_id_override
+    if setup_hash_override:
+        prep.parity_setup_manifest_sha256 = _validated_sha256_text(
+            setup_hash_override,
+            label="parity setup manifest SHA-256",
+        )
+    if physical_override or acquisition_override:
+        if len(prep.datasets) != 1:
+            raise SystemExit(
+                "--physical-crystal-id and --acquisition-fingerprint are "
+                "single-dataset overrides; record them per --dataset entry "
+                "when building a multi-dataset prep file"
+            )
+        if physical_override:
+            prep.datasets[0].physical_crystal_id = physical_override
+        if acquisition_override:
+            prep.datasets[0].acquisition_fingerprint = _validated_sha256_text(
+                acquisition_override,
+                label="acquisition fingerprint",
+            )
     for ds in prep.datasets:
         if args.geometry_percentile is not None:
             ds.geometry_percentile = float(args.geometry_percentile)
@@ -8913,11 +9635,1555 @@ def cmd_prep(args: argparse.Namespace) -> int:
         notes=args.notes,
         default_hkl_transform=args.hkl_transform,
         geometry_percentile=args.geometry_percentile,
+        parity_setup_id=str(args.parity_setup_id).strip(),
+        parity_setup_manifest_sha256=str(
+            args.parity_setup_manifest_sha256
+        ).strip(),
         datasets=datasets,
     )
     write_prep(Path(args.out), prep)
     write_datasets_csv(Path(args.out).with_suffix(".datasets.csv"), prep)
     print(json.dumps({"prep": str(Path(args.out).resolve()), "datasets": len(datasets)}, indent=2))
+    return 0
+
+
+def _validated_decision_identity(
+    raw: object,
+    *,
+    label: str,
+    require_complete: bool,
+) -> dict[str, object]:
+    """Validate one decision's exact dataset/model/raw-row identity."""
+
+    identity = raw if isinstance(raw, Mapping) else {}
+    fields = (
+        "dataset",
+        "setup_id",
+        "setup_manifest_sha256",
+        "physical_crystal_id",
+        "acquisition_fingerprint",
+        "source_hkl",
+        "source_hkl_sha256",
+        "source_model",
+        "source_model_sha256",
+        "split_contract_path",
+        "split_contract_sha256",
+        "split_membership_sha256",
+    )
+    normalized = {field: str(identity.get(field) or "").strip() for field in fields}
+    if require_complete:
+        missing = [field for field in fields if not normalized[field]]
+        if missing:
+            raise ValueError(
+                f"{label} is missing exact dataset identity field(s): "
+                + ", ".join(missing)
+            )
+        normalized["setup_manifest_sha256"] = _validated_sha256_text(
+            normalized["setup_manifest_sha256"],
+            label=f"{label} setup-manifest SHA-256",
+        )
+        normalized["acquisition_fingerprint"] = _validated_sha256_text(
+            normalized["acquisition_fingerprint"],
+            label=f"{label} acquisition fingerprint",
+        )
+        hkl_path = Path(normalized["source_hkl"]).expanduser().resolve()
+        model_path = Path(normalized["source_model"]).expanduser().resolve()
+        split_path = Path(normalized["split_contract_path"]).expanduser().resolve()
+        for artifact, path, expected_hash in (
+            ("source HKL", hkl_path, normalized["source_hkl_sha256"]),
+            ("source model", model_path, normalized["source_model_sha256"]),
+            ("split contract", split_path, normalized["split_contract_sha256"]),
+        ):
+            if not path.is_file():
+                raise ValueError(f"{label} {artifact} is missing: {path}")
+            if sha256_file(path) != expected_hash:
+                raise ValueError(f"{label} {artifact} hash mismatch: {path}")
+        split_payload = read_json(split_path)
+        if str(split_payload.get("membership_sha256") or "") != normalized[
+            "split_membership_sha256"
+        ]:
+            raise ValueError(f"{label} split-membership hash mismatch")
+        normalized["source_hkl"] = str(hkl_path)
+        normalized["source_model"] = str(model_path)
+        normalized["split_contract_path"] = str(split_path)
+    return normalized
+
+
+def _fixed_hand_decision_binding(
+    path_text: str,
+    expected_transform: str,
+    *,
+    require_decisive: bool = False,
+) -> dict[str, object]:
+    """Validate and hash a frozen matched-hand decision artifact."""
+
+    if not path_text:
+        return {}
+    path = Path(path_text).expanduser().resolve()
+    if not path.is_file():
+        raise ValueError(f"matched hand decision does not exist: {path}")
+    payload = read_json(path)
+    selected_hand = str(payload.get("selected_hand") or payload.get("selected") or "").strip()
+    if selected_hand not in {"original", "alternate"}:
+        raise ValueError(
+            "matched hand decision must explicitly freeze selected_hand as original or alternate"
+        )
+    comparison = payload.get("comparison_contract")
+    comparison = comparison if isinstance(comparison, Mapping) else {}
+    identity = _validated_decision_identity(
+        comparison.get("dataset_identity"),
+        label="matched hand decision",
+        require_complete=require_decisive,
+    )
+    recorded_transform = str(
+        comparison.get("hkl_transform")
+        or payload.get("selected_transform")
+        or ""
+    ).strip()
+    if recorded_transform:
+        recorded = parse_hkl_transform_info(recorded_transform).canonical
+        expected = parse_hkl_transform_info(expected_transform).canonical
+        if recorded != expected:
+            raise ValueError(
+                "matched hand decision transform does not match the transform being canonicalized: "
+                f"{recorded!r} != {expected!r}"
+            )
+    delta = safe_float(
+        payload.get("score_delta_original_minus_alternate"), float("nan")
+    )
+    accept_delta = safe_float(payload.get("accept_delta"), float("nan"))
+    comparison = payload.get("comparison_contract")
+    comparison = comparison if isinstance(comparison, Mapping) else {}
+    common_sigma_evidence: dict[str, object] = {}
+    if require_decisive:
+        reasons: list[str] = []
+        if str(payload.get("quality_gate_status") or "") != "passed":
+            reasons.append("quality gate did not pass")
+        if payload.get("warning"):
+            reasons.append(f"decision warning: {payload.get('warning')}")
+        if comparison.get("row_selection_match") is not True:
+            reasons.append("original/alternate row selections do not match")
+        if comparison.get("positive_matched_free_rows") is not True:
+            reasons.append("matched free-row population is missing or zero")
+        if comparison.get("finite_raw_free_metrics") is not True:
+            reasons.append("free-row metrics are missing or nonfinite")
+        recorded_nuisance_selection = comparison.get(
+            "branch_symmetric_nuisance_selection"
+        )
+        recorded_nuisance_selection = (
+            recorded_nuisance_selection
+            if isinstance(recorded_nuisance_selection, Mapping)
+            else {}
+        )
+        original_grid_binding = recorded_nuisance_selection.get(
+            "original_artifact_binding"
+        )
+        original_grid_binding = (
+            original_grid_binding
+            if isinstance(original_grid_binding, Mapping)
+            else {}
+        )
+        alternate_grid_binding = recorded_nuisance_selection.get(
+            "alternate_artifact_binding"
+        )
+        alternate_grid_binding = (
+            alternate_grid_binding
+            if isinstance(alternate_grid_binding, Mapping)
+            else {}
+        )
+        try:
+            recomputed_nuisance_selection = select_branch_symmetric_nuisance(
+                Path(str(original_grid_binding.get("summary_path") or "")),
+                Path(str(alternate_grid_binding.get("summary_path") or "")),
+            )
+        except Exception as exc:
+            reasons.append(
+                "branch-symmetric nuisance selection does not replay: "
+                f"{exc}"
+            )
+            recomputed_nuisance_selection = {}
+        if recomputed_nuisance_selection:
+            for field in (
+                "status",
+                "selection_rule",
+                "selection_objective",
+                "hand_label_invariant",
+                "free_rows_used_for_selection",
+                "known_configuration_used",
+                "candidate_count",
+                "candidate_grid_sha256",
+                "selected_candidate_sha256",
+                "selected_paired_mean_work_dyn_wR2",
+                "paired_candidate_records",
+                "original_artifact_binding",
+                "alternate_artifact_binding",
+                "original_job_contract",
+                "alternate_job_contract",
+            ):
+                if not _json_contract_equal(
+                    recorded_nuisance_selection.get(field),
+                    recomputed_nuisance_selection.get(field),
+                ):
+                    reasons.append(
+                        "branch-symmetric nuisance selection mismatch for "
+                        f"{field}"
+                    )
+            selected_nuisance_mismatches = _pinned_nuisance_mismatches(
+                dict(
+                    recomputed_nuisance_selection.get("selected_nuisance")
+                    or {}
+                ),
+                dict(recorded_nuisance_selection.get("selected_nuisance") or {}),
+            )
+            if selected_nuisance_mismatches:
+                reasons.append(
+                    "branch-symmetric selected nuisance mismatch: "
+                    + "; ".join(selected_nuisance_mismatches)
+                )
+        recorded_evidence = comparison.get("common_sigma_hand_evidence")
+        recorded_evidence = (
+            recorded_evidence if isinstance(recorded_evidence, Mapping) else {}
+        )
+        original_binding = recorded_evidence.get("original_artifact_binding")
+        original_binding = (
+            original_binding if isinstance(original_binding, Mapping) else {}
+        )
+        alternate_binding = recorded_evidence.get("alternate_artifact_binding")
+        alternate_binding = (
+            alternate_binding if isinstance(alternate_binding, Mapping) else {}
+        )
+        minimum_abs_z = safe_float(
+            recorded_evidence.get("minimum_abs_adjusted_z"),
+            float("nan"),
+        )
+        try:
+            recomputed_evidence = build_common_sigma_hand_evidence(
+                Path(str(original_binding.get("summary_path") or "")),
+                Path(str(alternate_binding.get("summary_path") or "")),
+                minimum_abs_adjusted_z=minimum_abs_z,
+            )
+        except Exception as exc:
+            reasons.append(f"common-sigma hand evidence does not replay: {exc}")
+            recomputed_evidence = {}
+        if recomputed_evidence:
+            common_sigma_evidence = dict(recomputed_evidence)
+            for field in (
+                "status",
+                "comparison_rule",
+                "common_sigma_rule",
+                "common_sigma_sha256",
+                "common_sigma_row_count",
+                "scale_design_rule",
+                "scale_design_sha256",
+                "original_artifact_binding",
+                "alternate_artifact_binding",
+                "original_job_contract",
+                "alternate_job_contract",
+                "residual_preferred_branch",
+                "branch_aligned_adjusted_z",
+                "minimum_abs_adjusted_z",
+                "branch_z_sign_agreement",
+                "adjusted_z_threshold_passed",
+                "known_configuration_used",
+            ):
+                if not _json_contract_equal(
+                    recorded_evidence.get(field),
+                    recomputed_evidence.get(field),
+                ):
+                    reasons.append(
+                        f"common-sigma hand evidence mismatch for {field}"
+                    )
+            recomputed_delta = safe_float(
+                recomputed_evidence.get(
+                    "score_delta_original_minus_alternate"
+                ),
+                float("nan"),
+            )
+            if not math.isclose(
+                delta,
+                recomputed_delta,
+                rel_tol=1e-12,
+                abs_tol=1e-14,
+            ):
+                reasons.append(
+                    "recorded hand score delta does not match common-sigma replay"
+                )
+            if selected_hand != str(
+                recomputed_evidence.get("residual_preferred_branch") or ""
+            ):
+                reasons.append(
+                    "selected hand does not match the common-sigma residual preference"
+                )
+            original_job = recomputed_evidence.get("original_job_contract")
+            original_job = (
+                original_job if isinstance(original_job, Mapping) else {}
+            )
+            expected_canonical = parse_hkl_transform_info(
+                expected_transform
+            ).canonical
+            try:
+                job_transform = parse_hkl_transform_info(
+                    str(original_job.get("hkl_transform") or "")
+                ).canonical
+            except ValueError:
+                job_transform = ""
+            if (
+                str(original_job.get("source_hkl_sha256") or "")
+                != str(identity.get("source_hkl_sha256") or "")
+                or str(original_job.get("source_model_sha256") or "")
+                != str(identity.get("source_model_sha256") or "")
+                or str(original_job.get("split_contract_sha256") or "")
+                != str(identity.get("split_contract_sha256") or "")
+                or str(original_job.get("split_membership_sha256") or "")
+                != str(identity.get("split_membership_sha256") or "")
+                or job_transform != expected_canonical
+            ):
+                reasons.append(
+                    "common-sigma hand job contract is not bound to the "
+                    "decision HKL/model/transform/split identity"
+                )
+            if recomputed_nuisance_selection:
+                pinned_mismatches = _pinned_nuisance_mismatches(
+                    dict(
+                        recomputed_nuisance_selection.get(
+                            "selected_nuisance"
+                        )
+                        or {}
+                    ),
+                    dict(original_job.get("selected_nuisance") or {}),
+                )
+                if pinned_mismatches:
+                    reasons.append(
+                        "final matched-hand evidence does not use the "
+                        "branch-symmetric selected nuisance: "
+                        + "; ".join(pinned_mismatches)
+                    )
+            recorded_z = recorded_evidence.get(
+                "adjusted_hand_z_original_favored"
+            )
+            recorded_z = recorded_z if isinstance(recorded_z, Mapping) else {}
+            recomputed_z = recomputed_evidence.get(
+                "adjusted_hand_z_original_favored"
+            )
+            recomputed_z = (
+                recomputed_z if isinstance(recomputed_z, Mapping) else {}
+            )
+            for split in ("all", "free"):
+                recorded_block = recorded_z.get(split)
+                recorded_block = (
+                    recorded_block
+                    if isinstance(recorded_block, Mapping)
+                    else {}
+                )
+                recomputed_block = recomputed_z.get(split)
+                recomputed_block = (
+                    recomputed_block
+                    if isinstance(recomputed_block, Mapping)
+                    else {}
+                )
+                if (
+                    recorded_block.get("status")
+                    != recomputed_block.get("status")
+                    or int(recorded_block.get("n") or 0)
+                    != int(recomputed_block.get("n") or 0)
+                    or not math.isclose(
+                        safe_float(recorded_block.get("z"), float("nan")),
+                        safe_float(recomputed_block.get("z"), float("nan")),
+                        rel_tol=1e-12,
+                        abs_tol=1e-14,
+                    )
+                ):
+                    reasons.append(
+                        f"common-sigma adjusted hand Z mismatch for {split} rows"
+                    )
+            all_z = recomputed_z.get("all")
+            all_z = all_z if isinstance(all_z, Mapping) else {}
+            if (
+                all_z.get("status") != "ok"
+                or int(all_z.get("n") or 0) <= 0
+                or recomputed_evidence.get("branch_z_sign_agreement") is not True
+                or recomputed_evidence.get("adjusted_z_threshold_passed")
+                is not True
+            ):
+                reasons.append(
+                    "common-sigma Klar-Palatinus adjusted hand Z is not "
+                    "finite, sign-consistent, and above its frozen threshold"
+                )
+        if not math.isfinite(delta) or not math.isfinite(accept_delta):
+            reasons.append("hand score delta or acceptance threshold is nonfinite")
+        elif selected_hand == "alternate" and not delta > accept_delta:
+            reasons.append(
+                f"alternate branch delta {delta:.6g} does not exceed +{accept_delta:.6g}"
+            )
+        elif selected_hand == "original" and not delta < -accept_delta:
+            reasons.append(
+                f"original branch delta {delta:.6g} does not exceed -{accept_delta:.6g}"
+            )
+        if reasons:
+            raise ValueError(
+                "matched hand decision is not decisive enough for parity calibration: "
+                + "; ".join(reasons)
+            )
+    return {
+        "path": str(path),
+        "sha256": sha256_file(path),
+        "selected_hand": selected_hand,
+        "recorded_transform": recorded_transform,
+        "score_delta_original_minus_alternate": (
+            delta if math.isfinite(delta) else None
+        ),
+        "accept_delta": accept_delta if math.isfinite(accept_delta) else None,
+        "decisive_for_calibration": require_decisive,
+        "dataset_identity": identity,
+        "common_sigma_hand_evidence": common_sigma_evidence,
+    }
+
+
+def _fixed_transform_decision_binding(
+    path_text: str,
+    expected_transform: str = "",
+    *,
+    require_proper_geometry: bool = False,
+    require_calibration_grade: bool = False,
+) -> dict[str, object]:
+    """Validate and hash a transform decision made without known chemistry."""
+
+    if not path_text:
+        return {}
+    path = Path(path_text).expanduser().resolve()
+    if not path.is_file():
+        raise ValueError(f"transform decision does not exist: {path}")
+    payload = read_json(path)
+    selected = payload.get("selected")
+    selected = selected if isinstance(selected, Mapping) else {}
+    recorded_transform = str(
+        selected.get("transform") or payload.get("selected_transform") or ""
+    ).strip()
+    if not recorded_transform:
+        raise ValueError("transform decision does not record a selected transform")
+    recorded = parse_hkl_transform_info(recorded_transform).canonical
+    expected = (
+        parse_hkl_transform_info(expected_transform).canonical
+        if expected_transform
+        else recorded
+    )
+    if expected_transform and recorded != expected:
+        raise ValueError(
+            "transform decision does not match the transform being canonicalized: "
+            f"{recorded!r} != {expected!r}"
+        )
+    input_identity = _validated_decision_identity(
+        payload.get("input_identity"),
+        label="transform decision",
+        require_complete=require_calibration_grade,
+    )
+    if (
+        require_calibration_grade
+        and payload.get("known_configuration_used_for_candidate_generation_or_ranking")
+        is not False
+    ):
+        raise ValueError(
+            "transform decision does not explicitly prove that known configuration was excluded "
+            "from candidate generation and ranking"
+        )
+    candidate_generation = payload.get("candidate_generation")
+    candidate_generation = (
+        candidate_generation if isinstance(candidate_generation, Mapping) else {}
+    )
+    ranking_tie_break = payload.get("ranking_tie_break")
+    ranking_tie_break = (
+        ranking_tie_break if isinstance(ranking_tie_break, Mapping) else {}
+    )
+    full_proper_universe = [
+        parse_hkl_transform_info(candidate).canonical
+        for candidate in ALL_PROPER_SIGNED_PERMUTATIONS
+    ]
+    retained_candidates: list[str] = []
+    metric_filter_contract: Mapping[str, object] = {}
+    if require_calibration_grade:
+        generated = [
+            parse_hkl_transform_info(candidate).canonical
+            for candidate in (
+                candidate_generation.get("generated_candidates_before_metadata")
+                or []
+            )
+        ]
+        if (
+            candidate_generation.get("policy")
+            != "automatic_full24_proper_metric_filtered_v1"
+            or candidate_generation.get("calibration_grade_candidate_generation")
+            is not True
+            or candidate_generation.get("exact_full24_proper_set") is not True
+            or len(generated) != len(full_proper_universe)
+            or set(generated) != set(full_proper_universe)
+        ):
+            raise ValueError(
+                "transform decision candidate generation is not the exact automatic "
+                "24 determinant-positive signed-axis permutation universe required "
+                "for parity calibration"
+            )
+        metric_filter_contract = candidate_generation.get("metric_filter")
+        metric_filter_contract = (
+            metric_filter_contract
+            if isinstance(metric_filter_contract, Mapping)
+            else {}
+        )
+        retained_candidates = [
+            parse_hkl_transform_info(candidate).canonical
+            for candidate in (
+                candidate_generation.get("retained_candidates_after_metric_filter")
+                or []
+            )
+        ]
+        if (
+            candidate_generation.get("metric_filter_contract_valid") is not True
+            or metric_filter_contract.get("policy")
+            != "source_model_reciprocal_cell_metric_only_v1"
+            or metric_filter_contract.get("uses_intensities") is not False
+            or metric_filter_contract.get("uses_atomic_coordinates_or_hand") is not False
+            or metric_filter_contract.get("uses_atom_types_or_known_chemistry") is not False
+            or metric_filter_contract.get("uses_known_configuration") is not False
+            or list(metric_filter_contract.get("retained_transforms") or [])
+            != retained_candidates
+            or not retained_candidates
+        ):
+            raise ValueError(
+                "transform decision does not contain a valid hand/chemistry/intensity-"
+                "independent source/model unit-cell metric filter contract"
+            )
+        if (
+            ranking_tie_break.get("policy")
+            != "fixed_full24_proper_priority_then_canonical_v1"
+            or ranking_tie_break.get(
+                "metadata_order_used_for_ties_or_rerank_admission"
+            )
+            is not False
+            or list(ranking_tie_break.get("full24_proper_priority") or [])
+            != full_proper_universe
+        ):
+            raise ValueError(
+                "transform decision does not prove a metadata-independent fixed "
+                "tie-break/rerank-admission policy"
+            )
+        coarse = payload.get("coarse_records")
+        coarse = coarse if isinstance(coarse, list) else []
+        coarse_by_transform = {
+            parse_hkl_transform_info(str(record.get("transform") or "")).canonical: record
+            for record in coarse
+            if isinstance(record, Mapping) and record.get("transform")
+        }
+        missing_or_invalid = []
+        nuisance_contract_hashes = set()
+        replayed_coarse_scores: dict[str, float] = {}
+        coarse_fidelity_contract: dict[str, object] | None = None
+        for candidate in retained_candidates:
+            record = coarse_by_transform.get(candidate)
+            if (
+                not isinstance(record, Mapping)
+                or record.get("status") != "ok"
+                or record.get("selection_target")
+                != "matched_born_work_only_hand_invariant_v1"
+                or record.get("coordinate_hand_sensitive_terms_used") is not False
+                or record.get("free_rows_used_for_transform_selection") is not False
+                or record.get("engine_trial_selection_metric")
+                != "work_born_wR2"
+                or record.get("engine_trial_selection_metric_requested")
+                != "work_born_wR2"
+                or int(record.get("nuisance_trial_count") or 0) != 1
+                or int(record.get("prediction_geometry_trial_count") or 0) != 1
+            ):
+                missing_or_invalid.append(candidate)
+            elif str(record.get("frozen_nuisance_contract_sha256") or ""):
+                nuisance_contract_hashes.add(
+                    str(record["frozen_nuisance_contract_sha256"])
+                )
+                recorded_replay = record.get("artifact_score_replay")
+                recorded_replay = (
+                    recorded_replay
+                    if isinstance(recorded_replay, Mapping)
+                    else {}
+                )
+                binding = recorded_replay.get("artifact_binding")
+                binding = binding if isinstance(binding, Mapping) else {}
+                try:
+                    recomputed_replay = replay_transform_work_born(
+                        Path(str(binding.get("summary_path") or ""))
+                    )
+                except Exception:
+                    missing_or_invalid.append(candidate)
+                    continue
+                recomputed_binding = recomputed_replay.get("artifact_binding")
+                recomputed_binding = (
+                    recomputed_binding
+                    if isinstance(recomputed_binding, Mapping)
+                    else {}
+                )
+                if (
+                    recorded_replay.get("status") != "replayed"
+                    or dict(binding) != dict(recomputed_binding)
+                    or not math.isclose(
+                        safe_float(recorded_replay.get("score")),
+                        safe_float(recomputed_replay.get("score")),
+                        rel_tol=1e-12,
+                        abs_tol=1e-14,
+                    )
+                    or not math.isclose(
+                        safe_float(record.get("score")),
+                        safe_float(recomputed_replay.get("score")),
+                        rel_tol=1e-12,
+                        abs_tol=1e-14,
+                    )
+                ):
+                    missing_or_invalid.append(candidate)
+                    continue
+                job = recomputed_replay.get("job_contract")
+                job = job if isinstance(job, Mapping) else {}
+                candidate_fidelity = {
+                    field: job.get(field)
+                    for field in (
+                        "n_basis",
+                        "n_points",
+                        "max_rows",
+                        "selected_rows",
+                        "work_rows",
+                        "free_rows",
+                        "scale_fit_split",
+                        "selection_metric",
+                        "split_contract_sha256",
+                        "split_membership_sha256",
+                        "declared_nuisance_contract_sha256",
+                        "grid_physics_contract_sha256",
+                        "selected_nuisance_sha256",
+                        "bloch_kernel_contract_sha256",
+                        "row_support_sha256",
+                    )
+                }
+                if (
+                    str(job.get("source_hkl_sha256") or "")
+                    != str(input_identity.get("source_hkl_sha256") or "")
+                    or str(job.get("source_model_sha256") or "")
+                    != str(input_identity.get("source_model_sha256") or "")
+                    or parse_hkl_transform_info(
+                        str(job.get("hkl_transform") or "identity")
+                    ).canonical
+                    != candidate
+                    or job.get("alternate_hand") is not False
+                    or str(job.get("model_tag") or "").split(";", 1)[0]
+                    != "original"
+                    or str(job.get("split_contract_sha256") or "")
+                    != str(input_identity.get("split_contract_sha256") or "")
+                    or str(job.get("split_membership_sha256") or "")
+                    != str(input_identity.get("split_membership_sha256") or "")
+                    or str(job.get("scale_fit_split") or "") != "work"
+                    or str(job.get("selection_metric") or "")
+                    != "work_born_wR2"
+                    or dict(job.get("declared_nuisance_contract") or {})
+                    != dict(record.get("frozen_nuisance_contract") or {})
+                    or str(
+                        job.get("declared_nuisance_contract_sha256") or ""
+                    )
+                    != str(
+                        record.get("frozen_nuisance_contract_sha256") or ""
+                    )
+                    or int(job.get("n_basis") or 0)
+                    != int(record.get("n_basis") or 0)
+                    or int(job.get("n_points") or 0)
+                    != int(record.get("n_points") or 0)
+                    or int(job.get("max_rows") or 0)
+                    != int(record.get("max_rows") or 0)
+                    or not str(
+                        job.get("bloch_kernel_contract_sha256") or ""
+                    )
+                    or not str(job.get("row_support_sha256") or "")
+                ):
+                    missing_or_invalid.append(candidate)
+                    continue
+                if coarse_fidelity_contract is None:
+                    coarse_fidelity_contract = candidate_fidelity
+                elif candidate_fidelity != coarse_fidelity_contract:
+                    missing_or_invalid.append(candidate)
+                    continue
+                replayed_coarse_scores[candidate] = float(
+                    recomputed_replay["score"]
+                )
+        if missing_or_invalid:
+            raise ValueError(
+                "calibration-grade transform decision did not successfully score "
+                "every metric-compatible proper candidate with the work-only matched-Born target: "
+                + ", ".join(missing_or_invalid)
+            )
+        if len(nuisance_contract_hashes) != 1:
+            raise ValueError(
+                "calibration-grade transform candidates do not share one exact "
+                "single-trial nuisance contract"
+            )
+        priority = {
+            candidate: rank
+            for rank, candidate in enumerate(full_proper_universe)
+        }
+        ranked_coarse_candidates = sorted(
+            retained_candidates,
+            key=lambda candidate: (
+                replayed_coarse_scores[candidate],
+                priority[candidate],
+                candidate,
+            ),
+        )
+        rerank = payload.get("rerank_records")
+        rerank = rerank if isinstance(rerank, list) else []
+        rerank_top = max(0, int(payload.get("rerank_top") or 0))
+        expected_selected = ranked_coarse_candidates[0]
+        if rerank:
+            expected_admitted = ranked_coarse_candidates[
+                : min(rerank_top, len(ranked_coarse_candidates))
+            ]
+            rerank_by_transform = {
+                parse_hkl_transform_info(
+                    str(record.get("transform") or "")
+                ).canonical: record
+                for record in rerank
+                if isinstance(record, Mapping) and record.get("transform")
+            }
+            if set(rerank_by_transform) != set(expected_admitted):
+                raise ValueError(
+                    "transform rerank admission does not reproduce from the "
+                    "fixed-priority coarse work-Born ranking"
+                )
+            replayed_rerank_scores: dict[str, float] = {}
+            rerank_fidelity_contract: dict[str, object] | None = None
+            for candidate in expected_admitted:
+                record = rerank_by_transform[candidate]
+                recorded_replay = record.get("artifact_score_replay")
+                recorded_replay = (
+                    recorded_replay
+                    if isinstance(recorded_replay, Mapping)
+                    else {}
+                )
+                binding = recorded_replay.get("artifact_binding")
+                binding = binding if isinstance(binding, Mapping) else {}
+                recomputed_replay = replay_transform_work_born(
+                    Path(str(binding.get("summary_path") or ""))
+                )
+                job = recomputed_replay.get("job_contract")
+                job = job if isinstance(job, Mapping) else {}
+                candidate_fidelity = {
+                    field: job.get(field)
+                    for field in (
+                        "n_basis",
+                        "n_points",
+                        "max_rows",
+                        "selected_rows",
+                        "work_rows",
+                        "free_rows",
+                        "scale_fit_split",
+                        "selection_metric",
+                        "split_contract_sha256",
+                        "split_membership_sha256",
+                        "declared_nuisance_contract_sha256",
+                        "grid_physics_contract_sha256",
+                        "selected_nuisance_sha256",
+                        "bloch_kernel_contract_sha256",
+                        "row_support_sha256",
+                    )
+                }
+                if (
+                    record.get("status") != "ok"
+                    or record.get("selection_target")
+                    != "matched_born_work_only_hand_invariant_v1"
+                    or record.get("engine_trial_selection_metric")
+                    != "work_born_wR2"
+                    or int(record.get("nuisance_trial_count") or 0) != 1
+                    or int(record.get("prediction_geometry_trial_count") or 0)
+                    != 1
+                    or dict(recorded_replay.get("artifact_binding") or {})
+                    != dict(recomputed_replay.get("artifact_binding") or {})
+                    or not math.isclose(
+                        safe_float(record.get("score")),
+                        safe_float(recomputed_replay.get("score")),
+                        rel_tol=1e-12,
+                        abs_tol=1e-14,
+                    )
+                    or str(job.get("source_hkl_sha256") or "")
+                    != str(input_identity.get("source_hkl_sha256") or "")
+                    or str(job.get("source_model_sha256") or "")
+                    != str(input_identity.get("source_model_sha256") or "")
+                    or parse_hkl_transform_info(
+                        str(job.get("hkl_transform") or "identity")
+                    ).canonical
+                    != candidate
+                    or job.get("alternate_hand") is not False
+                    or str(job.get("model_tag") or "").split(";", 1)[0]
+                    != "original"
+                    or str(job.get("split_contract_sha256") or "")
+                    != str(input_identity.get("split_contract_sha256") or "")
+                    or str(job.get("split_membership_sha256") or "")
+                    != str(input_identity.get("split_membership_sha256") or "")
+                    or dict(job.get("declared_nuisance_contract") or {})
+                    != dict(record.get("frozen_nuisance_contract") or {})
+                    or int(job.get("n_basis") or 0)
+                    != int(record.get("n_basis") or 0)
+                    or int(job.get("n_points") or 0)
+                    != int(record.get("n_points") or 0)
+                    or int(job.get("max_rows") or 0)
+                    != int(record.get("max_rows") or 0)
+                    or not str(
+                        job.get("bloch_kernel_contract_sha256") or ""
+                    )
+                    or not str(job.get("row_support_sha256") or "")
+                ):
+                    raise ValueError(
+                        f"transform rerank artifact does not replay for {candidate}"
+                    )
+                if rerank_fidelity_contract is None:
+                    rerank_fidelity_contract = candidate_fidelity
+                elif candidate_fidelity != rerank_fidelity_contract:
+                    raise ValueError(
+                        "transform rerank candidates do not share one exact "
+                        "fidelity and row-support contract"
+                    )
+                replayed_rerank_scores[candidate] = float(
+                    recomputed_replay["score"]
+                )
+            expected_selected = min(
+                expected_admitted,
+                key=lambda candidate: (
+                    replayed_rerank_scores[candidate],
+                    priority[candidate],
+                    candidate,
+                ),
+            )
+        if recorded != expected_selected:
+            raise ValueError(
+                "selected transform does not reproduce from hash-bound row "
+                f"artifacts: recorded={recorded!r}, expected={expected_selected!r}"
+            )
+        if (
+            selected.get("status") != "ok"
+            or selected.get("selection_target")
+            != "matched_born_work_only_hand_invariant_v1"
+            or selected.get("engine_trial_selection_metric")
+            != "work_born_wR2"
+            or int(selected.get("nuisance_trial_count") or 0) != 1
+            or int(selected.get("prediction_geometry_trial_count") or 0) != 1
+            or str(selected.get("frozen_nuisance_contract_sha256") or "")
+            not in nuisance_contract_hashes
+        ):
+            raise ValueError(
+                "selected transform is not bound to the validated single-trial "
+                "work-Born scout contract"
+            )
+    if (
+        require_calibration_grade
+        and payload.get("metadata_candidate_elimination_used") is not False
+    ):
+        raise ValueError(
+            "transform decision used metadata candidate elimination; a calibration-grade "
+            "decision must run every proper candidate through the work-only matched-Born target"
+        )
+    selection_target = str(payload.get("selection_target") or "")
+    if (
+        require_calibration_grade
+        and selection_target != "matched_born_work_only_hand_invariant_v1"
+    ):
+        raise ValueError(
+            "transform decision selection_target must be "
+            "'matched_born_work_only_hand_invariant_v1' before external calibration"
+        )
+    selected_info = parse_hkl_transform_info(recorded)
+    orientation = selected.get("source_orientation_contract")
+    if not isinstance(orientation, Mapping):
+        claim = payload.get("selected_transform_claim_contract")
+        claim = claim if isinstance(claim, Mapping) else {}
+        orientation = claim.get("source_orientation_contract")
+    orientation = orientation if isinstance(orientation, Mapping) else {}
+    if require_proper_geometry and (
+        not selected_info.proper
+        or orientation.get("absolute_claim_geometry_ready") is not True
+        or safe_float(orientation.get("source_basis_determinant"), -1.0) <= 0.0
+        or safe_float(orientation.get("transformed_basis_determinant"), -1.0)
+        <= 0.0
+    ):
+        raise ValueError(
+            "transform decision is not bound to a proper operator and positive right-handed "
+            "source/transformed orientation contract"
+        )
+    split_binding = payload.get("transform_hand_split_contract")
+    split_binding = split_binding if isinstance(split_binding, Mapping) else {}
+    if require_calibration_grade:
+        from .legacy.engine.bloch_engine import (
+            build_transform_split_contract,
+            validate_transform_split_contract,
+        )
+
+        split_path = Path(str(split_binding.get("path") or "")).expanduser().resolve()
+        if not split_path.is_file():
+            raise ValueError(
+                f"transform decision split contract is missing: {split_path}"
+            )
+        if sha256_file(split_path) != str(split_binding.get("sha256") or ""):
+            raise ValueError("transform decision split-contract file hash mismatch")
+        split_payload = read_json(split_path)
+        split_validation = validate_transform_split_contract(
+            split_payload,
+            source_hkl=Path(str(input_identity["source_hkl"])),
+            current_transform=recorded,
+        )
+        split_validation.pop("masks", None)
+        if (
+            str(split_validation["membership_sha256"])
+            != str(input_identity["split_membership_sha256"])
+            or str(split_binding.get("membership_sha256") or "")
+            != str(input_identity["split_membership_sha256"])
+            or list(split_validation["candidate_transforms"])
+            != retained_candidates
+        ):
+            raise ValueError(
+                "transform decision split contract does not match its input identity "
+                "and exact proper candidate set"
+            )
+        if str(input_identity["split_contract_sha256"]) != sha256_file(split_path):
+            raise ValueError(
+                "transform decision input identity has a different split-contract hash"
+            )
+        if str(input_identity["dataset"]) != str(payload.get("dataset") or ""):
+            raise ValueError(
+                "transform decision dataset does not match its bound input identity"
+            )
+        from .legacy.engine.bloch_engine import metric_filter_signed_axis_transforms
+
+        recomputed_retained, recomputed_metric = metric_filter_signed_axis_transforms(
+            Path(str(input_identity["source_hkl"])),
+            Path(str(input_identity["source_model"])),
+            generated,
+            relative_tolerance=float(
+                metric_filter_contract.get("relative_frobenius_tolerance")
+            ),
+        )
+        if (
+            recomputed_retained != retained_candidates
+            or str(recomputed_metric.get("contract_payload_sha256") or "")
+            != str(metric_filter_contract.get("contract_payload_sha256") or "")
+        ):
+            raise ValueError(
+                "transform decision unit-cell metric filter cannot be reproduced "
+                "from its bound source HKL/model"
+            )
+        recomputed_split = build_transform_split_contract(
+            Path(str(input_identity["source_hkl"])),
+            Path(str(input_identity["source_model"])),
+            retained_candidates,
+            dataset=str(input_identity["dataset"]),
+            free_fraction=float(split_payload["free_fraction"]),
+            seed=int(split_payload["split_seed"]),
+            include_friedel=bool(split_payload["include_friedel"]),
+        )
+        split_reproducibility_fields = (
+            "contract_payload_sha256",
+            "membership_sha256",
+            "orbit_group_by_row_sha256",
+            "source_raw_hkl_sha256",
+            "model_symmetry_rotations_sha256",
+            "candidate_transforms_sha256",
+        )
+        split_mismatches = {
+            field: {
+                "recorded": split_payload.get(field),
+                "recomputed": recomputed_split.get(field),
+            }
+            for field in split_reproducibility_fields
+            if str(split_payload.get(field) or "")
+            != str(recomputed_split.get(field) or "")
+        }
+        if split_mismatches:
+            raise ValueError(
+                "transform decision split contract cannot be reproduced from "
+                f"the bound HKL/model/candidates/seed: {split_mismatches}"
+            )
+    else:
+        split_validation = {}
+    return {
+        "path": str(path),
+        "sha256": sha256_file(path),
+        "selected_transform": recorded,
+        "selection_target": selection_target,
+        "transform_determinant": selected_info.determinant,
+        "source_orientation_contract": dict(orientation),
+        "calibration_grade_validated": require_calibration_grade,
+        "candidate_generation": dict(candidate_generation),
+        "ranking_tie_break": dict(ranking_tie_break),
+        "dataset_identity": input_identity,
+        "transform_hand_split_contract": {
+            **dict(split_validation),
+            "path": str(split_binding.get("path") or ""),
+            "sha256": str(split_binding.get("sha256") or ""),
+        }
+        if split_binding
+        else {},
+    }
+
+
+def _external_parity_calibration_binding(path_text: str) -> dict[str, object]:
+    """Bind an external parity-calibration artifact without interpreting chemistry."""
+
+    if not path_text:
+        return {}
+    path = Path(path_text).expanduser().resolve()
+    if not path.is_file():
+        raise ValueError(f"external parity-calibration reference does not exist: {path}")
+    payload = read_json(path)
+    return {
+        "path": str(path),
+        "sha256": sha256_file(path),
+        "payload": payload,
+    }
+
+
+def _require_matching_decision_identities(
+    transform: Mapping[str, object],
+    hand: Mapping[str, object],
+    *,
+    expected_dataset_id: str,
+    label: str,
+) -> dict[str, object]:
+    """Require transform and hand evidence from the same exact crystal bytes."""
+
+    transform_identity = transform.get("dataset_identity")
+    transform_identity = (
+        transform_identity if isinstance(transform_identity, Mapping) else {}
+    )
+    hand_identity = hand.get("dataset_identity")
+    hand_identity = hand_identity if isinstance(hand_identity, Mapping) else {}
+    compared_fields = (
+        "dataset",
+        "setup_id",
+        "setup_manifest_sha256",
+        "physical_crystal_id",
+        "acquisition_fingerprint",
+        "source_hkl_sha256",
+        "source_model_sha256",
+        "split_contract_sha256",
+        "split_membership_sha256",
+    )
+    mismatches = {
+        field: {
+            "transform": transform_identity.get(field),
+            "hand": hand_identity.get(field),
+        }
+        for field in compared_fields
+        if str(transform_identity.get(field) or "")
+        != str(hand_identity.get(field) or "")
+    }
+    if mismatches:
+        raise ValueError(
+            f"{label} transform and matched-hand decisions do not bind the same "
+            f"dataset/model/split identity: {mismatches}"
+        )
+    dataset = str(transform_identity.get("dataset") or "")
+    if dataset != str(expected_dataset_id):
+        raise ValueError(
+            f"{label} dataset ID {dataset!r} does not match the requested "
+            f"dataset ID {str(expected_dataset_id)!r}"
+        )
+    return dict(transform_identity)
+
+
+def _validated_sha256_text(value: object, *, label: str) -> str:
+    """Validate a caller-supplied immutable external provenance fingerprint."""
+
+    text = str(value or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", text):
+        raise ValueError(f"{label} must be exactly 64 hexadecimal SHA-256 characters")
+    return text
+
+
+def cmd_canonicalize_hand(args: argparse.Namespace) -> int:
+    """Canonicalize ``(model, T)`` to an explicit model plus proper transform."""
+
+    from .legacy.engine.make_res_variants import write_alternate_hand_variant
+    from .legacy.engine.shelx_hkl import (
+        audit_fixed_width_hklf4,
+        write_sign_paired_hklf4,
+    )
+
+    source = Path(args.input_res).expanduser().resolve()
+    output = Path(args.output_res).expanduser().resolve()
+    source_hkl = Path(args.input_hkl).expanduser().resolve()
+    output_hkl = Path(args.output_hkl).expanduser().resolve()
+    manifest_path = (
+        Path(args.manifest).expanduser().resolve()
+        if args.manifest
+        else output.with_suffix(output.suffix + ".hand_canonicalization.json")
+    )
+    if not source.is_file():
+        raise ValueError(f"input RES does not exist: {source}")
+    if not source_hkl.is_file():
+        raise ValueError(f"input HKLF4 does not exist: {source_hkl}")
+    if source == output or source_hkl == output_hkl:
+        raise ValueError("input and output RES/HKL paths must differ")
+    for path in (output, output_hkl, manifest_path):
+        if path.exists() and not args.overwrite:
+            raise ValueError(f"refusing to overwrite existing artifact without --overwrite: {path}")
+
+    input_info = parse_hkl_transform_info(args.hkl_transform)
+    if input_info.proper and not args.allow_proper_noop:
+        raise ValueError(
+            f"transform {input_info.canonical!r} is already proper; use --allow-proper-noop "
+            "only when an audited copy/calibration manifest is intentionally required"
+        )
+    hand_decision = _fixed_hand_decision_binding(
+        args.matched_hand_decision,
+        input_info.canonical,
+    )
+    transform_decision = _fixed_transform_decision_binding(
+        args.transform_decision,
+        input_info.canonical,
+    )
+    output_transform = input_info.proper_canonical_transform
+    output_info = parse_hkl_transform_info(output_transform)
+    if not output_info.proper:
+        raise RuntimeError("internal error: canonicalized output transform is not proper")
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output_hkl.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".grond-hand-", dir=output.parent) as temp_dir:
+        temp_res = Path(temp_dir) / output.name
+        # Keep the HKL temporary on its destination filesystem.
+        with tempfile.TemporaryDirectory(
+            prefix=".grond-hand-hkl-", dir=output_hkl.parent
+        ) as temp_hkl_dir:
+            temp_hkl = Path(temp_hkl_dir) / output_hkl.name
+            if input_info.proper:
+                shutil.copy2(source, temp_res)
+                shutil.copy2(source_hkl, temp_hkl)
+                source_hkl_audit = audit_fixed_width_hklf4(source_hkl)
+                output_hkl_audit = audit_fixed_width_hklf4(temp_hkl)
+                if source_hkl_audit != output_hkl_audit:
+                    raise ValueError("proper no-op copy changed the HKLF4 row/value contract")
+                hkl_audit = {
+                    "source": source_hkl_audit,
+                    "output": output_hkl_audit,
+                    "reflection_count_preserved": True,
+                    "observation_payload_preserved": True,
+                    "index_operation": "identity",
+                }
+                operation = "audited_proper_noop_copy"
+                coordinate_inversion_applied = False
+            else:
+                write_alternate_hand_variant(source, temp_res)
+                hkl_audit = write_sign_paired_hklf4(source_hkl, temp_hkl)
+                operation = "invert_coordinates_and_negate_hkl_transform"
+                coordinate_inversion_applied = True
+            os.replace(temp_res, output)
+            os.replace(temp_hkl, output_hkl)
+    claim_contract = absolute_configuration_claim_contract(output_transform)
+    manifest = {
+        "schema_version": 1,
+        "kind": "grond_hand_transform_canonicalization",
+        "operation": operation,
+        "gauge_identity": "(model,T) == (inverted_model,-T)",
+        "known_configuration_used_for_candidate_generation_or_ranking": False,
+        "input": {
+            "res": str(source),
+            "res_sha256": sha256_file(source),
+            "hkl": str(source_hkl),
+            "hkl_sha256": sha256_file(source_hkl),
+            "transform": input_info.to_dict(),
+        },
+        "output": {
+            "res": str(output),
+            "res_sha256": sha256_file(output),
+            "hkl": str(output_hkl),
+            "hkl_sha256": sha256_file(output_hkl),
+            "transform": output_info.to_dict(),
+        },
+        "hklf4_gauge_pair_audit": hkl_audit,
+        "coordinate_inversion_applied": coordinate_inversion_applied,
+        "symmetry_translation_inversion": (
+            "materialized_and_validated" if coordinate_inversion_applied else "not_required"
+        ),
+        "matched_hand_decision": hand_decision,
+        "transform_decision": transform_decision,
+        "external_parity_calibration": {},
+        "configuration_claim_contract": claim_contract,
+        "cif_status": (
+            "not_generated; regenerate CIF by replaying the canonical RES/HKL pair through "
+            "the configured endpoint program"
+        ),
+    }
+    write_json(manifest_path, manifest)
+    print(json.dumps({"manifest": str(manifest_path), **manifest}, indent=2))
+    return 0
+
+
+def cmd_create_parity_calibration(args: argparse.Namespace) -> int:
+    """Create a reserved calibrant manifest after blinded decisions are frozen."""
+
+    if not args.reserved_from_validation:
+        raise ValueError(
+            "a parity calibrant must be explicitly --reserved-from-validation"
+        )
+    transform = _fixed_transform_decision_binding(
+        args.transform_decision,
+        require_proper_geometry=True,
+        require_calibration_grade=True,
+    )
+    fixed_transform = str(transform["selected_transform"])
+    hand = _fixed_hand_decision_binding(
+        args.matched_hand_decision,
+        fixed_transform,
+        require_decisive=True,
+    )
+    calibrant_identity = _require_matching_decision_identities(
+        transform,
+        hand,
+        expected_dataset_id=str(args.calibrant_dataset_id),
+        label="calibrant",
+    )
+    calibrant_physical_crystal_id = str(args.calibrant_physical_crystal_id).strip()
+    if not calibrant_physical_crystal_id:
+        raise ValueError("calibrant physical-crystal ID must not be empty")
+    calibrant_acquisition_fingerprint = _validated_sha256_text(
+        args.calibrant_acquisition_fingerprint,
+        label="calibrant acquisition fingerprint",
+    )
+    setup_manifest_sha256 = _validated_sha256_text(
+        args.setup_manifest_sha256,
+        label="setup manifest SHA-256",
+    )
+    frozen_values = {
+        "setup_id": str(calibrant_identity["setup_id"]),
+        "setup_manifest_sha256": str(
+            calibrant_identity["setup_manifest_sha256"]
+        ),
+        "physical_crystal_id": str(
+            calibrant_identity["physical_crystal_id"]
+        ),
+        "acquisition_fingerprint": str(
+            calibrant_identity["acquisition_fingerprint"]
+        ),
+    }
+    requested_values = {
+        "setup_id": str(args.setup_id),
+        "setup_manifest_sha256": setup_manifest_sha256,
+        "physical_crystal_id": calibrant_physical_crystal_id,
+        "acquisition_fingerprint": calibrant_acquisition_fingerprint,
+    }
+    if requested_values != frozen_values:
+        raise ValueError(
+            "calibrant CLI identity does not match the identity frozen before "
+            f"transform/hand selection: requested={requested_values}, "
+            f"frozen={frozen_values}"
+        )
+    output = Path(args.out).expanduser().resolve()
+    if output.exists() and not args.overwrite:
+        raise ValueError(f"refusing to overwrite parity calibration without --overwrite: {output}")
+    orientation = transform["source_orientation_contract"]
+    orientation = orientation if isinstance(orientation, Mapping) else {}
+    payload: dict[str, object] = {
+        "schema_version": 1,
+        "kind": "grond_external_parity_calibration",
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "setup_id": frozen_values["setup_id"],
+        "calibrant_dataset_id": str(args.calibrant_dataset_id),
+        "calibrant_physical_crystal_id": frozen_values[
+            "physical_crystal_id"
+        ],
+        "calibrant_acquisition_fingerprint": frozen_values[
+            "acquisition_fingerprint"
+        ],
+        "setup_manifest_sha256": frozen_values[
+            "setup_manifest_sha256"
+        ],
+        "fixed_transform": fixed_transform,
+        "fixed_transform_determinant": 1,
+        "transform_decision_path": str(transform["path"]),
+        "transform_decision_sha256": str(transform["sha256"]),
+        "matched_hand_decision_path": str(hand["path"]),
+        "matched_hand_decision_sha256": str(hand["sha256"]),
+        "expected_known_configuration": str(args.expected_known_configuration),
+        "expected_known_branch": str(args.expected_known_branch),
+        "observed_branch": str(hand["selected_hand"]),
+        "calibrant_identity": calibrant_identity,
+        "observed_sign_mapping": {"original": 1, "alternate": -1},
+        "reserved_from_validation": True,
+        "source_orientation_determinant": orientation.get("source_basis_determinant"),
+        "transformed_orientation_determinant": orientation.get(
+            "transformed_basis_determinant"
+        ),
+        "source_orientation_right_handed": bool(
+            orientation.get("right_handed_source")
+        ),
+        "selection_independence": {
+            "calibration_used_for_transform_candidate_generation": False,
+            "known_configuration_used_for_transform_ranking": False,
+            "calibration_attached_after_transform_and_hand_frozen": True,
+        },
+    }
+    validation = validate_external_parity_calibration(
+        payload,
+        setup_id=str(args.setup_id),
+        proper_transform=fixed_transform,
+        transform_decision_sha256=str(transform["sha256"]),
+        matched_hand_decision_sha256=str(hand["sha256"]),
+        matched_selected_hand=str(hand["selected_hand"]),
+    )
+    payload["validation"] = validation
+    payload["setup_parity_multiplier"] = validation["setup_parity_multiplier"]
+    payload["manifest_payload_sha256"] = hashlib.sha256(
+        json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    write_json(output, payload)
+    print(json.dumps({"parity_calibration": str(output), **payload}, indent=2))
+    return 0
+
+
+def cmd_apply_parity_calibration(args: argparse.Namespace) -> int:
+    """Bind one reserved setup calibrant to a different validation decision."""
+
+    calibration_binding = _external_parity_calibration_binding(args.calibration)
+    payload = calibration_binding.get("payload")
+    if not isinstance(payload, Mapping):
+        raise ValueError("parity calibration manifest must contain a JSON object")
+    if str(payload.get("setup_id") or "") != str(args.setup_id):
+        raise ValueError("validation setup ID does not match the parity calibration")
+    setup_manifest_sha256 = _validated_sha256_text(
+        args.setup_manifest_sha256,
+        label="validation setup manifest SHA-256",
+    )
+    if setup_manifest_sha256 != str(payload.get("setup_manifest_sha256") or ""):
+        raise ValueError(
+            "validation setup-manifest hash does not match the reserved calibrant"
+        )
+    validation_physical_crystal_id = str(
+        args.validation_physical_crystal_id
+    ).strip()
+    if not validation_physical_crystal_id:
+        raise ValueError("validation physical-crystal ID must not be empty")
+    if validation_physical_crystal_id == str(
+        payload.get("calibrant_physical_crystal_id") or ""
+    ):
+        raise ValueError(
+            "reserved calibrant physical crystal cannot also be used as validation"
+        )
+    validation_acquisition_fingerprint = _validated_sha256_text(
+        args.validation_acquisition_fingerprint,
+        label="validation acquisition fingerprint",
+    )
+    if validation_acquisition_fingerprint == str(
+        payload.get("calibrant_acquisition_fingerprint") or ""
+    ):
+        raise ValueError(
+            "reserved calibrant acquisition/raw-image fingerprint cannot be reused "
+            "as validation after reintegration or renaming"
+        )
+    manifest_hash = str(payload.get("manifest_payload_sha256") or "")
+    manifest_without_hash = dict(payload)
+    manifest_without_hash.pop("manifest_payload_sha256", None)
+    current_manifest_hash = hashlib.sha256(
+        json.dumps(
+            manifest_without_hash,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    if not manifest_hash or manifest_hash != current_manifest_hash:
+        raise ValueError("parity calibration manifest payload hash mismatch")
+    if str(payload.get("calibrant_dataset_id") or "") == str(
+        args.validation_dataset_id
+    ):
+        raise ValueError(
+            "reserved calibrant dataset cannot also be used as a validation dataset"
+        )
+    calibrant_transform = _fixed_transform_decision_binding(
+        str(payload.get("transform_decision_path") or ""),
+        str(payload.get("fixed_transform") or ""),
+        require_proper_geometry=True,
+        require_calibration_grade=True,
+    )
+    calibrant_hand = _fixed_hand_decision_binding(
+        str(payload.get("matched_hand_decision_path") or ""),
+        str(calibrant_transform["selected_transform"]),
+        require_decisive=True,
+    )
+    if str(calibrant_transform["sha256"]) != str(
+        payload.get("transform_decision_sha256") or ""
+    ):
+        raise ValueError("reserved calibrant transform-decision hash mismatch")
+    if str(calibrant_hand["sha256"]) != str(
+        payload.get("matched_hand_decision_sha256") or ""
+    ):
+        raise ValueError("reserved calibrant matched-hand-decision hash mismatch")
+    calibrant_identity = _require_matching_decision_identities(
+        calibrant_transform,
+        calibrant_hand,
+        expected_dataset_id=str(payload.get("calibrant_dataset_id") or ""),
+        label="reserved calibrant",
+    )
+    recorded_identity = payload.get("calibrant_identity")
+    recorded_identity = recorded_identity if isinstance(recorded_identity, Mapping) else {}
+    for field in (
+        "dataset",
+        "setup_id",
+        "setup_manifest_sha256",
+        "physical_crystal_id",
+        "acquisition_fingerprint",
+        "source_hkl_sha256",
+        "source_model_sha256",
+        "split_contract_sha256",
+        "split_membership_sha256",
+    ):
+        if str(recorded_identity.get(field) or "") != str(
+            calibrant_identity.get(field) or ""
+        ):
+            raise ValueError(
+                f"parity calibration calibrant identity mismatch for {field}"
+            )
+    if str(payload.get("observed_branch") or "") != str(
+        calibrant_hand["selected_hand"]
+    ):
+        raise ValueError(
+            "parity calibration observed branch does not match the re-parsed "
+            "frozen calibrant hand decision"
+        )
+    calibration_validation = validate_external_parity_calibration(
+        payload,
+        setup_id=str(args.setup_id),
+        proper_transform=str(payload.get("fixed_transform") or ""),
+        transform_decision_sha256=str(calibrant_transform["sha256"]),
+        matched_hand_decision_sha256=str(calibrant_hand["sha256"]),
+        matched_selected_hand=str(calibrant_hand["selected_hand"]),
+    )
+    if int(payload.get("setup_parity_multiplier") or 0) != int(
+        calibration_validation["setup_parity_multiplier"]
+    ):
+        raise ValueError(
+            "parity calibration recorded setup multiplier does not match the "
+            "recomputed calibrant branch mapping"
+        )
+
+    validation_transform = _fixed_transform_decision_binding(
+        args.transform_decision,
+        require_proper_geometry=True,
+        require_calibration_grade=True,
+    )
+    validation_hand = _fixed_hand_decision_binding(
+        args.matched_hand_decision,
+        str(validation_transform["selected_transform"]),
+        require_decisive=True,
+    )
+    validation_identity = _require_matching_decision_identities(
+        validation_transform,
+        validation_hand,
+        expected_dataset_id=str(args.validation_dataset_id),
+        label="validation",
+    )
+    validation_frozen_values = {
+        "setup_id": str(validation_identity["setup_id"]),
+        "setup_manifest_sha256": str(
+            validation_identity["setup_manifest_sha256"]
+        ),
+        "physical_crystal_id": str(
+            validation_identity["physical_crystal_id"]
+        ),
+        "acquisition_fingerprint": str(
+            validation_identity["acquisition_fingerprint"]
+        ),
+    }
+    validation_requested_values = {
+        "setup_id": str(args.setup_id),
+        "setup_manifest_sha256": setup_manifest_sha256,
+        "physical_crystal_id": validation_physical_crystal_id,
+        "acquisition_fingerprint": validation_acquisition_fingerprint,
+    }
+    if validation_requested_values != validation_frozen_values:
+        raise ValueError(
+            "validation CLI identity does not match the identity frozen before "
+            f"transform/hand selection: requested={validation_requested_values}, "
+            f"frozen={validation_frozen_values}"
+        )
+    if str(validation_transform["sha256"]) == str(calibrant_transform["sha256"]):
+        raise ValueError(
+            "reserved calibrant transform decision cannot be reused as validation"
+        )
+    if str(validation_hand["sha256"]) == str(calibrant_hand["sha256"]):
+        raise ValueError(
+            "reserved calibrant matched-hand decision cannot be reused as validation"
+        )
+    if str(validation_identity["source_hkl_sha256"]) == str(
+        calibrant_identity["source_hkl_sha256"]
+    ):
+        raise ValueError(
+            "reserved calibrant source reflection content cannot be reused as validation "
+            "under a different dataset name"
+        )
+    setup_multiplier = int(calibration_validation["setup_parity_multiplier"])
+    branch_mapping = calibration_validation["observed_sign_mapping"]
+    branch_mapping = branch_mapping if isinstance(branch_mapping, Mapping) else {}
+    observed_branch = str(validation_hand["selected_hand"])
+    branch_sign = int(branch_mapping[observed_branch])
+    calibrated_coordinate_hand_factor = setup_multiplier * branch_sign
+    calibration_reference = (
+        f"{calibration_binding['path']}#sha256={calibration_binding['sha256']}"
+    )
+    claim = absolute_configuration_claim_contract(
+        str(validation_transform["selected_transform"]),
+        externally_calibrated_parity=True,
+        calibration_reference=calibration_reference,
+        calibration_validation_status="validated",
+    )
+    binding = {
+        "schema_version": 1,
+        "kind": "grond_applied_parity_calibration",
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "setup_id": validation_frozen_values["setup_id"],
+        "validation_dataset_id": str(args.validation_dataset_id),
+        "validation_physical_crystal_id": validation_frozen_values[
+            "physical_crystal_id"
+        ],
+        "validation_acquisition_fingerprint": validation_frozen_values[
+            "acquisition_fingerprint"
+        ],
+        "setup_manifest_sha256": validation_frozen_values[
+            "setup_manifest_sha256"
+        ],
+        "reserved_calibrant_dataset_id": calibration_validation[
+            "calibrant_dataset_id"
+        ],
+        "calibration_manifest": {
+            "path": str(calibration_binding["path"]),
+            "sha256": str(calibration_binding["sha256"]),
+        },
+        "validation_transform_decision": validation_transform,
+        "validation_matched_hand_decision": validation_hand,
+        "validation_identity": validation_identity,
+        "setup_parity_multiplier": setup_multiplier,
+        "validation_observed_branch": observed_branch,
+        "validation_branch_sign": branch_sign,
+        "calibrated_coordinate_hand_factor": calibrated_coordinate_hand_factor,
+        "configuration_relative_to_validation_input_coordinates": (
+            "as_supplied" if calibrated_coordinate_hand_factor == 1 else "inverted"
+        ),
+        "configuration_claim_contract": claim,
+        "known_configuration_used_for_validation_selection": False,
+        "reserved_calibrant_excluded_from_validation": True,
+    }
+    output = Path(args.out).expanduser().resolve()
+    if output.exists() and not args.overwrite:
+        raise ValueError(
+            f"refusing to overwrite applied parity calibration without --overwrite: {output}"
+        )
+    output.parent.mkdir(parents=True, exist_ok=True)
+    write_json(output, binding)
+    print(json.dumps({"applied_parity_calibration": str(output), **binding}, indent=2))
     return 0
 
 
@@ -11083,9 +13349,41 @@ def _quick_transform_summary(transform_decision: Mapping[str, object]) -> dict[s
     selected_block = selected if isinstance(selected, Mapping) else {}
     metadata = transform_decision.get("metadata_transform_decision")
     metadata_block = metadata if isinstance(metadata, Mapping) else {}
+    claim = transform_decision.get("selected_transform_claim_contract")
+    claim_block = claim if isinstance(claim, Mapping) else {}
+    transform_meta = claim_block.get("transform")
+    transform_meta = transform_meta if isinstance(transform_meta, Mapping) else {}
+    orientation = claim_block.get("source_orientation_contract")
+    orientation_block = orientation if isinstance(orientation, Mapping) else {}
     return {
         "selected_transform": selected_block.get("transform", "n/a"),
         "selected_status": selected_block.get("status", "n/a"),
+        "transform_determinant": selected_block.get(
+            "transform_determinant", transform_meta.get("determinant")
+        ),
+        "transform_parity": selected_block.get(
+            "transform_parity", transform_meta.get("parity", "n/a")
+        ),
+        "transform_parity_policy": transform_decision.get("transform_parity_policy", "n/a"),
+        "configuration_status": claim_block.get("configuration_status", "parity_unresolved"),
+        "absolute_configuration_claim_allowed": bool(
+            claim_block.get("absolute_configuration_claim_allowed", False)
+        ),
+        "configuration_status_reason": claim_block.get(
+            "reason", "transform parity contract is missing"
+        ),
+        "proper_canonical_transform": transform_meta.get(
+            "proper_canonical_transform", "n/a"
+        ),
+        "source_orientation_status": orientation_block.get("status", "missing"),
+        "source_basis_determinant": orientation_block.get("source_basis_determinant"),
+        "transformed_basis_determinant": orientation_block.get(
+            "transformed_basis_determinant"
+        ),
+        "right_handed_source": bool(orientation_block.get("right_handed_source", False)),
+        "right_handed_transformed": bool(
+            orientation_block.get("right_handed_transformed", False)
+        ),
         "metadata_status": metadata_block.get("status", "n/a"),
         "metadata_log_intensity_corr": (
             metadata_block.get("records", [{}])[0].get("log_intensity_corr")
@@ -11722,6 +14020,14 @@ def _format_terminal_finish_summary(payload: Mapping[str, object]) -> str:
         )
     final_hand = str(payload.get("final_hand", "n/a"))
     transform = str(payload.get("selected_transform", "n/a"))
+    transform_parity = str(payload.get("selected_transform_parity", "n/a"))
+    transform_determinant = payload.get("selected_transform_determinant", "per-dataset")
+    configuration_status = str(
+        payload.get("configuration_claim_status", "parity_unresolved")
+    )
+    configuration_claim_allowed = bool(
+        payload.get("absolute_configuration_claim_allowed", False)
+    )
     t_all = payload.get("final_hand_t_style_all", payload.get("final_hand_z_all"))
     t_free = payload.get("final_hand_t_style_free", payload.get("final_hand_z_free"))
     t_all_n = payload.get("final_hand_t_style_all_n")
@@ -11935,7 +14241,11 @@ def _format_terminal_finish_summary(payload: Mapping[str, object]) -> str:
         "",
         "Decision summary",
         hand_line,
-        f"  HKL transform: {transform}",
+        f"  HKL transform: {transform}; parity {transform_parity}; determinant {transform_determinant}",
+        (
+            f"  Configuration claim: {configuration_status}; named absolute configuration "
+            f"allowed = {configuration_claim_allowed}"
+        ),
         "",
         "Starting SHELXL reference",
         f"  R1(F)gt {_quick_percent(input_shelxl.get('R1gt'))}, R1(F)all {_quick_percent(input_shelxl.get('R1all'))}, wR2(F^2)all {_quick_percent(input_shelxl.get('wR2all'))}, GooF {_quick_number(input_shelxl.get('GooF'), 3)}",
@@ -12039,6 +14349,15 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
             f"{name}={row.get('selected_transform', 'n/a')}"
             for name, row in per_dataset_transforms.items()
         )
+        per_dataset_parity_text = "; ".join(
+            (
+                f"{name}={row.get('selected_transform', 'n/a')} "
+                f"(det {row.get('transform_determinant', 'n/a')}, "
+                f"{row.get('transform_parity', 'n/a')}, "
+                f"source {row.get('source_orientation_status', 'missing')})"
+            )
+            for name, row in per_dataset_transforms.items()
+        )
         unique_transforms = {
             str(row.get("selected_transform"))
             for row in per_dataset_transforms.values()
@@ -12049,6 +14368,85 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
             "selected_transform": next(iter(unique_transforms)) if len(unique_transforms) == 1 else selected_transform_text,
             "per_dataset": per_dataset_transforms,
             "per_dataset_text": selected_transform_text,
+            "per_dataset_parity_text": per_dataset_parity_text,
+            "configuration_status": (
+                "parity_unresolved"
+                if any(
+                    row.get("configuration_status") == "parity_unresolved"
+                    for row in per_dataset_transforms.values()
+                )
+                else (
+                    "absolute_configuration_calibrated"
+                    if per_dataset_transforms
+                    and all(
+                        row.get("configuration_status") == "absolute_configuration_calibrated"
+                        for row in per_dataset_transforms.values()
+                    )
+                    else "conditional_inversion_preference"
+                )
+            ),
+            "absolute_configuration_claim_allowed": bool(per_dataset_transforms)
+            and all(
+                bool(row.get("absolute_configuration_claim_allowed"))
+                for row in per_dataset_transforms.values()
+            ),
+            "transform_parity": (
+                next(
+                    iter(
+                        {
+                            str(row.get("transform_parity", "n/a"))
+                            for row in per_dataset_transforms.values()
+                        }
+                    )
+                )
+                if len(
+                    {
+                        str(row.get("transform_parity", "n/a"))
+                        for row in per_dataset_transforms.values()
+                    }
+                )
+                == 1
+                else "mixed"
+            ),
+            "transform_determinant": (
+                next(
+                    iter(
+                        {
+                            str(row.get("transform_determinant", "n/a"))
+                            for row in per_dataset_transforms.values()
+                        }
+                    )
+                )
+                if len(
+                    {
+                        str(row.get("transform_determinant", "n/a"))
+                        for row in per_dataset_transforms.values()
+                    }
+                )
+                == 1
+                else "per-dataset"
+            ),
+            "source_orientation_status": (
+                next(
+                    iter(
+                        {
+                            str(row.get("source_orientation_status", "missing"))
+                            for row in per_dataset_transforms.values()
+                        }
+                    )
+                )
+                if len(
+                    {
+                        str(row.get("source_orientation_status", "missing"))
+                        for row in per_dataset_transforms.values()
+                    }
+                )
+                == 1
+                else "mixed"
+            ),
+            "configuration_status_reason": (
+                "see per-dataset transform/source-orientation contracts"
+            ),
         }
     screen_run = Path(str(decision_tree.get("screen_run", ""))) if isinstance(decision_tree.get("screen_run"), str) else None
     screen_summary = try_read_json(screen_run / "summary.json") if screen_run else {}
@@ -12354,7 +14752,18 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
                 if transform_summary.get("per_dataset_text")
                 else []
             ),
+            *(
+                [
+                    f"| per-dataset parity/source orientation | `{transform_summary.get('per_dataset_parity_text', '')}` |"
+                ]
+                if transform_summary.get("per_dataset_parity_text")
+                else []
+            ),
             f"| transform scout status | `{transform_summary.get('selected_status', 'n/a')}` |",
+            f"| transform parity | `{transform_summary.get('transform_parity', 'n/a')}`; determinant `{transform_summary.get('transform_determinant', 'per-dataset')}`; scout policy `{transform_summary.get('transform_parity_policy', 'n/a')}` |",
+            f"| source orientation | `{transform_summary.get('source_orientation_status', 'missing')}`; raw determinant `{_quick_number(transform_summary.get('source_basis_determinant'), 6)}`; transformed determinant `{_quick_number(transform_summary.get('transformed_basis_determinant'), 6)}` |",
+            f"| configuration claim status | `{transform_summary.get('configuration_status', 'parity_unresolved')}`; named absolute configuration allowed `{bool(transform_summary.get('absolute_configuration_claim_allowed', False))}` |",
+            f"| configuration claim reason | {transform_summary.get('configuration_status_reason', 'see per-dataset transform contracts')} |",
             f"| metadata transform check | `{transform_summary.get('metadata_status', 'n/a')}`; log-I corr `{_quick_number(transform_summary.get('metadata_log_intensity_corr'), 4)}`; gap `{_quick_number(transform_summary.get('metadata_correlation_gap'), 4)}`; pairs `{transform_summary.get('metadata_paired_rows', 'n/a')}`; unique overlap `{transform_summary.get('metadata_unique_overlap', 'n/a')}` |",
             f"| initial hand scout | `{hand_summary.get('initial_hand', 'n/a')}`; delta original-minus-alternate `{_quick_number(hand_summary.get('initial_score_delta_original_minus_alternate'), 4)}` |",
             f"| final hand | `{hand_summary.get('final_hand', 'n/a')}`; post-feedback status `{hand_summary.get('promotion_status', 'n/a')}` |",
@@ -12842,6 +15251,17 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
         "final_hand_per_dataset": multi_hand_rows,
         "final_hand_consistency_status": multi_hand_diagnostic.get("status", "") if multi_hand_diagnostic else "",
         "selected_transform": transform_summary.get("selected_transform", "n/a"),
+        "selected_transform_parity": transform_summary.get("transform_parity", "n/a"),
+        "selected_transform_determinant": transform_summary.get("transform_determinant"),
+        "configuration_claim_status": transform_summary.get(
+            "configuration_status", "parity_unresolved"
+        ),
+        "absolute_configuration_claim_allowed": bool(
+            transform_summary.get("absolute_configuration_claim_allowed", False)
+        ),
+        "configuration_claim_reason": transform_summary.get(
+            "configuration_status_reason", "transform parity contract is missing"
+        ),
         "input_shelxl": {
             "R1gt": _quick_fraction(input_shelxl.get("R1_gt")),
             "R1all": _quick_fraction(input_shelxl.get("R1_all")),
@@ -12977,6 +15397,8 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
         f"| final hand | `{console['final_hand']}` |",
         final_hand_t_line,
         f"| selected HKL transform | `{console['selected_transform']}` |",
+        f"| transform parity / determinant | `{console.get('selected_transform_parity', 'n/a')}` / `{console.get('selected_transform_determinant', 'per-dataset')}` |",
+        f"| configuration claim status | `{console.get('configuration_claim_status', 'parity_unresolved')}`; named absolute configuration allowed `{bool(console.get('absolute_configuration_claim_allowed', False))}` |",
         f"| final N/Q | `{metadata.get('n_basis', 'n/a')}/{metadata.get('n_points', 'n/a')}` |",
         f"| effective thickness model | `{_quick_thickness_text(nuisance, metadata, dataset_nuisance_contracts)}`; Sg window `{metadata.get('sg_window', 'n/a')}` |",
         f"| publication endpoint source | `{console['publication_endpoint'].get('source') or 'none'}` / `{console['publication_endpoint'].get('source_kind') or 'no_physical_endpoint'}` |",
@@ -14079,6 +16501,10 @@ def prep_from_multi_checkpoint(
         baseline_hkl=str(checkpoint.get("baseline_hkl") or ""),
         default_hkl_transform=str(checkpoint.get("hkl_transform") or "identity"),
         geometry_percentile=float(checkpoint.get("geometry_percentile") or 99.0),
+        parity_setup_id=str(checkpoint.get("parity_setup_id") or ""),
+        parity_setup_manifest_sha256=str(
+            checkpoint.get("parity_setup_manifest_sha256") or ""
+        ),
         metadata={"continued_from": checkpoint.get("run_dir", "")},
     )
     return prep, nuisance
@@ -14556,6 +16982,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     absolute_structure_script = engine_script("absolute_structure_diagnostic.py")
     feedback_script = engine_script("shelxl_feedback_loop.py")
     native_regularize_script = engine_script("native_row_regularize.py")
+    shelx_hkl_script = engine_script("shelx_hkl.py")
+    hkl_transform_module = Path(__file__).resolve().parent / "hkl_transform.py"
     try:
         absolute_structure_text = absolute_structure_script.read_text(errors="replace")
     except OSError:
@@ -14568,6 +16996,14 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         native_regularize_text = native_regularize_script.read_text(errors="replace")
     except OSError:
         native_regularize_text = ""
+    try:
+        shelx_hkl_text = shelx_hkl_script.read_text(errors="replace")
+    except OSError:
+        shelx_hkl_text = ""
+    try:
+        hkl_transform_text = hkl_transform_module.read_text(errors="replace")
+    except OSError:
+        hkl_transform_text = ""
     try:
         cli_text = Path(__file__).read_text(errors="replace")
     except OSError:
@@ -14582,6 +17018,20 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         "final_feedback_row_recompute": "final_row_recompute" in feedback_text and "--skip-endpoint-refinement" in feedback_text,
         "corrected_endpoint_hklf4_contract": "HKLF 4" in native_regularize_text and "_unsupported_endpoint_reason" in native_regularize_text,
         "absolute_structure_no_pandas": "import pandas" not in absolute_structure_text and "pd.read_csv" not in absolute_structure_text,
+        "proper_hand_parity_contract": (
+            "def parse_hkl_transform_info" in hkl_transform_text
+            and "def validate_external_parity_calibration" in hkl_transform_text
+            and "matched_born_work_only_hand_invariant_v1" in cli_text
+            and "metadata_candidate_elimination_used" in cli_text
+        ),
+        "canonical_hand_hklf4_gauge_repair": (
+            "def write_sign_paired_hklf4" in shelx_hkl_text
+            and '"canonicalize-hand"' in cli_text
+        ),
+        "separate_parity_calibration_commands": (
+            '"create-parity-calibration"' in cli_text
+            and '"apply-parity-calibration"' in cli_text
+        ),
     }
     payload["grond"] = {
         "version": __version__,
@@ -15855,6 +18305,38 @@ def add_common_run_args(ap: argparse.ArgumentParser, *, expose_lambda_controls: 
     ap.add_argument("--structure", default="")
     ap.add_argument("--baseline-hkl", default="")
     ap.add_argument("--dataset-name", default="dataset")
+    ap.add_argument(
+        "--parity-setup-id",
+        default="",
+        help=(
+            "Stable acquisition/import setup identity frozen into transform and "
+            "hand decisions before selection. Required for calibration-grade claims."
+        ),
+    )
+    ap.add_argument(
+        "--parity-setup-manifest-sha256",
+        default="",
+        help=(
+            "SHA-256 of the immutable acquisition/import setup manifest, frozen "
+            "before transform or hand selection."
+        ),
+    )
+    ap.add_argument(
+        "--physical-crystal-id",
+        default="",
+        help=(
+            "Stable physical specimen/crystal identity for a direct single-dataset "
+            "run. For multi-dataset prep files, record physical_crystal_id per dataset."
+        ),
+    )
+    ap.add_argument(
+        "--acquisition-fingerprint",
+        default="",
+        help=(
+            "SHA-256 of the raw-acquisition/image manifest for a direct "
+            "single-dataset run. For multi-dataset prep files, record it per dataset."
+        ),
+    )
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--mode", choices=["bloch", "regularize", "auto"], default="auto")
     ap.add_argument("--fast", action="store_true", help="Use N=20/Q=5, no absorption/non-Hermitian terms, and no structure moves.")
@@ -15894,20 +18376,68 @@ def add_common_run_args(ap: argparse.ArgumentParser, *, expose_lambda_controls: 
     ap.add_argument("--transform-rerank-n-basis", type=int, default=24, help="Basis size for second-stage transform reranking.")
     ap.add_argument("--transform-rerank-n-points", type=int, default=10, help="Quadrature points for second-stage transform reranking.")
     ap.add_argument("--transform-rerank-max-rows", type=int, default=0, help="Row limit for second-stage transform reranking; 0 reuses the preflight scout row budget.")
-    ap.add_argument("--transform-candidates", default="auto", help="Semicolon-separated transforms, or auto/common/off. Auto includes identity and common XDS-to-model permutations.")
+    ap.add_argument(
+        "--transform-candidates",
+        default="auto",
+        help=(
+            "Semicolon-separated signed-axis transforms, or auto/common/off. "
+            "Calibration-grade auto/common enumerates all 24 determinant-positive "
+            "signed-axis permutations before the cell-metric filter."
+        ),
+    )
+    ap.add_argument(
+        "--transform-metric-tolerance",
+        type=float,
+        default=0.02,
+        help=(
+            "Maximum relative Frobenius mismatch between source and model "
+            "reciprocal-cell metrics before a signed-axis transform is rejected. "
+            "This filter uses cells only, never intensities, coordinates, chemistry, or hand."
+        ),
+    )
+    ap.add_argument(
+        "--transform-parity-policy",
+        choices=["proper-only", "all-diagnostic"],
+        default="proper-only",
+        help=(
+            "Use only determinant +1 transforms for automatic selection (default). "
+            "all-diagnostic restores mixed-parity scouting for diagnostics, but cannot by itself "
+            "support a named absolute-configuration claim."
+        ),
+    )
     ap.add_argument("--transform-scout-jobs", type=int, default=0, help="Concurrent transform-scout subprocesses across candidates and datasets; 0 derives a core-safe value from --workers and --max-core-fraction.")
     ap.add_argument("--transform-scout-workers-per-job", type=int, default=1, help="Worker processes inside each transform-scout subprocess. Keep low when many scout jobs run concurrently.")
-    ap.add_argument("--transform-metadata-prefilter", choices=["auto", "on", "off"], default="auto", help="Use solved/XSCALE baseline-HKL intensity overlap to shrink transform scouts before Bloch calculations.")
-    ap.add_argument("--transform-metadata-max-candidates", type=int, default=3, help="Number of ranked metadata candidates kept when the intensity-overlap signal is plausible but ambiguous.")
+    ap.add_argument(
+        "--transform-metadata-prefilter",
+        choices=["auto", "on", "off"],
+        default="auto",
+        help=(
+            "Use solved/XSCALE baseline-HKL overlap as a diagnostic ordering aid. "
+            "Default auto never eliminates candidates; explicit on may eliminate candidates "
+            "but is not eligible for parity calibration."
+        ),
+    )
+    ap.add_argument("--transform-metadata-max-candidates", type=int, default=3, help="Number of metadata-ranked candidates retained only by the explicit diagnostic --transform-metadata-prefilter on mode. Calibration-grade auto does not eliminate metric-compatible candidates.")
     ap.add_argument("--transform-metadata-min-pairs", type=int, default=100, help="Minimum paired positive-intensity rows required before trusting metadata transform ranking.")
     ap.add_argument("--transform-metadata-min-correlation", type=float, default=0.70, help="Minimum log-intensity correlation required before metadata can prefilter transform scouts.")
-    ap.add_argument("--transform-metadata-min-correlation-gap", type=float, default=0.05, help="Correlation gap required for auto mode to promote a single transform without Bloch-transform scouting.")
+    ap.add_argument("--transform-metadata-min-correlation-gap", type=float, default=0.05, help="Correlation gap used only by the explicit diagnostic metadata-elimination mode; calibration-grade auto still Bloch-scouts every metric-compatible candidate.")
     ap.add_argument("--transform-metadata-max-rows", type=int, default=0, help="Maximum INTEGRATE/XDS rows used by metadata transform ranking; 0 uses all rows.")
     ap.add_argument("--trust-hkl-transform", action="store_true", help="Trust the supplied --hkl-transform or prep-file transform and skip Bloch transform scouting while keeping the rest of auto-decision enabled.")
     ap.add_argument("--hand-accept-delta", dest="hand_accept_delta", metavar="DELTA", type=float, default=0.015, help="Adaptive score margin required before switching to the alternate hand.")
     ap.add_argument("--hand-max-wR2-all", type=float, default=0.45, help="Maximum alternate-hand all-row wR2 allowed before automatic hand switching. Poor row contracts still report the hand diagnostic but keep the input hand.")
     ap.add_argument("--hand-max-free-wR2-all", type=float, default=0.50, help="Maximum alternate-hand free-row wR2 allowed before automatic hand switching.")
     ap.add_argument("--hand-min-free-wR2-gain", type=float, default=0.0, help="Minimum free-row wR2 improvement required before automatic scout-stage hand switching.")
+    ap.add_argument(
+        "--hand-min-adjusted-z",
+        type=float,
+        default=2.0,
+        help=(
+            "Minimum absolute common-source-sigma Klar-Palatinus adjusted hand Z "
+            "required before a matched hand decision may train or consume an "
+            "external setup-parity calibration. Weaker decisions remain "
+            "residual-preference diagnostics."
+        ),
+    )
     ap.add_argument("--hand-min-z-all", type=float, default=2.0, help="Legacy option name for the minimum paired all-row t-style hand statistic required before post-feedback hand promotion; this is not a calibrated normal Z score.")
     ap.add_argument("--hand-min-z-free", type=float, default=0.5, help="Legacy option name for the minimum paired free-row t-style hand statistic required before post-feedback hand promotion. Set to 0 to disable the free-row sign gate; the minimum free-row count still applies.")
     ap.add_argument("--hand-min-free-rows", type=int, default=10, help="Minimum paired held-out rows required before a post-feedback diagnostic may materially favor the opposite hand.")
@@ -16219,6 +18749,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_prep.add_argument("--dataset", action="append", required=True)
     p_prep.add_argument("--hkl-transform", default="identity")
     p_prep.add_argument("--geometry-percentile", type=float, default=99.0)
+    p_prep.add_argument(
+        "--parity-setup-id",
+        default="",
+        help="Stable acquisition/import setup identity frozen before selection.",
+    )
+    p_prep.add_argument(
+        "--parity-setup-manifest-sha256",
+        default="",
+        help="SHA-256 of the immutable acquisition/import setup manifest.",
+    )
     p_prep.add_argument("--notes", default="")
     p_prep.add_argument("--out", required=True)
     add_tool_config_args(p_prep)
@@ -16298,6 +18838,109 @@ def build_parser() -> argparse.ArgumentParser:
     add_tool_config_args(p_endpoints)
     p_endpoints.add_argument("--json", action="store_true")
     p_endpoints.set_defaults(func=cmd_endpoints)
+
+    p_canonicalize = sub.add_parser(
+        "canonicalize-hand",
+        help=(
+            "Canonicalize an endpoint model/improper HKL transform pair to an explicitly "
+            "inverted RES and the proper sign-paired transform."
+        ),
+    )
+    p_canonicalize.add_argument("--input-res", required=True)
+    p_canonicalize.add_argument("--input-hkl", required=True)
+    p_canonicalize.add_argument("--hkl-transform", required=True)
+    p_canonicalize.add_argument("--output-res", required=True)
+    p_canonicalize.add_argument("--output-hkl", required=True)
+    p_canonicalize.add_argument("--manifest", default="")
+    p_canonicalize.add_argument(
+        "--allow-proper-noop",
+        action="store_true",
+        help="Allow an audited copy when the supplied transform is already proper.",
+    )
+    p_canonicalize.add_argument(
+        "--matched-hand-decision",
+        default="",
+        help="Frozen matched-hand decision JSON to hash and bind after transform selection.",
+    )
+    p_canonicalize.add_argument(
+        "--transform-decision",
+        default="",
+        help="Optional frozen pre-canonicalization transform-decision JSON to hash in the audit manifest.",
+    )
+    p_canonicalize.add_argument("--overwrite", action="store_true")
+    p_canonicalize.set_defaults(func=cmd_canonicalize_hand)
+
+    p_create_calibration = sub.add_parser(
+        "create-parity-calibration",
+        help=(
+            "Create a setup-parity manifest from one reserved known calibrant only after "
+            "proper transform selection and a decisive matched-hand decision are frozen."
+        ),
+    )
+    p_create_calibration.add_argument("--setup-id", required=True)
+    p_create_calibration.add_argument("--calibrant-dataset-id", required=True)
+    p_create_calibration.add_argument(
+        "--calibrant-physical-crystal-id",
+        required=True,
+        help="Stable specimen/crystal identity; this crystal is excluded from validation.",
+    )
+    p_create_calibration.add_argument(
+        "--calibrant-acquisition-fingerprint",
+        required=True,
+        help="SHA-256 of the calibrant raw-acquisition/image manifest.",
+    )
+    p_create_calibration.add_argument(
+        "--setup-manifest-sha256",
+        required=True,
+        help="SHA-256 of the acquisition/import setup manifest shared by calibrant and validation.",
+    )
+    p_create_calibration.add_argument("--transform-decision", required=True)
+    p_create_calibration.add_argument("--matched-hand-decision", required=True)
+    p_create_calibration.add_argument("--expected-known-configuration", required=True)
+    p_create_calibration.add_argument(
+        "--expected-known-branch",
+        choices=["original", "alternate"],
+        required=True,
+    )
+    p_create_calibration.add_argument(
+        "--reserved-from-validation",
+        action="store_true",
+        help="Required acknowledgement that this calibrant is excluded from validation.",
+    )
+    p_create_calibration.add_argument("--out", required=True)
+    p_create_calibration.add_argument("--overwrite", action="store_true")
+    p_create_calibration.set_defaults(func=cmd_create_parity_calibration)
+
+    p_apply_calibration = sub.add_parser(
+        "apply-parity-calibration",
+        help=(
+            "Apply a reserved setup-parity calibration prospectively to a different "
+            "proper-locked validation decision."
+        ),
+    )
+    p_apply_calibration.add_argument("--calibration", required=True)
+    p_apply_calibration.add_argument("--setup-id", required=True)
+    p_apply_calibration.add_argument("--validation-dataset-id", required=True)
+    p_apply_calibration.add_argument(
+        "--validation-physical-crystal-id",
+        required=True,
+        help="Stable specimen/crystal identity; must differ from the reserved calibrant.",
+    )
+    p_apply_calibration.add_argument(
+        "--validation-acquisition-fingerprint",
+        required=True,
+        help="SHA-256 of the validation raw-acquisition/image manifest.",
+    )
+    p_apply_calibration.add_argument(
+        "--setup-manifest-sha256",
+        required=True,
+        help="SHA-256 of the same setup manifest used by the reserved calibrant.",
+    )
+    p_apply_calibration.add_argument("--transform-decision", required=True)
+    p_apply_calibration.add_argument("--matched-hand-decision", required=True)
+    p_apply_calibration.add_argument("--out", required=True)
+    p_apply_calibration.add_argument("--overwrite", action="store_true")
+    p_apply_calibration.set_defaults(func=cmd_apply_parity_calibration)
 
     p_dials = sub.add_parser("import-dials", help="Convert DIALS integrated.refl/integrated.expt into a GROND row directory.")
     p_dials.add_argument("--refl", required=True, help="DIALS integrated.refl or scaled.refl file.")

@@ -1,5 +1,6 @@
 import argparse
 import csv
+import hashlib
 import json
 from pathlib import Path
 
@@ -8,6 +9,30 @@ import pytest
 import grond.cli as cli
 from grond.cli import build_parser
 from grond.io.config import DatasetSpec, PrepConfig
+
+
+@pytest.fixture(autouse=True)
+def _paired_nuisance_selector(monkeypatch):
+    """Keep orchestration tests focused on the four-stage hand contract."""
+
+    monkeypatch.setattr(
+        cli,
+        "select_branch_symmetric_nuisance",
+        lambda *_args, **_kwargs: {
+            "schema_version": 1,
+            "status": "selected",
+            "selection_rule": (
+                "min_paired_mean_work_dyn_wR2_then_nuisance_sha256_v1"
+            ),
+            "hand_label_invariant": True,
+            "free_rows_used_for_selection": False,
+            "known_configuration_used": False,
+            "selected_nuisance": {
+                "thickness_A": 1200.0,
+                "frame_offset": 0.1,
+            },
+        },
+    )
 
 
 def _hand_decision(
@@ -71,7 +96,7 @@ def _native_summary(
     [
         ({"dose_b_ref_frame": float("nan")}, True),
         ({}, False),
-        ({"dose_b_ref_frame": None}, False),
+        ({"dose_b_ref_frame": None}, True),
         ({"dose_b_ref_frame": "not-a-number"}, False),
         ({"dose_b_ref_frame": float("inf")}, False),
         ({"dose_b_ref_frame": 0.0}, False),
@@ -127,7 +152,9 @@ def test_hand_row_selection_contract_requires_exact_consistent_counts(
     assert cli._validated_row_selection_counts(rows) == expected
 
 
-def test_choose_hand_uses_two_matched_scout_commands_and_not_full_active_score(tmp_path: Path, monkeypatch):
+def test_choose_hand_uses_symmetric_grid_then_two_matched_scout_commands(
+    tmp_path: Path, monkeypatch
+):
     model = tmp_path / "model.res"
     hkl = tmp_path / "rows.hkl"
     baseline = tmp_path / "baseline.hkl"
@@ -148,10 +175,69 @@ def test_choose_hand_uses_two_matched_scout_commands_and_not_full_active_score(t
         commands.append(list(cmd))
         out_dir = Path(cmd[cmd.index("--out-dir") + 1])
         out_dir.mkdir(parents=True, exist_ok=True)
-        summary = _native_summary(0.15, 0.20) if "--alternate-hand" in cmd else _native_summary(0.22, 0.27)
+        alternate = "--alternate-hand" in cmd
+        summary = _native_summary(0.15, 0.20) if alternate else _native_summary(0.22, 0.27)
+        table = out_dir / "native_dyn_calc.csv"
+        fields = [
+            "row_index", "h", "k", "l", "target_I", "sigma_eff",
+            "xds_sigma", "group", "detector_bin", "split", "dyn_raw",
+            "born_raw", "dyn_scaled", "born_scaled",
+        ]
+        with table.open("w", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fields)
+            writer.writeheader()
+            for index in range(20):
+                target = 100.0 + index
+                error = 0.01 if alternate else 0.25
+                prediction = target * (
+                    1.0 + error * (-1.0 if index % 2 else 1.0)
+                )
+                writer.writerow(
+                    {
+                        "row_index": index,
+                        "h": index + 1,
+                        "k": 0,
+                        "l": 0,
+                        "target_I": target,
+                        "sigma_eff": 5.0,
+                        "xds_sigma": 5.0,
+                        "group": 0,
+                        "detector_bin": 0,
+                        "split": "free" if index >= 18 else "work",
+                        "dyn_raw": prediction,
+                        "born_raw": target,
+                        "dyn_scaled": prediction,
+                        "born_scaled": target,
+                    }
+                )
+        summary["artifacts"] = {
+            "native_row_table": str(table.resolve()),
+            "native_row_table_sha256": hashlib.sha256(
+                table.read_bytes()
+            ).hexdigest(),
+        }
         (out_dir / "summary.json").write_text(json.dumps(summary) + "\n")
 
     monkeypatch.setattr(cli, "run_logged", fake_run_logged)
+    monkeypatch.setattr(
+        cli,
+        "build_common_sigma_hand_evidence",
+        lambda *_args, **_kwargs: {
+            "status": "replayed",
+            "original_score": {
+                "score": 0.30,
+                "dyn_wR2_all": 0.22,
+                "free_dyn_wR2_all": 0.27,
+            },
+            "alternate_score": {
+                "score": 0.16,
+                "dyn_wR2_all": 0.15,
+                "free_dyn_wR2_all": 0.20,
+            },
+            "score_delta_original_minus_alternate": 0.14,
+            "adjusted_z_threshold_passed": True,
+        },
+    )
     selected, decision, alternate_run = cli.choose_hand_by_scout(
         prep,
         ds,
@@ -164,8 +250,10 @@ def test_choose_hand_uses_two_matched_scout_commands_and_not_full_active_score(t
     )
 
     assert selected == "alternate"
-    assert len(commands) == 2
-    original_cmd, alternate_cmd = commands
+    assert len(commands) == 4
+    grid_original_cmd, grid_alternate_cmd, original_cmd, alternate_cmd = commands
+    assert "--alternate-hand" not in grid_original_cmd
+    assert "--alternate-hand" in grid_alternate_cmd
     assert "--alternate-hand" not in original_cmd
     assert "--alternate-hand" in alternate_cmd
 
@@ -177,7 +265,16 @@ def test_choose_hand_uses_two_matched_scout_commands_and_not_full_active_score(t
             del result[index : index + 2]
         return result
 
+    assert normalized(grid_original_cmd) == normalized(grid_alternate_cmd)
     assert normalized(original_cmd) == normalized(alternate_cmd)
+    assert (
+        grid_original_cmd[grid_original_cmd.index("--thickness-grid") + 1]
+        == args.thickness_grid
+    )
+    assert (
+        original_cmd[original_cmd.index("--thickness-grid") + 1]
+        == "1200"
+    )
     for flag, value in (("--n-basis", "24"), ("--n-points", "10"), ("--max-rows", "500"), ("--split-seed", "731")):
         assert original_cmd[original_cmd.index(flag) + 1] == value
         assert alternate_cmd[alternate_cmd.index(flag) + 1] == value
@@ -195,7 +292,9 @@ def test_choose_hand_uses_two_matched_scout_commands_and_not_full_active_score(t
     assert decision["comparison_contract"]["production_scale_preference_ignored_for_holdout"] is True
     assert decision["production_active_run"] == str(active_run)
     assert decision["production_active_score"]["dyn_wR2_all"] == pytest.approx(0.09)
-    assert decision["active_score"]["dyn_wR2_all"] == pytest.approx(0.22)
+    evidence = decision["comparison_contract"]["common_sigma_hand_evidence"]
+    assert evidence["status"] == "replayed"
+    assert decision["active_score"] == evidence["original_score"]
     assert decision["original_run"].endswith("hand_scout_original")
     assert alternate_run == tmp_path / "out" / "decisions" / "a" / "hand_scout_alt"
 
@@ -323,7 +422,7 @@ def test_step_estimator_counts_scout_and_final_hand_pairs_per_multi_dataset(tmp_
     args.hand_control = False
     without_hand = cli.estimate_run_steps(prep, args)
 
-    assert with_hand - without_hand == 4 * len(prep.datasets) + 1
+    assert with_hand - without_hand == 6 * len(prep.datasets) + 1
 
 
 def test_shared_hand_aggregation_requires_unanimous_quality_gated_support():

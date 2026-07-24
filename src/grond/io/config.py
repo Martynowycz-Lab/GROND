@@ -8,9 +8,12 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from grond.hkl_transform import parse_hkl_transform_info
+
 DATASET_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 TARGET_MODES = {"iobs", "iobs_over_rlp", "iobs_times_peak", "recorded_proxy"}
 DATASET_OPTION_KEYS = {
+    "acquisition_fingerprint",
     "baseline_hkl",
     "dmin",
     "geometry_percentile",
@@ -18,8 +21,10 @@ DATASET_OPTION_KEYS = {
     "include_nonpositive",
     "min_d_spacing",
     "min_peak",
+    "physical_crystal_id",
     "target_mode",
 }
+SHA256_RE = re.compile(r"[0-9a-fA-F]{64}\Z")
 TRUE_TEXT = {"1", "true", "yes", "on"}
 FALSE_TEXT = {"0", "false", "no", "off"}
 
@@ -27,17 +32,12 @@ FALSE_TEXT = {"0", "false", "no", "off"}
 def validate_hkl_transform(value: str) -> None:
     """Validate a signed permutation of the crystallographic h, k, l axes."""
 
-    if value == "identity":
-        return
-    axes = [part.strip() for part in value.split(",")]
-    if (
-        len(axes) != 3
-        or {axis.lstrip("+-") for axis in axes} != {"h", "k", "l"}
-        or any(not re.fullmatch(r"[+-]?[hkl]", axis) for axis in axes)
-    ):
+    try:
+        parse_hkl_transform_info(value)
+    except ValueError as exc:
         raise ValueError(
             "hkl_transform must be 'identity' or a signed permutation such as 'l,-k,h'"
-        )
+        ) from exc
 
 
 def parse_bool_text(value: str, *, field: str) -> bool:
@@ -63,6 +63,9 @@ class DatasetSpec:
     target_mode: str = "iobs"
     include_nonpositive: bool = False
     geometry_percentile: float = 99.0
+    split_contract: str = ""
+    physical_crystal_id: str = ""
+    acquisition_fingerprint: str = ""
 
     def __post_init__(self) -> None:
         if not DATASET_NAME_RE.fullmatch(self.name):
@@ -86,6 +89,13 @@ class DatasetSpec:
             raise ValueError(f"dataset {self.name!r} min_peak must be in [0, 100]")
         if not math.isfinite(percentile) or not 0.0 < percentile <= 100.0:
             raise ValueError(f"dataset {self.name!r} geometry_percentile must be in (0, 100]")
+        acquisition = str(self.acquisition_fingerprint).strip().lower()
+        if acquisition and not SHA256_RE.fullmatch(acquisition):
+            raise ValueError(
+                f"dataset {self.name!r} acquisition_fingerprint must be a SHA-256 hex digest"
+            )
+        self.physical_crystal_id = str(self.physical_crystal_id).strip()
+        self.acquisition_fingerprint = acquisition
 
 
 @dataclass
@@ -98,6 +108,8 @@ class PrepConfig:
     notes: str = ""
     default_hkl_transform: str = "identity"
     geometry_percentile: float = 99.0
+    parity_setup_id: str = ""
+    parity_setup_manifest_sha256: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -120,6 +132,13 @@ class PrepConfig:
         percentile = float(self.geometry_percentile)
         if not math.isfinite(percentile) or not 0.0 < percentile <= 100.0:
             raise ValueError("geometry_percentile must be in (0, 100]")
+        self.parity_setup_id = str(self.parity_setup_id).strip()
+        setup_hash = str(self.parity_setup_manifest_sha256).strip().lower()
+        if setup_hash and not SHA256_RE.fullmatch(setup_hash):
+            raise ValueError(
+                "parity_setup_manifest_sha256 must be a SHA-256 hex digest"
+            )
+        self.parity_setup_manifest_sha256 = setup_hash
 
 
 def resolve_hkl(path_text: str) -> tuple[str, str]:
@@ -174,6 +193,8 @@ def parse_dataset_spec(text: str, *, default_hkl_transform: str = "identity", ge
             field="include_nonpositive",
         ),
         geometry_percentile=float(values.get("geometry_percentile", geometry_percentile)),
+        physical_crystal_id=values.get("physical_crystal_id", ""),
+        acquisition_fingerprint=values.get("acquisition_fingerprint", ""),
     )
 
 
@@ -187,6 +208,10 @@ def load_prep(path: Path) -> PrepConfig:
         notes=data.get("notes", ""),
         default_hkl_transform=data.get("default_hkl_transform", "identity"),
         geometry_percentile=float(data.get("geometry_percentile", 99.0)),
+        parity_setup_id=data.get("parity_setup_id", ""),
+        parity_setup_manifest_sha256=data.get(
+            "parity_setup_manifest_sha256", ""
+        ),
         metadata=data.get("metadata", {}),
         datasets=[DatasetSpec(**row) for row in data.get("datasets", [])],
     )
@@ -214,6 +239,11 @@ def write_datasets_csv(path: Path, prep: PrepConfig, nuisance_by_name: dict[str,
         "hkl",
         "baseline_hkl",
         "hkl_transform",
+        "parity_setup_id",
+        "parity_setup_manifest_sha256",
+        "physical_crystal_id",
+        "acquisition_fingerprint",
+        "split_contract",
         "min_d_spacing",
         "min_peak",
         "target_mode",
@@ -260,6 +290,13 @@ def write_datasets_csv(path: Path, prep: PrepConfig, nuisance_by_name: dict[str,
                     "hkl": ds.hkl,
                     "baseline_hkl": ds.baseline_hkl,
                     "hkl_transform": ds.hkl_transform,
+                    "parity_setup_id": prep.parity_setup_id,
+                    "parity_setup_manifest_sha256": (
+                        prep.parity_setup_manifest_sha256
+                    ),
+                    "physical_crystal_id": ds.physical_crystal_id,
+                    "acquisition_fingerprint": ds.acquisition_fingerprint,
+                    "split_contract": ds.split_contract,
                     "min_d_spacing": ds.min_d_spacing,
                     "min_peak": ds.min_peak,
                     "target_mode": ds.target_mode,

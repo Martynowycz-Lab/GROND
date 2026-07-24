@@ -8,6 +8,7 @@ writers from silently using incompatible limits.
 
 from __future__ import annotations
 
+import hashlib
 import math
 from collections.abc import Iterable
 from pathlib import Path
@@ -85,3 +86,104 @@ def write_fixed_width_hkl(
         for row in rows:
             handle.write(format_fixed_width_row(*row))
         handle.write(format_fixed_width_row(0, 0, 0, 0.0, 0.0))
+
+
+def _fixed_width_hklf4_records(path: Path) -> tuple[list[bytes], dict[str, object]]:
+    """Read strict fixed-width HKLF4 records without touching observation bytes."""
+
+    lines = path.read_bytes().splitlines(keepends=True)
+    reflection_count = 0
+    terminator_count = 0
+    seen_terminator = False
+    observation_payload = hashlib.sha256()
+    parsed: list[bytes] = []
+    for line_number, line in enumerate(lines, start=1):
+        body = line.rstrip(b"\r\n")
+        if not body:
+            parsed.append(line)
+            continue
+        if len(body) < 28:
+            raise ValueError(
+                f"HKLF4 row {line_number} is shorter than the required 28 fixed-width columns"
+            )
+        try:
+            h = int(body[0:4])
+            k = int(body[4:8])
+            ell = int(body[8:12])
+            float(body[12:20])
+            float(body[20:28])
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise ValueError(
+                f"HKLF4 row {line_number} is not valid fixed-width h,k,l,I,sigma data"
+            ) from exc
+        if (h, k, ell) == (0, 0, 0):
+            terminator_count += 1
+            seen_terminator = True
+        else:
+            if seen_terminator:
+                raise ValueError(
+                    f"HKLF4 reflection row {line_number} occurs after the 0,0,0 terminator"
+                )
+            reflection_count += 1
+            # This includes I, sigma, batch and any producer-specific trailing
+            # fields exactly as recorded.
+            observation_payload.update(body[12:])
+            observation_payload.update(b"\n")
+        parsed.append(line)
+    if terminator_count != 1:
+        raise ValueError(
+            f"HKLF4 file must contain exactly one 0,0,0 terminator, found {terminator_count}"
+        )
+    return parsed, {
+        "reflection_count": reflection_count,
+        "terminator_count": terminator_count,
+        "observation_payload_sha256": observation_payload.hexdigest(),
+        "fixed_width_contract": "hkl_4_4_4_observation_tail_byte_preserved_v1",
+    }
+
+
+def audit_fixed_width_hklf4(path: Path) -> dict[str, object]:
+    """Return a strict reflection/value-preservation audit for one HKLF4 file."""
+
+    _lines, audit = _fixed_width_hklf4_records(path)
+    return audit
+
+
+def write_sign_paired_hklf4(source: Path, output: Path) -> dict[str, object]:
+    """Write the exact gauge partner by negating h,k,l only.
+
+    I, sigma(I), batch numbers, producer-specific trailing fields, line
+    endings, and the terminator payload are retained byte-for-byte.
+    """
+
+    lines, source_audit = _fixed_width_hklf4_records(source)
+    written: list[bytes] = []
+    for line_number, line in enumerate(lines, start=1):
+        body = line.rstrip(b"\r\n")
+        if not body:
+            written.append(line)
+            continue
+        h, k, ell = int(body[0:4]), int(body[4:8]), int(body[8:12])
+        if (h, k, ell) == (0, 0, 0):
+            written.append(line)
+            continue
+        index_bytes = f"{-h:4d}{-k:4d}{-ell:4d}".encode("ascii")
+        if len(index_bytes) != 12:
+            raise ValueError(
+                f"HKLF4 index overflow after sign pairing on row {line_number}: "
+                f"{(-h, -k, -ell)}"
+            )
+        written.append(index_bytes + line[12:])
+    output.write_bytes(b"".join(written))
+    output_audit = audit_fixed_width_hklf4(output)
+    if output_audit != source_audit:
+        raise ValueError(
+            "sign-paired HKLF4 failed the reflection-count/observation-payload preservation audit"
+        )
+    return {
+        "source": source_audit,
+        "output": output_audit,
+        "reflection_count_preserved": True,
+        "observation_payload_preserved": True,
+        "index_operation": "h,k,l -> -h,-k,-l",
+    }

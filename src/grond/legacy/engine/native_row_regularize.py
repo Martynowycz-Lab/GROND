@@ -56,6 +56,7 @@ try:  # Package import.
         XDSData,
         alternate_hand_model,
         frozen_kernel_contract,
+        load_transform_split_contract_masks,
         parse_model,
         sha256,
         split_masks,
@@ -72,6 +73,7 @@ except ImportError:  # Direct script execution from this directory.
         XDSData,
         alternate_hand_model,
         frozen_kernel_contract,
+        load_transform_split_contract_masks,
         parse_model,
         sha256,
         split_masks,
@@ -2422,6 +2424,8 @@ def metric_row(trial):
 
 
 def trial_metric(trial, metric_name: str) -> float:
+    if metric_name == "work_born_wR2":
+        return float(trial["metrics"]["work"]["born"]["wR2_all"])
     split, value = metric_name.split("_", 1)
     if split not in trial["metrics"]:
         raise ValueError(f"unknown selection split {split!r} in {metric_name!r}")
@@ -2753,6 +2757,14 @@ def main():
             "rebuild membership from raw eligibility filters."
         ),
     )
+    ap.add_argument(
+        "--split-contract",
+        default="",
+        help=(
+            "Immutable candidate-union raw-row work/free split shared by every "
+            "transform candidate and subsequent hand comparison."
+        ),
+    )
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--n-basis", type=int, default=20)
     ap.add_argument("--n-points", type=int, default=10)
@@ -2830,7 +2842,15 @@ def main():
     ap.add_argument("--free-fraction", type=float, default=0.10)
     ap.add_argument("--split-seed", type=int, default=42)
     ap.add_argument("--scale-fit-split", choices=["work", "all"], default="work", help="Rows used to fit nuisance group scales. Use 'all' to reproduce final all-data model-update statistics; use 'work' for validation.")
-    ap.add_argument("--selection-metric", choices=["work_wR2", "free_wR2", "all_wR2", "all_R1"], default="work_wR2", help="Metric used to choose the reported best nuisance trial.")
+    ap.add_argument(
+        "--selection-metric",
+        choices=["work_born_wR2", "work_wR2", "free_wR2", "all_wR2", "all_R1"],
+        default="work_wR2",
+        help=(
+            "Metric used to choose the reported best nuisance trial. "
+            "work_born_wR2 is reserved for hand-invariant transform scouting."
+        ),
+    )
     ap.add_argument(
         "--promotion-baseline-json",
         default="",
@@ -2935,12 +2955,33 @@ def main():
         )
         indices = row_selection(data, target, args.positive_only, args.min_d_spacing, args.min_peak, args.max_rows, args.geometry_percentile)
     model = parse_model(Path(args.res))
-    masks = split_masks(
-        data.hkl,
-        args.free_fraction,
-        args.split_seed,
-        symmetry_ops=model.get("symmetry_ops"),
-    )
+    split_contract_summary = {}
+    if str(args.split_contract).strip():
+        masks, split_contract_summary = load_transform_split_contract_masks(
+            Path(args.split_contract),
+            data,
+            model,
+        )
+        if not math.isclose(
+            float(args.free_fraction),
+            float(split_contract_summary["free_fraction"]),
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        ):
+            raise ValueError(
+                "--free-fraction does not match the immutable transform/hand split contract"
+            )
+        if int(args.split_seed) != int(split_contract_summary["split_seed"]):
+            raise ValueError(
+                "--split-seed does not match the immutable transform/hand split contract"
+            )
+    else:
+        masks = split_masks(
+            data.hkl,
+            args.free_fraction,
+            args.split_seed,
+            symmetry_ops=model.get("symmetry_ops"),
+        )
     selected_mask = np.zeros(len(target), dtype=bool)
     selected_mask[indices] = True
     masks = {k: v & selected_mask for k, v in masks.items()}
@@ -3408,6 +3449,8 @@ def main():
             "xds_frame_datum": frame_datum,
         },
         "selection_metric": str(args.selection_metric),
+        "nuisance_trial_count": int(len(all_trials)),
+        "prediction_geometry_trial_count": int(len(geom_trials)),
         "shelx_weight": {
             "source_a": wght_a,
             "source_b": wght_b,
@@ -3474,6 +3517,7 @@ def main():
             "free_rows": int(np.count_nonzero(masks["free"])),
             "geometry_filter": geometry_summary,
             "contract": row_contract_summary,
+            "transform_hand_split_contract": split_contract_summary,
         },
         "best_native": {k: v for k, v in best.items() if k != "arrays"},
         "selection_ranked_best_native": {k: v for k, v in ranked_candidate.items() if k != "arrays"},

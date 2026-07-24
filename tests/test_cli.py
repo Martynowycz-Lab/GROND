@@ -27,9 +27,12 @@ from grond.io.config import DatasetSpec, PrepConfig, write_prep
 from grond.progress import ProgressState
 
 EXPECTED_CLI_COMMANDS = {
+    "apply-parity-calibration",
     "auto",
     "calibrate-endpoint",
+    "canonicalize-hand",
     "compile",
+    "create-parity-calibration",
     "doctor",
     "endpoints",
     "export-mtz",
@@ -243,6 +246,7 @@ def test_thickness_scout_parser_exposes_contract_diagnostic_defaults():
     assert args.transform_rerank_max_rows == 0
     assert args.transform_scout_jobs == 0
     assert args.transform_scout_workers_per_job == 1
+    assert args.transform_parity_policy == "proper-only"
     assert args.transform_metadata_prefilter == "auto"
     assert args.transform_metadata_max_candidates == 3
     assert args.transform_metadata_min_correlation == 0.70
@@ -2555,6 +2559,9 @@ def test_doctor_reports_current_install_feature_flags(capsys):
         "final_feedback_row_recompute": True,
         "corrected_endpoint_hklf4_contract": True,
         "absolute_structure_no_pandas": True,
+        "proper_hand_parity_contract": True,
+        "canonical_hand_hklf4_gauge_repair": True,
+        "separate_parity_calibration_commands": True,
     }
     assert payload["ready"] is True
     assert payload["failures"] == []

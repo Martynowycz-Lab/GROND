@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import itertools
 import json
 import math
 from collections.abc import Sequence
@@ -8,17 +9,36 @@ from pathlib import Path
 
 import numpy as np
 
+from grond.hkl_transform import parse_hkl_transform_info
 from grond.io.config import DatasetSpec
 
-COMMON_TRANSFORMS = [
-    "identity",
-    "l,-k,h",
-    "-l,k,-h",
-    "h,-k,-l",
-    "-h,k,l",
-    "k,h,-l",
-    "-k,-h,l",
-]
+
+def _all_signed_axis_permutations(determinant: int) -> list[str]:
+    """Return the complete, fixed-order signed-axis permutation universe."""
+
+    transforms = []
+    for axes in itertools.permutations(("h", "k", "l")):
+        for signs in itertools.product((1, -1), repeat=3):
+            spec = ",".join(
+                ("" if sign > 0 else "-") + axis
+                for axis, sign in zip(axes, signs, strict=True)
+            )
+            info = parse_hkl_transform_info(spec)
+            if info.determinant == int(determinant):
+                transforms.append(info.canonical)
+    return sorted(set(transforms), key=lambda value: (value != "identity", value))
+
+
+ALL_PROPER_SIGNED_PERMUTATIONS = _all_signed_axis_permutations(1)
+ALL_IMPROPER_SIGNED_PERMUTATIONS = _all_signed_axis_permutations(-1)
+# Backward-compatible names for callers that used the historical four-item
+# "common" list.  Their value is now deliberately the complete 24-operator
+# signed-axis universe for each determinant.
+COMMON_PROPER_TRANSFORMS = list(ALL_PROPER_SIGNED_PERMUTATIONS)
+COMMON_IMPROPER_TRANSFORMS = list(ALL_IMPROPER_SIGNED_PERMUTATIONS)
+# Backward-compatible public name, now intentionally safe for automatic use.
+COMMON_TRANSFORMS = COMMON_PROPER_TRANSFORMS
+ALL_COMMON_TRANSFORMS = [*COMMON_PROPER_TRANSFORMS, *COMMON_IMPROPER_TRANSFORMS]
 
 
 @dataclass
@@ -224,30 +244,66 @@ def apply_preflight(ds: DatasetSpec, decision: PreflightDecision) -> DatasetSpec
     )
 
 
-def expand_transform_candidates(current: str, spec: str) -> list[str]:
-    """Build the signed HKL transform list used by the transform scout."""
+def expand_transform_candidates(
+    current: str,
+    spec: str,
+    *,
+    parity_policy: str = "proper-only",
+) -> list[str]:
+    """Build the HKL transform list used by the transform scout.
+
+    Automatic/common scouting is proper-only by default.  The historical
+    mixed-parity search remains available as the explicit
+    ``all-diagnostic`` policy, but downstream reports then remain conditional
+    and cannot silently claim named absolute configuration.
+    """
 
     spec = (spec or "auto").strip()
+    if parity_policy not in {"proper-only", "all-diagnostic"}:
+        raise ValueError(
+            "transform parity policy must be 'proper-only' or 'all-diagnostic'"
+        )
     if spec.lower() in {"off", "none"}:
-        return [current]
+        info = parse_hkl_transform_info(current)
+        if parity_policy == "proper-only" and not info.proper:
+            raise ValueError(
+                f"improper fixed transform {info.canonical!r} (determinant -1) is not allowed "
+                "by --transform-parity-policy=proper-only; canonicalize the model/HKLF4 pair "
+                f"to {info.proper_canonical_transform!r}, or use all-diagnostic mode without "
+                "an absolute-configuration claim"
+            )
+        return [info.canonical]
     out: list[str] = []
-    raw: list[str] = []
+    raw: list[tuple[str, bool]] = []
+    common = ALL_COMMON_TRANSFORMS if parity_policy == "all-diagnostic" else COMMON_PROPER_TRANSFORMS
     for item in spec.split(";"):
         item = item.strip()
         if not item:
             continue
         if item == "auto":
-            raw.extend([current, *COMMON_TRANSFORMS])
+            raw.extend([(current, True), *((candidate, True) for candidate in common)])
         elif item == "common":
-            raw.extend(COMMON_TRANSFORMS)
+            raw.extend((candidate, True) for candidate in common)
         else:
-            raw.append(item)
+            raw.append((item, False))
     if not raw:
-        raw = [current, *COMMON_TRANSFORMS]
-    for item in raw:
+        raw = [(current, True), *((candidate, True) for candidate in common)]
+    for item, automatic in raw:
         item = "identity" if item in {"", "auto"} else item
-        if item not in out:
-            out.append(item)
+        info = parse_hkl_transform_info(item)
+        if parity_policy == "proper-only" and not info.proper:
+            if not automatic:
+                raise ValueError(
+                    f"improper transform {info.canonical!r} (determinant -1) is not allowed by "
+                    "--transform-parity-policy=proper-only; use a proper sign-paired operator "
+                    f"{info.proper_canonical_transform!r}, or opt into all-diagnostic mode without "
+                    "an absolute-configuration claim"
+                )
+            continue
+        if info.canonical not in out:
+            out.append(info.canonical)
+    if not out:
+        raise ValueError("no HKL transform candidates remain after applying the parity policy")
     return out
 
 
@@ -300,6 +356,52 @@ def score_native_summary(summary: dict) -> dict:
         "born_R1_gt": born_r1gt,
         "born_CC": born_cc,
         "dyn_CC": dyn_cc,
+    }
+
+
+def score_transform_summary(summary: dict) -> dict:
+    """Score a transform without consuming coordinate-hand-sensitive Bloch terms.
+
+    Transform selection and hand selection are distinct inference problems.
+    The former therefore uses only independently scaled *work-row*
+    matched-Born intensities, which are invariant to fractional-coordinate
+    inversion for GROND's real electron-scattering potential.  Free rows are
+    reserved for the later matched hand test.  Dynamical and all-row blocks
+    remain in the scout summary for diagnostics but are deliberately absent
+    from this ranking target.
+    """
+
+    best = summary.get("best_native") or {}
+    metrics = best.get("metrics") or {}
+    work_metrics = metrics.get("work") or {}
+    all_metrics = metrics.get("all") or {}
+    born = work_metrics.get("born") or {}
+    all_born = all_metrics.get("born") or {}
+    born_w = safe_float(born.get("wR2_all"), float("inf"))
+    born_r1 = safe_float(born.get("R1_all"), float("inf"))
+    born_r1gt = safe_float(born.get("R1_gt"), float("inf"))
+    born_cc = safe_float(born.get("CC"), float("-inf"))
+    score = (
+        born_w
+        + 0.10 * born_r1
+        + max(0.0, born_r1gt - 0.35)
+        + max(0.0, 0.5 - born_cc)
+    )
+    return {
+        "score": score,
+        "selection_target": "matched_born_work_only_hand_invariant_v1",
+        "work_born_wR2_all": born_w,
+        "work_born_R1_all": born_r1,
+        "work_born_R1_gt": born_r1gt,
+        "work_born_CC": born_cc,
+        "diagnostic_all_born_wR2_all": safe_float(
+            all_born.get("wR2_all"), float("nan")
+        ),
+        "diagnostic_all_born_R1_all": safe_float(
+            all_born.get("R1_all"), float("nan")
+        ),
+        "coordinate_hand_sensitive_terms_used": False,
+        "free_rows_used_for_transform_selection": False,
     }
 
 
