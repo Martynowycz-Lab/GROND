@@ -108,6 +108,53 @@ def header_float(data: XDSData, key: str, default=None):
     return float(text.split()[0])
 
 
+def xds_detector_origin_and_beam_center(
+    *,
+    fast,
+    slow,
+    beam_direction,
+    orgx: float,
+    orgy: float,
+    qx: float,
+    qy: float,
+    distance: float,
+):
+    """Convert XDS detector datum coordinates into a physical lab origin.
+
+    XDS ``ORGX/ORGY`` locate the detector coordinate origin; they are not the
+    direct-beam intersection when the incident beam is not parallel to the
+    detector normal. ``DETECTOR_DISTANCE`` is measured along that normal.
+    """
+
+    fast = np.asarray(fast, dtype=float)
+    slow = np.asarray(slow, dtype=float)
+    beam = np.asarray(beam_direction, dtype=float)
+    fast /= np.linalg.norm(fast)
+    slow /= np.linalg.norm(slow)
+    beam /= np.linalg.norm(beam)
+    normal = np.cross(fast, slow)
+    normal /= np.linalg.norm(normal)
+    beam_normal = float(np.dot(beam, normal))
+    if abs(beam_normal) <= 1e-12:
+        raise ValueError("XDS incident beam is parallel to the detector plane")
+    origin = (
+        float(distance) * normal
+        - float(orgx) * float(qx) * fast
+        - float(orgy) * float(qy) * slow
+    )
+    ray_distance = float(distance) / beam_normal
+    beam_center = np.asarray(
+        [
+            float(orgx)
+            + ray_distance * float(np.dot(beam, fast)) / float(qx),
+            float(orgy)
+            + ray_distance * float(np.dot(beam, slow)) / float(qy),
+        ],
+        dtype=float,
+    )
+    return origin, beam_center, normal
+
+
 def header_detector_geometry(data: XDSData):
     nx = None
     ny = None
@@ -143,24 +190,33 @@ def header_detector_geometry(data: XDSData):
     slow = header_vector(
         data, "DIRECTION_OF_DETECTOR_Y-AXIS", np.asarray([0.0, 1.0, 0.0])
     )
-    beam_dir = data.s0 / np.linalg.norm(data.s0)
     qx = 1.0 if qx is None else qx
     qy = 1.0 if qy is None else qy
     orgx = 0.0 if orgx is None else orgx
     orgy = 0.0 if orgy is None else orgy
     distance = 0.0 if distance is None else distance
-    origin = distance * beam_dir - orgx * qx * fast - orgy * qy * slow
+    origin, beam_center, normal = xds_detector_origin_and_beam_center(
+        fast=fast,
+        slow=slow,
+        beam_direction=data.s0,
+        orgx=orgx,
+        orgy=orgy,
+        qx=qx,
+        qy=qy,
+        distance=distance,
+    )
     return {
         "detector": data.header.get("DETECTOR", "").strip(),
         "nx": nx,
         "ny": ny,
         "pixel_size_mm": [float(qx), float(qy)],
-        "beam_center_px": [float(orgx), float(orgy)],
+        "xds_org_px": [float(orgx), float(orgy)],
+        "beam_center_px": beam_center.astype(float).tolist(),
         "detector_distance_mm": float(distance),
         "detector_origin_mm": origin.astype(float).tolist(),
         "detector_fast_axis": fast.astype(float).tolist(),
         "detector_slow_axis": slow.astype(float).tolist(),
-        "detector_normal": np.cross(fast, slow).astype(float).tolist(),
+        "detector_normal": normal.astype(float).tolist(),
         "n_segments": (
             int(float(data.header.get("NUMBER OF DETECTOR SEGMENTS", "1").split()[0]))
             if data.header.get("NUMBER OF DETECTOR SEGMENTS")
@@ -193,6 +249,21 @@ def parse_xparm(path: Path | None):
         }
     try:
         l1, l2, l3, l4, l5, l6, l7, l8, l9, l10, l11 = lines[:11]
+        fast = [float(v) for v in l9[:3]]
+        slow = [float(v) for v in l10[:3]]
+        incident_beam = [float(v) for v in l2[1:4]]
+        orgx, orgy, distance = [float(v) for v in l8[:3]]
+        qx, qy = [float(l7[3]), float(l7[4])]
+        origin, beam_center, normal = xds_detector_origin_and_beam_center(
+            fast=fast,
+            slow=slow,
+            beam_direction=incident_beam,
+            orgx=orgx,
+            orgy=orgy,
+            qx=qx,
+            qy=qy,
+            distance=distance,
+        )
         out = {
             "path": str(path.resolve()),
             "sha256": sha256(path),
@@ -201,7 +272,7 @@ def parse_xparm(path: Path | None):
             "oscillation_range_deg": float(l1[2]),
             "rotation_axis_lab": [float(v) for v in l1[3:6]],
             "wavelength_A": float(l2[0]),
-            "incident_beam_vector": [float(v) for v in l2[1:4]],
+            "incident_beam_vector": incident_beam,
             "space_group_number": int(float(l3[0])),
             "unit_cell": [float(v) for v in l3[1:7]],
             "real_space_axes": [
@@ -212,12 +283,14 @@ def parse_xparm(path: Path | None):
             "segment_count": int(float(l7[0])),
             "nx": int(float(l7[1])),
             "ny": int(float(l7[2])),
-            "pixel_size_mm": [float(l7[3]), float(l7[4])],
-            "beam_center_px": [float(l8[0]), float(l8[1])],
-            "detector_distance_mm": float(l8[2]),
-            "detector_fast_axis": [float(v) for v in l9[:3]],
-            "detector_slow_axis": [float(v) for v in l10[:3]],
-            "detector_normal": [float(v) for v in l11[:3]],
+            "pixel_size_mm": [qx, qy],
+            "xds_org_px": [orgx, orgy],
+            "beam_center_px": beam_center.astype(float).tolist(),
+            "detector_distance_mm": distance,
+            "detector_origin_mm": origin.astype(float).tolist(),
+            "detector_fast_axis": fast,
+            "detector_slow_axis": slow,
+            "detector_normal": normal.astype(float).tolist(),
         }
         return out
     except Exception as exc:
