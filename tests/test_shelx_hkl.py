@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+from grond.legacy.engine.native_row_regularize import enforce_hkl_row_width
 from grond.legacy.engine.shelx_hkl import (
     format_fixed_width_row,
     safe_fixed_width_factor,
@@ -51,3 +52,18 @@ def test_writer_produces_strict_28_character_hklf4_rows(tmp_path: Path):
     lines = path.read_text().splitlines()
     assert len(lines) == 3
     assert all(len(line) == 28 for line in lines)
+
+
+def test_common_width_guard_reapplies_after_sigma_calibration():
+    merged = [(1, 0, 0, 100.0, 150000.0)]
+    unmerged = [(1, 0, 0, 50.0, 120000.0)]
+
+    safe_merged, safe_unmerged, factor = enforce_hkl_row_width(
+        merged, unmerged, "shelx_fixed"
+    )
+
+    assert factor == pytest.approx(0.6)
+    assert safe_merged[0][3] == pytest.approx(60.0)
+    assert safe_merged[0][4] == pytest.approx(90000.0)
+    assert safe_unmerged[0][3] == pytest.approx(30.0)
+    assert safe_unmerged[0][4] == pytest.approx(72000.0)

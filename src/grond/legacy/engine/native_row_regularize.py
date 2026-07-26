@@ -520,6 +520,25 @@ def write_hkl(path: Path, rows, float_format: str = "shelx_fixed") -> None:
         f.write(fmt.format(h=0, k=0, l=0, I=0.0, sig=0.0))
 
 
+def enforce_hkl_row_width(rows_merged, rows_unmerged, hkl_format: str):
+    """Apply one common scale so both HKLF tables fit the requested format."""
+    merged = list(rows_merged)
+    unmerged = list(rows_unmerged)
+    if hkl_format != "shelx_fixed":
+        return merged, unmerged, 1.0
+    factor = min(safe_fixed_width_factor(merged), safe_fixed_width_factor(unmerged))
+    if factor < 1.0:
+        merged = [
+            (h, k, l, intensity * factor, sigma * factor)
+            for h, k, l, intensity, sigma in merged
+        ]
+        unmerged = [
+            (h, k, l, intensity * factor, sigma * factor)
+            for h, k, l, intensity, sigma in unmerged
+        ]
+    return merged, unmerged, float(factor)
+
+
 def shelx_wavelength_needs_electron_default(value: float) -> bool:
     """Return true when a SHELX CELL wavelength is clearly not an electron-diffraction value."""
 
@@ -2247,12 +2266,9 @@ def export_corrected_endpoint(
     rows_unmerged = [(data.hkl[i, 0], data.hkl[i, 1], data.hkl[i, 2], Icorr[i], sigcorr[i]) for i in np.where(valid)[0]]
     rows_merged = exact_hkl_merge(data.hkl[valid], Icorr[valid], sigcorr[valid])
     hkl = out_dir / "dyn_nuisance_corrected.hkl"
-    hkl_safe_factor = 1.0
-    if hkl_format == "shelx_fixed":
-        hkl_safe_factor = min(safe_fixed_width_factor(rows_merged), safe_fixed_width_factor(rows_unmerged))
-        if hkl_safe_factor < 1.0:
-            rows_merged = [(h, k, l, I * hkl_safe_factor, s * hkl_safe_factor) for h, k, l, I, s in rows_merged]
-            rows_unmerged = [(h, k, l, I * hkl_safe_factor, s * hkl_safe_factor) for h, k, l, I, s in rows_unmerged]
+    rows_merged, rows_unmerged, hkl_safe_factor = enforce_hkl_row_width(
+        rows_merged, rows_unmerged, hkl_format
+    )
     post_bloch_sigma = {"policy": str(post_bloch_sigma_policy), "status": "not_requested"}
     if str(post_bloch_sigma_policy) == "uniform_z_rms":
         try:
@@ -2279,6 +2295,10 @@ def export_corrected_endpoint(
             "policy": str(post_bloch_sigma_policy),
             "status": "unknown_policy",
         }
+    rows_merged, rows_unmerged, post_sigma_hkl_safe_factor = enforce_hkl_row_width(
+        rows_merged, rows_unmerged, hkl_format
+    )
+    hkl_safe_factor *= post_sigma_hkl_safe_factor
     write_hkl(hkl, rows_merged, hkl_format)
     write_hkl(out_dir / "dyn_nuisance_corrected_unmerged.hkl", rows_unmerged, hkl_format)
     initial_wght = (0.0, 0.0) if str(endpoint_wght_mode) == "freeze-zero" else None
@@ -2308,6 +2328,7 @@ def export_corrected_endpoint(
         "rescale": rescale,
         "rescale_factor": factor,
         "hkl_safe_factor": hkl_safe_factor,
+        "post_sigma_hkl_safe_factor": post_sigma_hkl_safe_factor,
         **modulation_audit,
         **modulation_meta,
         "keep_exti": bool(keep_exti),
