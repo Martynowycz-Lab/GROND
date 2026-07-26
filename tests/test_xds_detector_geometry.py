@@ -26,6 +26,8 @@ def test_xds_org_is_not_off_axis_direct_beam_center():
 
 
 def test_header_detector_geometry_reports_physical_origin_and_beam_center():
+    s0 = np.asarray([1.140061, 0.050374, 39.857662])
+    s0_before = s0.copy()
     data = SimpleNamespace(
         header={
             "NX": "1024 NY= 1024 QX= 0.056 QY= 0.056",
@@ -34,7 +36,7 @@ def test_header_detector_geometry_reports_physical_origin_and_beam_center():
             "DIRECTION_OF_DETECTOR_Y-AXIS": "0 1 0",
             "DETECTOR": "GENERIC",
         },
-        s0=np.asarray([1.140061, 0.050374, 39.857662]),
+        s0=s0,
         iseg=np.asarray([0]),
     )
 
@@ -47,3 +49,4 @@ def test_header_detector_geometry_reports_physical_origin_and_beam_center():
     assert np.allclose(
         geometry["beam_center_px"], [514.244, 511.880], atol=0.002
     )
+    assert np.array_equal(data.s0, s0_before)

@@ -126,9 +126,11 @@ def xds_detector_origin_and_beam_center(
     detector normal. ``DETECTOR_DISTANCE`` is measured along that normal.
     """
 
-    fast = np.asarray(fast, dtype=float)
-    slow = np.asarray(slow, dtype=float)
-    beam = np.asarray(beam_direction, dtype=float)
+    # Copy because callers commonly pass XDSData.s0 and axis arrays directly;
+    # in-place normalization must never mutate the forward-model geometry.
+    fast = np.array(fast, dtype=float, copy=True)
+    slow = np.array(slow, dtype=float, copy=True)
+    beam = np.array(beam_direction, dtype=float, copy=True)
     fast /= np.linalg.norm(fast)
     slow /= np.linalg.norm(slow)
     beam /= np.linalg.norm(beam)
