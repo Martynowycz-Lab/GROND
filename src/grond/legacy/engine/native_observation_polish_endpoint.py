@@ -23,6 +23,7 @@ if __package__:
         DEFAULT_HKL,
         DEFAULT_RES,
         configure_shelxl_executable,
+        enforce_hkl_row_width,
         exact_hkl_merge,
         fail_if_shelxl_became_unavailable,
         native_metrics,
@@ -41,6 +42,7 @@ else:  # pragma: no cover - direct script execution
         DEFAULT_HKL,
         DEFAULT_RES,
         configure_shelxl_executable,
+        enforce_hkl_row_width,
         exact_hkl_merge,
         fail_if_shelxl_became_unavailable,
         native_metrics,
@@ -271,6 +273,9 @@ def write_endpoint(
     hkls = np.vstack([h, k, l]).T
     rows_unmerged = [(int(h[i]), int(k[i]), int(l[i]), float(i_corr[i]), float(sig_corr[i])) for i in np.where(valid)[0]]
     rows_merged = exact_hkl_merge(hkls[valid], i_corr[valid], sig_corr[valid])
+    rows_merged, rows_unmerged, hkl_safe_factor = enforce_hkl_row_width(
+        rows_merged, rows_unmerged, hkl_format
+    )
     write_hkl(out_dir / "dyn_observation_polished_unmerged.hkl", rows_unmerged, hkl_format)
     write_hkl(out_dir / "dyn_observation_polished.hkl", rows_merged, hkl_format)
     write_no_exti_ins(res_path, out_dir / "dyn_observation_polished.ins", hkl_name="dyn_observation_polished.hkl")
@@ -287,6 +292,7 @@ def write_endpoint(
         "q_max": 20.0,
         "rescale": rescale,
         "rescale_factor": float(factor),
+        "hkl_safe_factor": hkl_safe_factor,
         **modulation_audit,
         "rows_unmerged": len(rows_unmerged),
         "rows_merged_exact_hkl": len(rows_merged),
