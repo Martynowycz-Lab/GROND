@@ -1647,6 +1647,21 @@ def test_quick_source_shelx_controls_reads_fixed_width_exti_without_space(
     assert "EXTI 33651.195312" in cli._quick_source_shelx_control_text(controls)
 
 
+def test_quick_source_shelx_controls_recovers_exti_from_sibling_ins(
+    tmp_path: Path,
+):
+    model = tmp_path / "refined.res"
+    model.write_text("WGHT 0.1622 1.034\nHKLF 4\nEND\n")
+    model.with_suffix(".ins").write_text(
+        "WGHT 0.1622 1.034\nEXTI33651.195312\nHKLF 4\nEND\n"
+    )
+
+    controls = cli._quick_source_shelx_controls(model)
+
+    assert controls["exti"] == "EXTI 33651.195312"
+    assert controls["wght"] == "WGHT 0.162200 1.034000"
+
+
 def test_finish_endpoint_resolution_fails_closed_against_fresh_baseline(tmp_path: Path):
     run = tmp_path / "run"
     run.mkdir()

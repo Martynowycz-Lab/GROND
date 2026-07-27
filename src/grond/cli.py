@@ -13433,31 +13433,44 @@ def _quick_source_shelx_controls(path: Path | None) -> dict[str, object]:
     out: dict[str, object] = {"hklf": "", "exti": "", "wght": "", "acta": False}
     if path is None or not path.exists():
         return out
-    try:
-        text = path.read_text(errors="replace")
-    except OSError:
-        return out
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        head = line.split()[0].upper()
-        if head == "END":
-            break
-        if head == "HKLF":
-            out["hklf"] = " ".join(line.split()[:2])
-        elif head == "EXTI" or line[:4].upper() == "EXTI":
-            # SHELXL uses a fixed-width four-character instruction field.
-            # Large values may therefore be emitted without a separating
-            # blank (for example ``EXTI33651.195312``), while remaining an
-            # active EXTI instruction to SHELXL.
-            value = line[4:].strip().split()
-            out["exti"] = "EXTI" + (f" {value[0]}" if value else "")
-        elif head == "WGHT":
-            terms = _quick_parse_wght_terms(line)
-            out["wght"] = "WGHT " + " ".join(_quick_number(value, 6) for value in terms) if terms else line
-        elif head == "ACTA":
-            out["acta"] = True
+
+    def read_controls(candidate: Path) -> dict[str, object]:
+        found: dict[str, object] = {"hklf": "", "exti": "", "wght": "", "acta": False}
+        try:
+            text = candidate.read_text(errors="replace")
+        except OSError:
+            return found
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            head = line.split()[0].upper()
+            if head == "END":
+                break
+            if head == "HKLF":
+                found["hklf"] = " ".join(line.split()[:2])
+            elif head == "EXTI" or line[:4].upper() == "EXTI":
+                # SHELXL uses a fixed-width four-character instruction field.
+                # Large values may therefore be emitted without a separating
+                # blank (for example ``EXTI33651.195312``), while remaining an
+                # active EXTI instruction to SHELXL.
+                value = line[4:].strip().split()
+                found["exti"] = "EXTI" + (f" {value[0]}" if value else "")
+            elif head == "WGHT":
+                terms = _quick_parse_wght_terms(line)
+                found["wght"] = "WGHT " + " ".join(_quick_number(value, 6) for value in terms) if terms else line
+            elif head == "ACTA":
+                found["acta"] = True
+        return found
+
+    out.update(read_controls(path))
+    # SHELXL can refine a very large fixed-width EXTI value from the INS yet
+    # omit that instruction from the output RES.  Preserve the output RES
+    # controls generally, but recover the active EXTI declaration from the
+    # exact sibling INS when the RES no longer contains it.
+    sibling_ins = path.with_suffix(".ins")
+    if not out["exti"] and path.suffix.lower() == ".res" and sibling_ins.is_file():
+        out["exti"] = read_controls(sibling_ins)["exti"]
     return out
 
 
