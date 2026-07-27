@@ -1624,6 +1624,29 @@ def test_quick_baseline_prefers_fresh_final_run_summary(tmp_path: Path):
     assert details["res"] == str(tmp_path / "fresh.res")
 
 
+def test_quick_source_shelx_controls_reads_fixed_width_exti_without_space(
+    tmp_path: Path,
+):
+    model = tmp_path / "fixed_width_exti.res"
+    model.write_text(
+        "\n".join(
+            [
+                "TITL fixed-width EXTI",
+                "WGHT 0.1622 1.034",
+                "EXTI33651.195312",
+                "HKLF 4",
+                "END",
+            ]
+        )
+        + "\n"
+    )
+
+    controls = cli._quick_source_shelx_controls(model)
+
+    assert controls["exti"] == "EXTI 33651.195312"
+    assert "EXTI 33651.195312" in cli._quick_source_shelx_control_text(controls)
+
+
 def test_finish_endpoint_resolution_fails_closed_against_fresh_baseline(tmp_path: Path):
     run = tmp_path / "run"
     run.mkdir()

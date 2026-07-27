@@ -13446,8 +13446,13 @@ def _quick_source_shelx_controls(path: Path | None) -> dict[str, object]:
             break
         if head == "HKLF":
             out["hklf"] = " ".join(line.split()[:2])
-        elif head == "EXTI":
-            out["exti"] = " ".join(line.split()[:2])
+        elif head == "EXTI" or line[:4].upper() == "EXTI":
+            # SHELXL uses a fixed-width four-character instruction field.
+            # Large values may therefore be emitted without a separating
+            # blank (for example ``EXTI33651.195312``), while remaining an
+            # active EXTI instruction to SHELXL.
+            value = line[4:].strip().split()
+            out["exti"] = "EXTI" + (f" {value[0]}" if value else "")
         elif head == "WGHT":
             terms = _quick_parse_wght_terms(line)
             out["wght"] = "WGHT " + " ".join(_quick_number(value, 6) for value in terms) if terms else line
