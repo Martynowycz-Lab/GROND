@@ -15,7 +15,6 @@ import json
 import math
 import re
 import shutil
-import subprocess
 from pathlib import Path
 
 import numpy as np
@@ -27,14 +26,16 @@ try:
         classify_shelxl_iteration_rejection,
         exact_hkl_merge,
         fail_if_shelxl_became_unavailable,
-        parse_lst,
         parse_model,
-        parse_recommended_wght,
         promote_recommended_wght,
+        recommended_wght_from_stats,
+        recover_npd_shelxl_attempt,
         require_endpoint_shelxl,
+        run_one_shelxl_attempt,
         safe_fixed_width_factor,
         select_last_safe_shelxl_iteration,
         shelx_res_health,
+        shelxl_iteration_safe,
         snapshot_safe_shelxl_iteration,
         write_endpoint_ins,
         write_hkl,
@@ -70,14 +71,16 @@ except ImportError:  # pragma: no cover - direct script execution
         classify_shelxl_iteration_rejection,
         exact_hkl_merge,
         fail_if_shelxl_became_unavailable,
-        parse_lst,
         parse_model,
-        parse_recommended_wght,
         promote_recommended_wght,
+        recommended_wght_from_stats,
+        recover_npd_shelxl_attempt,
         require_endpoint_shelxl,
+        run_one_shelxl_attempt,
         safe_fixed_width_factor,
         select_last_safe_shelxl_iteration,
         shelx_res_health,
+        shelxl_iteration_safe,
         snapshot_safe_shelxl_iteration,
         write_endpoint_ins,
         write_hkl,
@@ -194,41 +197,36 @@ def run_shelxl_replay(work_dir: Path, stem: str, executable: str, iterations: in
     for i in range(n_iter):
         if freeze and zero:
             write_active_wght(work_dir / f"{stem}.ins", 0.0, 0.0)
-        res = work_dir / f"{stem}.res"
-        lst = work_dir / f"{stem}.lst"
-        fcf = work_dir / f"{stem}.fcf"
-        res.unlink(missing_ok=True)
-        lst.unlink(missing_ok=True)
-        fcf.unlink(missing_ok=True)
-        proc = subprocess.run([exe, stem], cwd=str(work_dir), text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        ins = work_dir / f"{stem}.ins"
+        base_ins_text = ins.read_text(errors="replace") if ins.exists() else ""
+        proc, stats = run_one_shelxl_attempt(
+            work_dir,
+            stem,
+            exe,
+            iteration=i + 1,
+            log_name=f"shelxl_iter_{i + 1}.log",
+        )
         last_stdout = proc.stdout
-        (work_dir / f"shelxl_iter_{i + 1}.log").write_text(proc.stdout)
-        stats = {"iteration": i + 1, "returncode": proc.returncode, **parse_lst(lst)}
-        recommended_wght = parse_recommended_wght(lst)
-        if recommended_wght is not None:
-            stats["recommended_wght_a"] = recommended_wght[0]
-            stats["recommended_wght_b"] = recommended_wght[1]
-        health = shelx_res_health(res, lst)
-        stats["res_health"] = health
-        if proc.returncode != 0:
-            stats["status"] = "shelxl_failed"
-            stats["invalid_res_reason"] = f"SHELXL returned {proc.returncode}"
-        elif not health["ok"]:
-            stats["status"] = "invalid_res_output"
-            stats["invalid_res_reason"] = health["reason"]
+        if str(stats.get("status", "")) == "adp_pathology" and base_ins_text:
+            recovered_proc, stats = recover_npd_shelxl_attempt(
+                work_dir,
+                stem,
+                exe,
+                iteration=i + 1,
+                base_ins_text=base_ins_text,
+                initial_stats=stats,
+            )
+            if recovered_proc is not None:
+                last_stdout = recovered_proc.stdout
         history.append(stats)
-        if stats.get("status") in {"shelxl_failed", "invalid_res_output"}:
-            break
-        rejection = classify_shelxl_iteration_rejection(stats)
-        if rejection is not None:
-            stats["status"], stats["invalid_res_reason"] = rejection
+        if not shelxl_iteration_safe(stats):
             break
         last_safe = snapshot_safe_shelxl_iteration(work_dir, stem, i + 1, stats)
         stats["safe_snapshot_res"] = last_safe["res"]
         stats["safe_snapshot_lst"] = last_safe["lst"]
         stats["safe_snapshot_fcf"] = last_safe["fcf"]
         last_safe["stats"] = dict(stats)
-        ins = work_dir / f"{stem}.ins"
+        res = work_dir / f"{stem}.res"
         if i + 1 < n_iter and res.exists():
             write_endpoint_ins(res, ins, hkl_name=f"{stem}.hkl", keep_exti=False)
             if freeze:
@@ -238,7 +236,10 @@ def run_shelxl_replay(work_dir: Path, stem: str, executable: str, iterations: in
                 else:
                     stats["next_wght"] = {"promoted": False, "frozen": True}
             else:
-                stats["next_wght"] = promote_recommended_wght(ins, recommended_wght)
+                stats["next_wght"] = promote_recommended_wght(
+                    ins,
+                    recommended_wght_from_stats(stats),
+                )
     if history:
         (work_dir / "shelxl_stdout.log").write_text(last_stdout)
     final = select_last_safe_shelxl_iteration(work_dir, stem, history, last_safe)

@@ -440,6 +440,76 @@ def test_native_run_shelxl_marks_npd_res_pathological(tmp_path: Path, monkeypatc
     assert len(result["iteration_history"]) == 1
 
 
+def test_native_run_shelxl_recovers_first_npd_step_with_bounded_damp(tmp_path: Path, monkeypatch):
+    fake_shelxl = tmp_path / "damp_sensitive_shelxl.py"
+    fake_shelxl.write_text(
+        "import pathlib, re, sys\n"
+        "stem = sys.argv[1]\n"
+        "ins = pathlib.Path(stem + '.ins').read_text()\n"
+        "match = re.search(r'^DAMP\\s+([0-9.eE+-]+)', ins, flags=re.MULTILINE | re.IGNORECASE)\n"
+        "damp = float(match.group(1)) if match else 0.0\n"
+        "safe = damp >= 1000.0\n"
+        "npd = 0 if safe else 11\n"
+        "pathology = (\n"
+        "    f' ** Warning:     0  atoms may be split and     {npd}  atoms NPD **\\n'\n"
+        ")\n"
+        "pathlib.Path(stem + '.lst').write_text(\n"
+        "    pathology\n"
+        "    + ' 100 Unique reflections, of which 0 suppressed\\n'\n"
+        "    + ' wR2 = 0.2365, GooF = S = 1.043, Restrained GooF = 1.043 for all data\\n'\n"
+        "    + ' R1 = 0.0948 for 50 Fo > 4sig(Fo) and 0.1299 for all 100 data\\n'\n"
+        ")\n"
+        "pathlib.Path(stem + '.res').write_text(ins.replace('TITL start', f'TITL damp {damp:g}'))\n"
+        "pathlib.Path(stem + '.fcf').write_text(f'DAMP {damp:g}\\n')\n"
+    )
+    fake_shelxl.chmod(fake_shelxl.stat().st_mode | 0o111)
+    shim = tmp_path / "shelxl_shim"
+    shim.write_text(f"#!/bin/sh\nexec {sys.executable!r} {str(fake_shelxl)!r} \"$@\"\n")
+    shim.chmod(shim.stat().st_mode | 0o111)
+    work = tmp_path / "work"
+    work.mkdir()
+    stem = "dyn_nuisance_corrected"
+    (work / f"{stem}.ins").write_text(
+        "TITL start\n"
+        "CELL 0.02508 5 6 7 90 90 90\n"
+        "SFAC C 1 0 1 0 1 0 1 0\n"
+        "WGHT 0 0\n"
+        "FVAR 1\n"
+        "C1 1 0.10 0.20 0.30 11.0 0.05\n"
+        "CGLS 1\n"
+        "HKLF 4\n"
+        "END\n"
+    )
+    (work / f"{stem}.hkl").write_text("   1   0   0  100.00   10.00\n   0   0   0    0.00    0.00\n")
+    monkeypatch.setattr(nr, "SHELXL", str(shim))
+
+    result = nr.run_shelxl(work, stem, iterations=1)
+
+    assert result["status"] == "ok"
+    assert result["has_npd"] is False
+    assert result["npd_count"] == 0
+    assert result["R1_all"] == pytest.approx(0.1299)
+    assert result["wR2_all"] == pytest.approx(0.2365)
+    recovery = result["npd_recovery"]
+    assert recovery["status"] == "accepted_first_safe_damped_step"
+    assert recovery["accepted_damp"] == pytest.approx(1000.0)
+    assert [attempt["damp"] for attempt in recovery["attempts"]] == [
+        None,
+        100.0,
+        300.0,
+        1000.0,
+    ]
+    assert [attempt["npd_count"] for attempt in recovery["attempts"]] == [11, 11, 11, 0]
+    for attempt in recovery["attempts"]:
+        assert Path(attempt["res"]).exists()
+        assert Path(attempt["lst"]).exists()
+        assert Path(attempt["fcf"]).exists()
+        assert attempt["res_health"]["path"] == attempt["res"]
+        assert attempt["res_health"]["lst"] == attempt["lst"]
+    assert "DAMP 1000 15" in (work / f"{stem}.res").read_text()
+    assert result["res_health"]["safe_for_feedback"] is True
+
+
 def test_native_run_shelxl_reports_split_warning_without_blocking_feedback(tmp_path: Path, monkeypatch):
     fake_shelxl = tmp_path / "fake_shelxl.py"
     fake_shelxl.write_text(

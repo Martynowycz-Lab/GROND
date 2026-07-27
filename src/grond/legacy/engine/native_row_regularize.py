@@ -2040,6 +2040,226 @@ def _active_wght_from_stats(stats: dict) -> tuple[float, float] | None:
     return a, b
 
 
+def recommended_wght_from_stats(stats: dict) -> tuple[float, float] | None:
+    try:
+        a = float(stats["recommended_wght_a"])
+        b = float(stats.get("recommended_wght_b", 0.0))
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not math.isfinite(a) or not math.isfinite(b):
+        return None
+    return a, b
+
+
+DEFAULT_NPD_DAMP_RETRIES = (100.0, 300.0, 1000.0, 3000.0, 10000.0)
+DEFAULT_NPD_DAMP_LIMSE = 15.0
+
+
+def write_active_damp(path: Path, damp: float, limse: float = DEFAULT_NPD_DAMP_LIMSE) -> dict:
+    """Write one active pre-END SHELXL DAMP instruction.
+
+    This controls only the size of the least-squares model step.  It does not
+    add restraints, permit NPD atoms, or alter the corrected reflection data.
+    """
+
+    if not path.exists():
+        return {"written": False, "reason": "missing_file"}
+    lines = path.read_text(errors="replace").splitlines()
+    active_end = next(
+        (index for index, line in enumerate(lines) if line.strip().upper().startswith("END")),
+        len(lines),
+    )
+    active_damp = [
+        index
+        for index, line in enumerate(lines[:active_end])
+        if line.strip().upper().startswith("DAMP")
+    ]
+    damp_line = f"DAMP {float(damp):.8g} {float(limse):.8g}"
+    if active_damp:
+        lines[active_damp[0]] = damp_line
+        for index in reversed(active_damp[1:]):
+            del lines[index]
+    else:
+        insert_at = next(
+            (
+                index
+                for index, line in enumerate(lines[:active_end])
+                if line.strip().upper().startswith("FVAR")
+            ),
+            active_end,
+        )
+        lines.insert(insert_at, damp_line)
+    path.write_text("\n".join(lines).rstrip() + "\n")
+    return {
+        "written": True,
+        "active_damp": float(damp),
+        "active_damp_limse": float(limse),
+    }
+
+
+def _shelxl_attempt_label(value: float | None) -> str:
+    if value is None:
+        return "undamped"
+    return f"damp_{float(value):g}".replace(".", "p").replace("-", "m")
+
+
+def archive_shelxl_attempt(
+    work_dir: Path,
+    stem: str,
+    iteration: int,
+    attempt: int,
+    damp: float | None,
+) -> dict:
+    """Preserve one SHELXL attempt before a bounded recovery overwrites it."""
+
+    label = _shelxl_attempt_label(damp)
+    prefix = f"shelxl_attempt_iter_{int(iteration):02d}_{int(attempt):02d}_{label}"
+    archived: dict[str, object] = {
+        "attempt": int(attempt),
+        "label": label,
+        "damp": None if damp is None else float(damp),
+    }
+    for suffix in ("res", "lst", "fcf"):
+        source = work_dir / f"{stem}.{suffix}"
+        target = work_dir / f"{prefix}.{suffix}"
+        if source.exists():
+            shutil.copy2(source, target)
+            archived[suffix] = str(target)
+        else:
+            target.unlink(missing_ok=True)
+            archived[suffix] = ""
+    return archived
+
+
+def archived_shelxl_attempt_record(stats: dict, archived: dict) -> dict:
+    """Bind an attempt's health paths to its immutable archived artifacts."""
+
+    record = {**dict(stats), **dict(archived)}
+    health = record.get("res_health")
+    if isinstance(health, dict):
+        health = dict(health)
+        health["path"] = str(archived.get("res", ""))
+        health["lst"] = str(archived.get("lst", ""))
+        record["res_health"] = health
+    return record
+
+
+def run_one_shelxl_attempt(
+    work_dir: Path,
+    stem: str,
+    executable: str,
+    *,
+    iteration: int,
+    log_name: str,
+) -> tuple[subprocess.CompletedProcess[str], dict]:
+    """Run and classify one SHELXL attempt after clearing stale outputs."""
+
+    res = work_dir / f"{stem}.res"
+    lst = work_dir / f"{stem}.lst"
+    fcf = work_dir / f"{stem}.fcf"
+    res.unlink(missing_ok=True)
+    lst.unlink(missing_ok=True)
+    fcf.unlink(missing_ok=True)
+    proc = subprocess.run(
+        [executable, stem],
+        cwd=str(work_dir),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    (work_dir / log_name).write_text(proc.stdout)
+    stats = {"iteration": int(iteration), "returncode": proc.returncode, **parse_lst(lst)}
+    recommended_wght = parse_recommended_wght(lst)
+    if recommended_wght is not None:
+        stats["recommended_wght_a"] = recommended_wght[0]
+        stats["recommended_wght_b"] = recommended_wght[1]
+    health = shelx_res_health(res, lst)
+    stats["res_health"] = health
+    if proc.returncode != 0:
+        stats["status"] = "shelxl_failed"
+        stats["invalid_res_reason"] = f"SHELXL returned {proc.returncode}"
+    elif not health["ok"]:
+        stats["status"] = "invalid_res_output"
+        stats["invalid_res_reason"] = health["reason"]
+    else:
+        rejection = classify_shelxl_iteration_rejection(stats)
+        if rejection is not None:
+            stats["status"], stats["invalid_res_reason"] = rejection
+    return proc, stats
+
+
+def recover_npd_shelxl_attempt(
+    work_dir: Path,
+    stem: str,
+    executable: str,
+    *,
+    iteration: int,
+    base_ins_text: str,
+    initial_stats: dict,
+    damp_values: tuple[float, ...] = DEFAULT_NPD_DAMP_RETRIES,
+    limse: float = DEFAULT_NPD_DAMP_LIMSE,
+) -> tuple[subprocess.CompletedProcess[str] | None, dict]:
+    """Retry one rejected NPD step from its unchanged input with bounded DAMP.
+
+    The first zero-NPD, complete SHELXL result is accepted.  Every attempt is
+    archived and all failed trials remain visible in the returned provenance.
+    """
+
+    attempts: list[dict] = []
+    initial_archive = archive_shelxl_attempt(work_dir, stem, iteration, 0, None)
+    attempts.append(archived_shelxl_attempt_record(initial_stats, initial_archive))
+    last_proc: subprocess.CompletedProcess[str] | None = None
+    last_stats = dict(initial_stats)
+    ins = work_dir / f"{stem}.ins"
+    for attempt_number, damp in enumerate(damp_values, start=1):
+        ins.write_text(base_ins_text)
+        damp_write = write_active_damp(ins, damp, limse)
+        proc, stats = run_one_shelxl_attempt(
+            work_dir,
+            stem,
+            executable,
+            iteration=iteration,
+            log_name=(
+                f"shelxl_iter_{int(iteration):02d}_recovery_"
+                f"{int(attempt_number):02d}_{_shelxl_attempt_label(damp)}.log"
+            ),
+        )
+        stats["recovery_attempt"] = int(attempt_number)
+        stats["active_damp"] = float(damp)
+        stats["active_damp_limse"] = float(limse)
+        stats["damp_write"] = damp_write
+        archived = archive_shelxl_attempt(
+            work_dir,
+            stem,
+            iteration,
+            attempt_number,
+            damp,
+        )
+        attempts.append(archived_shelxl_attempt_record(stats, archived))
+        last_proc = proc
+        last_stats = stats
+        if shelxl_iteration_safe(stats):
+            stats["status"] = "ok"
+            stats["npd_recovery"] = {
+                "trigger": "adp_pathology",
+                "status": "accepted_first_safe_damped_step",
+                "accepted_damp": float(damp),
+                "limse": float(limse),
+                "attempts": attempts,
+            }
+            return proc, stats
+        if str(stats.get("status", "")) != "adp_pathology":
+            break
+    last_stats["npd_recovery"] = {
+        "trigger": "adp_pathology",
+        "status": "exhausted_without_safe_step",
+        "accepted_damp": None,
+        "limse": float(limse),
+        "attempts": attempts,
+    }
+    return last_proc, last_stats
+
+
 def run_shelxl(work_dir: Path, stem: str, iterations: int = 1, wght_mode: str = "freeze-zero", endpoint_ls_cycles: int = 1):
     exe = str(SHELXL)
     if not shelxl_executable_is_available(exe):
@@ -2059,47 +2279,44 @@ def run_shelxl(work_dir: Path, stem: str, iterations: int = 1, wght_mode: str = 
     for i in range(n_iter):
         if freeze_zero:
             write_active_wght(work_dir / f"{stem}.ins", 0.0, 0.0)
-        res = work_dir / f"{stem}.res"
-        lst = work_dir / f"{stem}.lst"
-        fcf = work_dir / f"{stem}.fcf"
-        res.unlink(missing_ok=True)
-        lst.unlink(missing_ok=True)
-        fcf.unlink(missing_ok=True)
-        proc = subprocess.run([exe, stem], cwd=str(work_dir), text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        last_proc = proc
-        (work_dir / f"shelxl_iter_{i + 1}.log").write_text(proc.stdout)
-        stats = {"iteration": i + 1, "returncode": proc.returncode, **parse_lst(lst)}
-        recommended_wght = parse_recommended_wght(lst)
-        if recommended_wght is not None:
-            stats["recommended_wght_a"] = recommended_wght[0]
-            stats["recommended_wght_b"] = recommended_wght[1]
-        history.append(stats)
         ins = work_dir / f"{stem}.ins"
-        if proc.returncode != 0:
-            stats["status"] = "shelxl_failed"
-            stats["invalid_res_reason"] = f"SHELXL returned {proc.returncode}"
-            stats["res_health"] = shelx_res_health(res, lst)
-            break
-        health = shelx_res_health(res, lst)
-        stats["res_health"] = health
-        if not health["ok"]:
-            stats["status"] = "invalid_res_output"
-            stats["invalid_res_reason"] = health["reason"]
-            break
-        rejection = classify_shelxl_iteration_rejection(stats)
-        if rejection is not None:
-            stats["status"], stats["invalid_res_reason"] = rejection
+        base_ins_text = ins.read_text(errors="replace") if ins.exists() else ""
+        proc, stats = run_one_shelxl_attempt(
+            work_dir,
+            stem,
+            exe,
+            iteration=i + 1,
+            log_name=f"shelxl_iter_{i + 1}.log",
+        )
+        last_proc = proc
+        if str(stats.get("status", "")) == "adp_pathology" and base_ins_text:
+            recovered_proc, stats = recover_npd_shelxl_attempt(
+                work_dir,
+                stem,
+                exe,
+                iteration=i + 1,
+                base_ins_text=base_ins_text,
+                initial_stats=stats,
+            )
+            if recovered_proc is not None:
+                last_proc = recovered_proc
+        history.append(stats)
+        if not shelxl_iteration_safe(stats):
             break
         last_safe = snapshot_safe_shelxl_iteration(work_dir, stem, i + 1, stats)
         stats["safe_snapshot_res"] = last_safe["res"]
         stats["safe_snapshot_lst"] = last_safe["lst"]
         stats["safe_snapshot_fcf"] = last_safe["fcf"]
         last_safe["stats"] = dict(stats)
+        res = work_dir / f"{stem}.res"
         if i + 1 < n_iter and res.exists():
             active = (0.0, 0.0) if freeze_zero else _active_wght_from_stats(stats)
             write_endpoint_ins(res, ins, hkl_name=f"{stem}.hkl", keep_exti=False, wght=active, ls_cycles=endpoint_ls_cycles)
             if mode == "promote":
-                stats["next_wght"] = promote_recommended_wght(ins, recommended_wght)
+                stats["next_wght"] = promote_recommended_wght(
+                    ins,
+                    recommended_wght_from_stats(stats),
+                )
             elif freeze_zero:
                 stats["next_wght"] = {"promoted": False, "frozen": True, "active_wght_a": 0.0, "active_wght_b": 0.0}
             else:

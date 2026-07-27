@@ -69,6 +69,33 @@ print(f"completed fake SHELXL iteration {iteration}")
     return executable
 
 
+def _npd_until_damp_shelxl(tmp_path: Path) -> Path:
+    executable = tmp_path / "npd_until_damp_shelxl"
+    executable.write_text(
+        """#!/usr/bin/env python3
+from pathlib import Path
+import re
+import sys
+
+stem = sys.argv[1]
+ins = Path(stem + ".ins").read_text()
+match = re.search(r"^DAMP\\s+([0-9.eE+-]+)", ins, flags=re.MULTILINE | re.IGNORECASE)
+damp = float(match.group(1)) if match else 0.0
+npd = 0 if damp >= 1000.0 else 1
+Path(stem + ".lst").write_text(
+    f" ** Warning:     0  atoms may be split and     {npd}  atoms NPD **\\n"
+    " 1 Unique reflections, of which 0 suppressed\\n"
+    " wR2 = 0.1400, GooF = S = 0.987, Restrained GooF = 0.987 for all data\\n"
+    " R1 = 0.0500 for 1 Fo > 4sig(Fo) and 0.1000 for all 1 data\\n"
+)
+Path(stem + ".res").write_text(ins)
+Path(stem + ".fcf").write_text(f"DAMP {damp:g}\\n")
+"""
+    )
+    executable.chmod(0o755)
+    return executable
+
+
 def _assert_safe_iteration_restored(work: Path, stem: str, result: dict) -> None:
     assert result["status"] == "ok"
     assert result["selected_iteration"] == 1
@@ -142,6 +169,41 @@ def test_scale_replay_shelxl_restores_last_safe_iteration_after_npd(tmp_path: Pa
     result = replay.run_shelxl_replay(work, stem, str(executable), iterations=3, wght_mode="freeze-zero")
 
     _assert_safe_iteration_restored(work, stem, result)
+
+
+@pytest.mark.parametrize("implementation", ["combined", "replay"])
+def test_shared_endpoint_paths_accept_first_safe_damp_recovery(
+    tmp_path: Path,
+    implementation: str,
+) -> None:
+    work = tmp_path / implementation
+    stem = "endpoint"
+    _write_start_files(work, stem)
+    executable = _npd_until_damp_shelxl(tmp_path)
+
+    if implementation == "combined":
+        result = combined.run_shelxl(
+            work,
+            stem,
+            str(executable),
+            iterations=1,
+            wght_mode="freeze-zero",
+        )
+    else:
+        result = replay.run_shelxl_replay(
+            work,
+            stem,
+            str(executable),
+            iterations=1,
+            wght_mode="freeze-zero",
+        )
+
+    assert result["status"] == "ok"
+    assert result["npd_count"] == 0
+    assert result["has_npd"] is False
+    assert result["npd_recovery"]["status"] == "accepted_first_safe_damped_step"
+    assert result["npd_recovery"]["accepted_damp"] == pytest.approx(1000.0)
+    assert [attempt["npd_count"] for attempt in result["npd_recovery"]["attempts"]] == [1, 1, 1, 0]
 
 
 def test_scale_replay_reports_missing_explicit_shelxl_path(tmp_path: Path) -> None:

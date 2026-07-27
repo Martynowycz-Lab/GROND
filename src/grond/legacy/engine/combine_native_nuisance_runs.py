@@ -16,7 +16,6 @@ import json
 import math
 import re
 import shutil
-import subprocess
 import time
 from pathlib import Path
 
@@ -26,12 +25,15 @@ try:  # Package import.
     from .bloch_engine import parse_model, sha256
     from .endpoint_modulation import modulation_manifest_fields
     from .native_row_regularize import (
-        classify_shelxl_iteration_rejection,
         fail_if_shelxl_became_unavailable,
         parse_shelx_wght_terms,
+        recommended_wght_from_stats,
+        recover_npd_shelxl_attempt,
         require_endpoint_shelxl,
+        run_one_shelxl_attempt,
         select_last_safe_shelxl_iteration,
         shelx_res_health,
+        shelxl_iteration_safe,
         snapshot_safe_shelxl_iteration,
         write_active_wght,
         write_endpoint_ins,
@@ -42,12 +44,15 @@ except ImportError:  # Direct script execution from this directory.
     from bloch_engine import parse_model, sha256
     from endpoint_modulation import modulation_manifest_fields
     from native_row_regularize import (
-        classify_shelxl_iteration_rejection,
         fail_if_shelxl_became_unavailable,
         parse_shelx_wght_terms,
+        recommended_wght_from_stats,
+        recover_npd_shelxl_attempt,
         require_endpoint_shelxl,
+        run_one_shelxl_attempt,
         select_last_safe_shelxl_iteration,
         shelx_res_health,
+        shelxl_iteration_safe,
         snapshot_safe_shelxl_iteration,
         write_active_wght,
         write_endpoint_ins,
@@ -869,41 +874,37 @@ def run_shelxl(
     for i in range(n_iter):
         if freeze_zero:
             write_active_wght(work / f"{stem}.ins", 0.0, 0.0)
-        res = work / f"{stem}.res"
-        lst = work / f"{stem}.lst"
-        fcf = work / f"{stem}.fcf"
-        res.unlink(missing_ok=True)
-        lst.unlink(missing_ok=True)
-        fcf.unlink(missing_ok=True)
-        proc = subprocess.run([exe, stem], cwd=str(work), text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        ins = work / f"{stem}.ins"
+        base_ins_text = ins.read_text(errors="replace") if ins.exists() else ""
+        proc, stats = run_one_shelxl_attempt(
+            work,
+            stem,
+            exe,
+            iteration=i + 1,
+            log_name=f"shelxl_iter_{i + 1}.log",
+        )
         last_stdout = proc.stdout
-        (work / f"shelxl_iter_{i + 1}.log").write_text(proc.stdout)
-        stats = {"iteration": i + 1, "returncode": proc.returncode, **parse_lst(lst)}
-        recommended = parse_recommended_wght(lst)
-        if recommended is not None:
-            stats["recommended_wght_a"] = recommended[0]
-            stats["recommended_wght_b"] = recommended[1]
-        health = shelx_res_health(res, lst)
-        stats["res_health"] = health
-        if proc.returncode != 0:
-            stats["status"] = "shelxl_failed"
-            stats["invalid_res_reason"] = f"SHELXL returned {proc.returncode}"
-        elif not health["ok"]:
-            stats["status"] = "invalid_res_output"
-            stats["invalid_res_reason"] = health["reason"]
+        if str(stats.get("status", "")) == "adp_pathology" and base_ins_text:
+            recovered_proc, stats = recover_npd_shelxl_attempt(
+                work,
+                stem,
+                exe,
+                iteration=i + 1,
+                base_ins_text=base_ins_text,
+                initial_stats=stats,
+            )
+            if recovered_proc is not None:
+                last_stdout = recovered_proc.stdout
         history.append(stats)
-        if stats.get("status") in {"shelxl_failed", "invalid_res_output"}:
-            break
-        rejection = classify_shelxl_iteration_rejection(stats)
-        if rejection is not None:
-            stats["status"], stats["invalid_res_reason"] = rejection
+        if not shelxl_iteration_safe(stats):
             break
         last_safe = snapshot_safe_shelxl_iteration(work, stem, i + 1, stats)
         stats["safe_snapshot_res"] = last_safe["res"]
         stats["safe_snapshot_lst"] = last_safe["lst"]
         stats["safe_snapshot_fcf"] = last_safe["fcf"]
         last_safe["stats"] = dict(stats)
-        if i + 1 < n_iter and (work / f"{stem}.res").exists():
+        res = work / f"{stem}.res"
+        if i + 1 < n_iter and res.exists():
             active = (0.0, 0.0) if freeze_zero else _active_wght_from_stats(stats)
             write_endpoint_ins(
                 work / f"{stem}.res",
@@ -914,7 +915,10 @@ def run_shelxl(
                 ls_cycles=n_ls,
             )
             if mode == "promote":
-                stats["next_wght"] = promote_recommended_wght(work / f"{stem}.ins", recommended)
+                stats["next_wght"] = promote_recommended_wght(
+                    work / f"{stem}.ins",
+                    recommended_wght_from_stats(stats),
+                )
             elif freeze_zero:
                 stats["next_wght"] = {"promoted": False, "frozen": True, "active_wght_a": 0.0, "active_wght_b": 0.0}
             else:
