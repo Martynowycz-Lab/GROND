@@ -341,6 +341,38 @@ def _scan_array_range(metadata: dict[str, Any]) -> tuple[int, int]:
     return start, stop
 
 
+def _a_scan_points_for_current_scan(metadata: dict[str, Any]) -> tuple[np.ndarray, dict[str, Any]]:
+    """Return scan-point A matrices in the cropped scan's local frame convention.
+
+    DIALS can retain the full scan-varying crystal model when an experiment's
+    ``Scan`` is cropped.  Reflection z and the scan origin remain in the
+    original array coordinate, while GROND's sidecar is indexed locally after
+    subtracting ``STARTING_FRAME``.  In that case select the inclusive
+    ``[array_start, array_stop]`` A-matrix slice.  Already-local and static
+    models are preserved unchanged.
+    """
+
+    raw = np.asarray(metadata["A_scan_points"], dtype=float)
+    if raw.ndim != 3 or raw.shape[1:] != (3, 3) or len(raw) == 0:
+        raise ValueError("DIALS A_scan_points must be a non-empty N x 3 x 3 array")
+    start, stop = _scan_array_range(metadata)
+    local_point_count = max(stop - start + 1, 1)
+    source = "static" if len(raw) == 1 else "already_local"
+    origin = 0
+    selected = raw
+    if len(raw) > 1 and start > 0 and len(raw) >= stop + 1 and len(raw) != local_point_count:
+        selected = raw[start : stop + 1]
+        source = "cropped_from_full_scan_model"
+        origin = start
+    return selected, {
+        "source": source,
+        "raw_scan_points": int(len(raw)),
+        "written_scan_points": int(len(selected)),
+        "source_scan_point_origin": int(origin),
+        "scan_array_range": [int(start), int(stop)],
+    }
+
+
 def dials_sg_statistics(arrays: dict[str, np.ndarray], metadata: dict[str, Any], keep: np.ndarray) -> dict[str, Any]:
     """Compute excitation-error diagnostics from the generated GROND geometry."""
 
@@ -348,7 +380,7 @@ def dials_sg_statistics(arrays: dict[str, np.ndarray], metadata: dict[str, Any],
         return {"status": "error", "message": "no reflection rows survived DIALS bridge filtering", "rows": 0}
     hkl = np.asarray(arrays["hkl"], dtype=float)
     xyzcal = np.asarray(arrays["xyzcal"], dtype=float)
-    a_scan = np.asarray(metadata["A_scan_points"], dtype=float)
+    a_scan, a_scan_contract = _a_scan_points_for_current_scan(metadata)
     goniometer = metadata.get("goniometer") or {}
     axis = np.asarray(
         goniometer.get("rotation_axis_datum", goniometer.get("rotation_axis", [1.0, 0.0, 0.0])),
@@ -394,6 +426,7 @@ def dials_sg_statistics(arrays: dict[str, np.ndarray], metadata: dict[str, Any],
         "median_abs_sg_inv_A": median_abs_sg,
         "p95_abs_sg_inv_A": p95_abs_sg,
         "max_abs_sg_inv_A": max_abs_sg,
+        "a_scan_contract": a_scan_contract,
         "limits_inv_A": {
             "p95_abs_sg": DIALS_SG_P95_ABS_LIMIT_INV_A,
         },
@@ -878,7 +911,7 @@ def convert_dials_to_grond(
         summary_path.write_text(json.dumps(failure_summary, indent=2, allow_nan=False) + "\n")
     _require_valid_dials_geometry(sg_validation)
 
-    a_scan = np.asarray(metadata["A_scan_points"], dtype=float)
+    a_scan, a_scan_contract = _a_scan_points_for_current_scan(metadata)
     scan_points_path = out / "DIALS_A_AT_SCAN_POINTS.txt"
     with scan_points_path.open("w") as f:
         for mat in a_scan:
@@ -1046,6 +1079,7 @@ def convert_dials_to_grond(
             "scan_image_range": metadata.get("scan", {}).get("image_range", []),
             "scan_array_range": list(scan_array_range),
             "starting_frame": starting_frame,
+            "a_scan_contract": a_scan_contract,
             "rotation_axis_lab": metadata.get("goniometer", {}).get("rotation_axis", []),
             "rotation_axis_datum": metadata.get("goniometer", {}).get("rotation_axis_datum", []),
             "fixed_rotation": metadata.get("goniometer", {}).get("fixed_rotation", []),

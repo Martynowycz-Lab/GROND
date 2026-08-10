@@ -242,6 +242,33 @@ def test_dials_sg_statistics_uses_scan_point_geometry():
     assert stats["max_abs_sg_inv_A"] > 0.0
 
 
+def test_full_scan_a_points_are_cropped_to_nonzero_scan_origin():
+    from grond.io.dials_bridge import _a_scan_points_for_current_scan
+
+    full = np.asarray([np.eye(3) * (1.0 + 0.01 * i) for i in range(148)])
+    metadata = {
+        "A_scan_points": full.tolist(),
+        "scan": {
+            "image_range": [27, 96],
+            "array_range": [26, 96],
+            "oscillation": [11.3204, 0.4354],
+        },
+    }
+
+    selected, contract = _a_scan_points_for_current_scan(metadata)
+
+    assert selected.shape == (71, 3, 3)
+    np.testing.assert_allclose(selected[0], full[26])
+    np.testing.assert_allclose(selected[-1], full[96])
+    assert contract == {
+        "source": "cropped_from_full_scan_model",
+        "raw_scan_points": 148,
+        "written_scan_points": 71,
+        "source_scan_point_origin": 26,
+        "scan_array_range": [26, 96],
+    }
+
+
 def test_dials_sg_statistics_normalizes_cropped_scan_z_and_fails_closed_without_it():
     reciprocal_length = 0.1
     beam_length = 40.0
