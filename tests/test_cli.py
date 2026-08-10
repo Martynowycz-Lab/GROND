@@ -646,6 +646,77 @@ def test_finish_native_model_rejects_mixed_provenance(tmp_path: Path):
         )
 
 
+def test_finish_endpoint_maps_replays_list3_as_zero_cycle_list6(tmp_path: Path, monkeypatch):
+    from types import SimpleNamespace
+
+    endpoint = tmp_path / "endpoint"
+    endpoint.mkdir()
+    res = endpoint / "model.res"
+    hkl = endpoint / "model.hkl"
+    fcf = endpoint / "model.fcf"
+    lst = endpoint / "model.lst"
+    res.write_text(
+        "TITL endpoint\n"
+        "CELL 0.025079 5 6 7 90 90 90\n"
+        "L.S. 1\n"
+        "LIST 3\n"
+        "WGHT 0 0\n"
+        "HKLF 4\n"
+        "END\n"
+    )
+    hkl.write_text("   0   0   0    0.00    0.00\n")
+    fcf.write_text("data_model\n_shelx_refln_list_code 3\n")
+    metrics = (
+        "wR2 = 0.2923, GooF = S = 1.074 for all data\n"
+        "R1 = 0.1281 for 441 Fo > 4sig(Fo) and 0.2004 for all 1894 data\n"
+        "0 atoms may be split and 0 atoms NPD\n"
+    )
+    lst.write_text(metrics)
+    fake_shelxl = tmp_path / "shelxl"
+    fake_shelx2map = tmp_path / "shelx2map"
+    for executable in (fake_shelxl, fake_shelx2map):
+        executable.write_text("#!/bin/sh\n")
+        executable.chmod(0o755)
+
+    calls: list[list[str]] = []
+
+    def fake_run(command, *, cwd, text, stdout, stderr):
+        calls.append(list(command))
+        work = Path(cwd)
+        if Path(command[0]) == fake_shelxl:
+            stem = command[1]
+            assert "L.S. 0" in (work / f"{stem}.ins").read_text()
+            assert "LIST 6" in (work / f"{stem}.ins").read_text()
+            (work / f"{stem}.fcf").write_text("data_model\n_shelx_refln_list_code 6\n")
+            (work / f"{stem}.lst").write_text(metrics)
+            return SimpleNamespace(returncode=0, stdout="SHELXL replay ok\n")
+        out_map = Path(command[command.index("-o") + 1])
+        out_map.write_text("map\n")
+        return SimpleNamespace(returncode=0, stdout=f'Map data written to "{out_map}"\n')
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        cli,
+        "_publication_endpoint_from_result",
+        lambda _result: {"endpoint_res": str(res), "endpoint_hkl": str(hkl)},
+    )
+    args = argparse.Namespace(
+        shelxl=str(fake_shelxl),
+        shelxl_requested=str(fake_shelxl),
+        tool_config={"tools": {"shelx2map": str(fake_shelx2map)}},
+    )
+
+    result = cli.run_finish_endpoint_maps({}, args)
+
+    assert result["status"] == "ok"
+    assert result["list6_replay"]["status"] == "ok"
+    assert result["list6_replay"]["source_list_code"] == 3
+    assert result["list6_replay"]["replay_list_code"] == 6
+    assert result["list6_replay"]["metrics_unchanged"] is True
+    assert len(calls) == 4
+    assert all(record["exists"] for record in result["maps"].values())
+
+
 def test_finish_regenerates_compact_package(tmp_path: Path, capsys):
     run = tmp_path / "grond"
     final_run = run / "runs" / "dataset" / "final"

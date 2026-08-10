@@ -46,7 +46,7 @@ from .io.tool_config import (
     tool_statuses,
     write_config_template,
 )
-from .legacy.engine.shelx_diagnostics import parse_shelx_lst_pathologies
+from .legacy.engine.shelx_diagnostics import parse_shelx_lst_metrics, parse_shelx_lst_pathologies
 from .macromolecule import (
     FREE_FLAG_LABEL,
     export_corrected_mtz,
@@ -15554,6 +15554,142 @@ def _shelx2map_executable(args: argparse.Namespace) -> str:
     return shutil.which("shelx2map") or "shelx2map"
 
 
+def _shelx_fcf_list_code(path: Path) -> int | None:
+    """Return the SHELXL reflection-list code recorded in an FCF file."""
+
+    if not path.is_file():
+        return None
+    text = path.read_text(errors="replace")
+    match = re.search(r"_(?:shelx_)?refln_list_code\s+([0-9]+)", text, flags=re.IGNORECASE)
+    return int(match.group(1)) if match else None
+
+
+def _write_finish_list6_ins(source_res: Path, destination: Path) -> None:
+    """Write an isolated zero-cycle LIST 6 replay without changing the model."""
+
+    lines: list[str] = []
+    saw_cycles = False
+    saw_list = False
+    for original in source_res.read_text(errors="replace").splitlines():
+        stripped = original.strip()
+        upper = stripped.upper()
+        if upper.startswith("ACTA"):
+            continue
+        cycle_match = re.match(r"^(\s*)(L\.S\.|LS|CGLS)(?=\s|$)", original, flags=re.IGNORECASE)
+        if cycle_match:
+            indent, command = cycle_match.groups()
+            original = f"{indent}{command} 0"
+            saw_cycles = True
+        if upper.startswith("LIST"):
+            original = "LIST 6"
+            saw_list = True
+        lines.append(original)
+        if upper.startswith("END"):
+            break
+    insert_at = next(
+        (index for index, line in enumerate(lines) if line.strip().upper().startswith(("HKLF", "END"))),
+        len(lines),
+    )
+    additions: list[str] = []
+    if not saw_cycles:
+        additions.append("L.S. 0")
+    if not saw_list:
+        additions.append("LIST 6")
+    lines[insert_at:insert_at] = additions
+    destination.write_text("\n".join(lines) + "\n")
+
+
+def _finish_list6_fcf(
+    endpoint: Mapping[str, object],
+    endpoint_res: Path,
+    source_fcf: Path,
+    args: argparse.Namespace,
+) -> tuple[Path | None, dict[str, object]]:
+    """Return a LIST 6 FCF, creating a zero-cycle SHELXL replay if required."""
+
+    source_list_code = _shelx_fcf_list_code(source_fcf)
+    if source_list_code == 6:
+        return source_fcf, {
+            "status": "existing_list6",
+            "source_fcf": str(source_fcf.resolve()),
+            "source_list_code": source_list_code,
+        }
+
+    endpoint_hkl_text = str(endpoint.get("endpoint_hkl", "") or "").strip()
+    endpoint_hkl = Path(endpoint_hkl_text).expanduser() if endpoint_hkl_text else endpoint_res.with_suffix(".hkl")
+    if not endpoint_hkl.is_file():
+        return None, {
+            "status": "missing_endpoint_hkl",
+            "endpoint_hkl": str(endpoint_hkl),
+            "source_fcf": str(source_fcf),
+            "source_list_code": source_list_code,
+        }
+
+    shelxl_status = external_tool_statuses(args).get("shelxl", {})
+    shelxl = str(shelxl_status.get("resolved", "") or "")
+    if not shelxl:
+        return None, {
+            "status": "missing_shelxl_for_list6_replay",
+            "source_fcf": str(source_fcf),
+            "source_list_code": source_list_code,
+            "note": "shelx2map needs a LIST 6 FCF; configure SHELXL so GROND can make a zero-cycle replay.",
+        }
+
+    replay_dir = endpoint_res.resolve().parent / "grond_finish_list6_replay"
+    replay_dir.mkdir(parents=True, exist_ok=True)
+    stem = endpoint_res.stem
+    replay_ins = replay_dir / f"{stem}.ins"
+    replay_hkl = replay_dir / f"{stem}.hkl"
+    replay_fcf = replay_dir / f"{stem}.fcf"
+    replay_lst = replay_dir / f"{stem}.lst"
+    _write_finish_list6_ins(endpoint_res, replay_ins)
+    shutil.copy2(endpoint_hkl, replay_hkl)
+    for stale in (replay_fcf, replay_lst, replay_dir / f"{stem}.res"):
+        stale.unlink(missing_ok=True)
+    proc = subprocess.run(
+        [shelxl, stem],
+        cwd=str(replay_dir),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    log_path = replay_dir / "grond_finish_list6_shelxl.log"
+    log_path.write_text(proc.stdout)
+    replay_list_code = _shelx_fcf_list_code(replay_fcf)
+    source_lst = endpoint_res.with_suffix(".lst")
+    source_metrics = parse_shelx_lst_metrics(source_lst)
+    replay_metrics = parse_shelx_lst_metrics(replay_lst)
+    metric_keys = ("R1_gt", "R1_all", "wR2_all", "GooF", "N_gt", "N_all")
+    comparable = source_metrics.get("metric_status") == "complete" and replay_metrics.get("metric_status") == "complete"
+    metrics_unchanged = bool(
+        comparable and all(source_metrics.get(key) == replay_metrics.get(key) for key in metric_keys)
+    )
+    replay = {
+        "status": "ok" if proc.returncode == 0 and replay_fcf.is_file() and replay_list_code == 6 else "failed",
+        "source_fcf": str(source_fcf.resolve()),
+        "source_list_code": source_list_code,
+        "endpoint_hkl": str(endpoint_hkl.resolve()),
+        "replay_dir": str(replay_dir),
+        "replay_ins": str(replay_ins),
+        "replay_fcf": str(replay_fcf),
+        "replay_list_code": replay_list_code,
+        "shelxl": shelxl,
+        "log": str(log_path),
+        "returncode": proc.returncode,
+        "source_metrics": source_metrics,
+        "replay_metrics": replay_metrics,
+        "metrics_compared": comparable,
+        "metrics_unchanged": metrics_unchanged if comparable else None,
+        "definition": "zero-cycle SHELXL LIST 6 replay of the selected endpoint; coordinates, ADPs, weights, and corrected HKL are unchanged",
+    }
+    if replay["status"] != "ok":
+        return None, replay
+    if comparable and not metrics_unchanged:
+        replay["status"] = "metric_mismatch"
+        return None, replay
+    return replay_fcf, replay
+
+
 def run_finish_endpoint_maps(result: Mapping[str, object], args: argparse.Namespace) -> dict[str, object]:
     """Generate corrected-HKL endpoint maps from the selected publication endpoint."""
 
@@ -15566,9 +15702,14 @@ def run_finish_endpoint_maps(result: Mapping[str, object], args: argparse.Namesp
         return {"status": "missing_endpoint_res", "endpoint_res": str(endpoint_res)}
     work_dir = endpoint_res.resolve().parent
     stem = endpoint_res.stem
-    fcf = work_dir / f"{stem}.fcf"
-    if not fcf.exists():
-        return {"status": "missing_fcf", "fcf": str(fcf), "note": "Run the endpoint branch with SHELXL available so an FCF file is written."}
+    source_fcf = work_dir / f"{stem}.fcf"
+    if not source_fcf.exists():
+        return {"status": "missing_fcf", "fcf": str(source_fcf), "note": "Run the endpoint branch with SHELXL available so an FCF file is written."}
+    fcf, list6_replay = _finish_list6_fcf(endpoint, endpoint_res, source_fcf, args)
+    if fcf is None:
+        return {"status": "list6_replay_failed", "endpoint_res": str(endpoint_res), "list6_replay": list6_replay}
+    map_work_dir = fcf.resolve().parent
+    map_stem = fcf.stem
     exe = _shelx2map_executable(args)
     if ("/" in exe and not Path(exe).exists()) or ("/" not in exe and shutil.which(exe) is None):
         return {"status": "missing_shelx2map", "executable": exe}
@@ -15576,8 +15717,8 @@ def run_finish_endpoint_maps(result: Mapping[str, object], args: argparse.Namesp
     for label, mode in [("fofc", "0"), ("fo", "1"), ("2fofc", "2")]:
         out_map = work_dir / f"grond_corrected_{label}.map"
         proc = subprocess.run(
-            [exe, "-m", mode, "-o", out_map.name, stem],
-            cwd=str(work_dir),
+            [exe, "-m", mode, "-o", str(out_map), map_stem],
+            cwd=str(map_work_dir),
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -15588,7 +15729,8 @@ def run_finish_endpoint_maps(result: Mapping[str, object], args: argparse.Namesp
         for line in proc.stdout.splitlines():
             match = re.search(r'Map data written to "([^"]+)"', line)
             if match:
-                actual = work_dir / match.group(1)
+                reported = Path(match.group(1))
+                actual = reported if reported.is_absolute() else map_work_dir / reported
         maps[label] = {
             "map": str(actual),
             "requested_map": str(out_map),
@@ -15596,11 +15738,13 @@ def run_finish_endpoint_maps(result: Mapping[str, object], args: argparse.Namesp
             "returncode": proc.returncode,
             "exists": actual.exists(),
         }
+    maps_ok = all(item.get("returncode") == 0 and item.get("exists") for item in maps.values())
     return {
-        "status": "ok",
+        "status": "ok" if maps_ok else "failed",
         "definition": "GROND-corrected endpoint maps from the selected corrected-HKL publication endpoint; not native dynamical residual-potential maps.",
         "endpoint_res": str(endpoint_res.resolve()),
         "fcf": str(fcf.resolve()),
+        "list6_replay": list6_replay,
         "maps": maps,
     }
 
@@ -19434,6 +19578,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_finish.add_argument("--run-dir", default=".", help="Completed GROND auto/run output directory. Defaults to the current directory.")
     p_finish.add_argument("--checkpoint", default="", help="Optional grond_continue_checkpoint.json; its run_dir is used.")
     p_finish.add_argument("--model", default="", help="Optional model override for native dynamical map phases. Defaults to the selected publication endpoint RES.")
+    p_finish.add_argument("--shelxl", default=default_shelxl_executable(), help="SHELXL executable used for zero-cycle LIST 6 endpoint-map replay when needed.")
     add_tool_config_args(p_finish)
     p_finish.add_argument(
         "--make-maps",
@@ -19458,6 +19603,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_publish.add_argument("--run-dir", default=".", help="Completed GROND auto/run output directory. Defaults to the current directory.")
     p_publish.add_argument("--checkpoint", default="", help="Optional grond_continue_checkpoint.json; its run_dir is used.")
     p_publish.add_argument("--model", default="", help="Optional model override for native dynamical map phases. Defaults to the selected publication endpoint RES.")
+    p_publish.add_argument("--shelxl", default=default_shelxl_executable(), help="SHELXL executable used for zero-cycle LIST 6 endpoint-map replay when needed.")
     add_tool_config_args(p_publish)
     p_publish.add_argument("--make-maps", action=argparse.BooleanOptionalAction, default=True)
     p_publish.add_argument("--map-mode", choices=["native", "shelx2map", "both", "off"], default="native")
