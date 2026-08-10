@@ -9537,6 +9537,7 @@ def prep_from_args(args: argparse.Namespace) -> PrepConfig:
                 args.dials_expt,
                 bridge_dir,
                 intensity_mode=args.dials_intensity_mode,
+                row_selection=args.dials_row_selection,
                 sigma_mode=args.dials_sigma_mode,
                 sigma_scale=args.dials_sigma_scale,
                 dials_python=args.dials_python,
@@ -11425,6 +11426,7 @@ def cmd_import_dials(args: argparse.Namespace) -> int:
         args.expt,
         args.out_dir,
         intensity_mode=args.intensity_mode,
+        row_selection=args.row_selection,
         sigma_mode=args.sigma_mode,
         sigma_scale=args.sigma_scale,
         dials_python=args.dials_python,
@@ -18314,6 +18316,7 @@ def add_common_run_args(ap: argparse.ArgumentParser, *, expose_lambda_controls: 
     ap.add_argument("--dials-expt", default="", help="DIALS integrated.expt/scaled.expt file matching --dials-refl.")
     ap.add_argument("--dials-python", default="", help="Python executable that can import dials and dxtbx. Leave blank when the active Python already can.")
     ap.add_argument("--dials-intensity-mode", choices=["sum_complete", "sum_raw", "scale"], default="sum_complete", help="DIALS intensity mapping for the GROND row contract.")
+    ap.add_argument("--dials-row-selection", choices=["integrated", "scaled"], default="integrated", help="Use all integrated rows or only rows accepted by DIALS scaling, independently of the selected intensity values.")
     ap.add_argument("--dials-sigma-mode", choices=["auto", "raw", "detector_gain"], default="raw", help="DIALS sigma bridge policy. raw keeps the detector-model variance; auto empirical calibration and detector_gain scaling are explicit diagnostics.")
     ap.add_argument("--dials-sigma-scale", type=float, default=None, help="Explicit DIALS sigma multiplier. Overrides --dials-sigma-mode when positive.")
     ap.add_argument("--dials-min-partiality-write", type=float, default=1e-6, help="Minimum DIALS partiality written into the converted row file. GROND's --min-peak still controls production row selection.")
@@ -18966,6 +18969,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_dials.add_argument("--out-dir", required=True)
     p_dials.add_argument("--dials-python", default="", help="Python executable that can import dials and dxtbx.")
     p_dials.add_argument("--intensity-mode", choices=["sum_complete", "sum_raw", "scale"], default="sum_complete")
+    p_dials.add_argument("--row-selection", choices=["integrated", "scaled"], default="integrated", help="Use all integrated rows or only rows accepted by DIALS scaling. The latter can still use raw summation intensities.")
     p_dials.add_argument("--sigma-mode", choices=["auto", "raw", "detector_gain"], default="raw")
     p_dials.add_argument("--sigma-scale", type=float, default=None)
     p_dials.add_argument("--min-partiality-write", type=float, default=1e-6)

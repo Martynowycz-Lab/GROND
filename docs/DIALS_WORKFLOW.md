@@ -28,7 +28,7 @@ dials.integrate refined.expt refined.refl \
 
 Those files can be large because they preserve pixel-level shoebox data for each integration block. They are useful for auditing frame profiles and rejected pixels, but they are not required for ordinary GROND auto runs.
 
-The important point is that the GROND input remains the row-preserving integrated reflection table and matching experiment list. It should not be scaled, merged, or symmetry-averaged before the Bloch calculation. If you also run `dials.scale`, keep the scaled files for conventional comparisons, but use `integrated.refl` and `integrated.expt` for the default GROND path unless you deliberately choose the diagnostic `--dials-intensity-mode scale`.
+The important point is that the GROND input remains a row-preserving reflection table and matching experiment list. It must not be merged or symmetry-averaged before the Bloch calculation. The default path uses `integrated.refl` and `integrated.expt`. A `scaled.refl` table still contains the raw summation columns, so a deliberate alternative is `--dials-row-selection scaled` (or `--row-selection scaled` with `import-dials`): this keeps `intensity.sum.value` and its variance while restricting the rows to observations accepted by `dials.scale`. That is useful after a documented scaling rejection such as delta-CC1/2, and is distinct from `--dials-intensity-mode scale`, which changes the intensity values themselves. The selected row contract is recorded in `dials_bridge_summary.json`; requesting scaled selection from a table with no scaled rows fails closed.
 
 DIALS does not need to be integrated in P1 just to preserve signed rows. The reflection table stores the signed `miller_index` assigned to each observation. GROND keeps that exact signed row identity for simulation and performs transform alignment against the solved structure. The DIALS crystal and laboratory frames are proper, right-handed rotations. GROND therefore keeps automatic setting selection to determinant-positive transforms, ranks them with a coordinate-hand-invariant matched-Born work-row target, and fixes the selected transform before comparing dynamical hands. If you are testing unusual indexing or space-group alternatives, keep separate DIALS output directories so each GROND run has a clear row contract.
 
@@ -91,14 +91,15 @@ If XDS and DIALS are being compared on the same frames, run at least one `sum_ra
 
 ```bash
 GROND import-dials \
-  --refl integrated.refl \
-  --expt integrated.expt \
+  --refl scaled.refl \
+  --expt scaled.expt \
   --dials-python /path/to/dials.python \
-  --intensity-mode sum_raw \
-  --out-dir dials_sum_raw_bridge
+  --intensity-mode sum_complete \
+  --row-selection scaled \
+  --out-dir dials_scaled_accepted_sum_bridge
 ```
 
-This is not automatically the promoted production mode. It is a scale and row-contract check. On some datasets the raw DIALS summation rows have an `I` and `I/sigma` distribution much closer to XDS no-profile rows, while the rows completed by `(lp/qe)/partiality` give better GROND row residuals. That means the DIALS/XDS disagreement is not only a global intensity scale question. It can also come from the refined cell, scan-varying orientation model, row filtering, partiality definitions, and which signed observations each program actually integrated.
+This is not automatically the promoted production mode. It is a row-contract choice that should match the stated data-processing protocol. For an intensity-mapping diagnostic, retain the same rows and use `--intensity-mode sum_raw` instead. On some datasets the raw DIALS summation rows have an `I` and `I/sigma` distribution much closer to XDS no-profile rows, while the rows completed by `(lp/qe)/partiality` give better GROND row residuals. That means the DIALS/XDS disagreement is not only a global intensity scale question. It can also come from the refined cell, scan-varying orientation model, row filtering, partiality definitions, and which signed observations each program actually integrated.
 
 ## Geometry And Sg
 

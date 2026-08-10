@@ -2773,6 +2773,7 @@ def test_auto_parser_accepts_dials_input_pair():
     assert args.dials_refl == "integrated.refl"
     assert args.dials_expt == "integrated.expt"
     assert args.dials_intensity_mode == "sum_complete"
+    assert args.dials_row_selection == "integrated"
     assert args.dials_sigma_mode == "raw"
     assert args.dials_python == "/path/to/dials.python"
     assert args.dials_drop_dont_integrate is False
@@ -3451,6 +3452,7 @@ def test_import_dials_parser_exposes_bridge_options():
     )
     assert args.command == "import-dials"
     assert args.intensity_mode == "sum_raw"
+    assert args.row_selection == "integrated"
     assert args.sigma_mode == "raw"
     assert args.dataset_name == "example_dials"
     assert args.drop_dont_integrate is False

@@ -4,6 +4,11 @@ This file records user-visible changes to the installable package. Version `0.2.
 
 ## 0.2.2 (unreleased)
 
+The DIALS bridge can now select rows accepted by `dials.scale` independently of
+the intensity source. `--row-selection scaled` therefore preserves raw
+summation intensities and variances from a `scaled.refl` table while respecting
+documented scaling exclusions; requesting it without scaled rows fails closed.
+
 HKL-transform candidates now use one internally consistent cell metric. GROND preserves the input `UNIT_CELL_CONSTANTS` as raw provenance, derives the working identity and transformed model-basis cells from the same oriented `UNIT_CELL_[ABC]-AXIS` vectors used by the Ewald geometry, and reports both sources with an explicit basis label. This removes a rounding-dependent identity/nonidentity asymmetry from resolution filtering, Fourier-potential normalization, support construction, and transform scoring. Fourier-potential and row-plan cache schemas were advanced so results created under the former mixed-cell convention cannot be reused.
 
 Automatic indexing alignment and absolute-structure testing now have an explicit parity contract. Calibration-grade scouting enumerates the complete 24 determinant-positive signed-axis permutations, applies only a recorded source/model unit-cell metric filter, and sends every retained operator through one matched-Born work-row nuisance trial. One candidate-union symmetry/Friedel split is rebuilt deterministically from the bound HKL, model, retained operators, and seed, so operator changes cannot move observations between work and free. Rankings are replayed from hash-bound row artifacts with a fixed candidate priority; every candidate must reproduce one exact N/Q, row-budget, selected/work/free support, nuisance, kernel, and backend contract. Expected chemistry and metadata overlap cannot select, eliminate, or break ties. A mixed-parity search remains available only as an explicit diagnostic mode and cannot authorize a named absolute configuration.

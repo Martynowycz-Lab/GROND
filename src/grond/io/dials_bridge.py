@@ -490,11 +490,45 @@ def _bool_array(arrays: dict[str, np.ndarray], name: str, n: int, default: bool 
     return arr
 
 
+def _dials_row_selection_keep(
+    arrays: dict[str, np.ndarray],
+    n: int,
+    row_selection: str,
+) -> np.ndarray:
+    """Select integrated rows or the subset accepted by DIALS scaling.
+
+    A ``scaled.refl`` table normally retains the original summation columns as
+    well as the ``scaled`` flag.  ``row_selection='scaled'`` therefore permits
+    GROND to use raw summation intensities while respecting the observations
+    accepted by ``dials.scale`` (including delta-CC1/2 or other scaling
+    exclusions).  This is intentionally independent of ``intensity_mode``.
+    """
+
+    selection = str(row_selection or "integrated").strip().lower()
+    if selection not in {"integrated", "scaled"}:
+        raise ValueError(f"unknown DIALS row selection {row_selection!r}")
+    keep = np.ones(n, dtype=bool)
+    integrated_sum = _bool_array(arrays, "integrated_sum", n, default=False)
+    if np.any(integrated_sum):
+        keep &= integrated_sum
+    if selection == "scaled":
+        scaled = _bool_array(arrays, "scaled", n, default=False)
+        if not np.any(scaled):
+            raise ValueError(
+                "DIALS row-selection 'scaled' was requested, but the reflection "
+                "table contains no rows flagged as accepted by scaling. Use a "
+                "scaled.refl table or select 'integrated'."
+            )
+        keep &= scaled
+    return keep
+
+
 def _dials_sigma_preflight_keep(
     arrays: dict[str, np.ndarray],
     iobs: np.ndarray,
     sigma: np.ndarray,
     mode: str,
+    row_selection: str = "integrated",
 ) -> np.ndarray:
     """Rows used to calibrate DIALS sigmas from equivalent-observation scatter."""
 
@@ -503,11 +537,8 @@ def _dials_sigma_preflight_keep(
     if len(partiality) != n:
         partiality = np.ones(n, dtype=float)
     keep = np.isfinite(iobs) & np.isfinite(sigma) & (sigma > 0.0) & np.isfinite(partiality) & (partiality >= 0.90)
-    integrated_sum = _bool_array(arrays, "integrated_sum", n, default=False)
-    if np.any(integrated_sum):
-        keep &= integrated_sum
-    if str(mode).strip().lower() == "scale":
-        keep &= _bool_array(arrays, "scaled", n, default=True)
+    effective_selection = "scaled" if str(mode).strip().lower() == "scale" else row_selection
+    keep &= _dials_row_selection_keep(arrays, n, effective_selection)
     keep &= ~_bool_array(arrays, "dont_integrate", n)
     for flag in (
         "overloaded",
@@ -578,6 +609,7 @@ def _fit_empirical_sigma_model(
     sigma: np.ndarray,
     *,
     mode: str,
+    row_selection: str = "integrated",
 ) -> tuple[np.ndarray, dict[str, Any]] | None:
     """Fit sigma_eff^2 = m^2 sigma_raw^2 + (a Iobs)^2 + c^2 from duplicate scatter."""
 
@@ -585,7 +617,7 @@ def _fit_empirical_sigma_model(
     if hkl.ndim != 2 or hkl.shape[1] != 3 or len(hkl) != len(iobs):
         return None
 
-    keep = _dials_sigma_preflight_keep(arrays, iobs, sigma, mode)
+    keep = _dials_sigma_preflight_keep(arrays, iobs, sigma, mode, row_selection=row_selection)
     if int(np.count_nonzero(keep)) < 50:
         return None
 
@@ -655,6 +687,7 @@ def _dials_sigma_multiplier(
     sigma: np.ndarray,
     *,
     mode: str,
+    row_selection: str = "integrated",
     sigma_mode: str,
     sigma_scale: float | None,
 ) -> tuple[float, dict[str, Any]]:
@@ -686,7 +719,9 @@ def _dials_sigma_multiplier(
         if requested == "detector_gain":
             mult = math.sqrt(gain)
             source = "detector_gain"
-        elif empirical := _fit_empirical_sigma_model(arrays, metadata, iobs, sigma, mode=mode):
+        elif empirical := _fit_empirical_sigma_model(
+            arrays, metadata, iobs, sigma, mode=mode, row_selection=row_selection
+        ):
             sigma_eff, empirical_summary = empirical
             mult = float(empirical_summary["equivalent_global_multiplier"])
             source = str(empirical_summary["source"])
@@ -731,6 +766,7 @@ def convert_dials_to_grond(
     out_dir: str | Path,
     *,
     intensity_mode: str = "sum_complete",
+    row_selection: str = "integrated",
     sigma_mode: str = "raw",
     sigma_scale: float | None = None,
     dials_python: str = "",
@@ -748,7 +784,9 @@ def convert_dials_to_grond(
     `(lp/qe)/partiality`, while retaining partiality as the GROND `PEAK` quality
     field.  With GROND's default `--min-peak 90`, this keeps fully recorded rows
     for production but leaves lower-partiality rows available for diagnostics.
-    Production conversion drops severe DIALS bad-row flags by default and keeps
+    ``row_selection='scaled'`` uses the raw summation values but retains only
+    rows accepted by DIALS scaling. Production conversion drops severe DIALS
+    bad-row flags by default and keeps
     the detector-model summation variance unchanged. Empirical or gain-based
     sigma inflation remains available as an explicit diagnostic policy.
     """
@@ -760,6 +798,7 @@ def convert_dials_to_grond(
 
     arrays, metadata = _run_dials_helper(refl_path, expt_path, dials_python=dials_python)
     mode = str(intensity_mode or "sum_complete").strip().lower()
+    selection = str(row_selection or "integrated").strip().lower()
     iobs, sigma, rlp, peak, intensity_note = _choose_intensity(
         arrays, mode, eps=max(float(min_partiality_write), 1e-12)
     )
@@ -769,6 +808,7 @@ def convert_dials_to_grond(
         iobs,
         sigma,
         mode=mode,
+        row_selection=selection,
         sigma_mode=sigma_mode,
         sigma_scale=sigma_scale,
     )
@@ -808,10 +848,8 @@ def convert_dials_to_grond(
         & np.isfinite(partiality)
         & (partiality >= float(min_partiality_write))
     )
-    if np.any(integrated_sum):
-        finite &= integrated_sum
-    if mode == "scale":
-        finite &= np.asarray(arrays["scaled"], dtype=bool)
+    effective_selection = "scaled" if mode == "scale" else selection
+    finite &= _dials_row_selection_keep(arrays, len(hkl), effective_selection)
     if not keep_dont_integrate:
         finite &= ~dont_integrate
     if drop_bad_flags:
@@ -953,6 +991,7 @@ def convert_dials_to_grond(
         "hkl": str(hkl_path),
         "scan_points": str(scan_points_path),
         "intensity_mode": mode,
+        "row_selection": effective_selection,
         "intensity_note": intensity_note,
         "sigma_model": sigma_summary,
         "rows_read": int(len(hkl)),

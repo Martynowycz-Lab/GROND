@@ -71,6 +71,10 @@ therefore means DIALS partiality `>= 0.90`. The DIALS bridge also writes
 detector-gain scaling remain explicit diagnostic modes. The intensities are not
 changed by sigma scaling.
 
+When the input is `scaled.refl`, `--row-selection scaled` can retain these raw
+summation values while accepting only rows that DIALS marked as scaled. This is
+independent of `--intensity-mode scale`, which uses the scaled intensity column.
+
 For integrations from other software, use the portable row contract documented
 in [PORTABLE_INPUTS_AND_ENDPOINTS.md](PORTABLE_INPUTS_AND_ENDPOINTS.md). The row
 table can be CSV, TSV, or JSON Lines. The smallest useful CSV table looks like

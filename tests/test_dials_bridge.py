@@ -5,6 +5,7 @@ import pytest
 
 from grond.io.dials_bridge import (
     _choose_intensity,
+    _dials_row_selection_keep,
     _dials_sigma_multiplier,
     _require_valid_dials_geometry,
     _rotation_matrix,
@@ -12,6 +13,32 @@ from grond.io.dials_bridge import (
     dials_sg_statistics,
 )
 from grond.legacy.engine.bloch_engine import XDSData
+
+
+def test_dials_scaled_row_selection_is_independent_of_intensity_mode():
+    arrays = {
+        "integrated_sum": np.array([True, True, False, True]),
+        "scaled": np.array([True, False, True, True]),
+    }
+
+    np.testing.assert_array_equal(
+        _dials_row_selection_keep(arrays, 4, "integrated"),
+        np.array([True, True, False, True]),
+    )
+    np.testing.assert_array_equal(
+        _dials_row_selection_keep(arrays, 4, "scaled"),
+        np.array([True, False, False, True]),
+    )
+
+
+def test_dials_scaled_row_selection_fails_closed_without_scaled_rows():
+    arrays = {
+        "integrated_sum": np.array([True, True]),
+        "scaled": np.array([False, False]),
+    }
+
+    with pytest.raises(ValueError, match="contains no rows flagged"):
+        _dials_row_selection_keep(arrays, 2, "scaled")
 
 
 def test_sum_complete_uses_lp_over_qe_and_preserves_recorded_intensity():
