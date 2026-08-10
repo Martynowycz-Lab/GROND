@@ -341,7 +341,12 @@ def _scan_array_range(metadata: dict[str, Any]) -> tuple[int, int]:
     return start, stop
 
 
-def _a_scan_points_for_current_scan(metadata: dict[str, Any]) -> tuple[np.ndarray, dict[str, Any]]:
+def _a_scan_points_for_current_scan(
+    metadata: dict[str, Any],
+    *,
+    scorer=None,
+    source_index_offset: int | None = None,
+) -> tuple[np.ndarray, dict[str, Any]]:
     """Return scan-point A matrices in the cropped scan's local frame convention.
 
     DIALS can retain the full scan-varying crystal model when an experiment's
@@ -360,16 +365,48 @@ def _a_scan_points_for_current_scan(metadata: dict[str, Any]) -> tuple[np.ndarra
     source = "static" if len(raw) == 1 else "already_local"
     origin = 0
     selected = raw
-    if len(raw) > 1 and start > 0 and len(raw) >= stop + 1 and len(raw) != local_point_count:
-        selected = raw[start : stop + 1]
-        source = "cropped_from_full_scan_model"
-        origin = start
+    tested_offsets: list[dict[str, float | int]] = []
+    if len(raw) > local_point_count:
+        maximum_offset = len(raw) - local_point_count
+        if source_index_offset is not None:
+            origin = int(source_index_offset)
+            if origin < 0 or origin > maximum_offset:
+                raise ValueError(
+                    f"DIALS A-scan source offset {origin} is outside [0, {maximum_offset}]"
+                )
+            selected = raw[origin : origin + local_point_count]
+            source = "replayed_geometry_selected_offset"
+        elif scorer is not None:
+            preferred_offsets = []
+            for candidate in (min(max(start, 0), maximum_offset), 0, maximum_offset):
+                if candidate not in preferred_offsets:
+                    preferred_offsets.append(candidate)
+            scored: list[tuple[float, int]] = []
+            for candidate in preferred_offsets:
+                score = float(scorer(raw[candidate : candidate + local_point_count]))
+                scored.append((score, candidate))
+                tested_offsets.append({"source_index_offset": candidate, "p95_abs_Sg_inv_A": score})
+            if min(score for score, _ in scored) > DIALS_SG_P95_ABS_LIMIT_INV_A:
+                for candidate in range(maximum_offset + 1):
+                    if candidate in preferred_offsets:
+                        continue
+                    score = float(scorer(raw[candidate : candidate + local_point_count]))
+                    scored.append((score, candidate))
+                    tested_offsets.append({"source_index_offset": candidate, "p95_abs_Sg_inv_A": score})
+            _, origin = min(scored)
+            selected = raw[origin : origin + local_point_count]
+            source = "geometry_selected_cropped_scan_model"
+        elif start > 0:
+            origin = min(start, maximum_offset)
+            selected = raw[origin : origin + local_point_count]
+            source = "cropped_from_full_scan_model"
     return selected, {
         "source": source,
         "raw_scan_points": int(len(raw)),
         "written_scan_points": int(len(selected)),
         "source_scan_point_origin": int(origin),
         "scan_array_range": [int(start), int(stop)],
+        "geometry_candidate_scores": tested_offsets,
     }
 
 
@@ -380,7 +417,6 @@ def dials_sg_statistics(arrays: dict[str, np.ndarray], metadata: dict[str, Any],
         return {"status": "error", "message": "no reflection rows survived DIALS bridge filtering", "rows": 0}
     hkl = np.asarray(arrays["hkl"], dtype=float)
     xyzcal = np.asarray(arrays["xyzcal"], dtype=float)
-    a_scan, a_scan_contract = _a_scan_points_for_current_scan(metadata)
     goniometer = metadata.get("goniometer") or {}
     axis = np.asarray(
         goniometer.get("rotation_axis_datum", goniometer.get("rotation_axis", [1.0, 0.0, 0.0])),
@@ -393,15 +429,24 @@ def dials_sg_statistics(arrays: dict[str, np.ndarray], metadata: dict[str, Any],
     start_angle, osc_width = [float(v) for v in metadata["scan"]["oscillation"]]
     starting_frame, _ = _scan_array_range(metadata)
 
-    sg = []
-    for i in np.where(keep)[0]:
-        scan_z = float(xyzcal[i, 2]) - float(starting_frame)
-        omega = start_angle + scan_z * osc_width
-        a_mat = _interp_scan_a(a_scan, scan_z)
-        g = setting @ _rotation_matrix(axis, omega) @ fixed @ a_mat @ hkl[i]
-        value = (k * k - float(np.sum((s0 + g) ** 2))) / (2.0 * k)
-        sg.append(value)
-    sg_arr = np.asarray(sg, dtype=float)
+    def sg_values(a_scan: np.ndarray) -> np.ndarray:
+        sg = []
+        for i in np.where(keep)[0]:
+            scan_z = float(xyzcal[i, 2]) - float(starting_frame)
+            omega = start_angle + scan_z * osc_width
+            a_mat = _interp_scan_a(a_scan, scan_z)
+            g = setting @ _rotation_matrix(axis, omega) @ fixed @ a_mat @ hkl[i]
+            value = (k * k - float(np.sum((s0 + g) ** 2))) / (2.0 * k)
+            sg.append(value)
+        return np.asarray(sg, dtype=float)
+
+    def p95_abs_sg(a_scan: np.ndarray) -> float:
+        values = sg_values(a_scan)
+        finite = values[np.isfinite(values)]
+        return float(np.percentile(np.abs(finite), 95)) if len(finite) else math.inf
+
+    a_scan, a_scan_contract = _a_scan_points_for_current_scan(metadata, scorer=p95_abs_sg)
+    sg_arr = sg_values(a_scan)
     finite_sg = sg_arr[np.isfinite(sg_arr)]
     median_sg = float(np.median(finite_sg)) if len(finite_sg) else None
     median_abs_sg = float(np.median(np.abs(finite_sg))) if len(finite_sg) else None
@@ -911,7 +956,11 @@ def convert_dials_to_grond(
         summary_path.write_text(json.dumps(failure_summary, indent=2, allow_nan=False) + "\n")
     _require_valid_dials_geometry(sg_validation)
 
-    a_scan, a_scan_contract = _a_scan_points_for_current_scan(metadata)
+    a_scan_contract = dict(sg_validation.get("a_scan_contract") or {})
+    a_scan, _ = _a_scan_points_for_current_scan(
+        metadata,
+        source_index_offset=int(a_scan_contract.get("source_scan_point_origin", 0)),
+    )
     scan_points_path = out / "DIALS_A_AT_SCAN_POINTS.txt"
     with scan_points_path.open("w") as f:
         for mat in a_scan:

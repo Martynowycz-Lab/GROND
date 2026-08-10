@@ -266,7 +266,33 @@ def test_full_scan_a_points_are_cropped_to_nonzero_scan_origin():
         "written_scan_points": 71,
         "source_scan_point_origin": 26,
         "scan_array_range": [26, 96],
+        "geometry_candidate_scores": [],
     }
+
+
+def test_scan_a_geometry_scoring_can_align_a_model_with_nonzero_source_origin():
+    from grond.io.dials_bridge import _a_scan_points_for_current_scan
+
+    full = np.asarray([np.eye(3) * (1.0 + 0.01 * i) for i in range(144)])
+    metadata = {
+        "A_scan_points": full.tolist(),
+        "scan": {
+            "image_range": [94, 147],
+            "array_range": [93, 147],
+            "oscillation": [40.4922, 0.4354],
+        },
+    }
+
+    def score(candidate):
+        return abs(float(candidate[0, 0, 0]) - float(full[89, 0, 0]))
+
+    selected, contract = _a_scan_points_for_current_scan(metadata, scorer=score)
+
+    np.testing.assert_allclose(selected[0], full[89])
+    np.testing.assert_allclose(selected[-1], full[143])
+    assert contract["source"] == "geometry_selected_cropped_scan_model"
+    assert contract["source_scan_point_origin"] == 89
+    assert contract["geometry_candidate_scores"][0]["source_index_offset"] == 89
 
 
 def test_dials_sg_statistics_normalizes_cropped_scan_z_and_fails_closed_without_it():
