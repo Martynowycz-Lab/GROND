@@ -526,6 +526,59 @@ def test_publication_model_candidate_preserves_hash_bound_hkl_safety(tmp_path: P
     assert stale["hkl_safe_factor"] == 0.0
 
 
+def test_multi_feedback_endpoint_candidates_include_adopted_cycles(tmp_path: Path, monkeypatch):
+    run = tmp_path / "grond"
+    summary = run / "runs" / "shared_shelxl_feedback" / "multi_shelxl_feedback_loop_summary.json"
+    summary.parent.mkdir(parents=True)
+    summary.write_text(
+        json.dumps(
+            {
+                "cycles": [
+                    {
+                        "cycle": 1,
+                        "output_model": str(tmp_path / "cycle_01.res"),
+                        "combined": str(tmp_path / "cycle_01_combined"),
+                        "adopted_for_feedback": True,
+                        "endpoint_modulation_p95": 1.25,
+                        "endpoint_modulation_metric": "fold_change_p95",
+                    },
+                    {
+                        "cycle": 2,
+                        "output_model": str(tmp_path / "cycle_02.res"),
+                        "combined": str(tmp_path / "cycle_02_combined"),
+                        "adopted_for_feedback": False,
+                    },
+                ]
+            }
+        )
+    )
+
+    monkeypatch.setattr(
+        cli,
+        "_publication_model_endpoint_candidate",
+        lambda result: {
+            "id": "final_ls1_corrected_hkl",
+            "model": result["model"],
+            "combined": result["combined"],
+        },
+    )
+
+    candidates = cli._multi_feedback_endpoint_candidates(
+        {"combined": str(tmp_path / "final_combined")},
+        run,
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0]["id"] == "shared_ls1_cycle_01"
+    assert candidates[0]["source_kind"] == "combined_feedback_cycle"
+    assert candidates[0]["modulation_p95"] == pytest.approx(1.25)
+    assert candidates[0]["model"] == str(tmp_path / "cycle_01.res")
+
+
+def test_multi_feedback_endpoint_candidates_ignore_single_dataset_runs(tmp_path: Path):
+    assert cli._multi_feedback_endpoint_candidates({"primary_run": "run"}, tmp_path) == []
+
+
 def test_finish_native_maps_use_publication_runs_for_combined_endpoint(tmp_path: Path):
     run_a = tmp_path / "weighted_runs" / "a"
     run_b = tmp_path / "weighted_runs" / "b"

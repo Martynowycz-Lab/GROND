@@ -4794,6 +4794,7 @@ def run_publication_endpoint_chooser(prep: PrepConfig, result: dict, args: argpa
     model_candidate = _publication_model_endpoint_candidate(result)
     if model_candidate:
         extra_candidates.append(model_candidate)
+    extra_candidates.extend(_multi_feedback_endpoint_candidates(result, Path(getattr(args, "out_dir", "."))))
     combined_baseline = _validated_fresh_conventional_baseline(result) if result.get("combined") else {}
     global_publication_blockers = _multi_hand_publication_blockers(result)
     return write_publication_endpoint_choice(
@@ -5168,6 +5169,63 @@ def _publication_model_endpoint_candidate(result: Mapping[str, object]) -> dict[
         "promotion_field_contract": promotion_fields,
         "wght_mode": origin_endpoint.get("wght_mode"),
     }
+
+
+def _multi_feedback_endpoint_candidates(
+    result: Mapping[str, object],
+    run_root: Path,
+) -> list[dict[str, object]]:
+    """Expose every healthy shared LS1 feedback cycle to the endpoint chooser.
+
+    The feedback loop is deliberately allowed to take several lagged LS1 steps,
+    but the last step is not guaranteed to be the best clean publication
+    endpoint.  Each adopted cycle already carries a hash-bound RES/HKL/LST and
+    modulation audit, so excluding intermediate cycles can silently discard a
+    substantially better result.  The ordinary publication gates and ranking
+    remain authoritative after these candidates are added.
+    """
+
+    if not result.get("combined"):
+        return []
+    summary_path = run_root / "runs" / "shared_shelxl_feedback" / "multi_shelxl_feedback_loop_summary.json"
+    summary = try_read_json(summary_path)
+    raw_cycles = summary.get("cycles") if isinstance(summary.get("cycles"), list) else []
+    candidates: list[dict[str, object]] = []
+    for raw_cycle in raw_cycles:
+        if not isinstance(raw_cycle, Mapping) or not bool(raw_cycle.get("adopted_for_feedback", False)):
+            continue
+        model_text = str(raw_cycle.get("output_model") or "").strip()
+        combined_text = str(raw_cycle.get("combined") or "").strip()
+        if not model_text or not combined_text:
+            continue
+        candidate = _publication_model_endpoint_candidate(
+            {
+                **result,
+                "model": model_text,
+                "combined": combined_text,
+            }
+        )
+        if not candidate:
+            continue
+        cycle_number = _quick_int(raw_cycle.get("cycle"))
+        cycle_label = f"shared_ls1_cycle_{cycle_number:02d}" if cycle_number is not None else str(
+            raw_cycle.get("label") or "shared_ls1_cycle"
+        )
+        modulation_p95 = safe_float(raw_cycle.get("endpoint_modulation_p95"), float("nan"))
+        candidate.update(
+            {
+                "id": cycle_label,
+                "label": cycle_label,
+                "source_kind": "combined_feedback_cycle",
+                "feedback_cycle": cycle_number,
+                "feedback_summary": str(summary_path),
+            }
+        )
+        if math.isfinite(modulation_p95):
+            candidate["modulation_p95"] = modulation_p95
+            candidate["modulation_metric"] = str(raw_cycle.get("endpoint_modulation_metric") or "")
+        candidates.append(candidate)
+    return candidates
 
 
 def _endpoint_calibration_lambda(summary: Mapping[str, object], args: argparse.Namespace) -> float:
