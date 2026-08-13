@@ -1052,6 +1052,48 @@ def test_multi_post_feedback_hand_diagnostic_fails_closed_when_final_rows_are_mi
     assert "selected row table is missing" in payload["datasets"]["a"]["warnings"][0]
 
 
+def test_multi_post_feedback_hand_diagnostic_centrosymmetric_policy_precedes_disabled_flag(
+    tmp_path: Path,
+    monkeypatch,
+):
+    root = tmp_path / "out"
+    model = tmp_path / "final.res"
+    hkl = tmp_path / "rows.hkl"
+    model.write_text("TITL centric\nCELL 0.025079 5 6 7 90 90 90\nLATT 1\nEND\n")
+    hkl.write_text("! rows\n")
+    prep = PrepConfig(structure=str(model), datasets=[DatasetSpec(name="a", hkl=str(hkl))])
+    args = _auto_args(tmp_path, model, hkl)
+    args.hand_control = False
+    monkeypatch.setattr(
+        cli,
+        "make_alternate_hand_model",
+        lambda *args, **kwargs: pytest.fail("centric models must not materialize an alternate hand"),
+    )
+
+    payload = cli.run_multi_post_feedback_hand_diagnostic(
+        prep,
+        args,
+        "python",
+        root / "logs",
+        root,
+        final_model=str(model),
+        selected_hand="original",
+        final_runs={},
+        publication_runs={},
+        shared_hand_decision={
+            "symmetry_policy": {
+                "run_hand_control": False,
+                "reason": "SHELX LATT is centrosymmetric; alternate hand check is not meaningful",
+            }
+        },
+    )
+
+    assert payload["status"] == "skipped_not_applicable"
+    assert payload["consistency_gate"]["status"] == "not_applicable"
+    assert payload["consistency_gate"]["passed"] is None
+    assert "centrosymmetric" in payload["consistency_gate"]["warnings"][0]
+
+
 def test_multi_post_feedback_hand_diagnostic_rejects_unbound_selected_model(
     tmp_path: Path,
     monkeypatch,

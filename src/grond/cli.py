@@ -7838,19 +7838,6 @@ def run_multi_post_feedback_hand_diagnostic(
         if isinstance(shared_hand_decision.get("symmetry_policy"), Mapping)
         else {}
     )
-    if not bool(getattr(args, "hand_control", True)):
-        payload.update(
-            {
-                "status": "skipped_disabled",
-                "consistency_gate": {
-                    "status": "not_applicable",
-                    "passed": None,
-                    "warnings": ["absolute-structure hand control was disabled"],
-                },
-            }
-        )
-        write_json(artifact, payload)
-        return payload
     if symmetry_policy and not bool(symmetry_policy.get("run_hand_control", True)):
         payload.update(
             {
@@ -7859,6 +7846,19 @@ def run_multi_post_feedback_hand_diagnostic(
                     "status": "not_applicable",
                     "passed": None,
                     "warnings": [str(symmetry_policy.get("reason") or "hand control is not applicable")],
+                },
+            }
+        )
+        write_json(artifact, payload)
+        return payload
+    if not bool(getattr(args, "hand_control", True)):
+        payload.update(
+            {
+                "status": "skipped_disabled",
+                "consistency_gate": {
+                    "status": "not_applicable",
+                    "passed": None,
+                    "warnings": ["absolute-structure hand control was disabled"],
                 },
             }
         )
