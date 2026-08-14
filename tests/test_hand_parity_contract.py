@@ -76,6 +76,27 @@ def _orthorhombic_res() -> str:
     )
 
 
+def _p212121_res_with_cell(cell: tuple[float, float, float]) -> str:
+    a, b, c = cell
+    return "\n".join(
+        [
+            "TITL XDS P1 integration-cell fallback control",
+            f"CELL 0.01970 {a} {b} {c} 90 90 90",
+            "LATT -1",
+            "SYMM 1/2-X, -Y, 1/2+Z",
+            "SYMM -X, 1/2+Y, 1/2-Z",
+            "SYMM 1/2+X, 1/2-Y, -Z",
+            "SFAC C 1 1 1 1 1 1 1 1 0",
+            "UNIT 1",
+            "FVAR 1.0",
+            "C1 1 0.13 0.27 0.39 1.0 0.04",
+            "HKLF 4",
+            "END",
+            "",
+        ]
+    )
+
+
 def _summary(
     *,
     born_wr2: float,
@@ -166,6 +187,7 @@ def _write_calibration_xds(
         "!OSCILLATION_RANGE= 0.5",
         "!ROTATION_AXIS= 1 0 0",
         "!INCIDENT_BEAM_DIRECTION= 0 0 1",
+        "!SPACE_GROUP_NUMBER= 1",
         f"!UNIT_CELL_CONSTANTS= {a} {b} {c} 90 90 90",
         f"!UNIT_CELL_A-AXIS= {a} 0 0",
         f"!UNIT_CELL_B-AXIS= 0 {b} 0",
@@ -211,6 +233,25 @@ def _write_calibration_xds(
         ]
         lines.append(" ".join(str(value) for value in values))
     path.write_text("\n".join(lines) + "\n")
+
+
+def _write_distorted_p1_xds(
+    path: Path,
+    *,
+    cell: tuple[float, float, float, float, float, float],
+) -> None:
+    _write_calibration_xds(
+        path,
+        intensity_offset=0.0,
+        cell=cell[:3],
+    )
+    a, b, c, alpha, beta, gamma = cell
+    text = path.read_text()
+    text = text.replace(
+        f"!UNIT_CELL_CONSTANTS= {a} {b} {c} 90 90 90",
+        f"!UNIT_CELL_CONSTANTS= {a} {b} {c} {alpha} {beta} {gamma}",
+    )
+    path.write_text(text)
 
 
 def _write_transform_decision(
@@ -1359,6 +1400,69 @@ def test_full24_metric_filter_is_cell_only_and_retains_orthorhombic_klein_four(
         )
         for row in second_contract["records"]
     ]
+
+
+@pytest.mark.parametrize(
+    "source_cell",
+    [
+        (5.896, 6.957, 21.156, 89.498, 89.712, 89.196),
+        (5.840, 7.050, 21.336, 88.660, 90.442, 90.060),
+    ],
+)
+def test_metric_filter_recovers_xds_p1_integration_basis_for_higher_symmetry_model(
+    tmp_path: Path,
+    source_cell: tuple[float, float, float, float, float, float],
+) -> None:
+    model = tmp_path / "p212121.res"
+    hkl = tmp_path / "INTEGRATE.HKL"
+    model.write_text(_p212121_res_with_cell((6.880, 21.080, 5.940)))
+    _write_distorted_p1_xds(hkl, cell=source_cell)
+
+    retained, contract = metric_filter_signed_axis_transforms(
+        hkl,
+        model,
+        ALL_PROPER_SIGNED_PERMUTATIONS,
+        relative_tolerance=0.02,
+    )
+
+    assert set(retained) == {"k,l,h", "-k,-l,h", "-k,l,-h", "k,-l,-h"}
+    assert contract["filter_mode"] == "xds_p1_distortion_fallback"
+    assert contract["source_space_group_number"] == 1
+    assert contract["model_symmetry_order"] == 4
+    assert contract["xds_p1_distortion_fallback"]["applicable"] is True
+    assert contract["xds_p1_distortion_fallback"]["applied"] is True
+    assert all(
+        row["retention_mode"] == "xds_p1_distortion_fallback"
+        for row in contract["records"]
+        if row["status"] == "retained"
+    )
+    assert contract["uses_intensities"] is False
+    assert contract["uses_atomic_coordinates_or_hand"] is False
+    assert contract["uses_atom_types_or_known_chemistry"] is False
+    assert contract["uses_known_configuration"] is False
+
+
+def test_metric_filter_p1_fallback_still_rejects_incompatible_cell(
+    tmp_path: Path,
+) -> None:
+    model = tmp_path / "p212121.res"
+    hkl = tmp_path / "INTEGRATE.HKL"
+    model.write_text(_p212121_res_with_cell((6.880, 21.080, 5.940)))
+    _write_distorted_p1_xds(
+        hkl,
+        cell=(4.0, 10.0, 30.0, 86.0, 93.0, 88.0),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="automatic XDS P1 fallback requires",
+    ):
+        metric_filter_signed_axis_transforms(
+            hkl,
+            model,
+            ALL_PROPER_SIGNED_PERMUTATIONS,
+            relative_tolerance=0.02,
+        )
 
 
 def test_candidate_union_split_keeps_duplicate_symmetry_and_friedel_rows_together() -> None:

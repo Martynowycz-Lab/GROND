@@ -4233,6 +4233,28 @@ def metric_filter_signed_axis_transforms(
     source_metric = _reciprocal_metric_from_cell(source_cell)
     model_metric = _reciprocal_metric_from_cell(model_cell)
     denominator = max(float(np.linalg.norm(model_metric, ord="fro")), 1.0e-30)
+    # XDS normally writes INTEGRATE.HKL in the primitive integration basis,
+    # even when CORRECT subsequently constrains and reindexes the data in the
+    # solved-model space group.  The raw P1 angles and lengths can therefore be
+    # several percent away from the symmetry-constrained model cell.  Keep the
+    # ordinary full-metric gate strict, but provide one bounded, geometry-only
+    # fallback for that explicit XDS P1 -> higher-symmetry situation.  The
+    # fallback still operates only on cells and signed-axis permutations; it
+    # never uses intensities, atoms, chemistry, or a known hand.
+    p1_fallback_full_metric_tolerance = 0.05
+    p1_fallback_max_axis_length_fraction = 0.03
+    source_space_group_text = str(data.header.get("SPACE_GROUP_NUMBER", "")).split()
+    try:
+        source_space_group_number = (
+            int(float(source_space_group_text[0])) if source_space_group_text else None
+        )
+    except ValueError:
+        source_space_group_number = None
+    model_symmetry_order = len(model.get("symmetry_ops") or [])
+    p1_fallback_applicable = bool(
+        source_space_group_number == 1 and model_symmetry_order > 1
+    )
+
     records = []
     retained = []
     seen = set()
@@ -4249,6 +4271,17 @@ def metric_filter_signed_axis_transforms(
             np.linalg.norm(difference, ord="fro") / denominator
         )
         max_absolute_mismatch = float(np.max(np.abs(difference)))
+        candidate_direct_metric = np.linalg.inv(candidate_metric)
+        candidate_axis_lengths = np.sqrt(
+            np.maximum(np.diag(candidate_direct_metric), 0.0)
+        )
+        model_axis_lengths = np.asarray(model_cell[:3], dtype=float)
+        axis_length_fractional_mismatch = np.abs(
+            candidate_axis_lengths - model_axis_lengths
+        ) / model_axis_lengths
+        max_axis_length_fractional_mismatch = float(
+            np.max(axis_length_fractional_mismatch)
+        )
         keep = bool(relative_frobenius_mismatch <= tolerance)
         if keep:
             retained.append(info.canonical)
@@ -4264,17 +4297,85 @@ def metric_filter_signed_axis_transforms(
                 ),
                 "relative_frobenius_mismatch": relative_frobenius_mismatch,
                 "max_absolute_metric_mismatch_A^-2": max_absolute_mismatch,
+                "candidate_axis_lengths_A": candidate_axis_lengths.tolist(),
+                "axis_length_fractional_mismatch": (
+                    axis_length_fractional_mismatch.tolist()
+                ),
+                "max_axis_length_fractional_mismatch": (
+                    max_axis_length_fractional_mismatch
+                ),
+                "retention_mode": "strict_full_metric" if keep else "rejected",
             }
         )
+    fallback_applied = False
     if not retained:
-        raise ValueError(
-            "unit-cell metric compatibility filter rejected every transform candidate"
-        )
+        fallback_records = [
+            record
+            for record in records
+            if p1_fallback_applicable
+            and float(record["relative_frobenius_mismatch"])
+            <= p1_fallback_full_metric_tolerance
+            and float(record["max_axis_length_fractional_mismatch"])
+            <= p1_fallback_max_axis_length_fraction
+        ]
+        if fallback_records:
+            fallback_applied = True
+            fallback_transforms = {
+                str(record["transform"]) for record in fallback_records
+            }
+            retained = [
+                str(record["transform"])
+                for record in records
+                if str(record["transform"]) in fallback_transforms
+            ]
+            for record in records:
+                if str(record["transform"]) in fallback_transforms:
+                    record.update(
+                        {
+                            "status": "retained",
+                            "reason": (
+                                "bounded XDS P1 integration-cell distortion fallback: "
+                                "source/model axis lengths and full reciprocal metrics "
+                                "agree within fixed fallback limits"
+                            ),
+                            "retention_mode": "xds_p1_distortion_fallback",
+                        }
+                    )
+        else:
+            best = min(
+                records,
+                key=lambda record: float(record["relative_frobenius_mismatch"]),
+            )
+            raise ValueError(
+                "unit-cell metric compatibility filter rejected every transform candidate; "
+                f"best={best['transform']} full-metric mismatch="
+                f"{float(best['relative_frobenius_mismatch']):.4f}, max axis-length "
+                f"mismatch={float(best['max_axis_length_fractional_mismatch']):.4f}. "
+                "The automatic XDS P1 fallback requires an explicit source "
+                "SPACE_GROUP_NUMBER=1, a higher-symmetry model, full-metric mismatch "
+                f"<={p1_fallback_full_metric_tolerance:.3f}, and maximum axis-length "
+                f"mismatch<={p1_fallback_max_axis_length_fraction:.3f}."
+            )
     contract = {
         "schema_version": 1,
         "policy": "source_model_reciprocal_cell_metric_only_v1",
         "supported_transform_family": "signed_axis_permutations_only",
         "relative_frobenius_tolerance": tolerance,
+        "filter_mode": (
+            "xds_p1_distortion_fallback" if fallback_applied else "strict_full_metric"
+        ),
+        "source_space_group_number": source_space_group_number,
+        "model_symmetry_order": model_symmetry_order,
+        "xds_p1_distortion_fallback": {
+            "applicable": p1_fallback_applicable,
+            "applied": fallback_applied,
+            "full_metric_relative_tolerance": p1_fallback_full_metric_tolerance,
+            "max_axis_length_fraction": p1_fallback_max_axis_length_fraction,
+            "reason": (
+                "INTEGRATE.HKL can retain a distorted P1 integration cell while "
+                "CORRECT and the solved model use a symmetry-constrained setting"
+            ),
+        },
         "uses_intensities": False,
         "uses_atomic_coordinates_or_hand": False,
         "uses_atom_types_or_known_chemistry": False,

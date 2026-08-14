@@ -4,6 +4,8 @@ If `GROND doctor --probe-bloch --strict` fails, the Python environment is not re
 
 If the run stops during preflight, inspect `decisions/<dataset>/preflight.json`. Common causes are missing numeric reflection rows, too few positive intensities, non-positive sigmas, or geometry columns that are absent or badly tailed.
 
+If transform selection reports that every unit-cell metric candidate was rejected, inspect the source and model cells printed in the exception. Current GROND automatically handles the normal XDS case in which `INTEGRATE.HKL` declares P1 but `CORRECT` and the solved model use a permuted, symmetry-constrained setting. That bounded fallback still rejects a best proper transform whose full reciprocal metric differs by more than 5% or whose transformed axis lengths differ by more than 3%. A failure beyond those limits normally means the wrong model/data pair, a genuinely non-isomorphous crystal, missing or incorrect XDS header metadata, or indexing that should be repaired rather than bypassed with `--trust-hkl-transform`.
+
 If endpoint statistics or maps are missing, check whether external crystallographic programs are on `PATH`. GROND can still run native row-level modeling without those tools, but merged endpoint statistics and maps require external programs.
 
 If `GROND auto` stops with an SFAC message, run `GROND sfac-check --structure model.res`. Element-only SHELX lines such as `SFAC C H N O` are not a valid GROND Bloch model because they rely on SHELXL's built-in scattering table. Replace them with explicit electron scattering coefficient rows, then rerun. The check also warns when the `CELL` wavelength is a placeholder or X-ray value; GROND endpoint `.ins` files use `0.025079 A` in those cases.
