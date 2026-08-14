@@ -15794,10 +15794,16 @@ def run_finish_endpoint_maps(result: Mapping[str, object], args: argparse.Namesp
     if ("/" in exe and not Path(exe).exists()) or ("/" not in exe and shutil.which(exe) is None):
         return {"status": "missing_shelx2map", "executable": exe}
     maps: dict[str, dict[str, object]] = {}
-    for label, mode in [("fofc", "0"), ("fo", "1"), ("2fofc", "2")]:
+    map_specs = [
+        ("fofc", "0", "1"),
+        ("fo", "1", "1"),
+        ("2fofc", "2", "1"),
+        ("fofc_unweighted_diagnostic", "0", "0"),
+    ]
+    for label, mode, map_weight in map_specs:
         out_map = work_dir / f"grond_corrected_{label}.map"
         proc = subprocess.run(
-            [exe, "-m", mode, "-o", str(out_map), map_stem],
+            [exe, "-w", map_weight, "-m", mode, "-o", str(out_map), map_stem],
             cwd=str(map_work_dir),
             text=True,
             stdout=subprocess.PIPE,
@@ -15817,11 +15823,13 @@ def run_finish_endpoint_maps(result: Mapping[str, object], args: argparse.Namesp
             "log": str(log_path),
             "returncode": proc.returncode,
             "exists": actual.exists(),
+            "shelx2map_weight": float(map_weight),
+            "display_role": "diagnostic_unweighted" if map_weight == "0" else "primary_weighted",
         }
     maps_ok = all(item.get("returncode") == 0 and item.get("exists") for item in maps.values())
     return {
         "status": "ok" if maps_ok else "failed",
-        "definition": "GROND-corrected endpoint maps from the selected corrected-HKL publication endpoint; not native dynamical residual-potential maps.",
+        "definition": "GROND-corrected endpoint maps from the selected corrected-HKL publication endpoint; primary maps use explicit shelx2map -w 1 model-reliability weighting, and the raw unweighted Fo-Fc map is retained as a labeled diagnostic. These are not native dynamical residual-potential maps.",
         "endpoint_res": str(endpoint_res.resolve()),
         "fcf": str(fcf.resolve()),
         "list6_replay": list6_replay,

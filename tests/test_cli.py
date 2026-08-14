@@ -766,7 +766,13 @@ def test_finish_endpoint_maps_replays_list3_as_zero_cycle_list6(tmp_path: Path, 
     assert result["list6_replay"]["source_list_code"] == 3
     assert result["list6_replay"]["replay_list_code"] == 6
     assert result["list6_replay"]["metrics_unchanged"] is True
-    assert len(calls) == 4
+    assert len(calls) == 5
+    map_calls = calls[1:]
+    assert all(call[1:3] == ["-w", "1"] for call in map_calls[:3])
+    assert map_calls[3][1:3] == ["-w", "0"]
+    assert result["maps"]["fofc"]["shelx2map_weight"] == 1.0
+    assert result["maps"]["fofc"]["display_role"] == "primary_weighted"
+    assert result["maps"]["fofc_unweighted_diagnostic"]["display_role"] == "diagnostic_unweighted"
     assert all(record["exists"] for record in result["maps"].values())
 
 
