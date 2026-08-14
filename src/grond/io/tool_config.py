@@ -19,9 +19,6 @@ DEFAULT_CONFIG_NAMES = (
 TOOL_ENV_VARS = {
     "shelxl": "SHELXL",
     "shelx2map": "SHELX2MAP",
-    "shelxt": "SHELXT",
-    "xds": "XDS",
-    "xdsconv": "XDSCONV",
     "phenix_refine": "PHENIX_REFINE",
     "refmac5": "REFMAC5",
     "servalcat": "SERVALCAT",
@@ -33,9 +30,6 @@ TOOL_PATH_ENV_VARS: dict[str, str] = {}
 TOOL_ALIASES = {
     "shelxl": ("shelxl", "shelxl2019"),
     "shelx2map": ("shelx2map",),
-    "shelxt": ("shelxt",),
-    "xds": ("xds",),
-    "xdsconv": ("xdsconv",),
     "phenix_refine": ("phenix.refine", "phenix_refine"),
     "refmac5": ("refmac5",),
     "servalcat": ("servalcat",),
@@ -275,23 +269,33 @@ def tool_statuses(config: Mapping[str, Any] | None) -> dict[str, dict[str, Any]]
     return statuses
 
 
-def config_template() -> dict[str, Any]:
-    """Return a commented-by-key JSON-compatible template for GROND tools."""
+def config_template(*, include_optional_endpoints: bool = False) -> dict[str, Any]:
+    """Return a JSON-compatible external-tool template.
 
-    return {
-        "tools": {
-            "python": "",
-            "shelxl": "",
-            "shelx2map": "",
-            "shelxt": "",
-            "xds": "",
-            "xdsconv": "",
-            "phenix_refine": "",
-            "refmac5": "",
-            "servalcat": "",
-            "custom_refiner": "",
-        },
-        "endpoints": {
+    The default template covers the production small-molecule workflow.  The
+    larger endpoint-adapter surface is opt-in so an ordinary install does not
+    imply that XDS, structure solution, or macromolecular refinement programs
+    are GROND runtime requirements.
+    """
+
+    data: dict[str, Any] = {
+        "tools": {"shelxl": "", "shelx2map": ""},
+        "notes": (
+            "SHELXL is needed for the default small-molecule LS1 endpoint. "
+            "shelx2map is optional and is used only for quick corrected-HKL endpoint maps; "
+            "GROND finish makes native dynamical maps without it. Empty values use environment variables and PATH."
+        ),
+    }
+    if include_optional_endpoints:
+        data["tools"].update(
+            {
+                "phenix_refine": "",
+                "refmac5": "",
+                "servalcat": "",
+                "custom_refiner": "",
+            }
+        )
+        data["endpoints"] = {
             "custom": {
                 "command": "",
                 "output_model": "",
@@ -312,54 +316,64 @@ def config_template() -> dict[str, Any]:
                 "output_model": "",
                 "note": "Optional macromolecular endpoint template using {model}, {mtz}, {out_dir}, {cycles}, and {free_label}.",
             },
-        },
-        "notes": "Use absolute paths on shared servers. Empty values mean GROND will try environment variables and PATH.",
-    }
+        }
+    return data
 
 
-def write_config_template(path: str | Path, *, fmt: str = "json", overwrite: bool = False) -> Path:
+def write_config_template(
+    path: str | Path,
+    *,
+    fmt: str = "json",
+    overwrite: bool = False,
+    include_optional_endpoints: bool = False,
+) -> Path:
     """Write a GROND external-tool config template."""
 
     out = Path(path).expanduser()
     if out.exists() and not overwrite:
         raise FileExistsError(f"Refusing to overwrite existing config: {out}")
     out.parent.mkdir(parents=True, exist_ok=True)
-    data = config_template()
+    data = config_template(include_optional_endpoints=include_optional_endpoints)
     if fmt == "json":
         out.write_text(json.dumps(data, indent=2) + "\n")
     elif fmt == "yaml":
         lines = [
             "tools:",
-            '  python: ""',
             '  shelxl: ""',
             '  shelx2map: ""',
-            '  shelxt: ""',
-            '  xds: ""',
-            '  xdsconv: ""',
-            '  phenix_refine: ""',
-            '  refmac5: ""',
-            '  servalcat: ""',
-            '  custom_refiner: ""',
-            "endpoints:",
-            "  custom:",
-            '    command: ""',
-            '    output_model: ""',
-            '    note: "Optional command template using {model}, {reflections}, {out_dir}, and {cycles}."',
-            "  phenix_refine:",
-            '    command: ""',
-            '    output_model: ""',
-            '    note: "Optional macromolecular endpoint template using {model}, {mtz}, {out_dir}, {cycles}, and {free_label}."',
-            "  refmac5:",
-            '    command: ""',
-            '    output_model: ""',
-            '    note: "Optional macromolecular endpoint template using {model}, {mtz}, {out_dir}, {cycles}, and {free_label}."',
-            "  servalcat:",
-            '    command: ""',
-            '    output_model: ""',
-            '    note: "Optional macromolecular endpoint template using {model}, {mtz}, {out_dir}, {cycles}, and {free_label}."',
-            'notes: "Use absolute paths on shared servers. Empty values mean GROND will try environment variables and PATH."',
-            "",
         ]
+        if include_optional_endpoints:
+            lines.extend(
+                [
+                    '  phenix_refine: ""',
+                    '  refmac5: ""',
+                    '  servalcat: ""',
+                    '  custom_refiner: ""',
+                    "endpoints:",
+                    "  custom:",
+                    '    command: ""',
+                    '    output_model: ""',
+                    '    note: "Optional command template using {model}, {reflections}, {out_dir}, and {cycles}."',
+                    "  phenix_refine:",
+                    '    command: ""',
+                    '    output_model: ""',
+                    '    note: "Optional macromolecular endpoint template using {model}, {mtz}, {out_dir}, {cycles}, and {free_label}."',
+                    "  refmac5:",
+                    '    command: ""',
+                    '    output_model: ""',
+                    '    note: "Optional macromolecular endpoint template using {model}, {mtz}, {out_dir}, {cycles}, and {free_label}."',
+                    "  servalcat:",
+                    '    command: ""',
+                    '    output_model: ""',
+                    '    note: "Optional macromolecular endpoint template using {model}, {mtz}, {out_dir}, {cycles}, and {free_label}."',
+                ]
+            )
+        lines.extend(
+            [
+                'notes: "SHELXL is needed for the default small-molecule LS1 endpoint. shelx2map is optional and only makes quick corrected-HKL endpoint maps; GROND finish makes native dynamical maps without it."',
+                "",
+            ]
+        )
         out.write_text("\n".join(lines))
     else:
         raise ValueError("fmt must be 'json' or 'yaml'")

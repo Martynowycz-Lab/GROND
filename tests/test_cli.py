@@ -2726,7 +2726,14 @@ def test_doctor_reports_current_install_feature_flags(capsys):
         "separate_parity_calibration_commands": True,
     }
     assert payload["ready"] is True
+    assert payload["ready_scope"] == "core"
     assert payload["failures"] == []
+    assert payload["requirements"]["core_python"] == ["numpy", "scipy", "gemmi"]
+    assert payload["requirements"]["default_small_molecule_endpoint"] == ["shelxl"]
+    assert payload["requirements"]["native_dynamical_maps"] == []
+    assert set(payload["tool_config"]["external_tools"]) == {"shelxl", "shelx2map"}
+    assert "optional_packages" not in payload
+    assert "jax" not in payload
 
 
 def test_doctor_strict_checks_exact_requested_python(monkeypatch, capsys):
@@ -2772,6 +2779,32 @@ def test_doctor_non_strict_remains_report_only(monkeypatch, capsys):
     assert any("dependency probe failed" in failure for failure in payload["failures"])
 
 
+def test_doctor_small_molecule_scope_requires_shelxl(monkeypatch, capsys):
+    monkeypatch.setattr(
+        cli,
+        "probe_accelerators",
+        lambda python: {
+            "python": python,
+            "returncode": 0,
+            "packages": {name: {"available": True} for name in ("numpy", "scipy", "gemmi")},
+        },
+    )
+    monkeypatch.setattr(
+        cli,
+        "external_tool_statuses",
+        lambda args: {
+            "shelxl": {"available": False, "error": "not found"},
+            "shelx2map": {"available": False, "error": "not found"},
+        },
+    )
+    args = build_parser().parse_args(["doctor", "--workflow", "small-molecule", "--strict"])
+
+    assert args.func(args) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ready_scope"] == "small-molecule"
+    assert any("small-molecule workflow requires shelxl" in failure for failure in payload["failures"])
+
+
 def test_doctor_strict_fails_requested_bloch_operation(monkeypatch, capsys):
     monkeypatch.setattr(
         cli,
@@ -2810,6 +2843,7 @@ def test_auto_parser_is_simple_run_alias():
     assert args.detector_scale_bins == "8"
     assert args.final_basis_max == 500
     assert args.scale_polish_detector_bins == "exact"
+    assert args.make_maps is False
 
 
 def test_push_endpoint_exposes_diagnostic_endpoint_ls_cycles():
@@ -4836,7 +4870,7 @@ def test_tool_config_applies_shelxl_paths(tmp_path: Path, monkeypatch):
     assert os.environ["SHELX2MAP"] == str(fake_shelx2map)
 
 
-def test_missing_map_tool_errors_before_full_auto(tmp_path: Path, monkeypatch):
+def test_missing_map_tool_only_errors_when_legacy_maps_are_requested(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("PATH", str(tmp_path))
     monkeypatch.delenv("SHELXL", raising=False)
     monkeypatch.delenv("SHELX2MAP", raising=False)
@@ -4857,6 +4891,7 @@ def test_missing_map_tool_errors_before_full_auto(tmp_path: Path, monkeypatch):
             str(model),
             "--config",
             str(cfg),
+            "--make-maps",
         ]
     )
     apply_tool_config(args)

@@ -1,6 +1,6 @@
 # Install
 
-GROND is a normal Python package. The recommended installation is a clean Python 3.11 to 3.13 environment with NumPy, SciPy, Pandas, and Gemmi installed from wheels. Python 3.12 is the recommended default today because it is widely supported by scientific wheels. GitHub Actions tests 3.11, 3.12, and 3.13.
+GROND is a normal Python package. The recommended installation is a clean Python 3.11 to 3.13 environment with NumPy, SciPy, and Gemmi installed from wheels. Python 3.12 is the recommended default today because it is widely supported by scientific wheels. GitHub Actions tests 3.11, 3.12, and 3.13.
 
 ## Prerequisites
 
@@ -9,12 +9,12 @@ GROND is a normal Python package. The recommended installation is a clean Python
 - A working XDS processing directory, or a DIALS `integrated.refl`/`integrated.expt` pair, for each dataset you want to regularize.
 - A solved SHELX `model.res` or `model.ins` with explicit electron scattering coefficients. A CIF is suitable for `GROND run` only when it embeds the complete SHELX instruction block used for model updates.
 - A baseline solved-model HKL file when available. This is strongly recommended because GROND uses it to reduce transform ambiguity before running Bloch scouts.
-- Optional: SHELXL for corrected-HKL endpoint polishing/statistics.
-- Optional: `shelx2map` for map generation.
+- SHELXL for the default corrected-HKL small-molecule endpoint polishing/statistics. It is optional only for an explicit `--native-only` row-analysis run.
+- Optional: `shelx2map` for quick corrected-HKL endpoint maps. Native dynamical maps from `GROND finish` do not need it.
 - Optional: a configured custom endpoint if you are deliberately testing a non-default model-update adapter.
 - Optional: a LaTeX engine if you want PDF tables; Markdown and TeX outputs are written without it.
 
-Native row-level Bloch calculations are Python-first. The full default endpoint path needs SHELXL, and maps need `shelx2map`. Those programs are not bundled with GROND.
+Native row-level Bloch calculations are Python-first. The full default small-molecule endpoint path needs SHELXL. Native dynamical maps need no additional executable. GROND does not run XDS, XDSCONV, SHELXT, DIALS, or Olex2 during an ordinary calculation: it reads already integrated XDS/GROND bridge rows and an already solved model. DIALS Python is needed only while converting a `.refl`/`.expt` pair; after `GROND import-dials` has written the bridge directory, it is no longer needed for that dataset.
 
 ## Fresh Install With venv
 
@@ -113,41 +113,13 @@ Fill in absolute paths for tools that are not already on `PATH`:
 ```json
 {
   "tools": {
-    "python": "/data/envs/grond/bin/python",
     "shelxl": "/programs/x86_64-linux/system/sbgrid_bin/shelxl",
-    "shelx2map": "/programs/x86_64-linux/system/sbgrid_bin/shelx2map",
-    "shelxt": "",
-    "xds": "",
-    "xdsconv": "",
-    "phenix_refine": "",
-    "refmac5": "",
-    "servalcat": "",
-    "custom_refiner": ""
-  },
-  "endpoints": {
-    "custom": {
-      "command": "",
-      "output_model": "",
-      "note": "Optional command template using {model}, {reflections}, {out_dir}, and {cycles}."
-    },
-    "phenix_refine": {
-      "command": "",
-      "output_model": "",
-      "note": "Optional macromolecular endpoint template using {model}, {mtz}, {out_dir}, {cycles}, and {free_label}."
-    },
-    "refmac5": {
-      "command": "",
-      "output_model": "",
-      "note": "Optional macromolecular endpoint template using {model}, {mtz}, {out_dir}, {cycles}, and {free_label}."
-    },
-    "servalcat": {
-      "command": "",
-      "output_model": "",
-      "note": "Optional macromolecular endpoint template using {model}, {mtz}, {out_dir}, {cycles}, and {free_label}."
-    }
+    "shelx2map": ""
   }
 }
 ```
+
+The ordinary template intentionally omits upstream processing and structure-solution programs because GROND never invokes them. It also omits experimental macromolecular endpoint adapters. Developers testing those adapters can request the expanded template with `GROND init-config --with-endpoint-adapters --out grond.config.json` and inspect them with `GROND doctor --all-tools` or `GROND endpoints`.
 
 Check the resolved environment:
 
@@ -155,6 +127,8 @@ Check the resolved environment:
 GROND doctor --config grond.config.json --probe-bloch
 GROND endpoints --config grond.config.json
 ```
+
+The default doctor readiness scope is the portable core. To verify the ordinary refined small-molecule workflow, use `GROND doctor --workflow small-molecule --probe-bloch --strict`. To check only native-map regeneration, use `--workflow native-maps`; no external map program is required. The explicit quick endpoint-map check is `--workflow endpoint-maps` and requires both SHELXL and `shelx2map`.
 
 Use the config explicitly:
 
@@ -168,7 +142,7 @@ or export it for a project:
 export GROND_CONFIG=/path/to/grond.config.json
 ```
 
-`GROND auto` stops early if a full endpoint workflow needs SHELXL or map generation needs `shelx2map` and neither is configured nor discoverable on `PATH`. Use `--native-only` for row-level Bloch statistics without corrected-HKL endpoint polishing, `--no-maps` for endpoint statistics without maps, or `--allow-missing-tools` only for an intentional incomplete diagnostic run.
+`GROND auto` stops early if a full small-molecule endpoint workflow needs SHELXL and it is neither configured nor discoverable on `PATH`. It does not make the legacy endpoint maps by default. After the run, `GROND finish --run-dir grond_out` writes the native dynamical maps without `shelx2map`. Add `--make-maps` to `GROND auto`, or use `GROND finish --map-mode shelx2map`, only when the quick corrected-HKL endpoint maps are specifically wanted. Use `--native-only` for row-level Bloch statistics without corrected-HKL endpoint polishing, or `--allow-missing-tools` only for an intentional incomplete diagnostic run.
 
 YAML configs are accepted when `PyYAML` is installed with `python -m pip install "grond[config]"`; JSON works with no extra dependency.
 

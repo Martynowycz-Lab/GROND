@@ -70,7 +70,7 @@ Run:
 GROND doctor --config grond.config.json --probe-bloch
 ```
 
-before launching a long regularization. This confirms Python dependencies and reports whether SHELXL and `shelx2map` are visible for endpoint statistics and maps.
+before launching a long regularization. This confirms the Python dependencies and reports whether SHELXL is visible for endpoint refinement. `shelx2map` is shown only as an optional quick endpoint-map tool; native dynamical maps do not need it.
 
 ## 4. Run One Dataset
 
@@ -129,4 +129,4 @@ An operator with determinant `-1` is not an alternative indexing setting for an 
 
 For a named sign claim, reserve one known crystal for every distinct acquisition/import setup. Select its proper operator without using the known configuration, freeze the matched hand comparison, and only then attach the known sign as the setup calibration. All remaining crystals are validation. When the same physical crystal is imported through XDS and DIALS, the two backend calibrations are useful pipeline controls but are not independent biological or chemical observations.
 
-If endpoint statistics or maps are missing, run `GROND doctor --config grond.config.json --probe-bloch`. Full corrected-HKL endpoint polishing requires SHELXL, and map generation requires `shelx2map`.
+If endpoint statistics or maps are missing, run `GROND doctor --config grond.config.json --probe-bloch`. Full corrected-HKL endpoint polishing requires SHELXL. Native dynamical map generation uses `GROND finish --run-dir grond_out` and requires no external map executable; only the optional `--map-mode shelx2map` check requires `shelx2map`.

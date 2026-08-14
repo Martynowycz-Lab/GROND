@@ -54,7 +54,7 @@ python -m pip install .
 GROND doctor --probe-bloch --strict
 ```
 
-Native Bloch calculations use Python, NumPy, SciPy, Pandas, and Gemmi. The full small-molecule endpoint needs a separately installed SHELXL executable; map generation needs `shelx2map`. GROND does not bundle either program. Configure external tools with `GROND init-config` and confirm the resolved paths with `GROND doctor`.
+Native Bloch calculations use Python, NumPy, SciPy, and Gemmi. The default small-molecule LS1 endpoint needs a separately installed SHELXL executable. Native dynamical maps are written by `GROND finish` with no external map program; `shelx2map` is optional and is used only for quick corrected-HKL endpoint maps. XDS, XDSCONV, SHELXT, DIALS, and Olex2 are not general GROND runtime requirements.
 
 The complete installation and update instructions are in [docs/INSTALL.md](docs/INSTALL.md).
 

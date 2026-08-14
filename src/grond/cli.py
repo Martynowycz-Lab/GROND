@@ -729,6 +729,10 @@ def external_tool_statuses(args: argparse.Namespace) -> dict[str, dict]:
     """Return the active external-tool status block for run configs and doctor."""
 
     statuses = tool_statuses(getattr(args, "tool_config", {}) or {})
+    requested_python = str(getattr(args, "python", "") or "").strip()
+    active_python = requested_python or sys.executable
+    statuses["python"] = resolve_executable("python", configured=active_python)
+    statuses["python"]["source"] = "argument/config" if requested_python else "current_interpreter"
     explicit_shelxl = str(getattr(args, "shelxl", "") or "").strip()
     if explicit_shelxl:
         statuses["shelxl"] = resolve_executable(
@@ -11249,8 +11253,22 @@ def cmd_apply_parity_calibration(args: argparse.Namespace) -> int:
 def cmd_init_config(args: argparse.Namespace) -> int:
     """CLI entrypoint that writes an external-tool config template."""
 
-    out = write_config_template(args.out, fmt=args.format, overwrite=bool(args.overwrite))
-    print(json.dumps({"config": str(out), "format": args.format}, indent=2))
+    out = write_config_template(
+        args.out,
+        fmt=args.format,
+        overwrite=bool(args.overwrite),
+        include_optional_endpoints=bool(args.with_endpoint_adapters),
+    )
+    print(
+        json.dumps(
+            {
+                "config": str(out),
+                "format": args.format,
+                "profile": "all_endpoint_adapters" if args.with_endpoint_adapters else "small_molecule",
+            },
+            indent=2,
+        )
+    )
     return 0
 
 
@@ -17146,7 +17164,12 @@ def cmd_push_endpoint(args: argparse.Namespace) -> int:
     return 0
 
 
-def _doctor_readiness_failures(payload: Mapping[str, object], *, require_bloch: bool) -> list[str]:
+def _doctor_readiness_failures(
+    payload: Mapping[str, object],
+    *,
+    require_bloch: bool,
+    workflow: str = "core",
+) -> list[str]:
     """Return actionable failures for the portable production runtime."""
 
     failures: list[str] = []
@@ -17169,6 +17192,23 @@ def _doctor_readiness_failures(payload: Mapping[str, object], *, require_bloch: 
     if not isinstance(grond, Mapping) or grond.get("install_status") != "current_required_features_present":
         status = grond.get("install_status") if isinstance(grond, Mapping) else "missing"
         failures.append(f"GROND install is stale or incomplete: {status}")
+
+    required_external = {
+        "core": (),
+        "native-maps": (),
+        "small-molecule": ("shelxl",),
+        "endpoint-maps": ("shelxl", "shelx2map"),
+    }.get(workflow, ())
+    tool_config = payload.get("tool_config")
+    external_tools = tool_config.get("external_tools") if isinstance(tool_config, Mapping) else None
+    if required_external and not isinstance(external_tools, Mapping):
+        failures.append(f"{workflow} workflow tool status is missing")
+    elif isinstance(external_tools, Mapping):
+        for name in required_external:
+            status = external_tools.get(name)
+            if not isinstance(status, Mapping) or not status.get("available"):
+                detail = status.get("error") if isinstance(status, Mapping) else "status missing"
+                failures.append(f"{workflow} workflow requires {name}: {detail}")
 
     if require_bloch:
         bloch_ops = payload.get("bloch_ops")
@@ -17200,6 +17240,12 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     # of this diagnostic. Do not silently substitute another healthy Python.
     python = str(getattr(args, "python", "") or "").strip() or choose_python("")
     payload = probe_accelerators(python)
+    if not bool(getattr(args, "all_tools", False)):
+        payload.pop("optional_packages", None)
+        engine = payload.get("engine")
+        if isinstance(engine, dict):
+            engine.pop("optional_backends", None)
+            engine["optional_backends_note"] = "Use --all-tools to report experimental JAX backends."
     package_init = Path(__file__).resolve().parent / "__init__.py"
     absolute_structure_script = engine_script("absolute_structure_diagnostic.py")
     feedback_script = engine_script("shelxl_feedback_loop.py")
@@ -17265,14 +17311,38 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         "required_features": required_features,
         "install_status": "current_required_features_present" if all(required_features.values()) else "stale_or_incomplete_install",
     }
+    all_external_tools = external_tool_statuses(args)
+    reported_tool_names = tuple(all_external_tools) if bool(getattr(args, "all_tools", False)) else (
+        "shelxl",
+        "shelx2map",
+    )
+    payload["requirements"] = {
+        "core_python": ["numpy", "scipy", "gemmi"],
+        "default_small_molecule_endpoint": ["shelxl"],
+        "native_dynamical_maps": [],
+        "optional_corrected_hkl_endpoint_maps": ["shelx2map"],
+        "input_note": (
+            "XDS, XDSCONV, SHELXT, DIALS, and Olex2 are not general GROND runtime requirements. "
+            "DIALS Python is needed only while importing .refl/.expt files; existing XDS or GROND bridge directories are read directly."
+        ),
+    }
     payload["tool_config"] = {
         "path": getattr(args, "tool_config_path", ""),
         "configured_tools": getattr(args, "configured_tools", {}),
-        "external_tools": external_tool_statuses(args),
+        "external_tools": {name: all_external_tools[name] for name in reported_tool_names if name in all_external_tools},
+        "showing": "all implemented endpoint adapters" if bool(getattr(args, "all_tools", False)) else "small-molecule tools",
     }
+    payload["ready_scope"] = str(getattr(args, "workflow", "core") or "core")
     if args.probe_bloch:
-        payload["bloch_ops"] = probe_bloch_ops(python)
-    failures = _doctor_readiness_failures(payload, require_bloch=bool(args.probe_bloch))
+        bloch_ops = probe_bloch_ops(python)
+        if not bool(getattr(args, "all_tools", False)):
+            bloch_ops.pop("jax", None)
+        payload["bloch_ops"] = bloch_ops
+    failures = _doctor_readiness_failures(
+        payload,
+        require_bloch=bool(args.probe_bloch),
+        workflow=payload["ready_scope"],
+    )
     payload["ready"] = not failures
     payload["failures"] = failures
     print(json.dumps(payload, indent=2))
@@ -18675,7 +18745,13 @@ def add_common_run_args(ap: argparse.ArgumentParser, *, expose_lambda_controls: 
     ap.add_argument("--geometry-percentile", type=float, default=99.0)
     ap.add_argument("--target-mode", choices=list(XDS_TARGET_MODES), default="iobs", help=argparse.SUPPRESS)
     ap.add_argument("--include-nonpositive", action="store_true")
-    ap.add_argument("--make-maps", dest="make_maps", action="store_true", default=True)
+    ap.add_argument(
+        "--make-maps",
+        dest="make_maps",
+        action="store_true",
+        default=False,
+        help="Generate legacy quick corrected-HKL endpoint maps with shelx2map. Native dynamical maps are made afterward with `GROND finish` and need no external map program.",
+    )
     ap.add_argument("--no-maps", dest="make_maps", action="store_false")
     ap.add_argument("--h-omit", choices=["off", "on", "only", "both"], default="off")
     ap.add_argument("--hand-control", dest="hand_control", action="store_true", default=True, help="Run the alternate-hand diagnostic when model symmetry makes that check meaningful.")
@@ -18990,6 +19066,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_cfg = sub.add_parser("init-config", help="Write a GROND JSON/YAML external-tool config template.")
     p_cfg.add_argument("--out", default="grond.config.json")
     p_cfg.add_argument("--format", choices=["json", "yaml"], default="json")
+    p_cfg.add_argument(
+        "--with-endpoint-adapters",
+        action="store_true",
+        help="Also include optional Phenix, REFMAC, Servalcat, and custom endpoint-adapter blocks.",
+    )
     p_cfg.add_argument("--overwrite", action="store_true")
     p_cfg.set_defaults(func=cmd_init_config)
 
@@ -19681,6 +19762,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_doc.add_argument("--python", default="")
     add_tool_config_args(p_doc)
     p_doc.add_argument("--probe-bloch", action="store_true", help="Also test complex eig/eigh support needed by the Bloch wave kernel.")
+    p_doc.add_argument(
+        "--workflow",
+        choices=["core", "small-molecule", "native-maps", "endpoint-maps"],
+        default="core",
+        help="Readiness scope: core/native-maps need no external program; small-molecule adds SHELXL; endpoint-maps also adds shelx2map.",
+    )
+    p_doc.add_argument("--all-tools", action="store_true", help="Also report optional endpoint tools and experimental accelerator backends.")
     p_doc.add_argument("--strict", action="store_true", help="Exit nonzero when required packages, installed features, or requested Bloch operations are not ready.")
     p_doc.set_defaults(func=cmd_doctor)
 

@@ -77,7 +77,19 @@ def test_tool_config_json_template_round_trip(tmp_path: Path):
     data = load_tool_config(cfg)
     tools = configured_tools(data)
     assert "shelxl" not in tools
+    assert set(data["tools"]) == {"shelxl", "shelx2map"}
+    assert "endpoints" not in data
     assert tool_env_updates(data) == {}
+
+
+def test_tool_config_expanded_template_keeps_optional_endpoint_adapters(tmp_path: Path):
+    cfg = write_config_template(
+        tmp_path / "grond.config.json",
+        include_optional_endpoints=True,
+    )
+    data = load_tool_config(cfg)
+    assert {"phenix_refine", "refmac5", "servalcat", "custom_refiner"} <= set(data["tools"])
+    assert {"custom", "phenix_refine", "refmac5", "servalcat"} == set(data["endpoints"])
 
 
 def test_tool_config_accepts_executables_alias(tmp_path: Path):

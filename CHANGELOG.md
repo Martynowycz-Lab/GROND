@@ -4,6 +4,8 @@ This file records user-visible changes to the installable package. Version `0.2.
 
 ## 0.2.2 (unreleased)
 
+The install and external-tool surface now matches the workflows GROND actually executes. Pandas was removed because no shipped runtime imports it. XDS, XDSCONV, and SHELXT were removed from the executable registry because GROND reads their existing products but never launches those programs; Olex2 likewise remains an optional user interface rather than a runtime dependency. The default config and doctor report now show only the small-molecule tools, while optional macromolecular/custom endpoint adapters are available through explicit expanded views. Doctor readiness can be scoped to the portable core, the SHELXL small-molecule endpoint, native maps, or the optional `shelx2map` endpoint-map path. Automatic runs no longer request legacy `shelx2map` maps by default. The production small-molecule runtime therefore needs only NumPy, SciPy, Gemmi, and SHELXL; native maps from `GROND finish` require no external map executable. DIALS Python remains necessary only when converting `.refl`/`.expt` input.
+
 The DIALS bridge can now select rows accepted by `dials.scale` independently of
 the intensity source. `--row-selection scaled` therefore preserves raw
 summation intensities and variances from a `scaled.refl` table while respecting

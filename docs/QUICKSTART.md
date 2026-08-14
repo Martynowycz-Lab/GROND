@@ -56,7 +56,7 @@ writing a wrapper. The signed indices and orientation matrix have to be in the
 same solved-model basis, otherwise GROND can compute a very precise answer for
 the wrong geometry.
 
-Create the config with `GROND init-config --out grond.config.json`, then fill in any external executables that are not already on `PATH`. The important ones for the default full endpoint are `shelxl` for corrected-HKL polishing/statistics and `shelx2map` for maps. The command can omit `--config` when the needed programs are already discoverable, or when `GROND_CONFIG` points to the file.
+Create the config with `GROND init-config --out grond.config.json`, then fill in any external executables that are not already on `PATH`. For the default full small-molecule endpoint, the only required external executable is `shelxl`. Native dynamical maps from `GROND finish` use the installed Python/Gemmi stack; `shelx2map` is optional for quick corrected-HKL endpoint maps. The command can omit `--config` when SHELXL is already discoverable, or when `GROND_CONFIG` points to the file.
 
 Use `GROND endpoints --config grond.config.json` to see the available model-update endpoints. SHELXL is the implemented production endpoint for the normal small-molecule feedback loop. `custom` is a command-template adapter for a lab-specific one-cycle refiner. `bloch_only` is always available and means GROND will simulate Bloch intensities, optimize nuisance terms, write diagnostics, and report hand/residual behavior without updating the model through an external refiner. Macromolecular tests should use the explicit MTZ layer described in [MACROMOLECULES.md](MACROMOLECULES.md): assign unique-HKL FreeR flags, export corrected `IMEAN/SIGIMEAN`, then run one configured `protein-ls1` endpoint macrocycle.
 
