@@ -1,3 +1,5 @@
+import copy
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -96,6 +98,162 @@ def test_response_cache_matches_core_forward_model_with_frame_offset(tmp_path: P
     assert records[0]["sg_profile_angle_jacobian"] is True
     assert cached["dyn"][0] == pytest.approx(direct["dyn"], rel=1e-12, abs=1e-14)
     assert cached["born"][0] == pytest.approx(direct["born"], rel=1e-12, abs=1e-14)
+
+
+def test_row_plan_cache_true_hit_is_exact_and_skips_geometry(tmp_path: Path):
+    hkl_path, model_path = _write_single_row_inputs(tmp_path)
+    data = XDSData(hkl_path)
+    model = parse_model(model_path)
+    second_atom = copy.deepcopy(model["atoms"][0])
+    second_atom.update(name="C2", x=0.41, y=0.19, z=0.31)
+    model["atoms"].append(second_atom)
+    common = dict(
+        n_basis=2,
+        n_points=3,
+        sg_window=0.0001,
+        sg_window_min=0.0001,
+        sg_window_max=0.0001,
+        topup_d_min=2.0,
+        ug_d_min=2.0,
+        thickness_A=75.0,
+        thickness_model="uniform_gradient",
+        thickness_grad_frac=0.2,
+        thickness_points=3,
+    )
+    cache_dir = tmp_path / "cache"
+    indices = np.asarray([0], dtype=int)
+
+    uncached_port = XDSBlochPort(
+        data,
+        model,
+        Config(**common, row_plan_cache="off"),
+        cache_dir=cache_dir,
+        res_hash=sha256(model_path),
+    )
+    uncached = uncached_port.predict_rows(indices, workers=1)
+
+    build_port = XDSBlochPort(
+        data,
+        model,
+        Config(**common, row_plan_cache="rebuild"),
+        cache_dir=cache_dir,
+        res_hash=sha256(model_path),
+    )
+    built = build_port.predict_rows(indices, workers=1)
+    assert built["row_plan_cache_status"]["status"] == "rebuilt"
+
+    hit_port = XDSBlochPort(
+        data,
+        model,
+        Config(**common, row_plan_cache="readwrite"),
+        cache_dir=cache_dir,
+        res_hash=sha256(model_path),
+    )
+    geometry_calls = {"basis": 0, "root": 0}
+    original_basis = hit_port.select_basis
+    original_root = hit_port.solve_omega_for_sg
+
+    def counted_basis(*args, **kwargs):
+        geometry_calls["basis"] += 1
+        return original_basis(*args, **kwargs)
+
+    def counted_root(*args, **kwargs):
+        geometry_calls["root"] += 1
+        return original_root(*args, **kwargs)
+
+    hit_port.select_basis = counted_basis
+    hit_port.solve_omega_for_sg = counted_root
+    hit = hit_port.predict_rows(indices, workers=1)
+
+    assert hit["row_plan_cache_status"]["status"] == "hit"
+    assert geometry_calls == {"basis": 0, "root": 0}
+    assert uncached["support_hkls"] == hit["support_hkls"]
+    for key, expected in uncached.items():
+        if key in {"seconds", "support_hkls"}:
+            continue
+        actual = hit[key]
+        np.testing.assert_array_equal(actual, expected)
+        assert np.asarray(actual).tobytes() == np.asarray(expected).tobytes()
+
+    moved_model = copy.deepcopy(model)
+    moved_model["atoms"][1]["x"] += 2e-4
+    moved_uncached_port = XDSBlochPort(
+        data,
+        moved_model,
+        Config(**common, row_plan_cache="off"),
+        cache_dir=cache_dir,
+        res_hash="moved",
+    )
+    moved_uncached = moved_uncached_port.predict_rows(indices, workers=1)
+    moved_hit_port = XDSBlochPort(
+        data,
+        moved_model,
+        Config(**common, row_plan_cache="readwrite"),
+        cache_dir=cache_dir,
+        res_hash="moved",
+    )
+    moved_calls = {"basis": 0, "root": 0}
+    moved_basis = moved_hit_port.select_basis
+    moved_root = moved_hit_port.solve_omega_for_sg
+
+    def counted_moved_basis(*args, **kwargs):
+        moved_calls["basis"] += 1
+        return moved_basis(*args, **kwargs)
+
+    def counted_moved_root(*args, **kwargs):
+        moved_calls["root"] += 1
+        return moved_root(*args, **kwargs)
+
+    moved_hit_port.select_basis = counted_moved_basis
+    moved_hit_port.solve_omega_for_sg = counted_moved_root
+    moved_hit = moved_hit_port.predict_rows(indices, workers=1)
+
+    assert moved_hit["row_plan_cache_status"]["status"] == "hit"
+    assert moved_calls == {"basis": 0, "root": 0}
+    assert moved_uncached["support_hkls"] == moved_hit["support_hkls"]
+    assert moved_uncached["dyn"].tobytes() == moved_hit["dyn"].tobytes()
+    assert moved_uncached["born"].tobytes() == moved_hit["born"].tobytes()
+    assert moved_hit["dyn"].tobytes() != hit["dyn"].tobytes()
+
+    cache_path = Path(hit["row_plan_cache_status"]["path"])
+    with np.load(cache_path, allow_pickle=False) as loaded:
+        payload = {key: loaded[key] for key in loaded.files if key != "meta_json"}
+        stale_meta = json.loads(str(loaded["meta_json"]))
+    stale_meta["n_basis"] = int(stale_meta["n_basis"]) + 1
+    np.savez_compressed(
+        cache_path,
+        **payload,
+        meta_json=json.dumps(stale_meta, sort_keys=True, allow_nan=True),
+    )
+
+    stale_port = XDSBlochPort(
+        data,
+        model,
+        Config(**common, row_plan_cache="readwrite"),
+        cache_dir=cache_dir,
+        res_hash=sha256(model_path),
+    )
+    stale_calls = {"basis": 0, "root": 0}
+    stale_basis = stale_port.select_basis
+    stale_root = stale_port.solve_omega_for_sg
+
+    def rebuilt_basis(*args, **kwargs):
+        stale_calls["basis"] += 1
+        return stale_basis(*args, **kwargs)
+
+    def rebuilt_root(*args, **kwargs):
+        stale_calls["root"] += 1
+        return stale_root(*args, **kwargs)
+
+    stale_port.select_basis = rebuilt_basis
+    stale_port.solve_omega_for_sg = rebuilt_root
+    rebuilt = stale_port.predict_rows(indices, workers=1)
+
+    assert rebuilt["row_plan_cache_status"]["status"] == "built"
+    assert stale_calls["basis"] > 0
+    assert stale_calls["root"] > 0
+    np.testing.assert_array_equal(rebuilt["dyn"], uncached["dyn"])
+    np.testing.assert_array_equal(rebuilt["born"], uncached["born"])
 
 
 def test_proper_sign_transform_native_smoke_has_no_cell_precision_score_drift(

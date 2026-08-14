@@ -9376,6 +9376,8 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
                 str(args.structure_max_nfev),
                 "--compute-backend",
                 args.compute_backend,
+                "--row-plan-cache",
+                getattr(args, "row_plan_cache", "off"),
                 "--jax-batch-size",
                 str(args.jax_batch_size),
                 "--jax-matrix-bucket-size",

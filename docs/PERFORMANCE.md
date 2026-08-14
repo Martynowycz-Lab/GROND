@@ -38,7 +38,7 @@ Prediction caches belong to a run, not to the installed package. `GROND auto` wr
 
 Installed package directories should remain read-only. Do not put run caches, model outputs, or benchmark arrays inside `src/grond`.
 
-The optional row-plan cache is enabled with `--row-plan-cache readwrite`. It freezes row identity, support, geometry, and quadrature while allowing structure factors to change between feedback cycles. Cache keys include the source rows and numerical contract, and incompatible entries are rebuilt. Current whole-run benchmarks have not shown a consistent enough improvement to make this the default, so use it as an explicit benchmark or LS1-development tool.
+The optional row-plan cache is enabled with `--row-plan-cache readwrite`. It freezes row identity, support, geometry, and quadrature while allowing structure factors to change between feedback cycles. Cache keys include the source rows and numerical contract, and incompatible entries are rebuilt. Cache reuse is now exercised directly by the native finite-difference model updater. A 24-row 370 development fixture produced byte-identical cached and uncached Born/Bloch predictions for both the cache-building model and a moved-coordinate model, while a true cache hit made no basis-selection or Bragg-root calls; a matched one-coordinate optimizer also returned the identical parameter, residual, and objective. This remains opt-in because a new moving model still pays for its model-dependent dense Fourier-potential construction, which limited the measured whole-evaluation gain on that deliberately small fixture even when row prediction itself became substantially faster. Treat this result as a correctness and reuse check, not a general runtime promise.
 
 ## Cheap Post-Processing
 

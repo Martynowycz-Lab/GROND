@@ -737,11 +737,39 @@ def row_plan_cache_validation_errors(cache: dict, indices, expected_key: str, ex
         "sg_residual_max",
         "dose_delta_b",
     )
+    optional_nan_contracts = {
+        # These are audit-only quantities which are undefined for the stated
+        # physical contract.  The cache builder records that fact as NaN.  Do
+        # not relax validation for any geometry-defining array or for a mode
+        # in which the quantity is applicable.
+        "sg_window_half_frames": (
+            "sg_window_mode",
+            {"fixed", "rlp_peak"},
+        ),
+        "sg_jitter_d_inv": (
+            "sg_jitter_mode",
+            {"none"},
+        ),
+        "sg_jitter_frame_fraction": (
+            "sg_jitter_mode",
+            {"none"},
+        ),
+    }
     for name in finite_row_arrays:
         if name not in cache:
             continue
         values = np.asarray(cache[name])
-        if values.shape != (len(indices),) or not np.all(np.isfinite(values)):
+        if values.shape != (len(indices),):
+            errors.append(f"{name} is incomplete or non-finite")
+            continue
+        optional_contract = optional_nan_contracts.get(name)
+        allows_nan = False
+        if optional_contract is not None:
+            contract_field, nonapplicable_values = optional_contract
+            allows_nan = str(expected_meta.get(contract_field, "")).lower() in nonapplicable_values
+        numeric = np.asarray(values, dtype=float)
+        valid = ~np.isinf(numeric) if allows_nan else np.isfinite(numeric)
+        if not np.all(valid):
             errors.append(f"{name} is incomplete or non-finite")
     if all(
         name in cache

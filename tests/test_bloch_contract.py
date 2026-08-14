@@ -514,6 +514,69 @@ def test_row_plan_cache_validation_rejects_stale_metadata():
     }
     assert row_plan_cache_validation_errors(valid_cache, indices, "expected", meta) == []
 
+    sentinel_meta = dict(meta, sg_window_mode="fixed", sg_jitter_mode="none")
+    sentinel_cache = dict(
+        valid_cache,
+        meta=dict(sentinel_meta),
+        sg_window_half_frames=np.full(3, np.nan),
+        sg_jitter_d_inv=np.full(3, np.nan),
+        sg_jitter_frame_fraction=np.full(3, np.nan),
+    )
+    assert row_plan_cache_validation_errors(
+        sentinel_cache,
+        indices,
+        "expected",
+        sentinel_meta,
+    ) == []
+
+    missing_contract = dict(sentinel_cache, meta=dict(meta))
+    errors = row_plan_cache_validation_errors(missing_contract, indices, "expected", meta)
+    assert "sg_window_half_frames is incomplete or non-finite" in errors
+    assert "sg_jitter_d_inv is incomplete or non-finite" in errors
+    assert "sg_jitter_frame_fraction is incomplete or non-finite" in errors
+
+    applicable_window_meta = dict(sentinel_meta, sg_window_mode="dials_bbox")
+    applicable_window = dict(sentinel_cache, meta=dict(applicable_window_meta))
+    errors = row_plan_cache_validation_errors(
+        applicable_window,
+        indices,
+        "expected",
+        applicable_window_meta,
+    )
+    assert "sg_window_half_frames is incomplete or non-finite" in errors
+
+    applicable_jitter_meta = dict(sentinel_meta, sg_jitter_mode="gaussian")
+    applicable_jitter = dict(sentinel_cache, meta=dict(applicable_jitter_meta))
+    errors = row_plan_cache_validation_errors(
+        applicable_jitter,
+        indices,
+        "expected",
+        applicable_jitter_meta,
+    )
+    assert "sg_jitter_d_inv is incomplete or non-finite" in errors
+    assert "sg_jitter_frame_fraction is incomplete or non-finite" in errors
+
+    invalid_geometry = dict(sentinel_cache, center_sg=np.asarray([0.0, np.nan, 0.0]))
+    errors = row_plan_cache_validation_errors(
+        invalid_geometry,
+        indices,
+        "expected",
+        sentinel_meta,
+    )
+    assert "center_sg is incomplete or non-finite" in errors
+
+    invalid_optional = dict(
+        sentinel_cache,
+        sg_jitter_d_inv=np.asarray([np.nan, np.inf, np.nan]),
+    )
+    errors = row_plan_cache_validation_errors(
+        invalid_optional,
+        indices,
+        "expected",
+        sentinel_meta,
+    )
+    assert "sg_jitter_d_inv is incomplete or non-finite" in errors
+
     stale_cache = dict(valid_cache)
     stale_cache["meta"] = dict(meta, n_basis=30)
     errors = row_plan_cache_validation_errors(stale_cache, indices, "expected", meta)

@@ -1,8 +1,14 @@
 import math
 
+import numpy as np
 import pytest
 
-from grond.legacy.engine.native_structure_update import atom_distance_A, frac_delta_min_image
+from grond.legacy.engine.native_structure_update import (
+    absolute_finite_difference_jacobian,
+    atom_distance_A,
+    frac_delta_min_image,
+    parameter_absolute_steps,
+)
 
 
 def test_closest_periodic_image_uses_skew_cell_metric():
@@ -39,3 +45,89 @@ def test_closest_periodic_image_is_exact_for_nonreduced_skew_cell():
     assert delta == pytest.approx((-0.0141646, 0.3894878, -2.5659565))
     model = {"cell": cell, "atoms": [first, second]}
     assert atom_distance_A(model, 0, 1) == pytest.approx(0.11365967283862, rel=1e-12)
+
+
+def test_native_finite_difference_steps_are_group_aware_and_absolute():
+    params = [
+        {"kind": "xyz"},
+        {"kind": "xyz"},
+        {"kind": "adp_ueq"},
+    ]
+
+    steps = parameter_absolute_steps(
+        params,
+        xyz_step_frac=2e-5,
+        adp_step_a2=7e-5,
+    )
+    np.testing.assert_array_equal(steps, [2e-5, 2e-5, 7e-5])
+    np.testing.assert_array_equal(
+        parameter_absolute_steps(params, legacy_step=3e-5),
+        [3e-5, 3e-5, 3e-5],
+    )
+
+    with pytest.raises(ValueError, match="finite-difference step"):
+        parameter_absolute_steps(params, xyz_step_frac=0.0)
+    with pytest.raises(ValueError, match="unknown parameter kind"):
+        parameter_absolute_steps([{"kind": "occupancy"}])
+
+
+def test_absolute_finite_difference_jacobian_matches_analytic_and_converges():
+    x = np.asarray([0.0, 0.02], dtype=float)
+    lower = np.asarray([-1.0, 0.001], dtype=float)
+    upper = np.asarray([1.0, 0.2], dtype=float)
+
+    def residuals(values):
+        return np.asarray(
+            [
+                np.sin(2.0 * values[0]) + values[1] ** 2,
+                np.exp(values[0] - values[1]),
+                values[0] * values[1],
+            ]
+        )
+
+    exact = np.asarray(
+        [
+            [2.0, 0.04],
+            [np.exp(-0.02), -np.exp(-0.02)],
+            [0.02, 0.0],
+        ]
+    )
+    coarse = absolute_finite_difference_jacobian(
+        residuals,
+        x,
+        (lower, upper),
+        np.asarray([1e-4, 1e-4]),
+    )
+    fine = absolute_finite_difference_jacobian(
+        residuals,
+        x,
+        (lower, upper),
+        np.asarray([5e-5, 5e-5]),
+    )
+    coarse_error = float(np.max(np.abs(coarse - exact)))
+    fine_error = float(np.max(np.abs(fine - exact)))
+
+    assert coarse_error < 1.1e-4
+    assert fine_error < 0.55 * coarse_error
+
+
+def test_absolute_finite_difference_jacobian_stays_within_bounds():
+    x = np.asarray([0.99995, 0.00105], dtype=float)
+    lower = np.asarray([-1.0, 0.001], dtype=float)
+    upper = np.asarray([1.0, 0.2], dtype=float)
+    calls = []
+
+    def residuals(values):
+        calls.append(np.asarray(values, dtype=float).copy())
+        return np.asarray([values[0] ** 2 + 3.0 * values[1]])
+
+    jacobian = absolute_finite_difference_jacobian(
+        residuals,
+        x,
+        (lower, upper),
+        np.asarray([1e-4, 1e-4]),
+    )
+
+    np.testing.assert_allclose(calls[1] - x, [-1e-4, 0.0], atol=1e-15)
+    np.testing.assert_allclose(calls[2] - x, [0.0, 1e-4], atol=1e-15)
+    np.testing.assert_allclose(jacobian, [[1.9998, 3.0]], atol=1e-12)

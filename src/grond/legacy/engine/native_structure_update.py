@@ -138,6 +138,85 @@ def make_early_stop_result(exc: EarlyStopOptimization, eval_count: int):
     )
 
 
+def parameter_absolute_steps(
+    params: list[dict],
+    *,
+    xyz_step_frac: float = 1e-4,
+    adp_step_a2: float = 1e-4,
+    legacy_step: float | None = None,
+) -> np.ndarray:
+    """Return finite-difference steps in each parameter's physical units.
+
+    SciPy's ``least_squares(diff_step=...)`` treats its input as a relative
+    multiplier of the current parameter value.  Fractional coordinates can be
+    zero and Ueq values are normally much smaller than coordinates, so one
+    relative scalar gives parameter-dependent, and sometimes near-zero, steps.
+    Native GROND instead uses explicit fractional-coordinate and A^2 steps.
+    ``legacy_step`` retains the old single-knob CLI as an absolute shorthand.
+    """
+
+    if legacy_step is not None:
+        xyz_step_frac = float(legacy_step)
+        adp_step_a2 = float(legacy_step)
+    values = {
+        "xyz": float(xyz_step_frac),
+        "adp_ueq": float(adp_step_a2),
+    }
+    for name, value in values.items():
+        if not math.isfinite(value) or value <= 0.0:
+            raise ValueError(f"{name} finite-difference step must be finite and positive")
+    steps = []
+    for param in params:
+        kind = str(param.get("kind", "xyz"))
+        if kind not in values:
+            raise ValueError(f"unknown parameter kind {kind!r} for finite-difference step")
+        steps.append(values[kind])
+    return np.asarray(steps, dtype=float)
+
+
+def absolute_finite_difference_jacobian(
+    fun,
+    x,
+    bounds,
+    absolute_steps,
+    *,
+    f0=None,
+) -> np.ndarray:
+    """Calculate a bounded two-point Jacobian using explicit absolute steps."""
+
+    x = np.asarray(x, dtype=float)
+    lower, upper = (np.asarray(value, dtype=float) for value in bounds)
+    steps = np.asarray(absolute_steps, dtype=float)
+    if x.ndim != 1 or lower.shape != x.shape or upper.shape != x.shape or steps.shape != x.shape:
+        raise ValueError("x, bounds, and absolute finite-difference steps must be matching vectors")
+    if not np.all(np.isfinite(x)) or not np.all(np.isfinite(steps)) or np.any(steps <= 0.0):
+        raise ValueError("finite-difference parameters and steps must be finite with positive steps")
+    base = np.asarray(fun(x) if f0 is None else f0, dtype=float)
+    if base.ndim != 1:
+        raise ValueError("finite-difference residual function must return a vector")
+    jac = np.empty((len(base), len(x)), dtype=float)
+    for column, requested in enumerate(steps):
+        forward_room = float(upper[column] - x[column])
+        backward_room = float(x[column] - lower[column])
+        if forward_room >= requested:
+            delta = float(requested)
+        elif backward_room >= requested:
+            delta = -float(requested)
+        elif forward_room >= backward_room and forward_room > 0.0:
+            delta = forward_room
+        elif backward_room > 0.0:
+            delta = -backward_room
+        else:
+            raise ValueError(f"parameter {column} has no room for a bounded finite-difference step")
+        trial = x.copy()
+        trial[column] += delta
+        shifted = np.asarray(fun(trial), dtype=float)
+        if shifted.shape != base.shape:
+            raise ValueError("finite-difference residual size changed between parameter evaluations")
+        jac[:, column] = (shifted - base) / delta
+    return jac
+
+
 def atom_is_refinable(atom, selection: str, labels: set[str]) -> bool:
     if atom["name"].upper().startswith("Q"):
         return False
@@ -850,7 +929,14 @@ def main():
     ap.add_argument("--bond-detection-tolerance", type=float, default=0.45)
     ap.add_argument("--bond-detection-max-distance", type=float, default=1.95)
     ap.add_argument("--max-nfev", type=int, default=80)
-    ap.add_argument("--diff-step", type=float, default=1e-4)
+    ap.add_argument(
+        "--diff-step",
+        type=float,
+        default=None,
+        help="Deprecated compatibility name setting both absolute finite-difference steps in each parameter's native unit; use the group-specific options instead. This is no longer a SciPy relative multiplier.",
+    )
+    ap.add_argument("--xyz-diff-step-frac", type=float, default=1e-4, help="Absolute fractional-coordinate step used for native Bloch finite differences.")
+    ap.add_argument("--adp-diff-step-a2", type=float, default=1e-4, help="Absolute Ueq step in A^2 used for native Bloch finite differences.")
     ap.add_argument("--thickness", type=float, default=2200.0)
     ap.add_argument("--thickness-grad-frac", type=float, default=0.8)
     ap.add_argument("--thickness-points", type=int, default=5)
@@ -876,7 +962,7 @@ def main():
     ap.add_argument("--sigma-b-corr", type=float, default=0.0)
     ap.add_argument("--sigma-c-peak", type=float, default=0.05)
     ap.add_argument("--compute-backend", choices=["scipy", "scipy_bethe", "scipy_expm", "scipy_expm_multiply", "jax", "jax_auto", "jax_cpu", "jax_mps", "jax_cuda", "jax_padded", "jax_auto_padded", "jax_cpu_padded", "jax_mps_padded", "jax_cuda_padded", "jax_cpu_real_expm", "jax_mps_real_expm", "jax_mps_real_expm_padded"], default="scipy", help="Bloch propagation backend. SciPy eigensolver is the production reference; scipy_bethe uses an opt-in promoted Bethe/Schur strong-beam reduction; SciPy expm/expm_multiply, real-embedded JAX expm, and JAX eigensolver backends are experimental. *_padded JAX backends pad matrix dimensions into small buckets to reduce compilation churn.")
-    ap.add_argument("--row-plan-cache", choices=["off", "readwrite", "rebuild"], default="off", help="Accepted for CLI compatibility with row-prediction stages. The native finite-difference updater currently rebuilds row plans internally.")
+    ap.add_argument("--row-plan-cache", choices=["off", "readwrite", "rebuild"], default="off", help="Freeze row geometry, basis, Sg profiles, quadrature, and difference-HKL lookup across moving-model evaluations while recomputing current U_g values.")
     ap.add_argument("--jax-batch-size", type=int, default=0, help="JAX matrix batch size. 0 chooses a conservative size from matrix dimension and device count.")
     ap.add_argument("--jax-matrix-bucket-size", type=int, default=0, help="Pad JAX matrix dimensions to this multiple. 0 keeps exact sizes unless a *_padded backend is selected, where 0 means 8.")
     ap.add_argument("--bethe-strong-count", type=int, default=48, help="Strong-beam block size for scipy_bethe. Values >= n_basis recover the dense SciPy matrix.")
@@ -988,6 +1074,7 @@ def main():
         absorption_mu_theta2=args.absorption_mu_theta2,
         absorption_tds_b=args.absorption_tds_b,
         ug_d_min=args.ug_d_min,
+        row_plan_cache=args.row_plan_cache,
     )
     objective_cfg = copy.deepcopy(cfg)
     objective_cfg.group_width_deg = args.objective_group_width_deg
@@ -1027,7 +1114,14 @@ def main():
         has_xyz_params = any(p.get("kind", "xyz") == "xyz" for p in params)
         has_adp_params = any(p.get("kind") == "adp_ueq" for p in params)
         bounds = parameter_bounds(params, x0, args.max_shift_frac, args.adp_shift, args.adp_min, args.adp_max)
+        absolute_steps = parameter_absolute_steps(
+            params,
+            xyz_step_frac=args.xyz_diff_step_frac,
+            adp_step_a2=args.adp_diff_step_a2,
+            legacy_step=args.diff_step,
+        )
         eval_counter = {"n": 0}
+        residual_cache = {"x": None, "value": None}
         block_scale_contract = None
         if args.objective_scale_mode == "frozen_block":
             anchor_pred = prediction_for_model(data, current_model, objective_cfg, objective_indices, cache_root, f"{block_tag}_scale_anchor", args.workers, args.chunksize)
@@ -1137,7 +1231,22 @@ def main():
                             float(early_stop_state["best_metric"]),
                             int(early_stop_state["best_eval"]),
                         )
+            residual_cache["x"] = np.asarray(x, dtype=float).copy()
+            residual_cache["value"] = np.asarray(total, dtype=float).copy()
             return total
+
+        def jacobian(x):
+            cached = residual_cache.get("value")
+            cached_x = residual_cache.get("x")
+            if cached_x is None or not np.array_equal(np.asarray(cached_x, dtype=float), np.asarray(x, dtype=float)):
+                cached = None
+            return absolute_finite_difference_jacobian(
+                residuals,
+                x,
+                bounds,
+                absolute_steps,
+                f0=cached,
+            )
 
         x_scale = []
         for p in params:
@@ -1147,8 +1256,7 @@ def main():
                 residuals,
                 x0,
                 bounds=bounds,
-                jac="2-point",
-                diff_step=args.diff_step,
+                jac=jacobian,
                 loss="linear",
                 max_nfev=args.max_nfev,
                 verbose=1,
@@ -1186,6 +1294,14 @@ def main():
             "parameter_count": int(len(params)),
             "xyz_parameter_count": int(sum(1 for p in params if p.get("kind", "xyz") == "xyz")),
             "adp_parameter_count": int(sum(1 for p in params if p.get("kind") == "adp_ueq")),
+            "finite_difference": {
+                "scheme": "bounded_two_point_absolute",
+                "xyz_step_frac": float(args.diff_step if args.diff_step is not None else args.xyz_diff_step_frac),
+                "adp_step_a2": float(args.diff_step if args.diff_step is not None else args.adp_diff_step_a2),
+                "legacy_diff_step_shorthand_used": bool(args.diff_step is not None),
+                "minimum_step": float(np.min(absolute_steps)),
+                "maximum_step": float(np.max(absolute_steps)),
+            },
             "accepted": block_accepted,
             "reason": block_reason,
             "objective_scale_mode": args.objective_scale_mode,
