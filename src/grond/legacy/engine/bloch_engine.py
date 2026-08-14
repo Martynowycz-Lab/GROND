@@ -4204,6 +4204,7 @@ def metric_filter_signed_axis_transforms(
     transforms,
     *,
     relative_tolerance: float,
+    dataset_label: str = "",
 ) -> tuple[list[str], dict]:
     """Retain signed-axis transforms compatible with source/model cell metrics.
 
@@ -4251,8 +4252,11 @@ def metric_filter_signed_axis_transforms(
     except ValueError:
         source_space_group_number = None
     model_symmetry_order = len(model.get("symmetry_ops") or [])
+    source_kind = str(data.header.get("GROND_SOURCE", "XDS") or "XDS").strip().upper()
     p1_fallback_applicable = bool(
-        source_space_group_number == 1 and model_symmetry_order > 1
+        source_kind == "XDS"
+        and source_space_group_number == 1
+        and model_symmetry_order > 1
     )
 
     records = []
@@ -4346,8 +4350,26 @@ def metric_filter_signed_axis_transforms(
                 records,
                 key=lambda record: float(record["relative_frobenius_mismatch"]),
             )
+            dataset_context = f"dataset {dataset_label!r}: " if dataset_label else ""
+            if source_kind == "DIALS":
+                raise ValueError(
+                    f"{dataset_context}unit-cell metric compatibility filter rejected every "
+                    "transform candidate for a DIALS bridge; "
+                    f"best={best['transform']} full-metric mismatch="
+                    f"{float(best['relative_frobenius_mismatch']):.4f}, max axis-length "
+                    f"mismatch={float(best['max_axis_length_fractional_mismatch']):.4f}; "
+                    f"source cell={tuple(round(float(v), 6) for v in source_cell)}, "
+                    f"model cell={tuple(round(float(v), 6) for v in model_cell)}. "
+                    "dials.cosym can make experiment indices mutually consistent, but it "
+                    "does not prove that an external RES/HKL pair is in that same basis. "
+                    "If the model and baseline HKL were exported from this exact post-cosym "
+                    "scaled.expt/scaled.refl basis with no later reindexing or inversion, use "
+                    "--hkl-transform identity --trust-hkl-transform. Otherwise inspect this "
+                    "named crystal as a possible cell outlier or supply the verified transform."
+                )
             raise ValueError(
-                "unit-cell metric compatibility filter rejected every transform candidate; "
+                f"{dataset_context}unit-cell metric compatibility filter rejected every "
+                "transform candidate; "
                 f"best={best['transform']} full-metric mismatch="
                 f"{float(best['relative_frobenius_mismatch']):.4f}, max axis-length "
                 f"mismatch={float(best['max_axis_length_fractional_mismatch']):.4f}. "

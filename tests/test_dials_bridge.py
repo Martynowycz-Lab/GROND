@@ -99,6 +99,8 @@ def test_bridge_writes_qe_correction_full_geometry_and_raw_sigma_default(tmp_pat
     axis_datum = np.array([1.0, 0.0, 0.0])
     metadata = {
         "space_group": "P 1",
+        "space_group_number": 1,
+        "experiment_identifier": "crystal-uuid-1",
         "unit_cell": [10.0, 10.0, 10.0, 90.0, 90.0, 90.0],
         "A_static": np.diag([0.1, 0.1, 0.1]).tolist(),
         "A_scan_points": [np.diag([0.1, 0.1, 0.1]).tolist()],
@@ -131,6 +133,11 @@ def test_bridge_writes_qe_correction_full_geometry_and_raw_sigma_default(tmp_pat
     assert data.setting_rotation == pytest.approx(setting)
     assert summary["sigma_model"]["mode"] == "raw"
     assert summary["sigma_model"]["source"] == "raw"
+    assert data.header["SPACE_GROUP_NUMBER"] == "1"
+    assert data.header["DIALS_INDEXING_BASIS"] == "miller_index_from_source_reflection_table"
+    assert data.header["DIALS_EXPERIMENT_IDENTIFIER"] == "crystal-uuid-1"
+    assert summary["geometry"]["space_group_number"] == 1
+    assert summary["geometry"]["experiment_identifier"] == "crystal-uuid-1"
 
 
 def test_bridge_preserves_cropped_dials_scan_origin(tmp_path, monkeypatch):

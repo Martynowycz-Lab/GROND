@@ -212,7 +212,9 @@ def main():
         "source_expt": str(expt_path),
         "row_count": int(len(table)),
         "experiment_count": int(len(experiments)),
+        "experiment_identifier": str(getattr(exp, "identifier", "") or ""),
         "space_group": str(crystal.get_space_group().info()),
+        "space_group_number": int(crystal.get_space_group().type().number()),
         "unit_cell": [float(v) for v in crystal.get_unit_cell().parameters()],
         "A_static": a_static.tolist(),
         "A_scan_points": a_scan_points,
@@ -981,6 +983,12 @@ def convert_dials_to_grond(
         f.write("!GROND_SOURCE=DIALS\n")
         f.write(f"!DIALS_REFLECTIONS= {refl_path}\n")
         f.write(f"!DIALS_EXPERIMENTS= {expt_path}\n")
+        f.write("!DIALS_INDEXING_BASIS= miller_index_from_source_reflection_table\n")
+        if str(metadata.get("experiment_identifier") or ""):
+            f.write(
+                "!DIALS_EXPERIMENT_IDENTIFIER= "
+                f"{str(metadata['experiment_identifier'])}\n"
+            )
         f.write(f"!DIALS_INTENSITY_MODE= {mode}\n")
         f.write(f"!DIALS_INTENSITY_NOTE= {intensity_note}\n")
         f.write(f"!DIALS_SIGMA_MODE= {sigma_summary['mode']}\n")
@@ -1014,6 +1022,8 @@ def convert_dials_to_grond(
             f.write(f"!DIALS_IMAGE_RANGE= {int(image_range[0])} {int(image_range[1])}\n")
         f.write(f"!DIALS_ARRAY_RANGE= {scan_array_range[0]} {scan_array_range[1]}\n")
         f.write(f"!X-RAY_WAVELENGTH= {float(metadata['beam']['wavelength_A']):.12g}\n")
+        if metadata.get("space_group_number") is not None:
+            f.write(f"!SPACE_GROUP_NUMBER= {int(metadata['space_group_number'])}\n")
         f.write(f"!STARTING_FRAME= {starting_frame}\n")
         f.write(f"!STARTING_ANGLE= {float(scan_osc[0]):.12g}\n")
         f.write(f"!OSCILLATION_RANGE= {float(scan_osc[1]):.12g}\n")
@@ -1122,6 +1132,8 @@ def convert_dials_to_grond(
         },
         "geometry": {
             "space_group": metadata.get("space_group", ""),
+            "space_group_number": metadata.get("space_group_number"),
+            "experiment_identifier": metadata.get("experiment_identifier", ""),
             "unit_cell": metadata.get("unit_cell", []),
             "scan_points": int(len(a_scan)),
             "scan_oscillation": scan_osc,

@@ -10,6 +10,11 @@ The DIALS bridge can now select rows accepted by `dials.scale` independently of
 the intensity source. `--row-selection scaled` therefore preserves raw
 summation intensities and variances from a `scaled.refl` table while respecting
 documented scaling exclusions; requesting it without scaled rows fails closed.
+New DIALS bridges also record the experiment UUID, actual space-group number,
+and source Miller-index basis. A DIALS cell-metric failure now names the
+offending dataset, prints both cells, and explains when a post-cosym identity
+transform may safely be trusted. The bounded distorted-P1 fallback remains
+specific to native XDS input and is no longer suggested for a DIALS bridge.
 
 HKL-transform candidates now use one internally consistent cell metric. GROND preserves the input `UNIT_CELL_CONSTANTS` as raw provenance, derives the working identity and transformed model-basis cells from the same oriented `UNIT_CELL_[ABC]-AXIS` vectors used by the Ewald geometry, and reports both sources with an explicit basis label. This removes a rounding-dependent identity/nonidentity asymmetry from resolution filtering, Fourier-potential normalization, support construction, and transform scoring. Fourier-potential and row-plan cache schemas were advanced so results created under the former mixed-cell convention cannot be reused.
 

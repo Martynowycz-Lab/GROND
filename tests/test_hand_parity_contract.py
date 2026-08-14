@@ -1465,6 +1465,39 @@ def test_metric_filter_p1_fallback_still_rejects_incompatible_cell(
         )
 
 
+def test_metric_filter_names_dials_dataset_and_does_not_apply_xds_p1_fallback(
+    tmp_path: Path,
+) -> None:
+    model = tmp_path / "p212121.res"
+    hkl = tmp_path / "INTEGRATE.HKL"
+    model.write_text(_p212121_res_with_cell((6.880, 21.080, 5.940)))
+    _write_distorted_p1_xds(
+        hkl,
+        cell=(5.896, 6.957, 21.156, 89.498, 89.712, 89.196),
+    )
+    hkl.write_text(
+        hkl.read_text().replace(
+            "!X-RAY_WAVELENGTH=", "!GROND_SOURCE= DIALS\n!X-RAY_WAVELENGTH=", 1
+        )
+    )
+
+    with pytest.raises(ValueError) as error:
+        metric_filter_signed_axis_transforms(
+            hkl,
+            model,
+            ALL_PROPER_SIGNED_PERMUTATIONS,
+            relative_tolerance=0.02,
+            dataset_label="crystal_07",
+        )
+
+    message = str(error.value)
+    assert "dataset 'crystal_07'" in message
+    assert "DIALS bridge" in message
+    assert "source cell=" in message
+    assert "model cell=" in message
+    assert "--trust-hkl-transform" in message
+
+
 def test_candidate_union_split_keeps_duplicate_symmetry_and_friedel_rows_together() -> None:
     raw = np.asarray(
         [

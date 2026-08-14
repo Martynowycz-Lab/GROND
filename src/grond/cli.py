@@ -6292,6 +6292,7 @@ def choose_transform_by_scout(
         relative_tolerance=float(
             getattr(args, "transform_metric_tolerance", 0.02)
         ),
+        dataset_label=ds.name,
     )
     candidate_generation = _transform_candidate_generation_contract(
         str(args.transform_candidates),
@@ -10621,6 +10622,7 @@ def _fixed_transform_decision_binding(
             relative_tolerance=float(
                 metric_filter_contract.get("relative_frobenius_tolerance")
             ),
+            dataset_label=str(input_identity["dataset"]),
         )
         if (
             recomputed_retained != retained_candidates
