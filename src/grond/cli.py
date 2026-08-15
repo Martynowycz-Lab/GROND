@@ -4385,6 +4385,7 @@ def run_multi_final_row_recompute(
                 pinned=nuisance[ds.name],
                 make_maps=False,
                 endpoint=False,
+                strict_pinned_contract=True,
             ),
             logs,
             f"{ds.name}_final_row_recompute",
@@ -4517,6 +4518,7 @@ def run_multi_shelxl_feedback_loop(
                     pinned=nuisance[ds.name],
                     make_maps=False,
                     endpoint=False,
+                    strict_pinned_contract=True,
                 ),
                 logs,
                 f"{ds.name}_{cycle_label}",
@@ -16181,6 +16183,10 @@ def cmd_validate_ls1(args: argparse.Namespace) -> int:
         str(args.n_points),
         "--shelxl-iterations",
         str(args.shelxl_iterations),
+        "--endpoint-ls-cycles",
+        str(args.endpoint_ls_cycles),
+        "--endpoint-wght-mode",
+        args.endpoint_wght_mode,
         "--shelxl",
         args.shelxl,
         "--workers",
@@ -16762,6 +16768,30 @@ def prep_from_multi_checkpoint(
     return prep, nuisance
 
 
+def override_push_native_weights(
+    nuisance: dict[str, dict],
+    args: argparse.Namespace,
+) -> dict[str, dict]:
+    """Apply an explicit native row-weight contract to a continuation replay.
+
+    This is a diagnostic/recovery control for checkpoints written before the
+    native feedback loop pinned its starting WGHT contract.  The override is
+    deliberately global so every dataset in the shared endpoint loop is
+    evaluated under the same declared row objective.
+    """
+
+    native_wght_a = getattr(args, "native_wght_a", None)
+    native_wght_b = getattr(args, "native_wght_b", None)
+    if native_wght_a is None and native_wght_b is None:
+        return nuisance
+    for block in nuisance.values():
+        if native_wght_a is not None:
+            block["native_wght_a"] = float(native_wght_a)
+        if native_wght_b is not None:
+            block["native_wght_b"] = float(native_wght_b)
+    return nuisance
+
+
 def write_multi_push_endpoint_report(out_dir: Path, *, best_cycle_tolerance: float) -> Path | None:
     """Write a compact safety report for a multi-dataset endpoint-push run."""
 
@@ -16912,6 +16942,7 @@ def cmd_push_endpoint_multi(
         start_model,
         min_d_spacing=float(getattr(args, "min_d_spacing", 0.0) or 0.0),
     )
+    nuisance = override_push_native_weights(nuisance, args)
     args.dataset_row_contracts = resolve_dataset_row_contracts(
         getattr(args, "dataset_row_contract", None), prep.datasets
     )
@@ -19582,6 +19613,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_validate_ls1.add_argument("--n-points", type=int, default=20)
     p_validate_ls1.add_argument("--shelxl", default=default_shelxl_executable())
     p_validate_ls1.add_argument("--shelxl-iterations", type=int, default=1, help="SHELXL iterations per updated-q macrocycle.")
+    p_validate_ls1.add_argument(
+        "--endpoint-ls-cycles",
+        type=int,
+        default=1,
+        help="Diagnostic internal L.S./CGLS cycle count while each Bloch q field is frozen. Production keeps this at 1.",
+    )
+    p_validate_ls1.add_argument(
+        "--endpoint-wght-mode",
+        choices=["freeze-zero", "inherit", "promote"],
+        default="freeze-zero",
+        help="SHELXL endpoint weighting policy used by the validation cycles.",
+    )
     p_validate_ls1.add_argument("--workers", type=int, default=auto_worker_count(0, 0.85))
     p_validate_ls1.add_argument("--chunksize", type=int, default=0)
     p_validate_ls1.add_argument("--compute-backend", choices=["scipy", "scipy_bethe", "scipy_expm", "scipy_expm_multiply", "jax", "jax_auto", "jax_cpu", "jax_mps", "jax_cuda", "jax_padded", "jax_auto_padded", "jax_cpu_padded", "jax_mps_padded", "jax_cuda_padded", "jax_cpu_real_expm", "jax_mps_real_expm", "jax_mps_real_expm_padded"], default="scipy_bethe")
@@ -19654,6 +19697,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_push.add_argument("--shelxl", default=default_shelxl_executable())
     p_push.add_argument("--shelxl-iterations", type=int, default=1, help="SHELXL executable calls per macrocycle.")
     p_push.add_argument("--endpoint-ls-cycles", type=int, default=1, help="Diagnostic internal L.S./CGLS cycle count for each generated endpoint. Production keeps this at 1.")
+    p_push.add_argument(
+        "--native-wght-a",
+        type=float,
+        default=None,
+        help="Override the checkpoint native row-weight a term for every continuation dataset.",
+    )
+    p_push.add_argument(
+        "--native-wght-b",
+        type=float,
+        default=None,
+        help="Override the checkpoint native row-weight b term for every continuation dataset.",
+    )
     p_push.add_argument("--workers", type=int, default=auto_worker_count(0, 0.85))
     p_push.add_argument("--chunksize", type=int, default=4)
     p_push.add_argument("--compute-backend", choices=["scipy", "scipy_bethe", "scipy_expm", "scipy_expm_multiply", "jax", "jax_auto", "jax_cpu", "jax_mps", "jax_cuda", "jax_padded", "jax_auto_padded", "jax_cpu_padded", "jax_mps_padded", "jax_cuda_padded", "jax_cpu_real_expm", "jax_mps_real_expm", "jax_mps_real_expm_padded"], default="scipy")

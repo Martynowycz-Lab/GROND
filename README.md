@@ -38,6 +38,8 @@ After these decisions, GROND writes row-level residuals, corrected reflection fi
 
 The default fast structure-update route is an alternating Bloch/LS1 calculation. GROND freezes the current row-wise correction, performs one conventional least-squares model update, and recalculates the Bloch rows from the updated model. This is a practical surrogate, not exact native dynamical least squares. `GROND validate-ls1` supplies fixed-q, q=1, shuffled-q, alternate-hand, and optional native finite-difference controls for judging that approximation.
 
+The complete `auto` stage order, the switches that disable optional stages, and the corresponding direct commands are documented in [docs/AUTO_WORKFLOW.md](docs/AUTO_WORKFLOW.md).
+
 For several crystals, GROND keeps thickness, geometry, scale, and uncertainty decisions attached to each dataset. Accepted corrected rows are placed on a common post-dynamical scale and merged only at the shared endpoint. The production shared-model loop recalculates every dataset from one model, writes one combined corrected HKL, performs one shared SHELXL update, and returns that model to every dataset. The slower native finite-difference updater remains available as a diagnostic.
 
 ## Install

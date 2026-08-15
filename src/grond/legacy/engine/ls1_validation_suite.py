@@ -57,7 +57,10 @@ def as_feedback_args(args: argparse.Namespace, *, lambda_grid: str, shelxl_itera
         min_peak=args.min_peak,
         geometry_percentile=args.geometry_percentile,
         lambda_grid=lambda_grid,
+        shelxl=str(args.shelxl),
         shelxl_iterations=int(shelxl_iterations),
+        endpoint_ls_cycles=int(args.endpoint_ls_cycles),
+        endpoint_wght_mode=str(args.endpoint_wght_mode),
         post_bloch_sigma_policy=args.post_bloch_sigma_policy,
         post_bloch_sigma_holdout_fraction=args.post_bloch_sigma_holdout_fraction,
         post_bloch_sigma_min_scale=args.post_bloch_sigma_min_scale,
@@ -433,6 +436,8 @@ def main() -> None:
     ap.add_argument("--n-basis", type=int, default=30)
     ap.add_argument("--n-points", type=int, default=20)
     ap.add_argument("--shelxl-iterations", type=int, default=1)
+    ap.add_argument("--endpoint-ls-cycles", type=int, default=1)
+    ap.add_argument("--endpoint-wght-mode", choices=["freeze-zero", "inherit", "promote"], default="freeze-zero")
     ap.add_argument("--shelxl", default=os.environ.get("SHELXL", "shelxl"))
     ap.add_argument("--workers", type=int, default=1)
     ap.add_argument("--chunksize", type=int, default=8)

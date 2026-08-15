@@ -2870,6 +2870,34 @@ def test_push_endpoint_exposes_diagnostic_endpoint_ls_cycles():
     assert args.endpoint_ls_cycles == 20
 
 
+def test_push_endpoint_native_weight_override_is_global_and_explicit():
+    args = build_parser().parse_args(
+        [
+            "push-endpoint",
+            "--source-summary",
+            "summary.json",
+            "--start-res",
+            "model.res",
+            "--out-dir",
+            "out",
+            "--native-wght-a",
+            "0.179443",
+            "--native-wght-b",
+            "0.131843",
+        ]
+    )
+    nuisance = {
+        "a": {"native_wght_a": 0.0, "native_wght_b": 0.0},
+        "b": {"native_wght_a": 0.2, "native_wght_b": 0.3},
+    }
+
+    result = cli.override_push_native_weights(nuisance, args)
+
+    assert result is nuisance
+    assert {block["native_wght_a"] for block in nuisance.values()} == {0.179443}
+    assert {block["native_wght_b"] for block in nuisance.values()} == {0.131843}
+
+
 def test_experimental_row_plan_cache_flags_parse():
     auto = build_parser().parse_args(
         [
@@ -3911,7 +3939,13 @@ def test_multi_shelxl_feedback_recomputes_rows_for_accepted_output_model(tmp_pat
         cli,
         "native_stage_cmd",
         lambda _python, _ds, structure, _baseline, out_dir, _args, **kwargs: captured.append(
-            (str(structure), str(out_dir), kwargs["stage"], kwargs["endpoint"])
+            (
+                str(structure),
+                str(out_dir),
+                kwargs["stage"],
+                kwargs["endpoint"],
+                kwargs.get("strict_pinned_contract", False),
+            )
         )
         or ["native"],
     )
@@ -3938,11 +3972,13 @@ def test_multi_shelxl_feedback_recomputes_rows_for_accepted_output_model(tmp_pat
 
     assert current_model == str(output_model)
     assert labels == ["a_multi_ls1_cycle_01", "multi_ls1_cycle_01_combine", "a_final_row_recompute"]
+    assert captured[0][-1] is True
     assert captured[-1] == (
         str(output_model),
         str(tmp_path / "runs" / "shared_shelxl_feedback" / "final_row_recompute" / "a"),
         "final_row_recompute",
         False,
+        True,
     )
     assert summary["final_row_recompute"]["model"] == str(output_model)
     assert summary["final_row_recompute"]["status"] == "ok"
@@ -3958,7 +3994,13 @@ def test_multi_shelxl_feedback_zero_cycles_can_recompute_rows_without_ls1(tmp_pa
         cli,
         "native_stage_cmd",
         lambda _python, _ds, structure, _baseline, out_dir, _args, **kwargs: captured.append(
-            (str(structure), str(out_dir), kwargs["stage"], kwargs["endpoint"])
+            (
+                str(structure),
+                str(out_dir),
+                kwargs["stage"],
+                kwargs["endpoint"],
+                kwargs.get("strict_pinned_contract", False),
+            )
         )
         or ["native"],
     )
@@ -3990,6 +4032,7 @@ def test_multi_shelxl_feedback_zero_cycles_can_recompute_rows_without_ls1(tmp_pa
             str(tmp_path / "runs" / "shared_shelxl_feedback" / "final_row_recompute" / "a"),
             "final_row_recompute",
             False,
+            True,
         )
     ]
     assert summary["status"] == "ok_recomputed_zero_cycles"
