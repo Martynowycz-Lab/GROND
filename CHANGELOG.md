@@ -14,6 +14,19 @@ profile-fitted input by default. Every output is reparsed, receives an actual
 nonzero `dstarmax`, and is accompanied by source hashes and a complete transform,
 filter, variance, and cell-projection manifest.
 
+PETS exports now have an explicit virtual-frame ownership contract. The default
+`overlap` mode preserves the stock PETS/Jana candidate-frame representation.
+The opt-in `--frame-ownership nearest-excitation` mode assigns every selected
+source observation to exactly one minimum-absolute-excitation-error frame for
+diffBloch refinement and records the complete ownership accounting in the
+manifest. This prevents overlapping virtual frames from being mistaken for
+independent repeat observations without changing the underlying measurement.
+XDS PETS exports now also declare their uncertainty contract. The default
+retains the calibrated XDS-reported sigma after the same PEAK/RLP transform as
+the intensity; `--xds-sigma-mode raw` is an explicit sensitivity mode that
+inverts the declared XDS variance model. The raw-mode nonpositive fallback now
+retains variance on the correct recorded-intensity scale.
+
 `GROND validate-ls1` now exposes and correctly forwards `--endpoint-ls-cycles` and `--endpoint-wght-mode` to every updated-q and fixed-q endpoint calculation. This repairs a diagnostic-only wrapper failure that prevented a controlled comparison of one versus several conventional LS/CGLS cycles under one frozen Bloch correction; production automatic feedback remains at one internal cycle by default. The new auto-workflow guide lists the automatic stage order, optional-stage switches, direct subcommands, and the separate meanings of inner LS cycles, repeated SHELXL calls, and updated-q macrocycles.
 
 Corrected-HKL endpoint maps now pass their weighting mode to `shelx2map` explicitly. The primary Fo, Fo-Fc, and 2Fo-Fc maps use `-w 1`; a raw `-w 0` Fo-Fc map is retained under an unambiguous diagnostic filename. This avoids silently receiving unweighted maps from `shelx2map` builds whose executable default does not match the documented default, while preserving the untouched LIST 6 FCF and the unweighted control for audit.

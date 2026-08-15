@@ -9,8 +9,10 @@ import numpy as np
 import pytest
 
 from grond.io._dials_pets_helper import (
+    _nearest_excitation_owners,
     _read_xds_profile_fitting,
     _xds_correct_acceptance,
+    _xds_recorded_variance,
 )
 from grond.io.pets_export import (
     _validate_and_repair_pets,
@@ -75,6 +77,41 @@ def test_xds_recorded_observation_inverts_documented_correction() -> None:
     assert intensity * 2.0 / 0.8 == pytest.approx(800.0)
 
 
+def test_nearest_excitation_owners_choose_unique_rows_and_deterministic_ties() -> None:
+    owners = _nearest_excitation_owners(
+        [
+            (10, 0.003, 3),
+            (10, 0.001, 7),
+            (20, 0.002, 5),
+            (20, 0.002, 2),
+        ]
+    )
+    assert owners == {10: 7, 20: 2}
+
+
+def test_nearest_excitation_owners_reject_nonfinite_values() -> None:
+    with pytest.raises(ValueError, match="finite and non-negative"):
+        _nearest_excitation_owners([(10, float("nan"), 3)])
+
+
+def test_xds_recorded_variance_reports_or_inverts_calibration() -> None:
+    sigma = np.asarray([10.0, 2.0])
+    factor = np.asarray([0.5, 0.5])
+    intensity = np.asarray([20.0, 20.0])
+    reported, reported_policy, reported_fallback = _xds_recorded_variance(
+        sigma, factor, intensity, [4.0, 0.001], mode="reported"
+    )
+    assert reported.tolist() == pytest.approx([25.0, 1.0])
+    assert "reported" in reported_policy
+    assert reported_fallback == 0
+    raw, raw_policy, raw_fallback = _xds_recorded_variance(
+        sigma, factor, intensity, [4.0, 0.001], mode="raw"
+    )
+    assert raw.tolist() == pytest.approx([5.85, 1.0])
+    assert "inverted" in raw_policy
+    assert raw_fallback == 1
+
+
 def test_pets_validation_repairs_dstarmax(tmp_path: Path) -> None:
     path = tmp_path / "test.cif_pets"
     path.write_text(_pets_text())
@@ -133,6 +170,8 @@ def test_export_pets_writes_manifest_and_hashes(monkeypatch: pytest.MonkeyPatch,
         config_path = Path(command[command.index("--config") + 1])
         result_path = Path(command[command.index("--result") + 1])
         config = json.loads(config_path.read_text())
+        assert config["frame_ownership"] == "nearest-excitation"
+        assert config["xds_sigma_mode"] == "reported"
         output = Path(config["out_dir"]) / "sample.cif_pets"
         output.write_text(_pets_text())
         result_path.write_text(
@@ -153,6 +192,7 @@ def test_export_pets_writes_manifest_and_hashes(monkeypatch: pytest.MonkeyPatch,
         dials_python="python",
         dials_refl=refl,
         dials_expt=expt,
+        frame_ownership="nearest-excitation",
     )
     manifest = json.loads(result.manifest.read_text())
     assert result.files == (out_dir / "sample.cif_pets",)
@@ -160,6 +200,26 @@ def test_export_pets_writes_manifest_and_hashes(monkeypatch: pytest.MonkeyPatch,
     assert manifest["outputs"][0]["rows"] == 2
     assert manifest["source_sha256"][str(refl.resolve())]
     assert result.readme.is_file()
+
+
+def test_export_pets_rejects_unknown_frame_ownership(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="frame-ownership"):
+        export_pets(
+            out_dir=tmp_path,
+            dataset_name="sample",
+            xds_dir=tmp_path,
+            frame_ownership="everywhere",
+        )
+
+
+def test_export_pets_rejects_unknown_xds_sigma_mode(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="xds-sigma-mode"):
+        export_pets(
+            out_dir=tmp_path,
+            dataset_name="sample",
+            xds_dir=tmp_path,
+            xds_sigma_mode="mystery",
+        )
 
 
 def test_export_pets_requires_exactly_one_source(tmp_path: Path) -> None:

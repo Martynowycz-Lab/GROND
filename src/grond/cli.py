@@ -11549,8 +11549,10 @@ def cmd_export_pets(args: argparse.Namespace) -> int:
             intensity=args.intensity,
             row_selection=args.row_selection,
             xds_row_selection=args.xds_row_selection,
+            xds_sigma_mode=args.xds_sigma_mode,
             min_partiality=args.min_partiality,
             excitation_error_cutoff=args.excitation_error_cutoff,
+            frame_ownership=args.frame_ownership,
             n_merged=args.virtual_frame_n_merged,
             step=args.virtual_frame_step,
             scan_varying_cell=args.scan_varying_cell,
@@ -19384,8 +19386,26 @@ def build_parser() -> argparse.ArgumentParser:
         default="correct",
         help="For XDS, retain only rows accepted into unmerged XDS_ASCII.HKL, or all valid INTEGRATE.HKL rows.",
     )
+    p_pets.add_argument(
+        "--xds-sigma-mode",
+        choices=["reported", "raw"],
+        default="reported",
+        help=(
+            "Retain XDS's reported calibrated sigma after PEAK/RLP transformation, or invert "
+            "the declared XDS variance model as a labeled raw-sigma sensitivity export."
+        ),
+    )
     p_pets.add_argument("--min-partiality", type=float, default=0.90)
     p_pets.add_argument("--excitation-error-cutoff", type=float, default=0.04)
+    p_pets.add_argument(
+        "--frame-ownership",
+        choices=["overlap", "nearest-excitation"],
+        default="overlap",
+        help=(
+            "Assign observations to all eligible PETS virtual frames (overlap), or exactly one "
+            "minimum-|Sg| frame (nearest-excitation) for diffBloch refinement."
+        ),
+    )
     p_pets.add_argument("--virtual-frame-n-merged", type=int, default=1)
     p_pets.add_argument("--virtual-frame-step", type=int, default=1)
     p_pets.add_argument(

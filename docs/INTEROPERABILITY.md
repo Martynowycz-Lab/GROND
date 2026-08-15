@@ -60,6 +60,15 @@ derived XDS-to-export basis transform. The transform, determinant, rounding
 error, source hashes, variance handling, and row counts are written to
 `pets_export_manifest.json`.
 
+By default, `--xds-sigma-mode reported` retains XDS's calibrated reported
+uncertainty and applies the same PEAK/RLP linear transformation as the
+intensity. The labeled `--xds-sigma-mode raw` sensitivity option instead
+inverts a declared XDS `VARIANCE_MODEL`, using
+`v0 = v_reported/a - b Irecorded^2`; rows for which that inversion is not
+positive retain the reported recorded-scale variance. The mode, coefficients,
+fallback count, and exact policy are recorded. Do not compare weighted
+residuals across the two sigma contracts as if they used the same likelihood.
+
 ```bash
 grond export-pets \
   --xds-dir /path/to/xds \
@@ -75,6 +84,25 @@ That conversion is an interoperability bridge, not evidence that the two
 integration programs produce interchangeable measurements. The manifest must
 travel with the file. Profile-fitted XDS input is refused unless the diagnostic
 `--allow-profile-fitted-xds` override is given.
+
+## Virtual-frame ownership
+
+The stock PETS convention writes an observation into every eligible virtual
+frame within the excitation-error cutoff. This overlap is retained by default
+for PETS/Jana2020/Dyngo compatibility. It can repeat one integrated observation
+many times in the materialized `cif_pets`, so it must not be treated as
+independent repeated evidence by a downstream optimizer.
+
+For direct diffBloch refinement, add `--frame-ownership nearest-excitation`.
+GROND then assigns each selected source observation to exactly one eligible
+virtual frame: the frame with minimum absolute excitation error, with a
+deterministic lower-frame tie break. The source-row count, candidate occurrence
+count, unique owned count, and removed overlap count are recorded in the
+manifest. This changes only virtual-frame ownership; it does not alter HKL,
+intensity, uncertainty, partiality filtering, or geometry. A fixed-geometry
+calculation should therefore give the same scored observations and predictions
+under either representation. Use the default overlap representation for Jana
+unless that program's import contract explicitly calls for unique ownership.
 
 ## Outputs and validation
 
@@ -92,4 +120,3 @@ diffBloch experiment still needs a structure CIF and its own YAML run settings;
 the exported `cif_pets` file is the `exp_data` input. Jana2020/Dyngo should be
 given the `cif_pets` file together with the manifest and the same indexed
 structure setting.
-

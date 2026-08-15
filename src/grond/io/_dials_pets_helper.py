@@ -126,6 +126,109 @@ def _pets_params(prefix, *, intensity, partiality, excitation_error, n_merged, s
     )
 
 
+def _nearest_excitation_owners(candidates):
+    """Choose one virtual frame per source row with deterministic ties."""
+
+    owners = {}
+    for source_id, absolute_excitation, frame_index in candidates:
+        source_id = int(source_id)
+        absolute_excitation = float(absolute_excitation)
+        frame_index = int(frame_index)
+        if not math.isfinite(absolute_excitation) or absolute_excitation < 0.0:
+            raise ValueError("frame-ownership excitation errors must be finite and non-negative")
+        candidate = (absolute_excitation, frame_index)
+        if source_id not in owners or candidate < owners[source_id]:
+            owners[source_id] = candidate
+    return {source_id: candidate[1] for source_id, candidate in owners.items()}
+
+
+def _xds_recorded_variance(sigma, factor, recorded_intensity, variance_model, *, mode):
+    """Transform XDS sigma to the recorded-intensity scale under an explicit policy."""
+
+    import numpy as np
+
+    reported = np.square(np.asarray(sigma, dtype=float) * np.asarray(factor, dtype=float))
+    if mode == "reported":
+        return reported, "XDS reported sigma transformed by PEAK/RLP", 0
+    if mode != "raw":
+        raise ValueError(f"unknown XDS sigma mode {mode!r}")
+    if not variance_model:
+        return reported, "XDS reported sigma (no VARIANCE_MODEL available to invert)", 0
+    a, b = [float(value) for value in variance_model[:2]]
+    if not math.isfinite(a) or not math.isfinite(b) or a <= 0.0 or b < 0.0:
+        raise ValueError(f"invalid XDS VARIANCE_MODEL values {(a, b)!r}")
+    candidate = reported / a - b * np.square(np.asarray(recorded_intensity, dtype=float))
+    invalid = ~np.isfinite(candidate) | (candidate <= 0.0)
+    fallback_rows = int(np.count_nonzero(invalid))
+    candidate[invalid] = reported[invalid]
+    return (
+        candidate,
+        "XDS variance model inverted: var_raw=var_reported/a-b*I_recorded^2; "
+        "nonpositive rows retain reported recorded-scale variance",
+        fallback_rows,
+    )
+
+
+def _pets_writer(experiments, tables, params, *, frame_ownership):
+    """Build the stock PETS writer or a one-source-row/one-frame variant."""
+
+    from dials.array_family import flex
+    from dials.util.export_pets import PETSOutput
+
+    if frame_ownership == "overlap":
+        return PETSOutput(experiments, tables, params)
+    if frame_ownership != "nearest-excitation":
+        raise ValueError(f"unknown PETS frame ownership mode {frame_ownership!r}")
+
+    class UniqueFramePETSOutput(PETSOutput):
+        def _set_virtual_frames(self):
+            super()._set_virtual_frames()
+            if "grond.source_row_id" not in self.reflections:
+                raise ValueError("nearest-excitation frame ownership requires source-row IDs")
+            from scitbx import matrix
+
+            s0 = matrix.col(self.experiment.beam.get_s0())
+            inv_wl = s0.length()
+            a_matrix = matrix.sqr(self.experiment.crystal.get_A())
+            candidates = []
+            rows_before = 0
+            for frame_index, virtual_frame in enumerate(self.virtual_frames):
+                refs = virtual_frame["reflections"]
+                source_ids = refs["grond.source_row_id"]
+                rows_before += len(source_ids)
+                ub = flex.mat3_double(len(refs), virtual_frame["rotated_misset"] * a_matrix)
+                reciprocal = ub * refs["miller_index"].as_vec3_double()
+                excitation = inv_wl - (reciprocal + s0).norms()
+                if len(source_ids) != len(excitation):
+                    raise ValueError("virtual-frame source IDs and excitation errors differ in length")
+                candidates.extend(
+                    (int(source_id), abs(float(sg)), frame_index)
+                    for source_id, sg in zip(source_ids, excitation)  # noqa: B905
+                )
+            owners = _nearest_excitation_owners(candidates)
+            rows_after = 0
+            for frame_index, virtual_frame in enumerate(self.virtual_frames):
+                refs = virtual_frame["reflections"]
+                keep = flex.bool(
+                    [
+                        owners[int(source_id)] == frame_index
+                        for source_id in refs["grond.source_row_id"]
+                    ]
+                )
+                virtual_frame["reflections"] = refs.select(keep)
+                rows_after += keep.count(True)
+            self.grond_frame_ownership_summary = {
+                "mode": "nearest-excitation",
+                "candidate_occurrences": rows_before,
+                "owned_occurrences": rows_after,
+                "unique_source_rows_owned": len(owners),
+                "duplicate_occurrences_removed": rows_before - rows_after,
+                "distance_basis": "minimum absolute excitation error among eligible virtual frames",
+            }
+
+    return UniqueFramePETSOutput(experiments, tables, params)
+
+
 def _space_group_metadata(crystal):
     space_group = crystal.get_space_group()
     return {
@@ -155,7 +258,6 @@ def _severe_bad_flags(table):
 
 def _export_dials(config):
     from dials.array_family import flex
-    from dials.util.export_pets import PETSOutput
     from dxtbx.model.experiment_list import ExperimentList, ExperimentListFactory
 
     refl_path = Path(config["refl"])
@@ -208,6 +310,7 @@ def _export_dials(config):
         if len(table) == 0:
             raise ValueError(f"DIALS experiment {experiment_id} has no rows after selection")
         table["id"] = flex.int(len(table), 0)
+        table["grond.source_row_id"] = flex.size_t(range(len(table)))
         partiality_rows = int(
             (table["partiality"] >= float(config["min_partiality"])).count(True)
         )
@@ -236,7 +339,13 @@ def _export_dials(config):
             n_merged=config["n_merged"],
             step=config["step"],
         )
-        PETSOutput(one_experiment, [table], params).write_dyn_cif_pets()
+        writer = _pets_writer(
+            one_experiment,
+            [table],
+            params,
+            frame_ownership=str(config.get("frame_ownership", "overlap")),
+        )
+        writer.write_dyn_cif_pets()
         output = {
             "path": str(prefix) + ".cif_pets",
             "experiment_id": experiment_id,
@@ -245,6 +354,11 @@ def _export_dials(config):
             "selected_rows_before_partiality": int(len(table)),
             "source_observations_at_partiality": partiality_rows,
             "static_cell_contract": cell_contract,
+            "frame_ownership": getattr(
+                writer,
+                "grond_frame_ownership_summary",
+                {"mode": "overlap"},
+            ),
         }
         output.update(_space_group_metadata(experiment.crystal))
         outputs.append(output)
@@ -397,7 +511,6 @@ def _xds_correct_acceptance(handle, transformed_hkl, xds_ascii):
 def _export_xds(config):
     import numpy as np
     from dials.array_family import flex
-    from dials.util.export_pets import PETSOutput
     from dxtbx.model.experiment_list import ExperimentList
     from iotbx.xds import integrate_hkl
 
@@ -428,20 +541,13 @@ def _export_xds(config):
     sigma = np.asarray(handle.sigma, dtype=float)
     factor = peak / np.maximum(rlp, 1e-30)
     recorded_i = iobs * factor
-    recorded_var = np.square(sigma * factor)
-    variance_policy = "XDS INTEGRATE sigma transformed by PEAK/RLP"
-    nonpositive_after_undo = 0
-    if getattr(handle, "variance_model", None):
-        a, b = [float(value) for value in handle.variance_model[:2]]
-        candidate = recorded_var / a - b * np.square(recorded_i)
-        invalid = ~np.isfinite(candidate) | (candidate <= 0.0)
-        nonpositive_after_undo = int(np.count_nonzero(invalid))
-        candidate[invalid] = np.square(sigma[invalid])
-        recorded_var = candidate
-        variance_policy = (
-            "DIALS import_xds variance undo: var_raw=var_recorded/a-b*I_recorded^2; "
-            "nonpositive rows fall back to source SIGMA^2"
-        )
+    recorded_var, variance_policy, nonpositive_after_undo = _xds_recorded_variance(
+        sigma,
+        factor,
+        recorded_i,
+        getattr(handle, "variance_model", None),
+        mode=str(config.get("xds_sigma_mode", "reported")),
+    )
 
     keep = (
         np.all(np.isfinite(hkl), axis=1)
@@ -481,6 +587,7 @@ def _export_xds(config):
     table["partiality"] = flex.double(peak[keep].astype(float).tolist())
     table["intensity.sum.value"] = flex.double(recorded_i[keep].astype(float).tolist())
     table["intensity.sum.variance"] = flex.double(recorded_var[keep].astype(float).tolist())
+    table["grond.source_row_id"] = flex.size_t(range(len(table)))
     table.set_flags(flex.bool(len(table), True), table.flags.integrated_sum)
     partiality_rows = int(np.count_nonzero(peak[keep] >= float(config["min_partiality"])))
 
@@ -504,7 +611,13 @@ def _export_xds(config):
         n_merged=config["n_merged"],
         step=config["step"],
     )
-    PETSOutput(one_experiment, [table], params).write_dyn_cif_pets()
+    writer = _pets_writer(
+        one_experiment,
+        [table],
+        params,
+        frame_ownership=str(config.get("frame_ownership", "overlap")),
+    )
+    writer.write_dyn_cif_pets()
     result = {
         "source_kind": "XDS",
         "source_dir": str(xds_dir.resolve()),
@@ -522,9 +635,15 @@ def _export_xds(config):
         "reindex_rounding_error": transform_error,
         "detector_sensor_thickness_workaround": bool(detector_workaround),
         "variance_model": [float(value) for value in getattr(handle, "variance_model", [])],
+        "xds_sigma_mode": str(config.get("xds_sigma_mode", "reported")),
         "variance_policy": variance_policy,
         "variance_undo_nonpositive_fallback_rows": nonpositive_after_undo,
         "observation_convention": "I_recorded=IOBS*(PEAK/100)/RLP; sigma transformed identically",
+        "frame_ownership": getattr(
+            writer,
+            "grond_frame_ownership_summary",
+            {"mode": "overlap"},
+        ),
         "outputs": [{"path": str(prefix) + ".cif_pets"}],
     }
     result.update(_space_group_metadata(experiment.crystal))

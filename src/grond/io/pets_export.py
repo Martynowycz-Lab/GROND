@@ -234,8 +234,10 @@ def export_pets(
     intensity: str = "sum",
     row_selection: str = "integrated",
     xds_row_selection: str = "correct",
+    xds_sigma_mode: str = "reported",
     min_partiality: float = 0.90,
     excitation_error_cutoff: float = 0.04,
+    frame_ownership: str = "overlap",
     n_merged: int = 1,
     step: int = 1,
     scan_varying_cell: str = "project",
@@ -257,6 +259,10 @@ def export_pets(
         raise ValueError("--min-partiality must be in (0, 1]")
     if int(n_merged) < 1 or int(step) < 1:
         raise ValueError("virtual-frame n-merged and step must be positive integers")
+    if frame_ownership not in {"overlap", "nearest-excitation"}:
+        raise ValueError("--frame-ownership must be overlap or nearest-excitation")
+    if xds_sigma_mode not in {"reported", "raw"}:
+        raise ValueError("--xds-sigma-mode must be reported or raw")
     if float(max_cell_length_fraction) < 0.0 or float(max_cell_angle_degrees) < 0.0:
         raise ValueError("scan-varying cell deviation limits must be non-negative")
     if not str(dataset_name).strip() or not re.fullmatch(r"[A-Za-z0-9_.-]+", str(dataset_name)):
@@ -275,9 +281,11 @@ def export_pets(
         "intensity": str(intensity),
         "row_selection": str(row_selection),
         "xds_row_selection": str(xds_row_selection),
+        "xds_sigma_mode": str(xds_sigma_mode),
         "experiment_ids": experiment_ids,
         "min_partiality": float(min_partiality),
         "excitation_error_cutoff": float(excitation_error_cutoff),
+        "frame_ownership": str(frame_ownership),
         "n_merged": int(n_merged),
         "step": int(step),
         "scan_varying_cell": str(scan_varying_cell),
@@ -346,6 +354,10 @@ def export_pets(
             "No Friedel merging or absolute-hand selection is performed by this export.",
             "cif_pets stores one declared cell; any scan-varying DIALS cell projection is explicit in helper_result.",
             "The XDS conversion is an approximate XDS-to-DIALS geometry bridge and must retain its transform ledger.",
+            (
+                "nearest-excitation frame ownership emits each selected source observation once; "
+                "overlap is the stock PETS/Jana candidate-frame convention."
+            ),
         ],
     }
     manifest.write_text(json.dumps(payload, indent=2, allow_nan=False) + "\n")
