@@ -26,6 +26,10 @@ The DIALS route uses matching `integrated.refl` and `integrated.expt` files. GRO
 
 Other integration programs can target the documented `grond-row-v1` CSV, TSV, or JSON Lines contract plus its geometry sidecar. See [Portable inputs and endpoints](docs/PORTABLE_INPUTS_AND_ENDPOINTS.md).
 
+GROND can also export either integration to the shared PETS `cif_pets`
+observation-and-geometry format used by PETS/Jana2020/Dyngo and diffBloch. See
+[PETS and diffBloch interoperability](docs/INTEROPERABILITY.md).
+
 A solved SHELX `RES` or `INS` model with explicit electron scattering coefficients is the normal starting point. `GROND run` also accepts a CIF when it embeds the complete SHELX instruction block needed for model updates. The lower-level Bloch parser can read a coefficient-based CIF only when the file explicitly identifies those coefficients as electron factors. A solved-model HKL file is strongly recommended because it lets GROND settle indexing alignment before spending time on Bloch transform scouts.
 
 ## What a normal run does
@@ -56,7 +60,7 @@ python -m pip install .
 GROND doctor --probe-bloch --strict
 ```
 
-Native Bloch calculations use Python, NumPy, SciPy, and Gemmi. The default small-molecule LS1 endpoint needs a separately installed SHELXL executable. Native dynamical maps are written by `GROND finish` with no external map program; `shelx2map` is optional and is used only for quick corrected-HKL endpoint maps. XDS, XDSCONV, SHELXT, DIALS, and Olex2 are not general GROND runtime requirements.
+Native Bloch calculations use Python, NumPy, SciPy, and Gemmi. The default small-molecule LS1 endpoint needs a separately installed SHELXL executable. Native dynamical maps are written by `GROND finish` with no external map program; `shelx2map` is optional and is used only for quick corrected-HKL endpoint maps. XDS, XDSCONV, SHELXT, DIALS, and Olex2 are not general GROND runtime requirements. A DIALS Python is needed only to import `.refl`/`.expt` observations or to write the optional PETS/Jana/diffBloch interoperability format; the XDS export uses DIALS solely for the PETS coordinate-frame writer.
 
 The complete installation and update instructions are in [docs/INSTALL.md](docs/INSTALL.md).
 
@@ -119,6 +123,7 @@ Start with the [quickstart](docs/QUICKSTART.md), then use the guide that matches
 
 - [XDS workflow](docs/XDS_WORKFLOW.md)
 - [DIALS workflow](docs/DIALS_WORKFLOW.md)
+- [PETS, Jana2020, Dyngo, and diffBloch interoperability](docs/INTEROPERABILITY.md)
 - [Multi-dataset workflow](docs/MULTI_DATASET.md)
 - [Outputs](docs/OUTPUTS.md)
 - [Troubleshooting](docs/TROUBLESHOOTING.md)

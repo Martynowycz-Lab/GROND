@@ -4,6 +4,16 @@ This file records user-visible changes to the installable package. Version `0.2.
 
 ## 0.2.2 (unreleased)
 
+The new `GROND export-pets` command writes audited `cif_pets` files from DIALS
+or summation-only XDS integrations for PETS/Jana2020/Dyngo and diffBloch. DIALS
+exports use its native PETS geometry writer, with an explicit bounded projection
+when a scan-varying cell cannot be represented by the one-cell PETS contract.
+For XDS, GROND inverts the documented `RLP/PEAK` correction, verifies the raw-to-
+CORRECT signed-row mapping and basis transform, and refuses unlabeled or
+profile-fitted input by default. Every output is reparsed, receives an actual
+nonzero `dstarmax`, and is accompanied by source hashes and a complete transform,
+filter, variance, and cell-projection manifest.
+
 `GROND validate-ls1` now exposes and correctly forwards `--endpoint-ls-cycles` and `--endpoint-wght-mode` to every updated-q and fixed-q endpoint calculation. This repairs a diagnostic-only wrapper failure that prevented a controlled comparison of one versus several conventional LS/CGLS cycles under one frozen Bloch correction; production automatic feedback remains at one internal cycle by default. The new auto-workflow guide lists the automatic stage order, optional-stage switches, direct subcommands, and the separate meanings of inner LS cycles, repeated SHELXL calls, and updated-q macrocycles.
 
 Corrected-HKL endpoint maps now pass their weighting mode to `shelx2map` explicitly. The primary Fo, Fo-Fc, and 2Fo-Fc maps use `-w 1`; a raw `-w 0` Fo-Fc map is retained under an unambiguous diagnostic filename. This avoids silently receiving unweighted maps from `shelx2map` builds whose executable default does not match the documented default, while preserving the untouched LIST 6 FCF and the unweighted control for audit.

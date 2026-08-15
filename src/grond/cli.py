@@ -11532,6 +11532,52 @@ def cmd_import_dials(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_export_pets(args: argparse.Namespace) -> int:
+    """Export DIALS or XDS observations to PETS/Jana/diffBloch ``cif_pets``."""
+
+    from .io.pets_export import export_pets
+
+    try:
+        result = export_pets(
+            out_dir=args.out_dir,
+            dataset_name=args.dataset_name,
+            dials_python=args.dials_python,
+            dials_refl=args.dials_refl or None,
+            dials_expt=args.dials_expt or None,
+            xds_dir=args.xds_dir or None,
+            experiment_ids=args.experiment_id,
+            intensity=args.intensity,
+            row_selection=args.row_selection,
+            xds_row_selection=args.xds_row_selection,
+            min_partiality=args.min_partiality,
+            excitation_error_cutoff=args.excitation_error_cutoff,
+            n_merged=args.virtual_frame_n_merged,
+            step=args.virtual_frame_step,
+            scan_varying_cell=args.scan_varying_cell,
+            max_cell_length_fraction=args.max_cell_length_deviation,
+            max_cell_angle_degrees=args.max_cell_angle_deviation,
+            keep_bad_flags=bool(args.keep_bad_flags),
+            allow_profile_fitted_xds=bool(args.allow_profile_fitted_xds),
+            overwrite=bool(args.overwrite),
+        )
+    except (FileNotFoundError, OSError, RuntimeError, ValueError) as exc:
+        print(json.dumps({"status": "error", "error": str(exc)}, indent=2))
+        return 2
+    print(
+        json.dumps(
+            {
+                "status": "complete",
+                "out_dir": str(result.out_dir),
+                "cif_pets": [str(path) for path in result.files],
+                "manifest": str(result.manifest),
+                "readme": str(result.readme),
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
 def _finalize_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argparse.Namespace) -> dict:
     """Write real-run statistics, or describe an intentionally unmaterialized dry run."""
 
@@ -19307,6 +19353,57 @@ def build_parser() -> argparse.ArgumentParser:
     p_dials.add_argument("--dataset-name", default="dials")
     p_dials.add_argument("--prep-out", default="", help="Optional prep JSON output path. Defaults to OUT/grond_prep.json when --structure is supplied.")
     p_dials.set_defaults(func=cmd_import_dials)
+
+    p_pets = sub.add_parser(
+        "export-pets",
+        help="Export DIALS or XDS observations to PETS/Jana2020/Dyngo/diffBloch cif_pets files.",
+    )
+    p_pets.add_argument("--dials-refl", default="", help="DIALS integrated.refl or scaled.refl input.")
+    p_pets.add_argument("--dials-expt", default="", help="DIALS integrated.expt or scaled.expt input.")
+    p_pets.add_argument("--xds-dir", default="", help="XDS directory containing XDS.INP and INTEGRATE.HKL.")
+    p_pets.add_argument("--out-dir", required=True)
+    p_pets.add_argument("--dataset-name", default="dataset")
+    p_pets.add_argument("--dials-python", default="", help="Python executable that can import dials and dxtbx.")
+    p_pets.add_argument(
+        "--experiment-id",
+        action="append",
+        type=int,
+        default=None,
+        help="DIALS experiment-list index to export. Repeat as needed; the default exports all experiments separately.",
+    )
+    p_pets.add_argument("--intensity", choices=["sum", "profile"], default="sum")
+    p_pets.add_argument(
+        "--row-selection",
+        choices=["integrated", "scaled"],
+        default="integrated",
+        help="For DIALS, export integrated rows or only rows accepted by dials.scale while retaining the chosen observation column.",
+    )
+    p_pets.add_argument(
+        "--xds-row-selection",
+        choices=["correct", "integrate"],
+        default="correct",
+        help="For XDS, retain only rows accepted into unmerged XDS_ASCII.HKL, or all valid INTEGRATE.HKL rows.",
+    )
+    p_pets.add_argument("--min-partiality", type=float, default=0.90)
+    p_pets.add_argument("--excitation-error-cutoff", type=float, default=0.04)
+    p_pets.add_argument("--virtual-frame-n-merged", type=int, default=1)
+    p_pets.add_argument("--virtual-frame-step", type=int, default=1)
+    p_pets.add_argument(
+        "--scan-varying-cell",
+        choices=["error", "project"],
+        default="project",
+        help="cif_pets has one cell. Project keeps DIALS U(scan) with the declared static B; error refuses varying-cell input.",
+    )
+    p_pets.add_argument("--max-cell-length-deviation", type=float, default=0.03)
+    p_pets.add_argument("--max-cell-angle-deviation", type=float, default=1.0)
+    p_pets.add_argument("--keep-bad-flags", action="store_true", help="Diagnostic only: keep severe DIALS bad-flag rows.")
+    p_pets.add_argument(
+        "--allow-profile-fitted-xds",
+        action="store_true",
+        help="Diagnostic only: allow XDS input not explicitly produced with PROFILE_FITTING=FALSE.",
+    )
+    p_pets.add_argument("--overwrite", action="store_true")
+    p_pets.set_defaults(func=cmd_export_pets)
 
     p_run = sub.add_parser("run", help="Run fixed-structure Bloch, dynamic regularization, or full auto mode.")
     add_common_run_args(p_run)

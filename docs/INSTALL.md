@@ -14,7 +14,7 @@ GROND is a normal Python package. The recommended installation is a clean Python
 - Optional: a configured custom endpoint if you are deliberately testing a non-default model-update adapter.
 - Optional: a LaTeX engine if you want PDF tables; Markdown and TeX outputs are written without it.
 
-Native row-level Bloch calculations are Python-first. The full default small-molecule endpoint path needs SHELXL. Native dynamical maps need no additional executable. GROND does not run XDS, XDSCONV, SHELXT, DIALS, or Olex2 during an ordinary calculation: it reads already integrated XDS/GROND bridge rows and an already solved model. DIALS Python is needed only while converting a `.refl`/`.expt` pair; after `GROND import-dials` has written the bridge directory, it is no longer needed for that dataset.
+Native row-level Bloch calculations are Python-first. The full default small-molecule endpoint path needs SHELXL. Native dynamical maps need no additional executable. GROND does not run XDS, XDSCONV, SHELXT, DIALS, or Olex2 during an ordinary calculation: it reads already integrated XDS/GROND bridge rows and an already solved model. DIALS Python is needed only while converting a `.refl`/`.expt` pair or while writing the optional PETS/Jana/diffBloch interoperability format; after `GROND import-dials` has written its bridge, DIALS is no longer needed for an ordinary GROND calculation.
 
 ## Fresh Install With venv
 

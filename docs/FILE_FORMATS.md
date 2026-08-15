@@ -75,6 +75,15 @@ When the input is `scaled.refl`, `--row-selection scaled` can retain these raw
 summation values while accepting only rows that DIALS marked as scaled. This is
 independent of `--intensity-mode scale`, which uses the scaled intensity column.
 
+`GROND export-pets` writes a separate interoperability product rather than a
+GROND engine bridge. Its `*.cif_pets` file contains the cell, wavelength, UB,
+virtual-frame geometry, signed observations, and uncertainties used by
+PETS/Jana2020/Dyngo and diffBloch. Every export includes a hash-bound
+`pets_export_manifest.json`. For XDS, the manifest records the exact inverse of
+the documented `RLP/PEAK` correction and the verified mapping from raw
+`INTEGRATE.HKL` rows to the unmerged rows accepted by CORRECT. See
+[INTEROPERABILITY.md](INTEROPERABILITY.md).
+
 For integrations from other software, use the portable row contract documented
 in [PORTABLE_INPUTS_AND_ENDPOINTS.md](PORTABLE_INPUTS_AND_ENDPOINTS.md). The row
 table can be CSV, TSV, or JSON Lines. The smallest useful CSV table looks like

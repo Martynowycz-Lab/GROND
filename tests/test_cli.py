@@ -35,6 +35,7 @@ EXPECTED_CLI_COMMANDS = {
     "create-parity-calibration",
     "doctor",
     "endpoints",
+    "export-pets",
     "export-mtz",
     "finish",
     "forensics",

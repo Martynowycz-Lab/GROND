@@ -1,0 +1,95 @@
+# PETS, Jana2020, Dyngo, and diffBloch interoperability
+
+`GROND export-pets` turns a row-preserving DIALS or XDS integration into the
+`cif_pets` observation-and-geometry contract. PETS/Jana2020/Dyngo use this
+format, and diffBloch reads the same file as its experimental-data input. The
+export does not perform a GROND refinement, merge Friedel mates, or choose an
+absolute hand.
+
+## DIALS
+
+The DIALS route calls the PETS writer shipped with the selected DIALS
+installation. It exports the requested signed `miller_index`, intensity,
+uncertainty, wavelength, UB matrix, and virtual-frame geometry. Summation is
+the default. A `scaled.refl` can be used with `--row-selection scaled` to keep
+only observations accepted by `dials.scale` while still exporting the original
+summation column.
+
+```bash
+grond export-pets \
+  --dials-refl scaled.refl \
+  --dials-expt scaled.expt \
+  --dials-python /path/to/dials.python \
+  --row-selection scaled \
+  --intensity sum \
+  --min-partiality 0.90 \
+  --dataset-name crystal_01 \
+  --out-dir crystal_01_pets
+```
+
+PETS stores one unit cell. Some refined DIALS experiments carry a
+scan-varying cell as well as a scan-varying orientation. The default bounded
+projection retains `U(scan)` and replaces `B(scan)` by the one declared static
+cell, recording the source range and maximum cell variation in the manifest.
+It refuses a length change above 3% or an angle change above 1 degree. Use
+`--scan-varying-cell error` to require a strictly representable experiment, or
+change a limit explicitly when the approximation has been independently
+justified.
+
+## XDS
+
+XDS does not need to be rerun with a hidden “Lorentz off” switch. The documented
+`INTEGRATE.HKL` relationship is
+
+```text
+IOBS = Irecorded * RLP / (PEAK / 100)
+```
+
+so GROND reconstructs the recorded observation and its linearly transformed
+uncertainty using
+
+```text
+Irecorded = IOBS * (PEAK / 100) / RLP.
+```
+
+For an unambiguous summation export, `XDS.INP` or `INTEGRATE.HKL` must declare
+`PROFILE_FITTING=FALSE`. The default `--xds-row-selection correct` then binds
+the raw INTEGRATE observations to the rows accepted into unmerged
+`XDS_ASCII.HKL`. Position and signed HKL must both match exactly after the
+derived XDS-to-export basis transform. The transform, determinant, rounding
+error, source hashes, variance handling, and row counts are written to
+`pets_export_manifest.json`.
+
+```bash
+grond export-pets \
+  --xds-dir /path/to/xds \
+  --dials-python /path/to/dials.python \
+  --xds-row-selection correct \
+  --min-partiality 0.90 \
+  --dataset-name crystal_01 \
+  --out-dir crystal_01_pets
+```
+
+The XDS route uses DIALS to express XDS geometry in the PETS coordinate frame.
+That conversion is an interoperability bridge, not evidence that the two
+integration programs produce interchangeable measurements. The manifest must
+travel with the file. Profile-fitted XDS input is refused unless the diagnostic
+`--allow-profile-fitted-xds` override is given.
+
+## Outputs and validation
+
+The output directory contains one `*.cif_pets` file per selected experiment,
+`pets_export_manifest.json`, and a short `README.md`. GROND parses every cell,
+wavelength, UB matrix, zone-axis identifier, signed reflection, intensity, and
+positive uncertainty after export. It also replaces the zero `dstarmax` emitted
+by the DIALS PETS writer with the actual maximum reciprocal spacing in the
+materialized rows. This makes the file usable by diffBloch's input and
+convergence checks without changing any observation.
+
+For a multi-experiment DIALS pair, omit `--experiment-id` to write all
+experiments separately, or repeat `--experiment-id N` to select a subset. A
+diffBloch experiment still needs a structure CIF and its own YAML run settings;
+the exported `cif_pets` file is the `exp_data` input. Jana2020/Dyngo should be
+given the `cif_pets` file together with the manifest and the same indexed
+structure setting.
+
