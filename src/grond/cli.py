@@ -2232,6 +2232,7 @@ def native_stage_cmd(
     strict_pinned_contract: bool = False,
     allow_pinned_jitter_fallback: bool = True,
     promotion_baseline: Mapping[str, object] | None = None,
+    paired_inverse_hand: bool = False,
 ) -> list[str]:
     """Build one native nuisance-regularization command for the vendored engine."""
 
@@ -2464,6 +2465,8 @@ def native_stage_cmd(
         cmd += ["--split-contract", str(ds.split_contract)]
     if alternate_hand:
         cmd.append("--alternate-hand")
+    if paired_inverse_hand:
+        cmd.append("--paired-inverse-hand")
     if make_maps and endpoint_ok:
         cmd.append("--make-maps")
     if not endpoint_ok:
@@ -7111,6 +7114,9 @@ def _args_with_recorded_native_contract(
         "sg_window_max",
         "sg_window_scale",
         "sg_window_frame_floor",
+        "sg_jitter_student_df",
+        "sg_jitter_width_factor",
+        "mosaicity_max_sigma_deg",
         "profile_quadrature",
         "profile_accumulation",
         "topup_d_min",
@@ -11575,6 +11581,437 @@ def cmd_export_pets(args: argparse.Namespace) -> int:
                 "readme": str(result.readme),
             },
             indent=2,
+        )
+    )
+    return 0
+
+
+def _fill_common_run_defaults(args: argparse.Namespace) -> argparse.Namespace:
+    """Fill hidden run defaults for focused expert-stage subcommands."""
+
+    parser = argparse.ArgumentParser(add_help=False)
+    add_common_run_args(parser, expose_lambda_controls=False)
+    defaults = parser.parse_args(["--out-dir", str(args.out_dir)])
+    for key, value in vars(defaults).items():
+        if not hasattr(args, key):
+            setattr(args, key, value)
+    return args
+
+
+def cmd_scout(args: argparse.Namespace) -> int:
+    """Run only preflight and coordinate-hand-invariant HKL transform scouting."""
+
+    _fill_common_run_defaults(args)
+    args.out_dir = str(Path(args.out_dir).expanduser().resolve())
+    root = Path(args.out_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    logs = root / "logs"
+    python = choose_python(args.python)
+    prep = prep_from_args(args)
+    args.workers = auto_worker_count(args.workers, args.max_core_fraction)
+    args.chunksize = auto_chunksize(args.chunksize, args.workers)
+    write_prep(root / "source_prep.json", prep)
+    original_structure = prep.structure
+    prep.structure, structure_prep = prepare_structure_for_legacy(prep.structure, root)
+    sfac_check = check_sfac_contract(prep.structure)
+    (root / "sfac_check.json").write_text(json.dumps(sfac_check, indent=2) + "\n")
+    if not sfac_check.get("ok", False):
+        errors = "; ".join(
+            str(item.get("message", ""))
+            for item in sfac_check.get("messages", [])
+            if item.get("severity") == "error"
+        )
+        raise SystemExit(
+            "GROND model SFAC check failed before transform scouting. "
+            + (errors or "See sfac_check.json for details.")
+        )
+    prep.metadata = dict(prep.metadata or {})
+    if structure_prep.get("prepared"):
+        prep.metadata["original_structure"] = original_structure
+        prep.metadata["structure_preparation"] = structure_prep
+    write_prep(root / "input_prep.json", prep)
+    configure_progress(
+        logs,
+        resume=bool(args.resume),
+        total=max(1, len(prep.datasets) * max(1, len(ALL_PROPER_SIGNED_PERMUTATIONS))),
+    )
+    selected: list[DatasetSpec] = []
+    records: dict[str, object] = {}
+    for source in prep.datasets:
+        preflight = preflight_dataset(
+            source,
+            requested_min_peak=source.min_peak,
+            requested_geometry_percentile=source.geometry_percentile,
+            requested_scout_rows=args.scout_max_rows,
+        )
+        write_json(root / "decisions" / source.name / "preflight.json", preflight)
+        if preflight.status == "fatal":
+            raise RuntimeError(
+                f"fatal preflight failure for {source.name}: {preflight.warnings}"
+            )
+        prepared = apply_preflight(source, preflight)
+        scout_rows = (
+            preflight.scout_max_rows
+            if preflight.scout_max_rows > 0
+            else int(args.scout_max_rows)
+        )
+        decided, decision = choose_transform_by_scout(
+            prep,
+            prepared,
+            args,
+            python,
+            logs,
+            root,
+            scout_max_rows=scout_rows,
+        )
+        selected.append(decided)
+        records[source.name] = {
+            "preflight": str(
+                (root / "decisions" / source.name / "preflight.json").resolve()
+            ),
+            "decision": str(
+                (root / "decisions" / source.name / "transform_decision.json").resolve()
+            ),
+            "selected_transform": decided.hkl_transform,
+            "selected_transform_claim_contract": decision.get(
+                "selected_transform_claim_contract"
+            ),
+        }
+    scouted = PrepConfig(
+        structure=prep.structure,
+        datasets=selected,
+        baseline_hkl=prep.baseline_hkl,
+        notes=prep.notes,
+        default_hkl_transform=prep.default_hkl_transform,
+        geometry_percentile=prep.geometry_percentile,
+        parity_setup_id=prep.parity_setup_id,
+        parity_setup_manifest_sha256=prep.parity_setup_manifest_sha256,
+        metadata={
+            **dict(prep.metadata or {}),
+            "scouted_from": str((root / "input_prep.json").resolve()),
+            "scout_root": str(root.resolve()),
+        },
+    )
+    scouted_path = root / "scouted_prep.json"
+    write_prep(scouted_path, scouted)
+    handoff = {
+        "schema_version": 1,
+        "kind": "grond_expert_transform_handoff",
+        "status": "dry_run" if args.dry_run else "ready",
+        "input_prep": str((root / "input_prep.json").resolve()),
+        "source_prep": str((root / "source_prep.json").resolve()),
+        "original_structure": original_structure,
+        "scout_structure": prep.structure,
+        "structure_preparation": structure_prep,
+        "sfac_check": str((root / "sfac_check.json").resolve()),
+        "output_prep": str(scouted_path.resolve()),
+        "datasets": records,
+        "known_configuration_used": False,
+        "next": {
+            "thickness": (
+                f"grond thickness --prep {shlex.quote(str(scouted_path.resolve()))} "
+                f"--out-dir {shlex.quote(str((root / '02_thickness').resolve()))}"
+            ),
+            "fixed_model": (
+                f"grond run --prep {shlex.quote(str(scouted_path.resolve()))} "
+                f"--out-dir {shlex.quote(str((root / '03_fixed_model').resolve()))} "
+                "--mode bloch --no-auto-decide --no-hand-control --no-maps --native-only"
+            ),
+        },
+    }
+    handoff_path = root / "scout_handoff.json"
+    handoff_path.write_text(json.dumps(handoff, indent=2) + "\n")
+    print(
+        json.dumps(
+            {
+                "status": handoff["status"],
+                "scouted_prep": str(scouted_path.resolve()),
+                "handoff": str(handoff_path.resolve()),
+                "selected_transforms": {
+                    dataset.name: dataset.hkl_transform for dataset in selected
+                },
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
+def _source_summary_hand_dataset(
+    source_summary: Path,
+) -> tuple[dict, DatasetSpec, str, str, dict]:
+    """Resolve one immutable native-row summary into a hand-check contract."""
+
+    summary = read_json(source_summary)
+    inputs = summary.get("inputs") if isinstance(summary.get("inputs"), Mapping) else {}
+    config = summary.get("config") if isinstance(summary.get("config"), Mapping) else {}
+    best = summary.get("best_native") if isinstance(summary.get("best_native"), Mapping) else {}
+    nuisance = best.get("nuisance") if isinstance(best.get("nuisance"), Mapping) else {}
+    hkl = str(inputs.get("hkl") or "").strip()
+    structure = str(inputs.get("res") or "").strip()
+    row_table = str((summary.get("artifacts") or {}).get("native_row_table") or "").strip()
+    if not hkl or not Path(hkl).is_file():
+        raise SystemExit(f"Source summary does not bind a readable HKL file: {source_summary}")
+    if not structure or not Path(structure).is_file():
+        raise SystemExit(f"Source summary does not bind a readable model: {source_summary}")
+    if not row_table or not Path(row_table).is_file():
+        fallback = source_summary.parent / "native_dyn_calc.csv"
+        if not fallback.is_file():
+            raise SystemExit(
+                f"Source summary does not bind a readable native row table: {source_summary}"
+            )
+        row_table = str(fallback.resolve())
+    raw_name = str(config.get("dataset_name") or source_summary.parent.parent.name or "dataset")
+    name = re.sub(r"[^A-Za-z0-9._-]+", "_", raw_name).strip("_")[:64] or "dataset"
+    dataset = DatasetSpec(
+        name=name,
+        hkl=str(Path(hkl).resolve()),
+        xds_dir=str(Path(hkl).resolve().parent),
+        baseline_hkl=str(inputs.get("baseline_hkl") or ""),
+        hkl_transform=str(inputs.get("hkl_transform") or "identity"),
+        min_d_spacing=float(config.get("min_d_spacing") or 0.70),
+        min_peak=float(config.get("min_peak") or 0.0),
+        target_mode=str(config.get("target_mode") or "iobs"),
+        include_nonpositive=not bool(config.get("positive_only", True)),
+        geometry_percentile=float(config.get("geometry_percentile") or 100.0),
+        split_contract=str(config.get("split_contract") or ""),
+    )
+    return summary, dataset, structure, row_table, dict(nuisance)
+
+
+def _apply_source_physics_to_hand_args(
+    args: argparse.Namespace,
+    source_config: Mapping[str, object],
+) -> None:
+    """Replay the exact source row-physics settings needed by hand checking."""
+
+    keys = (
+        "sg_window",
+        "sg_window_mode",
+        "sg_window_min",
+        "sg_window_max",
+        "sg_window_scale",
+        "sg_window_frame_floor",
+        "profile_coordinate",
+        "profile_angle_max_half_width_deg",
+        "profile_quadrature",
+        "profile_accumulation",
+        "topup_d_min",
+        "max_support_sg",
+        "free_fraction",
+        "split_seed",
+        "matrix_convention",
+        "thickness_points",
+    )
+    for key in keys:
+        if key in source_config and hasattr(args, key):
+            setattr(args, key, source_config[key])
+    args.compute_backend = "scipy"
+    args.fast = False
+    args.native_only = True
+    args.make_maps = False
+    args.production_scales = str(source_config.get("scale_fit_split") or "work") == "all"
+
+
+def cmd_hand_check(args: argparse.Namespace) -> int:
+    """Run a fixed-nuisance matched hand check from one completed native stage."""
+
+    _fill_common_run_defaults(args)
+    source_path = Path(args.source_summary).expanduser().resolve()
+    summary, dataset, structure, row_table, nuisance = _source_summary_hand_dataset(
+        source_path
+    )
+    source_config = summary.get("config") if isinstance(summary.get("config"), Mapping) else {}
+    _apply_source_physics_to_hand_args(args, source_config)
+    out = Path(args.out_dir).expanduser().resolve()
+    args.out_dir = str(out)
+    out.mkdir(parents=True, exist_ok=True)
+    logs = out / "logs"
+    python = choose_python(args.python)
+    args.workers = auto_worker_count(args.workers, args.max_core_fraction)
+    args.chunksize = auto_chunksize(args.chunksize, args.workers)
+    args.dataset_row_contracts = {dataset.name: row_table}
+    n_basis = int(args.hand_check_n_basis or source_config.get("n_basis") or 20)
+    n_points = int(args.hand_check_n_points or source_config.get("n_points") or 10)
+    inverse_structure = make_alternate_hand_model(
+        python,
+        structure,
+        out / "inverse_model",
+        logs,
+        bool(args.dry_run),
+    )
+    elastic_nuisance = dict(nuisance)
+    source_absorption = {
+        key: elastic_nuisance.get(key)
+        for key in (
+            "absorption_mode",
+            "absorption_mu",
+            "absorption_frac",
+            "absorption_mu_g2",
+            "absorption_mu_theta2",
+            "absorption_tds_b",
+        )
+    }
+    source_absorption_active = (
+        str(source_absorption.get("absorption_mode") or "none").lower() != "none"
+        or any(
+            abs(float(source_absorption.get(key) or 0.0)) > 0.0
+            for key in (
+                "absorption_mu",
+                "absorption_frac",
+                "absorption_mu_g2",
+                "absorption_mu_theta2",
+                "absorption_tds_b",
+            )
+        )
+    )
+    elastic_only = (
+        args.hand_check_method == "negative-thickness"
+        or args.hand_check_absorption == "elastic"
+    )
+    if args.hand_check_method == "negative-thickness" and args.hand_check_absorption == "preserve":
+        raise SystemExit(
+            "negative-thickness hand checking is exact only for the elastic Bloch "
+            "Hamiltonian. Use --hand-check-absorption elastic, or choose "
+            "--hand-check-method explicit to preserve absorption."
+        )
+    if elastic_only:
+        elastic_nuisance.update(
+            {
+                "absorption_mode": "none",
+                "absorption_mu": 0.0,
+                "absorption_frac": 0.0,
+                "absorption_mu_g2": 0.0,
+                "absorption_mu_theta2": 0.0,
+                "absorption_tds_b": 0.0,
+            }
+        )
+    selected_run = out / "selected"
+    selected_cmd = native_stage_cmd(
+        python,
+        dataset,
+        structure,
+        dataset.baseline_hkl,
+        selected_run,
+        args,
+        n_basis=n_basis,
+        n_points=n_points,
+        stage="expert_hand_selected",
+        pinned=elastic_nuisance,
+        make_maps=False,
+        endpoint=False,
+        strict_pinned_contract=True,
+        allow_pinned_jitter_fallback=False,
+        scale_fit_split_override=str(source_config.get("scale_fit_split") or "work"),
+        paired_inverse_hand=args.hand_check_method == "negative-thickness",
+    )
+    run_logged(selected_cmd, logs, "expert_hand_selected", dry_run=args.dry_run)
+    if args.hand_check_method == "negative-thickness":
+        other_table = selected_run / "native_inverse_hand_dyn_calc.csv"
+        other_run = selected_run
+    else:
+        other_run = out / "inverse"
+        other_cmd = native_stage_cmd(
+            python,
+            dataset,
+            structure,
+            dataset.baseline_hkl,
+            other_run,
+            args,
+            n_basis=n_basis,
+            n_points=n_points,
+            stage="expert_hand_inverse_explicit",
+            pinned=elastic_nuisance,
+            alternate_hand=True,
+            make_maps=False,
+            endpoint=False,
+            strict_pinned_contract=True,
+            allow_pinned_jitter_fallback=False,
+            scale_fit_split_override=str(source_config.get("scale_fit_split") or "work"),
+        )
+        run_logged(
+            other_cmd,
+            logs,
+            "expert_hand_inverse_explicit",
+            dry_run=args.dry_run,
+        )
+        other_table = other_run / "native_dyn_calc.csv"
+    diagnostic = out / "absolute_structure_diagnostic.json"
+    run_logged(
+        [
+            python,
+            str(engine_script("absolute_structure_diagnostic.py")),
+            "--best",
+            str(selected_run / "native_dyn_calc.csv"),
+            "--other",
+            str(other_table),
+            "--out",
+            str(diagnostic),
+        ],
+        logs,
+        "expert_absolute_structure_diagnostic",
+        dry_run=args.dry_run,
+    )
+    manifest = {
+        "schema_version": 1,
+        "kind": "grond_expert_hand_handoff",
+        "status": "dry_run" if args.dry_run else "ready",
+        "method": args.hand_check_method,
+        "source_summary": str(source_path),
+        "source_summary_sha256": sha256_file(source_path),
+        "source_row_table": row_table,
+        "source_row_table_sha256": sha256_file(Path(row_table)),
+        "model": structure,
+        "model_sha256": sha256_file(Path(structure)),
+        "inverse_model": str(inverse_structure.resolve()),
+        "inverse_model_sha256": (
+            sha256_file(inverse_structure) if inverse_structure.is_file() else ""
+        ),
+        "hkl": dataset.hkl,
+        "hkl_sha256": sha256_file(Path(dataset.hkl)),
+        "hkl_transform": dataset.hkl_transform,
+        "n_basis": n_basis,
+        "n_points": n_points,
+        "source_absorption": source_absorption,
+        "hand_check_absorption": (
+            "disabled_for_matched_elastic_hand_contract"
+            if elastic_only
+            else "preserved_from_source_nuisance"
+        ),
+        "source_absorption_changed": bool(elastic_only and source_absorption_active),
+        "known_configuration_used": False,
+        "same_transform_rows_split_and_nonabsorptive_nuisance": True,
+        "selected_row_table": str((selected_run / "native_dyn_calc.csv").resolve()),
+        "other_row_table": str(other_table.resolve()),
+        "diagnostic": str(diagnostic.resolve()),
+        "next": {
+            "refine_input_hand": (
+                f"grond refine --source-summary {shlex.quote(str(source_path))} "
+                f"--start-res {shlex.quote(structure)} --out-dir "
+                f"{shlex.quote(str((out / 'refine_input_hand').resolve()))}"
+            ),
+            "refine_inverse_hand": (
+                f"grond refine --source-summary {shlex.quote(str(source_path))} "
+                f"--start-res {shlex.quote(str(inverse_structure.resolve()))} --out-dir "
+                f"{shlex.quote(str((out / 'refine_inverse_hand').resolve()))}"
+            ),
+        },
+    }
+    manifest_path = out / "hand_handoff.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+    payload = try_read_json(diagnostic)
+    print(
+        json.dumps(
+            {
+                "status": manifest["status"],
+                "method": args.hand_check_method,
+                "diagnostic": str(diagnostic.resolve()),
+                "handoff": str(manifest_path.resolve()),
+                "all": payload.get("all"),
+                "free": payload.get("free"),
+            },
+            indent=2,
+            allow_nan=True,
         )
     )
     return 0
@@ -18664,8 +19101,55 @@ def cmd_thickness_scout(args: argparse.Namespace) -> int:
     _write_csv(out_dir / "thickness_scout_trials.csv", trial_rows)
     _write_csv(out_dir / "q_field_stability.csv", q_rows)
     (out_dir / "thickness_scout_summary.json").write_text(json.dumps(summary, indent=2, allow_nan=True) + "\n")
+    selected_by_dataset: dict[str, dict[str, object]] = {}
+    for row in rows:
+        dataset_name = str(row.get("dataset") or "dataset")
+        if dataset_name not in selected_by_dataset and row.get("status") == "ok":
+            selected_by_dataset[dataset_name] = row
+    thickness_handoff = {
+        "schema_version": 1,
+        "kind": "grond_expert_thickness_handoff",
+        "status": "dry_run" if args.dry_run else "ready",
+        "source_prep": str((out_dir / "thickness_scout_prep.json").resolve()),
+        "summary": str((out_dir / "thickness_scout_summary.json").resolve()),
+        "selection_policy": (
+            "first successful production-order contract per dataset; inspect the full "
+            "table before accepting a different sensitivity branch"
+        ),
+        "datasets": {},
+    }
+    for dataset_name, row in selected_by_dataset.items():
+        run_dir = Path(str(row.get("run_dir") or "")).expanduser().resolve()
+        source_summary = run_dir / "summary.json"
+        hand_out = out_dir / "03_hand" / dataset_name
+        thickness_handoff["datasets"][dataset_name] = {
+            "selected_run": str(run_dir),
+            "selected_summary": str(source_summary),
+            "selected_n_basis": row.get("n_basis"),
+            "selected_n_points": row.get("n_points"),
+            "selected_thickness_A": row.get("thickness_A"),
+            "selected_thickness_grad_frac": row.get("thickness_grad_frac"),
+            "next_hand_check": (
+                f"grond hand-check --source-summary {shlex.quote(str(source_summary))} "
+                f"--out-dir {shlex.quote(str(hand_out.resolve()))}"
+            ),
+        }
+    (out_dir / "thickness_handoff.json").write_text(
+        json.dumps(thickness_handoff, indent=2, allow_nan=True) + "\n"
+    )
     _write_thickness_scout_report(out_dir, summary)
-    print(json.dumps({"out_dir": str(out_dir), "report": str((out_dir / "REPORT.md").resolve()), "warnings": warnings}, indent=2, allow_nan=True))
+    print(
+        json.dumps(
+            {
+                "out_dir": str(out_dir),
+                "report": str((out_dir / "REPORT.md").resolve()),
+                "handoff": str((out_dir / "thickness_handoff.json").resolve()),
+                "warnings": warnings,
+            },
+            indent=2,
+            allow_nan=True,
+        )
+    )
     return 0
 
 
@@ -19425,6 +19909,115 @@ def build_parser() -> argparse.ArgumentParser:
     p_pets.add_argument("--overwrite", action="store_true")
     p_pets.set_defaults(func=cmd_export_pets)
 
+    p_scout = sub.add_parser(
+        "scout",
+        help="Run only preflight and hand-invariant proper HKL transform selection.",
+    )
+    p_scout.add_argument("--prep", required=True, help="Prep JSON written by GROND prep/import-dials.")
+    p_scout.add_argument("--out-dir", required=True)
+    p_scout.add_argument("--python", default="")
+    add_tool_config_args(p_scout)
+    p_scout.add_argument("--dry-run", action="store_true")
+    p_scout.add_argument("--resume", action=argparse.BooleanOptionalAction, default=True)
+    p_scout.add_argument("--workers", type=int, default=0)
+    p_scout.add_argument("--max-core-fraction", type=float, default=0.85)
+    p_scout.add_argument("--chunksize", type=int, default=0)
+    p_scout.add_argument("--scout-max-rows", type=int, default=1000)
+    p_scout.add_argument("--scout-n-basis", type=int, default=8)
+    p_scout.add_argument("--scout-n-points", type=int, default=3)
+    p_scout.add_argument("--transform-rerank-top", type=int, default=3)
+    p_scout.add_argument("--transform-rerank-n-basis", type=int, default=24)
+    p_scout.add_argument("--transform-rerank-n-points", type=int, default=10)
+    p_scout.add_argument("--transform-rerank-max-rows", type=int, default=0)
+    p_scout.add_argument("--transform-candidates", default="auto")
+    p_scout.add_argument("--transform-metric-tolerance", type=float, default=0.02)
+    p_scout.add_argument(
+        "--transform-parity-policy",
+        choices=["proper-only", "all-diagnostic"],
+        default="proper-only",
+    )
+    p_scout.add_argument("--transform-scout-jobs", type=int, default=0)
+    p_scout.add_argument("--transform-scout-workers-per-job", type=int, default=1)
+    p_scout.add_argument(
+        "--transform-metadata-prefilter",
+        choices=["auto", "on", "off"],
+        default="auto",
+    )
+    p_scout.add_argument("--transform-metadata-max-candidates", type=int, default=3)
+    p_scout.add_argument("--transform-metadata-min-pairs", type=int, default=100)
+    p_scout.add_argument("--transform-metadata-min-correlation", type=float, default=0.70)
+    p_scout.add_argument("--transform-metadata-min-correlation-gap", type=float, default=0.05)
+    p_scout.add_argument("--transform-metadata-max-rows", type=int, default=0)
+    p_scout.add_argument(
+        "--trust-hkl-transform",
+        action="store_true",
+        help="Skip scouting and freeze the proper transform already recorded in the prep file.",
+    )
+    p_scout.set_defaults(func=cmd_scout)
+
+    p_hand = sub.add_parser(
+        "hand-check",
+        help=(
+            "Run a matched fixed-nuisance hand comparison from a completed native summary. "
+            "The default elastic negative-thickness method shares each eigendecomposition."
+        ),
+    )
+    p_hand.add_argument("--out-dir", required=True)
+    p_hand.add_argument("--python", default="")
+    add_tool_config_args(p_hand)
+    p_hand.add_argument("--dry-run", action="store_true")
+    p_hand.add_argument("--resume", action=argparse.BooleanOptionalAction, default=True)
+    p_hand.add_argument("--workers", type=int, default=0)
+    p_hand.add_argument("--max-core-fraction", type=float, default=0.85)
+    p_hand.add_argument("--chunksize", type=int, default=0)
+    p_hand.add_argument(
+        "--row-plan-cache",
+        choices=["off", "readwrite", "rebuild"],
+        default="off",
+    )
+    p_hand.add_argument(
+        "--prediction-cache-compression",
+        choices=["compressed", "none"],
+        default="none",
+    )
+    p_hand.add_argument(
+        "--source-summary",
+        required=True,
+        help="summary.json from a completed fixed-model or final native row stage.",
+    )
+    p_hand.add_argument(
+        "--hand-check-method",
+        choices=["negative-thickness", "explicit"],
+        default="negative-thickness",
+        help=(
+            "negative-thickness disables absorption and evaluates both hands from one elastic "
+            "eigensystem; explicit rebuilds the coordinate-inverted model and can preserve absorption."
+        ),
+    )
+    p_hand.add_argument(
+        "--hand-check-absorption",
+        choices=["elastic", "preserve"],
+        default="elastic",
+        help=(
+            "elastic disables absorptive terms in both hands and is required by the "
+            "negative-thickness identity. preserve is available only with explicit "
+            "coordinate inversion."
+        ),
+    )
+    p_hand.add_argument(
+        "--hand-check-n-basis",
+        type=int,
+        default=0,
+        help="Override the source N value. Zero reuses the exact source value.",
+    )
+    p_hand.add_argument(
+        "--hand-check-n-points",
+        type=int,
+        default=0,
+        help="Override the source Q value. Zero reuses the exact source value.",
+    )
+    p_hand.set_defaults(func=cmd_hand_check)
+
     p_run = sub.add_parser("run", help="Run fixed-structure Bloch, dynamic regularization, or full auto mode.")
     add_common_run_args(p_run)
     p_run.set_defaults(func=cmd_run)
@@ -19682,7 +20275,11 @@ def build_parser() -> argparse.ArgumentParser:
         p_target_ablation.add_argument("--extra-auto-args", default="", help="Advanced: quoted argument string appended to every inner auto command.")
         p_target_ablation.set_defaults(func=cmd_target_ablation)
 
-    p_thick = sub.add_parser("thickness-scout", help="Audit effective thickness sensitivity to row contract, scale model, and accepted nuisance terms.")
+    p_thick = sub.add_parser(
+        "thickness-scout",
+        aliases=["thickness"],
+        help="Audit effective thickness sensitivity to row contract, scale model, and accepted nuisance terms.",
+    )
     add_common_run_args(p_thick, expose_lambda_controls=False)
     p_thick.set_defaults(mode="regularize", n_points=10)
     p_thick.add_argument("--n-basis-grid", default="24,48", help="Comma grid of basis sizes. The first value uses the broad grid; later values use a local confirmation grid by default.")
@@ -19781,7 +20378,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_validate_ls1.add_argument("--native-polish-free-wR2-tolerance", type=float, default=0.02)
     p_validate_ls1.set_defaults(func=cmd_validate_ls1)
 
-    p_push = sub.add_parser("push-endpoint", help="Continue a pinned GROND endpoint from an existing summary and start model.")
+    p_push = sub.add_parser(
+        "push-endpoint",
+        aliases=["refine"],
+        help="Continue a pinned GROND endpoint from an existing summary and start model.",
+    )
     p_push.add_argument("--checkpoint", default="", help="grond_continue_checkpoint.json from a completed auto run.")
     p_push.add_argument("--source-summary", default="", help="Existing native_row_regularize summary whose selected nuisance values should be pinned.")
     p_push.add_argument("--start-res", default="", help="Starting RES model to continue from. Overrides the checkpoint model when provided.")

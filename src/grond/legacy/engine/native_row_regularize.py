@@ -1317,11 +1317,15 @@ def apply_q_control(data: XDSData, dyn: np.ndarray, born: np.ndarray, valid, gro
 
 def evaluate_trial(data, target, base_sig, pred, indices, masks, nui: Nuisance, wght_a, wght_b, scale_fit_split: str = "work", q_control_args=None):
     dyn = np.full(len(target), np.nan, dtype=float)
+    dyn_inverse = np.full(len(target), np.nan, dtype=float)
     born = np.full(len(target), np.nan, dtype=float)
     basis_size = np.zeros(len(target), dtype=int)
     dyn[pred["indices"]] = pred["dyn"]
+    if "dyn_inverse" in pred:
+        dyn_inverse[pred["indices"]] = pred["dyn_inverse"]
     born[pred["indices"]] = pred["born"]
     dyn_unmodulated = dyn.copy()
+    dyn_inverse_unmodulated = dyn_inverse.copy()
     if "basis_size" in pred:
         basis_size[pred["indices"]] = np.asarray(pred["basis_size"], dtype=int)
     pred_indices = np.asarray(pred["indices"], dtype=int)
@@ -1378,6 +1382,7 @@ def evaluate_trial(data, target, base_sig, pred, indices, masks, nui: Nuisance, 
     dyn, q_control_meta = apply_q_control(data, dyn, born, valid, groups, q_control_args)
     row_mod, row_mod_meta = row_resolution_modulation(data, valid, nui.row_resolution_b)
     dyn = dyn * row_mod
+    dyn_inverse = dyn_inverse * row_mod
     valid = (
         np.isfinite(target)
         & np.isfinite(sig)
@@ -1459,7 +1464,9 @@ def evaluate_trial(data, target, base_sig, pred, indices, masks, nui: Nuisance, 
         "born_detector_scales": {str(k): float(v) for k, v in born_detector_scales.items()},
         "arrays": {
             "dyn_raw": dyn,
+            "dyn_inverse_raw": dyn_inverse,
             "dyn_raw_unmodulated": dyn_unmodulated,
+            "dyn_inverse_raw_unmodulated": dyn_inverse_unmodulated,
             "born_raw": born,
             "row_resolution_factor": row_mod,
             "dyn_scaled": dyn_scaled,
@@ -3219,7 +3226,19 @@ def main():
     ap.add_argument("--max-rows", type=int, default=0)
     ap.add_argument("--make-maps", action="store_true")
     ap.add_argument("--alternate-hand", dest="alternate_hand", action="store_true", help="Use alternate fractional xyz before building U_g for an alternate-hand control run.")
+    ap.add_argument(
+        "--paired-inverse-hand",
+        action="store_true",
+        help=(
+            "Also calculate the elastic inverse hand by negative-thickness propagation from each "
+            "already diagonalized Bloch matrix. Requires absorption off and the SciPy backend."
+        ),
+    )
     args = ap.parse_args()
+    if args.paired_inverse_hand and str(args.q_control) != "real":
+        raise ValueError(
+            "--paired-inverse-hand cannot be combined with a shuffled-q control"
+        )
     configure_shelxl_executable(args.shelxl)
     require_endpoint_shelxl(
         args.shelxl,
@@ -3398,6 +3417,7 @@ def main():
                                                             bethe_denom_eps=args.bethe_denom_eps,
                                                             matrix_convention=args.matrix_convention,
                                                             row_plan_cache=args.row_plan_cache,
+                                                            paired_inverse_hand=args.paired_inverse_hand,
                                                             free_fraction=args.free_fraction,
                                                             split_seed=args.split_seed,
                                                             **abs_par,
@@ -3603,6 +3623,83 @@ def main():
     native_row_table = out / "native_dyn_calc.csv"
     write_row_table(native_row_table, data, target, best, masks)
     native_row_artifact = native_row_table_artifact(native_row_table)
+    paired_inverse_hand = {}
+    if args.paired_inverse_hand:
+        inverse_raw = np.asarray(best["arrays"]["dyn_inverse_raw"], dtype=float)
+        paired_indices = np.where(
+            np.isfinite(inverse_raw)
+            & np.isfinite(np.asarray(best["arrays"]["born_raw"], dtype=float))
+        )[0]
+        if len(paired_indices) == 0:
+            raise RuntimeError(
+                "paired inverse-hand calculation produced no finite inverse intensities"
+            )
+        inverse_pred = {
+            "indices": paired_indices,
+            "dyn": inverse_raw[paired_indices],
+            "born": np.asarray(best["arrays"]["born_raw"], dtype=float)[paired_indices],
+        }
+        for key in (
+            "basis_size",
+            "center_sg",
+            "omega_bragg",
+            "omega_delta",
+            "sg_window",
+            "sg_window_raw",
+            "sg_window_half_frames",
+            "sg_window_clipped",
+            "sg_dSg_domega",
+            "sg_dSg_dframe",
+            "sg_jitter_sigma",
+            "sg_jitter_d_inv",
+            "sg_jitter_frame_fraction",
+            "sg_jitter_kernel_points",
+            "sg_profile_points_total",
+            "sg_profile_weight_sum",
+            "sg_profile_same_branch_continuation_used",
+            "sg_profile_same_branch_continuation_segments",
+            "sg_residual",
+        ):
+            values = best["arrays"].get(key)
+            if values is not None:
+                inverse_pred[key] = np.asarray(values)[paired_indices]
+        inverse_eval = evaluate_trial(
+            data,
+            target,
+            base_sig,
+            inverse_pred,
+            paired_indices,
+            masks,
+            Nuisance(**best["nuisance"]),
+            wght_a,
+            wght_b,
+            scale_fit_split=args.scale_fit_split,
+            q_control_args=args,
+        )
+        inverse_row_table = out / "native_inverse_hand_dyn_calc.csv"
+        write_row_table(inverse_row_table, data, target, inverse_eval, masks)
+        paired_inverse_hand = {
+            "status": "complete",
+            "method": "nakane_negative_thickness_elastic_pair_v1",
+            "physics_contract": {
+                "absorption": "disabled",
+                "incident_wave": "real direct-beam basis vector",
+                "same_rows_basis_geometry_nuisance": True,
+                "same_positive_physical_thickness_distribution": True,
+                "inverse_evaluation": "I_inverse(t)=I_original(-t)",
+                "shared_eigendecomposition": True,
+            },
+            "selected_row_table": str(native_row_table.resolve()),
+            "inverse_row_table": str(inverse_row_table.resolve()),
+            "inverse_row_table_sha256": sha256(inverse_row_table),
+            "selected_metrics": best["metrics"],
+            "inverse_metrics": inverse_eval["metrics"],
+            "selected_scale_count": int(best["scale_count"]),
+            "inverse_scale_count": int(inverse_eval["scale_count"]),
+        }
+        (out / "paired_inverse_hand.json").write_text(
+            json.dumps(paired_inverse_hand, indent=2, allow_nan=True) + "\n"
+        )
 
     endpoint_results = []
     endpoint_exti_modes = [m.strip().lower() for m in str(args.endpoint_exti_grid).replace(",", " ").split() if m.strip()]
@@ -3786,6 +3883,7 @@ def main():
     }
     summary = {
         "artifacts": native_row_artifact,
+        "paired_inverse_hand": paired_inverse_hand,
         "inputs": {
             "hkl": str(Path(args.hkl).resolve()),
             "hkl_sha256": sha256(Path(args.hkl)),
@@ -3896,6 +3994,7 @@ def main():
                 bethe_denom_eps=args.bethe_denom_eps,
                 matrix_convention=args.matrix_convention,
                 row_plan_cache=args.row_plan_cache,
+                paired_inverse_hand=args.paired_inverse_hand,
             )
         ),
         "profile_root_solver": profile_root_solver_audit,

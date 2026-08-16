@@ -27,6 +27,7 @@ from grond.legacy.engine.bloch_engine import (
     split_masks,
 )
 from grond.legacy.engine.build_dynrows_xds import gvec_for_hkl, sg_for_hkl
+from grond.legacy.engine.native_row_regularize import Nuisance, evaluate_trial
 
 ELECTRON_SFAC_C = "SFAC C 1 1 1 1 1 1 1 1 0"
 
@@ -829,6 +830,104 @@ def test_expm_multiply_backend_matches_eigensolver_on_hermitian_matrix():
 
     assert np.isclose(trial_single, reference_single, rtol=1e-9, atol=1e-11)
     assert np.isclose(trial_average, reference_average, rtol=1e-9, atol=1e-11)
+
+
+def test_paired_inverse_hand_matches_explicit_conjugate_hamiltonian():
+    """The elastic negative-thickness shortcut must equal coordinate inversion."""
+
+    rng = np.random.default_rng(20260815)
+    raw = 0.001 * (rng.normal(size=(9, 9)) + 1j * rng.normal(size=(9, 9)))
+    H = (raw + raw.conj().T) * 0.5
+    H[np.diag_indices_from(H)] = np.real(np.diag(H))
+
+    port = object.__new__(XDSBlochPort)
+    port.cfg = Config(compute_backend="scipy", paired_inverse_hand=True)
+    port.thick = np.asarray([250.0, 600.0, 950.0], dtype=float)
+    port.thick_w = np.asarray([0.2, 0.5, 0.3], dtype=float)
+    port.absorption_enabled = lambda: False
+
+    selected, inverse_from_negative_thickness = (
+        port.propagate_direct_to_target_thickness_average_pair(H)
+    )
+
+    port.cfg = Config(compute_backend="scipy")
+    explicit_selected = port.propagate_direct_to_target_thickness_average(H)
+    explicit_inverse = port.propagate_direct_to_target_thickness_average(H.conj())
+
+    assert selected == pytest.approx(explicit_selected, rel=1e-13, abs=1e-15)
+    assert inverse_from_negative_thickness == pytest.approx(
+        explicit_inverse, rel=1e-12, abs=1e-14
+    )
+
+
+def test_paired_inverse_hand_rejects_absorption_and_unsupported_backend():
+    with pytest.raises(ValueError, match="requires absorption_mode=none"):
+        Config(
+            paired_inverse_hand=True,
+            absorption_mode="midgley_like",
+            absorption_mu=5e-5,
+        )
+    with pytest.raises(ValueError, match="requires the full SciPy Hermitian"):
+        Config(paired_inverse_hand=True, compute_backend="scipy_expm")
+
+
+def test_paired_inverse_hand_receives_same_row_resolution_envelope():
+    data = SimpleNamespace(
+        hkl=np.asarray([[1, 0, 0], [2, 0, 0], [3, 0, 0], [4, 0, 0]]),
+        zcal=np.asarray([0.0, 1.0, 2.0, 3.0]),
+        omega_from_z=lambda z: float(z),
+        corr=np.full(4, 100.0),
+        peak=np.full(4, 100.0),
+        xcal=np.arange(4, dtype=float),
+        ycal=np.arange(4, dtype=float),
+        header={},
+        cell=gemmi.UnitCell(10.0, 11.0, 12.0, 90.0, 90.0, 90.0),
+    )
+    target = np.asarray([10.0, 20.0, 30.0, 40.0])
+    sigma = np.ones(4)
+    forward = np.asarray([1.0, 2.0, 3.0, 4.0])
+    inverse = np.asarray([2.0, 4.0, 6.0, 8.0])
+    pred = {
+        "indices": np.arange(4),
+        "dyn": forward,
+        "dyn_inverse": inverse,
+        "born": forward.copy(),
+    }
+    masks = {
+        "all": np.ones(4, dtype=bool),
+        "work": np.ones(4, dtype=bool),
+        "free": np.zeros(4, dtype=bool),
+    }
+    nuisance = Nuisance(
+        thickness_A=1000.0,
+        thickness_grad_frac=0.0,
+        frame_offset=0.0,
+        group_width_deg=10.0,
+        detector_scale_bins=1,
+        sigma_a=0.0,
+        sigma_b_corr=0.0,
+        sigma_c_peak=0.0,
+        row_resolution_b=2.0,
+    )
+
+    result = evaluate_trial(
+        data,
+        target,
+        sigma,
+        pred,
+        np.arange(4),
+        masks,
+        nuisance,
+        0.0,
+        0.0,
+    )
+    factor = result["arrays"]["row_resolution_factor"]
+
+    np.testing.assert_allclose(result["arrays"]["dyn_raw"], forward * factor)
+    np.testing.assert_allclose(result["arrays"]["dyn_inverse_raw"], inverse * factor)
+    np.testing.assert_allclose(
+        result["arrays"]["dyn_inverse_raw_unmodulated"], inverse
+    )
 
 
 def test_real_embedding_generator_matches_complex_expm_column():

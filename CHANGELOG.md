@@ -4,6 +4,24 @@ This file records user-visible changes to the installable package. Version `0.2.
 
 ## 0.2.2 (unreleased)
 
+Experts can now run the principal automatic decisions as explicit handoff
+stages. `grond scout` performs only proper-transform preflight and scouting,
+`grond thickness` aliases the existing thickness audit, `grond hand-check`
+replays a completed native row contract, and `grond refine` aliases pinned
+endpoint continuation. Scout, thickness, and hand stages write hash-bound JSON
+handoffs containing the accepted inputs and ready-to-copy commands for the next
+stage. The new expert workflow guide documents the complete `prep -> scout ->
+thickness -> hand-check -> refine -> finish` sequence.
+
+Elastic hand checking now implements the negative-thickness identity. One
+Hermitian eigendecomposition produces both the supplied-coordinate and
+coordinate-inverted intensities on the same signed rows, proper transform,
+split, thickness distribution, and nonabsorptive nuisance contract. Absorption
+is disabled explicitly in both branches and recorded; GROND refuses to apply
+the shortcut when absorptive terms are requested. A separate explicit
+coordinate-inversion mode remains available when absorption must be preserved
+or when a full two-model control is required.
+
 The native Bloch engine now has an opt-in direct-angle rocking-profile
 coordinate. It projects the existing finite profile width into scan angle,
 applies an explicit angular half-width bound, and can convolve that profile

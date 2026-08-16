@@ -1686,6 +1686,7 @@ class Config:
     bethe_denom_eps: float = 1e-5
     matrix_convention: str = "j_minus_i"
     row_plan_cache: str = "off"
+    paired_inverse_hand: bool = False
 
     def __post_init__(self):
         integer_minima = {
@@ -1818,6 +1819,24 @@ class Config:
             raise ValueError("frame_offset must be finite")
         if not (math.isnan(float(self.dose_b_ref_frame)) or math.isfinite(float(self.dose_b_ref_frame))):
             raise ValueError("dose_b_ref_frame must be finite or NaN")
+        if bool(self.paired_inverse_hand):
+            absorptive_values = (
+                self.absorption_mu,
+                self.absorption_frac,
+                self.absorption_mu_g2,
+                self.absorption_mu_theta2,
+                self.absorption_tds_b,
+            )
+            if str(self.absorption_mode).lower() != "none" or any(
+                abs(float(value)) > 0.0 for value in absorptive_values
+            ):
+                raise ValueError(
+                    "paired_inverse_hand requires absorption_mode=none and zero absorptive coefficients"
+                )
+            if str(self.compute_backend).lower() not in {"scipy", "numpy_scipy_cpu"}:
+                raise ValueError(
+                    "paired_inverse_hand currently requires the full SciPy Hermitian backend"
+                )
 
 
 def frozen_kernel_contract(cfg: Config | None = None):
@@ -1866,6 +1885,15 @@ def frozen_kernel_contract(cfg: Config | None = None):
             "dose_b": "optional frame-dependent isotropic Debye-Waller attenuation U_g -> U_g exp(-DeltaB/(4d_g^2)); default none",
             "hermitian_fill": "H_ji = conj(H_ij)",
             "propagation": "psi(t) = exp(2*pi*i*H*t) psi(0)",
+            "paired_inverse_hand": (
+                None
+                if cfg is None
+                else {
+                    "enabled": bool(getattr(cfg, "paired_inverse_hand", False)),
+                    "method": "I_inverse(t)=I_original(-t) with one elastic Hermitian eigensystem",
+                    "absorption_allowed": False,
+                }
+            ),
             "absorption": "optional non-Hermitian optical-potential diagnostics; default none. Modes are mean, beam_dependent, offdiag_fraction, offdiag_tds, and midgley_like.",
             "rejected_nonhermitian_modes": [
                 "row-specific imaginary diagonal terms",
@@ -3699,6 +3727,39 @@ class XDSBlochPort:
             f"unknown compute_backend={backend!r}; expected one of {COMPUTE_BACKEND_HELP}"
         )
 
+    def propagate_direct_to_target_thickness_average_pair(self, H):
+        """Return original- and inverse-hand intensities from one eigensystem.
+
+        For elastic scattering the inverted-coordinate Hamiltonian is ``H*``.
+        With a real incident direct-beam vector, propagation through ``H*`` at
+        positive thickness has the same intensity as propagation through ``H``
+        at negative thickness.  The two signs therefore share one Hermitian
+        eigendecomposition.  Absorptive optical potentials break this identity
+        and are rejected rather than silently approximated.
+        """
+
+        if self.absorption_enabled():
+            raise ValueError(
+                "paired inverse-hand propagation requires absorption_mode=none and zero "
+                "absorptive coefficients; run explicit coordinate-inverted branches when "
+                "absorption is active"
+            )
+        backend = str(getattr(self.cfg, "compute_backend", "scipy") or "scipy").lower()
+        if backend not in {"scipy", "numpy_scipy_cpu"}:
+            raise NotImplementedError(
+                "paired inverse-hand propagation requires the full audited SciPy Hermitian "
+                "eigensolver; choose --compute-backend scipy"
+            )
+        vals, vecs = eigh(np.asarray(H, dtype=np.complex128))
+        coupling = vecs[1, :] * np.conj(vecs[0, :])
+        phase = np.exp((2j * np.pi) * vals[:, None] * self.thick[None, :])
+        forward = np.abs(np.sum(coupling[:, None] * phase, axis=0)) ** 2
+        reverse = np.abs(np.sum(coupling[:, None] * np.conj(phase), axis=0)) ** 2
+        return (
+            float(np.sum(self.thick_w * forward)),
+            float(np.sum(self.thick_w * reverse)),
+        )
+
     def row_prediction_plan(self, row_idx):
         """Build one row's Bloch matrices and metadata before eigensolver evaluation."""
 
@@ -3777,6 +3838,17 @@ class XDSBlochPort:
 
     def row_prediction(self, row_idx):
         plan = self.row_prediction_plan(row_idx)
+        if bool(getattr(self.cfg, "paired_inverse_hand", False)):
+            pairs = [
+                self.propagate_direct_to_target_thickness_average_pair(H)
+                for H in plan["_dyn_matrices"]
+            ]
+            out = self.finish_row_prediction_plan(plan, [pair[0] for pair in pairs])
+            weights = np.asarray(plan["_profile_weights"], dtype=float)
+            out["dyn_inverse"] = float(
+                np.sum(weights * np.asarray([pair[1] for pair in pairs], dtype=float))
+            )
+            return out
         dyn_vals = [self.propagate_direct_to_target_thickness_average(H) for H in plan["_dyn_matrices"]]
         return self.finish_row_prediction_plan(plan, dyn_vals)
 
@@ -4159,10 +4231,16 @@ class XDSBlochPort:
             H_born_static = H_dyn_static
         h10_born = H_born_static[1, 0]
         dyn_vals = []
+        inverse_dyn_vals = []
         born_vals = []
         for sg_basis in sg_basis_rows:
             H = self.hamiltonian_from_static(H_dyn_static, sg_basis)
-            dyn_vals.append(self.propagate_direct_to_target_thickness_average(H))
+            if bool(getattr(self.cfg, "paired_inverse_hand", False)):
+                forward, reverse = self.propagate_direct_to_target_thickness_average_pair(H)
+                dyn_vals.append(forward)
+                inverse_dyn_vals.append(reverse)
+            else:
+                dyn_vals.append(self.propagate_direct_to_target_thickness_average(H))
             delta = float(np.real(sg_basis[1] - sg_basis[0]))
             sinc = np.sinc(delta * self.thick)
             born_t = (2.0 * math.pi) ** 2 * (abs(h10_born) ** 2) * (self.thick**2) * (sinc**2)
@@ -4170,7 +4248,7 @@ class XDSBlochPort:
         dyn = float(np.sum(weights * np.asarray(dyn_vals, dtype=float)))
         born = float(np.sum(weights * np.asarray(born_vals, dtype=float)))
         support = [[int(v) for v in row] for row in basis.tolist()]
-        return row_idx, {
+        result = {
             "dyn": dyn,
             "born": born,
             "basis_size": int(n),
@@ -4202,6 +4280,11 @@ class XDSBlochPort:
             "thickness_model": str(getattr(self.cfg, "thickness_model", "uniform_gradient")),
             "thickness_sigma_frac": float(getattr(self.cfg, "thickness_sigma_frac", 0.0)),
         }
+        if inverse_dyn_vals:
+            result["dyn_inverse"] = float(
+                np.sum(weights * np.asarray(inverse_dyn_vals, dtype=float))
+            )
+        return row_idx, result
 
     def row_prediction_from_active_cache(self, pos: int):
         return self.row_prediction_from_cache(self._active_row_plan_cache, int(pos), self._active_unique_ug)
@@ -4416,6 +4499,10 @@ class XDSBlochPort:
     def pack_prediction_results(self, indices, results):
         indices = np.asarray(indices, dtype=int)
         dyn = np.zeros(len(indices), dtype=float)
+        include_inverse = bool(results) and all(
+            isinstance(result, dict) and "dyn_inverse" in result for result in results
+        )
+        dyn_inverse = np.zeros(len(indices), dtype=float) if include_inverse else None
         born = np.zeros(len(indices), dtype=float)
         basis_size = np.zeros(len(indices), dtype=int)
         sg_resid = np.zeros(len(indices), dtype=float)
@@ -4442,6 +4529,8 @@ class XDSBlochPort:
         def accept_result(idx, r):
             n = position[int(idx)]
             dyn[n] = r["dyn"]
+            if dyn_inverse is not None:
+                dyn_inverse[n] = r["dyn_inverse"]
             born[n] = r["born"]
             basis_size[n] = r["basis_size"]
             sg_resid[n] = r["max_sg_solve_residual"]
@@ -4471,7 +4560,7 @@ class XDSBlochPort:
         for idx, r in zip(indices, results, strict=True):
             accept_result(int(idx), r)
 
-        return {
+        packed = {
             "indices": indices,
             "dyn": dyn,
             "born": born,
@@ -4497,6 +4586,9 @@ class XDSBlochPort:
             "sg_profile_same_branch_continuation_segments": sg_profile_same_branch_continuation_segments,
             "seconds": 0.0,
         }
+        if dyn_inverse is not None:
+            packed["dyn_inverse"] = dyn_inverse
+        return packed
 
     def predict_rows(self, indices=None, workers=1, chunksize=8):
         if indices is None:

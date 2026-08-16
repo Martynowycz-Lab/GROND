@@ -39,6 +39,7 @@ EXPECTED_CLI_COMMANDS = {
     "export-mtz",
     "finish",
     "forensics",
+    "hand-check",
     "import-dials",
     "init-config",
     "make-free-flags",
@@ -50,10 +51,13 @@ EXPECTED_CLI_COMMANDS = {
     "row-template",
     "row-validate",
     "run",
+    "scout",
     "scale-polish",
     "scale-replay",
     "sfac-check",
     "thickness-scout",
+    "thickness",
+    "refine",
     "validate",
     "validate-ls1",
 }
@@ -167,7 +171,10 @@ def test_all_registered_subcommands_have_help(capsys):
         assert exc.value.code == 0
         captured = capsys.readouterr()
         assert "usage:" in captured.out
-        assert command in captured.out
+        canonical = {"refine": "push-endpoint", "thickness": "thickness-scout"}.get(
+            command, command
+        )
+        assert canonical in captured.out
 
 
 def test_run_parser_exposes_staged_feature_grids():
@@ -251,6 +258,55 @@ def test_thickness_scout_parser_exposes_contract_diagnostic_defaults():
     assert args.transform_metadata_prefilter == "auto"
     assert args.transform_metadata_max_candidates == 3
     assert args.transform_metadata_min_correlation == 0.70
+
+
+def test_expert_stage_parsers_expose_safe_handoffs_and_aliases():
+    parser = build_parser()
+    scout = parser.parse_args(
+        ["scout", "--prep", "prep.json", "--out-dir", "01_scout"]
+    )
+    assert scout.transform_parity_policy == "proper-only"
+    assert scout.trust_hkl_transform is False
+
+    hand = parser.parse_args(
+        [
+            "hand-check",
+            "--source-summary",
+            "summary.json",
+            "--out-dir",
+            "03_hand",
+        ]
+    )
+    assert hand.hand_check_method == "negative-thickness"
+    assert hand.hand_check_absorption == "elastic"
+    assert hand.hand_check_n_basis == 0
+    assert hand.hand_check_n_points == 0
+
+    thickness = parser.parse_args(
+        [
+            "thickness",
+            "--prep",
+            "prep.json",
+            "--out-dir",
+            "02_thickness",
+        ]
+    )
+    assert thickness.command == "thickness"
+    assert thickness.func is cli.cmd_thickness_scout
+
+    refine = parser.parse_args(
+        [
+            "refine",
+            "--source-summary",
+            "summary.json",
+            "--start-res",
+            "model.res",
+            "--out-dir",
+            "04_refine",
+        ]
+    )
+    assert refine.command == "refine"
+    assert refine.func is cli.cmd_push_endpoint
 
 
 def test_target_ablation_is_hidden_from_public_parser():

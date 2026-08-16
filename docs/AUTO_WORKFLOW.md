@@ -37,15 +37,17 @@ Disabling a control can change what may be claimed. For example, `--no-hand-cont
 
 ## Running parts directly
 
-Use `grond import-dials` to make and inspect a DIALS row bridge, and `grond prep` to bind a structure, baseline HKL, and one or more row directories. `grond run --mode bloch` is the low-level frozen-model calculation. `grond run --mode regularize` performs the row correction and endpoint calculation without asking the full automatic policy to choose every stage. The more focused commands are intended for completed or partially completed runs:
+The complete expert sequence, handoff artifacts, and the elastic inverse-hand identity are documented in [MANUAL_WORKFLOW.md](MANUAL_WORKFLOW.md). Use `grond import-dials` to make and inspect a DIALS row bridge, and `grond prep` to bind a structure, baseline HKL, and one or more row directories. `grond scout` performs only proper-transform selection. `grond hand-check` performs a matched fixed-nuisance hand comparison. `grond run --mode bloch` is the low-level frozen-model calculation. `grond run --mode regularize` performs the row correction and endpoint calculation without asking the full automatic policy to choose every stage. The more focused commands are intended for completed or partially completed runs:
 
 ```bash
-grond thickness-scout ...
+grond scout ...
+grond thickness ...
+grond hand-check ...
 grond scale-polish --row-table native_dyn_calc.csv --summary summary.json --out-dir scale_polish
 grond scale-replay ...
 grond calibrate-endpoint ...
 grond validate-ls1 --source-summary summary.json --start-res model.res --out-dir ls1_check
-grond push-endpoint --checkpoint grond_continue_checkpoint.json --start-res model.res --out-dir continuation
+grond refine --checkpoint grond_continue_checkpoint.json --start-res model.res --out-dir continuation
 grond finish --run-dir completed_run
 ```
 
