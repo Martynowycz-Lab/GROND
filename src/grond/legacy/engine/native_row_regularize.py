@@ -199,6 +199,10 @@ class Nuisance:
     sg_jitter_points: int = 1
     sg_jitter_student_df: float = 4.0
     sg_jitter_width_factor: float = 3.0
+    mosaicity_mode: str = "none"
+    mosaicity_sigma_deg: float = 0.0
+    mosaicity_points: int = 1
+    geometry_path_file: str = ""
     absorption_mode: str = "none"
     absorption_mu: float = 0.0
     absorption_frac: float = 0.0
@@ -1402,9 +1406,23 @@ def evaluate_trial(data, target, base_sig, pred, indices, masks, nui: Nuisance, 
         or abs(float(nui.sg_jitter_sigma_d_inv)) > 0.0
         or abs(float(nui.sg_jitter_sigma_frame)) > 0.0
     ))
+    n_mosaicity = int(
+        str(nui.mosaicity_mode) != "none"
+        and abs(float(nui.mosaicity_sigma_deg)) > 0.0
+    )
     n_resolution = int(abs(float(nui.row_resolution_b)) > 0.0)
     n_weight = int(np.isfinite(float(nui.native_wght_a)) or np.isfinite(float(nui.native_wght_b)))
-    n_params = n_scales + 7 + n_abs + n_thick_shape + n_dose + n_jitter + n_resolution + n_weight
+    n_params = (
+        n_scales
+        + 7
+        + n_abs
+        + n_thick_shape
+        + n_dose
+        + n_jitter
+        + n_mosaicity
+        + n_resolution
+        + n_weight
+    )
     if int(nui.detector_scale_bins) > 1:
         dyn_scaled, dyn_scales, dyn_detector_scales = fit_frame_detector_scales(target, sig, dyn, groups, det_bins, scale_fit, use_wght_a, use_wght_b, scale_smoothness=nui.scale_smoothness)
         born_scaled, born_scales, born_detector_scales = fit_frame_detector_scales(target, sig, born, groups, det_bins, scale_fit, use_wght_a, use_wght_b, scale_smoothness=nui.scale_smoothness)
@@ -3071,6 +3089,13 @@ def main():
     ap.add_argument("--sg-jitter-points", type=int, default=5, help="Kernel quadrature points for jitter convolution.")
     ap.add_argument("--sg-jitter-student-df", type=float, default=4.0)
     ap.add_argument("--sg-jitter-width-factor", type=float, default=3.0)
+    ap.add_argument("--mosaicity-mode", choices=["none", "gaussian_omega"], default="none", help="Fixed direct-angle projected mosaic model for this run.")
+    ap.add_argument("--mosaicity-sigma-deg", type=float, default=0.0, help="Projected Gaussian mosaicity sigma in degrees; one nuisance parameter when active.")
+    ap.add_argument("--mosaicity-max-sigma-deg", type=float, default=0.5, help="Hard upper bound for projected mosaicity sigma.")
+    ap.add_argument("--mosaicity-points", type=int, default=3, help="Gauss-Hermite points for direct-angle mosaic quadrature.")
+    ap.add_argument("--geometry-path", default="", help="Fixed geometry-only slew/two-axis tilt contract fitted without intensities.")
+    ap.add_argument("--profile-coordinate", choices=["target_sg", "direct_angle"], default="target_sg", help="Integrate through solved target-Sg points or directly in recorded scan angle.")
+    ap.add_argument("--profile-angle-max-half-width-deg", type=float, default=2.0, help="Hard half-width bound for direct-angle integration.")
     ap.add_argument("--profile-quadrature", choices=["uniform", "trapezoid", "gauss_legendre"], default="uniform", help="Rocking-profile Sg quadrature rule.")
     ap.add_argument("--profile-accumulation", choices=["sum", "mean"], default="sum", help="Accumulate rocking-profile samples as summed detector sub-exposures or legacy normalized means.")
     ap.add_argument("--min-d-spacing", type=float, default=0.70)
@@ -3343,6 +3368,13 @@ def main():
                                                             sg_jitter_points=args.sg_jitter_points,
                                                             sg_jitter_student_df=args.sg_jitter_student_df,
                                                             sg_jitter_width_factor=args.sg_jitter_width_factor,
+                                                            mosaicity_mode=args.mosaicity_mode,
+                                                            mosaicity_sigma_deg=args.mosaicity_sigma_deg,
+                                                            mosaicity_max_sigma_deg=args.mosaicity_max_sigma_deg,
+                                                            mosaicity_points=args.mosaicity_points,
+                                                            geometry_path_file=args.geometry_path,
+                                                            profile_coordinate=args.profile_coordinate,
+                                                            profile_angle_max_half_width_deg=args.profile_angle_max_half_width_deg,
                                                             profile_quadrature=args.profile_quadrature,
                                                             profile_accumulation=args.profile_accumulation,
                                                             topup_d_min=effective_topup_d_min,
@@ -3456,6 +3488,10 @@ def main():
                                                                 sg_jitter_points=args.sg_jitter_points,
                                                                 sg_jitter_student_df=args.sg_jitter_student_df,
                                                                 sg_jitter_width_factor=args.sg_jitter_width_factor,
+                                                                mosaicity_mode=args.mosaicity_mode,
+                                                                mosaicity_sigma_deg=args.mosaicity_sigma_deg,
+                                                                mosaicity_points=args.mosaicity_points,
+                                                                geometry_path_file=args.geometry_path,
                                                                 dose_b_mode=dose_b_mode,
                                                                 dose_b_per_frame=dose_b_per_frame,
                                                                 dose_b_ref_frame=args.dose_b_ref_frame,
@@ -3820,6 +3856,12 @@ def main():
                 sg_jitter_points=args.sg_jitter_points,
                 sg_jitter_student_df=args.sg_jitter_student_df,
                 sg_jitter_width_factor=args.sg_jitter_width_factor,
+                mosaicity_mode=best["nuisance"].get("mosaicity_mode", "none"),
+                mosaicity_sigma_deg=best["nuisance"].get("mosaicity_sigma_deg", 0.0),
+                mosaicity_points=best["nuisance"].get("mosaicity_points", 1),
+                geometry_path_file=best["nuisance"].get("geometry_path_file", ""),
+                profile_coordinate=args.profile_coordinate,
+                profile_angle_max_half_width_deg=args.profile_angle_max_half_width_deg,
                 profile_quadrature=args.profile_quadrature,
                 profile_accumulation=args.profile_accumulation,
                 topup_d_min=effective_topup_d_min,

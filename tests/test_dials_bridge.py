@@ -115,6 +115,19 @@ def test_bridge_writes_qe_correction_full_geometry_and_raw_sigma_default(tmp_pat
         # the fixed/setting rotations above so the bridge geometry gate is real.
         "scan": {"image_range": [1, 1], "oscillation": [-35.36177806085131, 1.0]},
         "detector": {"image_size_px": [10, 10], "pixel_size_mm": [0.01, 0.01], "gain": 2.0},
+        "profile": {
+            "model": "GaussianRSProfileModel",
+            "parameters": {
+                "__id__": "gaussian_rs",
+                "sigma_b": 0.0012,
+                "sigma_m": 0.0023,
+            },
+        },
+        "frame_sliced_shoebox": {
+            "available": True,
+            "used_for_intensity": False,
+            "status": "recorded_for_future_rocking_profile_import",
+        },
     }
     monkeypatch.setattr(
         "grond.io.dials_bridge._run_dials_helper",
@@ -138,6 +151,15 @@ def test_bridge_writes_qe_correction_full_geometry_and_raw_sigma_default(tmp_pat
     assert data.header["DIALS_EXPERIMENT_IDENTIFIER"] == "crystal-uuid-1"
     assert summary["geometry"]["space_group_number"] == 1
     assert summary["geometry"]["experiment_identifier"] == "crystal-uuid-1"
+    assert data.header["DIALS_PROFILE_MODEL"] == "GaussianRSProfileModel"
+    profile = data.integration_profile_provenance()
+    assert profile["dials"]["profile_model"] == "GaussianRSProfileModel"
+    assert profile["dials"]["profile_parameters"]["sigma_b"] == pytest.approx(0.0012)
+    assert profile["dials"]["gaussian_rs_sigma_m_deg"] == pytest.approx([0.0023])
+    assert profile["optional_prior"]["projected_mosaicity_sigma_deg"] == pytest.approx(0.0023)
+    assert summary["geometry"]["profile"]["parameters"]["sigma_m"] == pytest.approx(0.0023)
+    assert data.header["DIALS_FRAME_SLICED_SHOEBOX_AVAILABLE"] == "TRUE"
+    assert profile["dials"]["frame_sliced_shoebox_available"] is True
 
 
 def test_bridge_preserves_cropped_dials_scan_origin(tmp_path, monkeypatch):

@@ -4,6 +4,25 @@ This file records user-visible changes to the installable package. Version `0.2.
 
 ## 0.2.2 (unreleased)
 
+The native Bloch engine now has an opt-in direct-angle rocking-profile
+coordinate. It projects the existing finite profile width into scan angle,
+applies an explicit angular half-width bound, and can convolve that profile
+with one bounded Gaussian projected-mosaic width per dataset. Unlike the older
+target-Sg jitter experiment, this mode never asks for extra offset Ewald roots.
+The default target-Sg production path is unchanged. XDS reflecting range and
+beam divergence, DIALS profile-model parameters, and the presence of DIALS
+frame-sliced shoeboxes are now retained as provenance; a DIALS GaussianRS
+`sigma_m` or XDS reflecting-range width is exposed only as an optional prior
+centre and is never activated automatically.
+
+An experimental geometry-only scan-path fitter can derive a bounded,
+zero-median along-scan slew and two transverse Chebyshev rotations from XDS
+centroids. The global frame datum remains a separate nuisance. The fitter uses
+no intensities, structure, hand label, or GROND residuals, records contiguous-
+frame validation and source hashes, and rejects transverse corrections that do
+not improve held-out detector centroids or hit a coefficient bound. Geometry
+contracts are opt-in and fail closed on source-HKL or bound mismatches.
+
 The new `GROND export-pets` command writes audited `cif_pets` files from DIALS
 or summation-only XDS integrations for PETS/Jana2020/Dyngo and diffBloch. DIALS
 exports use its native PETS geometry writer, with an explicit bounded projection

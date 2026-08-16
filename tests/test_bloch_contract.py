@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 
 import gemmi
@@ -17,6 +18,7 @@ from grond.legacy.engine.bloch_engine import (
     fcalc_res,
     fcalc_res_grid,
     frozen_kernel_contract,
+    load_geometry_path_contract,
     parse_model,
     promoted_bethe_effective_hamiltonian,
     relativistic_gamma_from_wavelength,
@@ -670,6 +672,141 @@ def test_single_profile_point_is_centered():
     points, weights, _ = profile_points(Config(n_points=1))
     assert np.allclose(points, [0.0])
     assert np.allclose(weights, [1.0])
+
+
+def test_direct_angular_mosaicity_is_normalized_and_bounded():
+    port = object.__new__(XDSBlochPort)
+    port.cfg = Config(
+        mosaicity_mode="gaussian_omega",
+        mosaicity_sigma_deg=0.02,
+        mosaicity_max_sigma_deg=0.05,
+        mosaicity_points=3,
+    )
+
+    offsets, weights, meta = port.row_mosaicity_angle_points()
+
+    assert len(offsets) == 3
+    assert np.allclose(offsets, -offsets[::-1])
+    assert np.isclose(np.sum(weights), 1.0)
+    assert meta["mosaicity_sigma_deg"] == pytest.approx(0.02)
+    with pytest.raises(ValueError, match="exceeds the explicit"):
+        Config(
+            mosaicity_mode="gaussian_omega",
+            mosaicity_sigma_deg=0.051,
+            mosaicity_max_sigma_deg=0.05,
+        )
+
+
+def test_direct_angular_mosaicity_does_not_request_extra_sg_roots():
+    port = object.__new__(XDSBlochPort)
+    port.cfg = Config(
+        mosaicity_mode="gaussian_omega",
+        mosaicity_sigma_deg=0.02,
+        mosaicity_points=3,
+    )
+    port.row_profile_sg_points = lambda *_args: (
+        np.asarray([-0.001, 0.001]),
+        np.asarray([0.5, 0.5]),
+        {},
+    )
+    solved_targets = []
+
+    def solve_target(_row_idx, _hkl, _omega_center, target_sg, _meta):
+        solved_targets.append(float(target_sg))
+        return float(target_sg)
+
+    port.solve_sg_profile_target = solve_target
+    port.sg_for_hkls = lambda _hkls, omega: np.asarray([omega], dtype=float)
+    port.sg_derivative_per_deg = lambda _hkl, _omega: 2.0
+
+    omegas, weights, residuals, _sg_meta, mosaicity_meta = port.row_profile_omega_points(
+        0,
+        np.asarray([1, 0, 0]),
+        0.0,
+        0.0,
+        0.004,
+    )
+
+    assert solved_targets == pytest.approx([-0.001, 0.001])
+    assert len(omegas) == 6
+    assert len(weights) == 6
+    assert np.isclose(np.sum(weights), 1.0)
+    assert np.allclose(residuals, 0.0)
+    assert mosaicity_meta["mosaicity_kernel_points"] == 3
+
+
+def test_direct_angle_profile_requires_no_sg_root():
+    port = object.__new__(XDSBlochPort)
+    port.cfg = Config(
+        n_points=5,
+        profile_coordinate="direct_angle",
+        profile_quadrature="gauss_legendre",
+        mosaicity_mode="gaussian_omega",
+        mosaicity_sigma_deg=0.01,
+        mosaicity_points=3,
+    )
+    port.row_sg_jitter_sigma = lambda *_args: (
+        0.0,
+        {
+            "sg_jitter_mode": "none",
+            "sg_jitter_sigma_inv_A": 0.0,
+            "sg_jitter_d_inv_A": float("nan"),
+            "sg_jitter_frame_fraction": float("nan"),
+        },
+    )
+    port.sg_derivative_per_deg = lambda *_args: 0.02
+    port.solve_sg_profile_target = lambda *_args: pytest.fail(
+        "direct-angle integration must not request an Sg root"
+    )
+
+    omegas, weights, residuals, meta, mosaicity_meta = port.row_profile_omega_points(
+        0,
+        np.asarray([1, 0, 0]),
+        12.0,
+        0.001,
+        0.004,
+    )
+
+    assert len(omegas) == 15
+    assert np.isclose(np.sum(weights), 5.0)
+    assert residuals.size == 0
+    assert meta["sg_profile_coordinate"] == "direct_angle"
+    assert meta["sg_profile_angle_half_width_deg"] == pytest.approx(0.1)
+    assert mosaicity_meta["mosaicity_kernel_points"] == 3
+
+
+def test_geometry_path_contract_rejects_zero_axes_and_bound_violations(tmp_path):
+    payload = {
+        "schema_version": 1,
+        "kind": "grond_geometry_path",
+        "basis": "chebyshev",
+        "frame_center": 10.0,
+        "frame_half_range": 5.0,
+        "coefficients": {
+            "slew_frames": [0.1, 0.2],
+            "tilt_x_deg": [0.0, 0.01],
+            "tilt_y_deg": [0.0, -0.01],
+        },
+        "tilt_axes_lab": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+        "bounds": {"max_abs_slew_frames": 1.0, "max_abs_tilt_deg": 0.1},
+        "source_hkl_sha256": "test-hash",
+    }
+    path = tmp_path / "path.json"
+    path.write_text(json.dumps(payload))
+    contract = load_geometry_path_contract(path)
+    assert contract["source_hkl_sha256"] == "test-hash"
+    assert contract["bounds"]["max_abs_slew_frames"] == pytest.approx(1.0)
+
+    payload["tilt_axes_lab"][0] = [0.0, 0.0, 0.0]
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="nonzero"):
+        load_geometry_path_contract(path)
+
+    payload["tilt_axes_lab"][0] = [1.0, 0.0, 0.0]
+    payload["coefficients"]["slew_frames"] = [2.0]
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="slew exceeds"):
+        load_geometry_path_contract(path)
 
 
 def test_expm_multiply_backend_matches_eigensolver_on_hermitian_matrix():

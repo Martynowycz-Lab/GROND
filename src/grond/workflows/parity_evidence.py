@@ -308,23 +308,35 @@ def _job_contract(summary: Mapping[str, object]) -> dict[str, object]:
 _NUISANCE_CATEGORICAL_FIELDS = {
     "thickness_model",
     "sg_jitter_mode",
+    "mosaicity_mode",
+    "geometry_path_file",
     "absorption_mode",
     "dose_b_mode",
     "matrix_convention",
 }
-_NUISANCE_INTEGER_FIELDS = {"detector_scale_bins", "sg_jitter_points"}
+_NUISANCE_INTEGER_FIELDS = {
+    "detector_scale_bins",
+    "sg_jitter_points",
+    "mosaicity_points",
+}
 _NUISANCE_NULLABLE_FIELDS = {
     "dose_b_ref_frame",
     "native_wght_a",
     "native_wght_b",
 }
 _NUISANCE_FIELDS = tuple(Nuisance.__dataclass_fields__)
+_OPTIONAL_NUISANCE_DEFAULTS = {
+    "mosaicity_mode": "none",
+    "mosaicity_sigma_deg": 0.0,
+    "mosaicity_points": 1,
+    "geometry_path_file": "",
+}
 
 
 def _canonical_nuisance_value(field: str, value: object) -> object:
     if field in _NUISANCE_CATEGORICAL_FIELDS:
         text = str(value).strip()
-        if not text:
+        if not text and field != "geometry_path_file":
             raise ValueError(f"nuisance field {field!r} is empty")
         return text
     if (
@@ -364,7 +376,10 @@ def _nuisance_contract_from_row(
     row: Mapping[str, object],
 ) -> tuple[dict[str, object], dict[str, object], str]:
     canonical = {
-        field: _canonical_nuisance_value(field, row.get(field))
+        field: _canonical_nuisance_value(
+            field,
+            row.get(field, _OPTIONAL_NUISANCE_DEFAULTS.get(field)),
+        )
         for field in _NUISANCE_FIELDS
     }
     typed: dict[str, object] = {}
@@ -402,9 +417,8 @@ def _nuisance_grid_artifact(
     with trials_path.open(newline="") as handle:
         reader = csv.DictReader(handle)
         fields = set(reader.fieldnames or [])
-        missing = sorted(
-            set(_NUISANCE_FIELDS).union({"work_dyn_wR2"}) - fields
-        )
+        required_fields = set(_NUISANCE_FIELDS) - set(_OPTIONAL_NUISANCE_DEFAULTS)
+        missing = sorted(required_fields.union({"work_dyn_wR2"}) - fields)
         if missing:
             raise ValueError(
                 f"native nuisance-trial table {trials_path} lacks required "

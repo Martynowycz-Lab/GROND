@@ -90,7 +90,7 @@ COMPUTE_BACKENDS = [
     "jax_mps_real_expm_padded",
 ]
 COMPUTE_BACKEND_HELP = ", ".join(COMPUTE_BACKENDS)
-ROW_PLAN_CACHE_SCHEMA = 4
+ROW_PLAN_CACHE_SCHEMA = 5
 UG_CACHE_SCHEMA = 3
 ELECTRON_COMPTON_WAVELENGTH_A = 0.024263102
 DEFAULT_MAX_DENSE_UG_GIB = 2.0
@@ -1643,6 +1643,13 @@ class Config:
     sg_jitter_points: int = 5
     sg_jitter_student_df: float = 4.0
     sg_jitter_width_factor: float = 3.0
+    mosaicity_mode: str = "none"
+    mosaicity_sigma_deg: float = 0.0
+    mosaicity_max_sigma_deg: float = 0.5
+    mosaicity_points: int = 3
+    geometry_path_file: str = ""
+    profile_coordinate: str = "target_sg"
+    profile_angle_max_half_width_deg: float = 2.0
     profile_quadrature: str = "uniform"
     profile_accumulation: str = "sum"
     topup_d_min: float = 0.8
@@ -1685,6 +1692,7 @@ class Config:
             "n_basis": (self.n_basis, 2),
             "n_points": (self.n_points, 1),
             "sg_jitter_points": (self.sg_jitter_points, 1),
+            "mosaicity_points": (self.mosaicity_points, 1),
             "thickness_points": (self.thickness_points, 1),
             "jax_batch_size": (self.jax_batch_size, 0),
             "jax_matrix_bucket_size": (self.jax_matrix_bucket_size, 0),
@@ -1702,6 +1710,8 @@ class Config:
             "sg_jitter_width_factor": self.sg_jitter_width_factor,
             "topup_d_min": self.topup_d_min,
             "max_support_sg": self.max_support_sg,
+            "mosaicity_max_sigma_deg": self.mosaicity_max_sigma_deg,
+            "profile_angle_max_half_width_deg": self.profile_angle_max_half_width_deg,
             "thickness_A": self.thickness_A,
             "group_width_deg": self.group_width_deg,
             "ug_d_min": self.ug_d_min,
@@ -1720,6 +1730,7 @@ class Config:
             "sg_jitter_sigma0": self.sg_jitter_sigma0,
             "sg_jitter_sigma_d_inv": self.sg_jitter_sigma_d_inv,
             "sg_jitter_sigma_frame": self.sg_jitter_sigma_frame,
+            "mosaicity_sigma_deg": self.mosaicity_sigma_deg,
             "thickness_grad_frac": self.thickness_grad_frac,
             "thickness_sigma_frac": self.thickness_sigma_frac,
             "variance_a": self.variance_a,
@@ -1736,6 +1747,10 @@ class Config:
         for name, value in nonnegative_fields.items():
             if not math.isfinite(float(value)) or float(value) < 0.0:
                 raise ValueError(f"{name} must be finite and nonnegative")
+        if float(self.mosaicity_sigma_deg) > float(self.mosaicity_max_sigma_deg):
+            raise ValueError(
+                "mosaicity_sigma_deg exceeds the explicit mosaicity_max_sigma_deg bound"
+            )
 
         choices = {
             "sg_window_mode": (
@@ -1743,6 +1758,11 @@ class Config:
                 {"fixed", "zobs_residual", "zobs_plus_floor", "rlp_peak", "dials_bbox"},
             ),
             "sg_jitter_mode": (self.sg_jitter_mode, {"none", "gaussian", "student_t"}),
+            "mosaicity_mode": (self.mosaicity_mode, {"none", "gaussian_omega"}),
+            "profile_coordinate": (
+                self.profile_coordinate,
+                {"target_sg", "direct_angle"},
+            ),
             "profile_quadrature": (
                 self.profile_quadrature,
                 {"uniform", "trapezoid", "gauss_legendre", "legendre"},
@@ -1815,13 +1835,23 @@ def frozen_kernel_contract(cfg: Config | None = None):
         "geometry": {
             "g(alpha)": "S @ R(alpha) @ F @ A(alpha) @ h (S=F=identity for ordinary XDS)",
             "Sg": "(k^2 - |s0 + g(alpha)|^2) / (2*k)",
-            "profile_mode": "target_sg_to_angle",
+            "profile_mode": "target_sg_to_angle or explicit direct-angle integration",
+            "profile_coordinate": (
+                None if cfg is None else str(getattr(cfg, "profile_coordinate", "target_sg"))
+            ),
             "profile_quadrature": None if cfg is None else str(getattr(cfg, "profile_quadrature", "uniform")),
             "profile_accumulation": None if cfg is None else str(getattr(cfg, "profile_accumulation", "sum")),
             "profile_weight_mode": "rocking-profile samples are summed by default; legacy normalized averaging is available as profile_accumulation=mean",
             "profile_coordinate_jacobian": "target-Sg quadrature weights include relative abs(domega/dSg) so exposure sampling is uniform in angle",
             "profile_width_mode": "fixed unless cfg.sg_window_mode explicitly requests an auditable XDS metadata-derived per-row width",
-            "orientation_distribution": "optional target-Sg jitter convolution after the base uniform-Sg grid; disabled by default",
+            "orientation_distribution": (
+                "optional target-Sg jitter plus a separately normalized direct-angle projected "
+                "mosaic convolution; both disabled by default"
+            ),
+            "geometry_path": (
+                "optional fixed geometry-only Chebyshev slew and two-axis tilt contract; "
+                "never fitted from intensities inside the Bloch calculation"
+            ),
             "basis_sg_recompute": "all basis Sg recomputed at every solved target-Sg angle",
             "bragg_root_search": "strict local angular bound around the recorded row geometry",
             "base_profile_root_search": "exact target-Sg continuation through strict local steps on one derivative-sign-certified Ewald branch",
@@ -2200,8 +2230,165 @@ class XDSData:
         frac = float(scan_index) - lo
         return (1.0 - frac) * self.A_at_scan_points[lo] + frac * self.A_at_scan_points[lo + 1]
 
+    def integration_profile_provenance(self):
+        """Return profile/mosaic metadata without treating it as fitted physics.
+
+        XDS reflecting range and beam divergence describe the integration
+        profile, not a uniquely separable crystal mosaicity.  DIALS profile
+        dictionaries are likewise retained in their native representation.
+        The values are therefore suitable as reported provenance or bounded
+        prior centres, but are never activated implicitly by the Bloch engine.
+        """
+
+        def first_float(key):
+            text = str(self.header.get(key, "") or "").strip()
+            if not text:
+                return None
+            try:
+                value = float(text.split()[0])
+            except (TypeError, ValueError):
+                return None
+            return value if math.isfinite(value) else None
+
+        profile_json = str(self.header.get("DIALS_PROFILE_PARAMETERS_JSON", "") or "").strip()
+        dials_profile = None
+        if profile_json:
+            try:
+                dials_profile = json.loads(profile_json)
+            except json.JSONDecodeError:
+                dials_profile = {"status": "unparsed", "raw": profile_json}
+        reflecting = first_float("REFLECTING_RANGE_E.S.D.")
+        divergence = first_float("BEAM_DIVERGENCE_E.S.D.")
+        dials_sigma_m_values = []
+        if isinstance(dials_profile, dict) and dials_profile.get("__id__") == "gaussian_rs":
+            raw_sigma_m = dials_profile.get("sigma_m")
+            if not isinstance(raw_sigma_m, (list, tuple)):
+                raw_sigma_m = [raw_sigma_m]
+            for raw_value in raw_sigma_m:
+                try:
+                    value = float(raw_value)
+                except (TypeError, ValueError):
+                    continue
+                if math.isfinite(value) and value >= 0.0:
+                    dials_sigma_m_values.append(value)
+        if dials_sigma_m_values:
+            prior_sigma = float(np.median(dials_sigma_m_values))
+            prior_source = "DIALS GaussianRS sigma_m (degrees)"
+        else:
+            prior_sigma = reflecting
+            prior_source = "XDS REFLECTING_RANGE_E.S.D. (degrees)"
+        return {
+            "source": str(self.header.get("GROND_SOURCE", "XDS") or "XDS").strip(),
+            "profile_fitting": str(self.header.get("PROFILE_FITTING", "") or "").strip() or None,
+            "xds": {
+                "reflecting_range_esd_deg": reflecting,
+                "beam_divergence_esd_deg": divergence,
+            },
+            "dials": {
+                "profile_model": str(self.header.get("DIALS_PROFILE_MODEL", "") or "").strip() or None,
+                "profile_parameters": dials_profile,
+                "gaussian_rs_sigma_m_deg": dials_sigma_m_values or None,
+                "frame_sliced_shoebox_available": (
+                    str(
+                        self.header.get(
+                            "DIALS_FRAME_SLICED_SHOEBOX_AVAILABLE", "FALSE"
+                        )
+                    ).strip().upper()
+                    == "TRUE"
+                ),
+            },
+            "optional_prior": {
+                "projected_mosaicity_sigma_deg": prior_sigma,
+                "source": prior_source,
+                "status": "provenance_only_not_activated",
+                "warning": (
+                    "The recorded integration-profile width is a prior centre, not an automatic "
+                    "Bloch nuisance value. XDS reflecting range can contain multiple broadening "
+                    "terms, while DIALS GaussianRS sigma_m remains tied to its integration model."
+                ),
+            },
+        }
+
     def recorded_proxy(self):
         return self.iobs * np.maximum(self.peak, 0.0) / 100.0 / np.maximum(self.rlp, 1e-12)
+
+
+def _rotation_matrix_axis_angle(axis, angle_deg):
+    """Return a right-handed lab-frame rotation matrix."""
+
+    axis = np.asarray(axis, dtype=float)
+    norm = float(np.linalg.norm(axis))
+    if axis.shape != (3,) or not np.all(np.isfinite(axis)) or norm <= 0.0:
+        raise ValueError("geometry-path rotation axis must be a finite nonzero 3-vector")
+    axis = axis / norm
+    x, y, z = axis
+    cross = np.asarray([[0.0, -z, y], [z, 0.0, -x], [-y, x, 0.0]], dtype=float)
+    theta = math.radians(float(angle_deg))
+    return np.eye(3, dtype=float) + math.sin(theta) * cross + (1.0 - math.cos(theta)) * (cross @ cross)
+
+
+def load_geometry_path_contract(path):
+    """Load one geometry-only smooth scan path with strict provenance checks."""
+
+    text = str(path or "").strip()
+    if not text:
+        return None
+    resolved = Path(text).expanduser().resolve()
+    payload = json.loads(resolved.read_text())
+    if int(payload.get("schema_version", -1)) != 1 or payload.get("kind") != "grond_geometry_path":
+        raise ValueError("geometry path must be a schema-1 grond_geometry_path JSON file")
+    if payload.get("basis") != "chebyshev":
+        raise ValueError("geometry path currently requires Chebyshev coefficients")
+    center = float(payload.get("frame_center"))
+    half_range = float(payload.get("frame_half_range"))
+    if not math.isfinite(center) or not math.isfinite(half_range) or half_range <= 0.0:
+        raise ValueError("geometry path frame centre/range must be finite and positive")
+    coefficients = payload.get("coefficients") or {}
+    checked = {}
+    for name in ("slew_frames", "tilt_x_deg", "tilt_y_deg"):
+        values = np.asarray(coefficients.get(name, []), dtype=float)
+        if values.ndim != 1 or len(values) == 0 or not np.all(np.isfinite(values)):
+            raise ValueError(f"geometry path {name} coefficients must be a finite vector")
+        checked[name] = values
+    axes = payload.get("tilt_axes_lab") or []
+    if len(axes) != 2:
+        raise ValueError("geometry path must define two lab-frame tilt axes")
+    axes = np.asarray(axes, dtype=float)
+    if axes.shape != (2, 3) or not np.all(np.isfinite(axes)):
+        raise ValueError("geometry path tilt axes must be a finite 2 by 3 array")
+    axis_norms = np.linalg.norm(axes, axis=1)
+    if np.any(axis_norms <= 0.0):
+        raise ValueError("geometry path tilt axes must be nonzero")
+    axes /= axis_norms[:, None]
+    bounds = payload.get("bounds") or {}
+    max_slew = float(bounds.get("max_abs_slew_frames", float("nan")))
+    max_tilt = float(bounds.get("max_abs_tilt_deg", float("nan")))
+    if not math.isfinite(max_slew) or max_slew <= 0.0:
+        raise ValueError("geometry path must record a positive finite slew bound")
+    if not math.isfinite(max_tilt) or max_tilt <= 0.0:
+        raise ValueError("geometry path must record a positive finite tilt bound")
+    sampled_x = np.linspace(-1.0, 1.0, 1001)
+    sampled = {
+        name: np.polynomial.chebyshev.chebval(sampled_x, values)
+        for name, values in checked.items()
+    }
+    if float(np.max(np.abs(sampled["slew_frames"]))) > max_slew + 1e-10:
+        raise ValueError("geometry path slew exceeds its declared bound")
+    for name in ("tilt_x_deg", "tilt_y_deg"):
+        if float(np.max(np.abs(sampled[name]))) > max_tilt + 1e-10:
+            raise ValueError(f"geometry path {name} exceeds its declared bound")
+    return {
+        "path": str(resolved),
+        "sha256": sha256(resolved),
+        "frame_center": center,
+        "frame_half_range": half_range,
+        "coefficients": checked,
+        "tilt_axes_lab": axes,
+        "source_hkl_sha256": str(payload.get("source_hkl_sha256", "") or ""),
+        "bounds": {"max_abs_slew_frames": max_slew, "max_abs_tilt_deg": max_tilt},
+        "fit_source": payload.get("fit_source"),
+        "validation": payload.get("validation"),
+    }
 
 
 def validate_ug_cube(cube: np.ndarray, expected_shape: tuple[int, int, int]) -> np.ndarray:
@@ -2298,6 +2485,18 @@ class XDSBlochPort:
         self.data = data
         self.model = copy.deepcopy(res_model)
         self.cfg = cfg
+        self.geometry_path = load_geometry_path_contract(
+            getattr(cfg, "geometry_path_file", "")
+        )
+        if self.geometry_path is not None:
+            expected_hkl_hash = str(self.geometry_path.get("source_hkl_sha256", ""))
+            actual_hkl_hash = sha256(self.data.path)
+            if not expected_hkl_hash:
+                raise ValueError("geometry path is missing its source HKL hash")
+            if expected_hkl_hash != actual_hkl_hash:
+                raise ValueError(
+                    "geometry path source HKL hash does not match the current reflection table"
+                )
         self.gamma = (
             relativistic_gamma_from_wavelength(data.wavelength)
             if cfg.gamma is None
@@ -2530,17 +2729,66 @@ class XDSBlochPort:
         omegas = np.array([self.omega_from_z(z) for z in self.data.zcal])
         return ((omegas - np.min(omegas)) // float(self.cfg.group_width_deg)).astype(int)
 
+    def geometry_path_at_z(self, z):
+        """Return fixed geometry-only corrections at a nominal frame."""
+
+        if getattr(self, "geometry_path", None) is None:
+            return 0.0, 0.0, 0.0
+        contract = self.geometry_path
+        x = (float(z) - float(contract["frame_center"])) / float(
+            contract["frame_half_range"]
+        )
+        x = float(np.clip(x, -1.0, 1.0))
+        coeff = contract["coefficients"]
+        return tuple(
+            float(np.polynomial.chebyshev.chebval(x, coeff[name]))
+            for name in ("slew_frames", "tilt_x_deg", "tilt_y_deg")
+        )
+
     def omega_from_z(self, z):
-        return self.data.omega_from_z(float(z) + float(self.cfg.frame_offset))
+        nominal_z = float(z)
+        if getattr(self, "geometry_path", None) is None:
+            return self.data.omega_from_z(nominal_z + float(self.cfg.frame_offset))
+        slew_frames, _, _ = self.geometry_path_at_z(nominal_z)
+        return self.data.omega_from_z(
+            nominal_z + float(self.cfg.frame_offset) + float(slew_frames)
+        )
+
+    def nominal_z_from_corrected_omega(self, omega_deg):
+        """Invert the smooth slew map for profile samples by fixed-point iteration."""
+
+        base = float(self.data.z_from_omega(omega_deg)) - float(self.cfg.frame_offset)
+        if getattr(self, "geometry_path", None) is None:
+            return base
+        z = base
+        for _ in range(8):
+            slew_frames, _, _ = self.geometry_path_at_z(z)
+            updated = base - float(slew_frames)
+            if abs(updated - z) <= 1e-10:
+                break
+            z = updated
+        return float(z)
 
     def gvecs(self, hkls, omega_deg):
-        A = self.data.A_for_omega(omega_deg)
+        if getattr(self, "geometry_path", None) is None:
+            A = self.data.A_for_omega(omega_deg)
+        else:
+            nominal_z = self.nominal_z_from_corrected_omega(omega_deg)
+            A = self.data.A_for_omega(self.data.omega_from_z(nominal_z))
         theta = np.radians(float(omega_deg))
         c = float(np.cos(theta))
         s = float(np.sin(theta))
         R = self.data.axis_eye + s * self.data.axis_cross + (1.0 - c) * self.data.axis_cross2
         transform = self.data.setting_rotation @ R @ self.data.fixed_rotation @ A
-        return (transform @ np.asarray(hkls, dtype=float).T).T
+        g = (transform @ np.asarray(hkls, dtype=float).T).T
+        if getattr(self, "geometry_path", None) is None:
+            return g
+        _, tilt_x_deg, tilt_y_deg = self.geometry_path_at_z(nominal_z)
+        axes = self.geometry_path["tilt_axes_lab"]
+        correction = _rotation_matrix_axis_angle(
+            axes[1], tilt_y_deg
+        ) @ _rotation_matrix_axis_angle(axes[0], tilt_x_deg)
+        return (correction @ g.T).T
 
     def sg_for_hkls(self, hkls, omega_deg):
         g = self.gvecs(hkls, omega_deg)
@@ -2981,6 +3229,198 @@ class XDSBlochPort:
         )
         return requested, weights, meta
 
+    def row_mosaicity_angle_points(self):
+        """Return a normalized projected angular mosaic distribution.
+
+        These offsets are applied directly to the crystal rotation angle after
+        each base target-Sg point has been solved.  Unlike the legacy Sg-jitter
+        proxy, every finite angular sample is geometrically defined and no
+        additional Ewald-root search is required.
+        """
+
+        mode = str(getattr(self.cfg, "mosaicity_mode", "none") or "none").lower()
+        sigma = float(getattr(self.cfg, "mosaicity_sigma_deg", 0.0))
+        if mode == "none" or sigma <= 0.0:
+            return (
+                np.asarray([0.0], dtype=float),
+                np.asarray([1.0], dtype=float),
+                {
+                    "mosaicity_mode": "none" if sigma <= 0.0 else mode,
+                    "mosaicity_sigma_deg": 0.0 if sigma <= 0.0 else sigma,
+                    "mosaicity_kernel_points": 1,
+                    "mosaicity_offset_abs_p95_deg": 0.0,
+                },
+            )
+        if mode != "gaussian_omega":
+            raise ValueError(f"unknown mosaicity_mode={mode!r}")
+        n = max(1, int(getattr(self.cfg, "mosaicity_points", 3)))
+        if n == 1:
+            offsets = np.asarray([0.0], dtype=float)
+            weights = np.asarray([1.0], dtype=float)
+        else:
+            nodes, raw_weights = hermgauss(n)
+            offsets = math.sqrt(2.0) * sigma * np.asarray(nodes, dtype=float)
+            weights = np.asarray(raw_weights, dtype=float) / math.sqrt(math.pi)
+            weights /= max(float(np.sum(weights)), 1e-30)
+        return offsets, weights, {
+            "mosaicity_mode": mode,
+            "mosaicity_sigma_deg": sigma,
+            "mosaicity_kernel_points": int(len(offsets)),
+            "mosaicity_offset_abs_p95_deg": float(
+                np.quantile(np.abs(offsets), 0.95)
+            ),
+        }
+
+    def row_profile_omega_points(self, row_idx, hkl, omega_center, center_sg, sg_window_i):
+        """Build solved base-profile angles convolved with direct angular mosaicity."""
+
+        coordinate = str(
+            getattr(self.cfg, "profile_coordinate", "target_sg") or "target_sg"
+        ).lower()
+        if coordinate == "direct_angle":
+            jitter_sigma, jitter_meta = self.row_sg_jitter_sigma(row_idx, hkl)
+            if jitter_sigma > 0.0:
+                raise ValueError(
+                    "direct-angle profile quadrature cannot be combined with target-Sg jitter"
+                )
+            n_base = max(1, int(self.cfg.n_points))
+            derivative = abs(float(self.sg_derivative_per_deg(hkl, omega_center)))
+            if not math.isfinite(derivative) or derivative <= 1e-12:
+                raise ValueError("direct-angle profile requires a finite nonzero dSg/domega")
+            raw_half_width_deg = 0.5 * float(sg_window_i) / derivative
+            maximum = float(getattr(self.cfg, "profile_angle_max_half_width_deg", 2.0))
+            half_width_deg = min(raw_half_width_deg, maximum)
+            rule = str(
+                getattr(self.cfg, "profile_quadrature", "uniform") or "uniform"
+            ).lower()
+            accumulation = str(
+                getattr(self.cfg, "profile_accumulation", "sum") or "sum"
+            ).lower()
+            if n_base == 1:
+                base_offsets = np.asarray([0.0], dtype=float)
+                base_weights = np.asarray([1.0], dtype=float)
+            elif rule == "uniform":
+                base_offsets = np.linspace(-half_width_deg, half_width_deg, n_base)
+                base_weights = np.ones(n_base, dtype=float)
+            elif rule == "trapezoid":
+                base_offsets = np.linspace(-half_width_deg, half_width_deg, n_base)
+                base_weights = np.ones(n_base, dtype=float)
+                base_weights[[0, -1]] = 0.5
+                base_weights *= n_base / max(float(np.sum(base_weights)), 1e-30)
+            elif rule in {"gauss_legendre", "legendre"}:
+                nodes, weights = leggauss(n_base)
+                base_offsets = half_width_deg * np.asarray(nodes, dtype=float)
+                base_weights = np.asarray(weights, dtype=float)
+                base_weights *= n_base / max(float(np.sum(base_weights)), 1e-30)
+            else:
+                raise ValueError(f"unknown profile_quadrature={rule!r}")
+            if accumulation == "mean":
+                base_weights /= max(float(np.sum(base_weights)), 1e-30)
+            elif accumulation != "sum":
+                raise ValueError(f"unknown profile_accumulation={accumulation!r}")
+            angular_offsets, angular_weights, mosaicity_meta = (
+                self.row_mosaicity_angle_points()
+            )
+            sample_omegas = (
+                float(omega_center)
+                + base_offsets[:, None]
+                + np.asarray(angular_offsets, dtype=float)[None, :]
+            ).reshape(-1)
+            profile_weights = (
+                base_weights[:, None]
+                * np.asarray(angular_weights, dtype=float)[None, :]
+            ).reshape(-1)
+            jitter_meta.update(
+                {
+                    "sg_profile_coordinate": "direct_angle",
+                    "sg_profile_quadrature": rule,
+                    "sg_profile_accumulation": accumulation,
+                    "sg_profile_angle_jacobian": False,
+                    "sg_profile_angle_half_width_deg": float(half_width_deg),
+                    "sg_profile_angle_raw_half_width_deg": float(raw_half_width_deg),
+                    "sg_profile_angle_half_width_clipped": bool(
+                        half_width_deg < raw_half_width_deg
+                    ),
+                    "sg_profile_weight_sum": float(np.sum(profile_weights)),
+                    "sg_profile_points_total": int(len(profile_weights)),
+                    "sg_profile_same_branch_continuation_used": False,
+                    "sg_profile_same_branch_continuation_segments": 1,
+                    "sg_profile_root_search": "not_used_direct_angle",
+                    "sg_jitter_kernel_points": 1,
+                    "sg_jitter_offset_abs_p95_inv_A": 0.0,
+                }
+            )
+            return (
+                np.asarray(sample_omegas, dtype=float),
+                np.asarray(profile_weights, dtype=float),
+                np.asarray([], dtype=float),
+                jitter_meta,
+                mosaicity_meta,
+            )
+        if coordinate != "target_sg":
+            raise ValueError(f"unknown profile_coordinate={coordinate!r}")
+
+        requested, base_weights, jitter_meta = self.row_profile_sg_points(
+            row_idx, hkl, sg_window_i
+        )
+        physical_targets = float(center_sg) + np.asarray(requested, dtype=float)
+        base_omegas = []
+        root_residuals = []
+        for target_sg in physical_targets:
+            omega = self.solve_sg_profile_target(
+                row_idx,
+                hkl,
+                omega_center,
+                target_sg,
+                jitter_meta,
+            )
+            base_omegas.append(float(omega))
+            solved = float(
+                self.sg_for_hkls(np.asarray([hkl], dtype=int), omega)[0]
+            )
+            root_residuals.append(solved - float(target_sg))
+
+        base_weights = np.asarray(base_weights, dtype=float)
+        jacobian = 1.0 / np.maximum(
+            np.abs(
+                [self.sg_derivative_per_deg(hkl, omega) for omega in base_omegas]
+            ),
+            1e-12,
+        )
+        original_weight_sum = float(np.sum(base_weights))
+        base_weights *= jacobian
+        base_weights *= original_weight_sum / max(
+            float(np.sum(base_weights)), 1e-30
+        )
+        angular_offsets, angular_weights, mosaicity_meta = (
+            self.row_mosaicity_angle_points()
+        )
+        sample_omegas = (
+            np.asarray(base_omegas, dtype=float)[:, None]
+            + np.asarray(angular_offsets, dtype=float)[None, :]
+        ).reshape(-1)
+        profile_weights = (
+            base_weights[:, None] * np.asarray(angular_weights, dtype=float)[None, :]
+        ).reshape(-1)
+        jitter_meta.update(
+            {
+                "sg_profile_coordinate": "target_sg",
+                "sg_profile_angle_jacobian": True,
+                "sg_profile_jacobian_ratio": float(
+                    np.max(jacobian) / max(np.min(jacobian), 1e-30)
+                ),
+                "sg_profile_weight_sum": float(np.sum(profile_weights)),
+                "sg_profile_points_total": int(len(profile_weights)),
+            }
+        )
+        return (
+            np.asarray(sample_omegas, dtype=float),
+            np.asarray(profile_weights, dtype=float),
+            np.asarray(root_residuals, dtype=float),
+            jitter_meta,
+            mosaicity_meta,
+        )
+
     def select_basis(self, target_hkl, omega_bragg, row_idx=None):
         sg_pool = self.sg_for_hkls(self.pool_hkl, omega_bragg)
         if row_idx is None:
@@ -3266,31 +3706,32 @@ class XDSBlochPort:
         zcal = self.data.zcal[row_idx]
         omega_center = self.omega_from_z(zcal)
         center_sg = float(self.sg_for_hkls(np.asarray([hkl], dtype=int), omega_center)[0])
-        omega_bragg = self.solve_omega_for_sg(hkl, omega_center, 0.0)
+        if str(getattr(self.cfg, "profile_coordinate", "target_sg")) == "direct_angle":
+            omega_bragg = float(omega_center)
+        else:
+            omega_bragg = self.solve_omega_for_sg(hkl, omega_center, 0.0)
         basis = self.select_basis(hkl, omega_center, row_idx=row_idx)
         if not np.array_equal(basis[0], np.asarray([0, 0, 0], dtype=int)) or not np.array_equal(basis[1], np.asarray(hkl, dtype=int)):
             raise RuntimeError("Frozen kernel basis contract violated: basis must start with direct beam then exact signed target hkl.")
         sg_window_i, sg_width_meta = self.row_sg_window(row_idx, hkl, omega_center)
-        requested, profile_weights, jitter_meta = self.row_profile_sg_points(row_idx, hkl, sg_window_i)
-        physical_targets = center_sg + np.asarray(requested, dtype=float)
+        (
+            solved_omegas,
+            profile_weights,
+            sg_resid,
+            jitter_meta,
+            mosaicity_meta,
+        ) = self.row_profile_omega_points(
+            row_idx, hkl, omega_center, center_sg, sg_window_i
+        )
         H_dyn_static = self.hamiltonian_static_part(basis, absorb=True, row_idx=row_idx)
         if self.absorption_enabled():
             H_born_static = self.hamiltonian_static_part(basis, absorb=False, row_idx=row_idx)
         else:
             H_born_static = H_dyn_static
         h10_born = H_born_static[1, 0]
-        dyn_matrices, born_vals, born_deltas, sg_resid, solved_omegas = [], [], [], [], []
-        for target_sg in physical_targets:
-            omega = self.solve_sg_profile_target(
-                row_idx,
-                hkl,
-                omega_center,
-                target_sg,
-                jitter_meta,
-            )
-            solved_omegas.append(float(omega))
+        dyn_matrices, born_vals, born_deltas = [], [], []
+        for omega in solved_omegas:
             sg_basis = self.sg_for_hkls(basis, omega)
-            sg_resid.append(float(sg_basis[1] - target_sg))
             H = self.hamiltonian_from_static(H_dyn_static, sg_basis)
             dyn_matrices.append(H)
             delta = float(np.real(sg_basis[1] - sg_basis[0]))
@@ -3298,17 +3739,6 @@ class XDSBlochPort:
             sinc = np.sinc(delta * self.thick)
             born_t = (2.0 * math.pi) ** 2 * (abs(h10_born) ** 2) * (self.thick**2) * (sinc**2)
             born_vals.append(float(np.sum(self.thick_w * born_t)))
-        profile_weights = np.asarray(profile_weights, dtype=float)
-        jacobian = 1.0 / np.maximum(
-            np.abs([self.sg_derivative_per_deg(hkl, omega) for omega in solved_omegas]),
-            1e-12,
-        )
-        original_weight_sum = float(np.sum(profile_weights))
-        profile_weights *= jacobian
-        profile_weights *= original_weight_sum / max(float(np.sum(profile_weights)), 1e-30)
-        jitter_meta["sg_profile_angle_jacobian"] = True
-        jitter_meta["sg_profile_jacobian_ratio"] = float(np.max(jacobian) / max(np.min(jacobian), 1e-30))
-        jitter_meta["sg_profile_weight_sum"] = float(np.sum(profile_weights))
         return {
             "_dyn_matrices": dyn_matrices,
             "_profile_weights": np.asarray(profile_weights, dtype=float),
@@ -3328,6 +3758,7 @@ class XDSBlochPort:
             "thickness_sigma_frac": float(getattr(self.cfg, "thickness_sigma_frac", 0.0)),
             **sg_width_meta,
             **jitter_meta,
+            **mosaicity_meta,
         }
 
     def finish_row_prediction_plan(self, plan, dyn_vals):
@@ -3392,6 +3823,19 @@ class XDSBlochPort:
             "sg_jitter_points": int(self.cfg.sg_jitter_points),
             "sg_jitter_student_df": float(self.cfg.sg_jitter_student_df),
             "sg_jitter_width_factor": float(self.cfg.sg_jitter_width_factor),
+            "mosaicity_mode": str(self.cfg.mosaicity_mode),
+            "mosaicity_sigma_deg": float(self.cfg.mosaicity_sigma_deg),
+            "mosaicity_max_sigma_deg": float(self.cfg.mosaicity_max_sigma_deg),
+            "mosaicity_points": int(self.cfg.mosaicity_points),
+            "profile_coordinate": str(self.cfg.profile_coordinate),
+            "profile_angle_max_half_width_deg": float(
+                self.cfg.profile_angle_max_half_width_deg
+            ),
+            "geometry_path_sha256": (
+                str(self.geometry_path["sha256"])
+                if self.geometry_path is not None
+                else ""
+            ),
             "profile_quadrature": str(self.cfg.profile_quadrature),
             "profile_accumulation": str(self.cfg.profile_accumulation),
             "topup_d_min": float(self.cfg.topup_d_min),
@@ -3473,37 +3917,27 @@ class XDSBlochPort:
             zcal = self.data.zcal[row_idx]
             omega_c = self.omega_from_z(zcal)
             c_sg = float(self.sg_for_hkls(np.asarray([hkl], dtype=int), omega_c)[0])
-            omega_b = self.solve_omega_for_sg(hkl, omega_c, 0.0)
+            if str(getattr(self.cfg, "profile_coordinate", "target_sg")) == "direct_angle":
+                omega_b = float(omega_c)
+            else:
+                omega_b = self.solve_omega_for_sg(hkl, omega_c, 0.0)
             basis = self.select_basis(hkl, omega_c, row_idx=row_idx)
             if not np.array_equal(basis[0], np.asarray([0, 0, 0], dtype=int)) or not np.array_equal(basis[1], np.asarray(hkl, dtype=int)):
                 raise RuntimeError("Frozen row-plan basis contract violated: basis must start with direct beam then exact signed target hkl.")
             sg_window_i, sg_width_meta = self.row_sg_window(row_idx, hkl, omega_c)
-            requested, profile_weights, jitter_meta = self.row_profile_sg_points(row_idx, hkl, sg_window_i)
-            physical_targets = c_sg + np.asarray(requested, dtype=float)
+            (
+                solved_omegas,
+                profile_weights,
+                sg_resid_values,
+                jitter_meta,
+                _mosaicity_meta,
+            ) = self.row_profile_omega_points(
+                row_idx, hkl, omega_c, c_sg, sg_window_i
+            )
             sg_basis_rows = []
-            sg_resid = []
-            solved_omegas = []
-            for target_sg in physical_targets:
-                omega = self.solve_sg_profile_target(
-                    row_idx,
-                    hkl,
-                    omega_c,
-                    target_sg,
-                    jitter_meta,
-                )
-                solved_omegas.append(float(omega))
+            for omega in solved_omegas:
                 sg_basis = self.sg_for_hkls(basis, omega)
                 sg_basis_rows.append(np.asarray(sg_basis, dtype=float))
-                sg_resid.append(float(sg_basis[1] - target_sg))
-            profile_weights = np.asarray(profile_weights, dtype=float)
-            jacobian = 1.0 / np.maximum(
-                np.abs([self.sg_derivative_per_deg(hkl, omega) for omega in solved_omegas]),
-                1e-12,
-            )
-            original_weight_sum = float(np.sum(profile_weights))
-            profile_weights *= jacobian
-            profile_weights *= original_weight_sum / max(float(np.sum(profile_weights)), 1e-30)
-            jitter_meta["sg_profile_weight_sum"] = float(np.sum(profile_weights))
 
             diffs = basis[None, :, :] - basis[:, None, :] if convention == "j_minus_i" else basis[:, None, :] - basis[None, :, :]
             row_diff_idx = []
@@ -3548,7 +3982,11 @@ class XDSBlochPort:
             sg_profile_same_branch_continuation_segments.append(
                 int(jitter_meta["sg_profile_same_branch_continuation_segments"])
             )
-            sg_residual_max.append(float(np.max(np.abs(sg_resid))) if len(sg_resid) else 0.0)
+            sg_residual_max.append(
+                float(np.max(np.abs(sg_resid_values)))
+                if len(sg_resid_values)
+                else 0.0
+            )
             dose_delta_b.append(float(self.row_delta_b(row_idx)))
             if (pos + 1) % 500 == 0 or pos + 1 == len(indices):
                 elapsed = time.perf_counter() - t0
@@ -4876,6 +5314,13 @@ def main():
     ap.add_argument("--sg-jitter-points", type=int, default=5, help="Kernel quadrature points for Sg-jitter convolution.")
     ap.add_argument("--sg-jitter-student-df", type=float, default=4.0, help="Student-t degrees of freedom for Sg-jitter mode.")
     ap.add_argument("--sg-jitter-width-factor", type=float, default=3.0, help="Truncation half-width in sigma units for Student-t jitter mode.")
+    ap.add_argument("--mosaicity-mode", choices=["none", "gaussian_omega"], default="none", help="Optional direct projected angular mosaic convolution applied after target-Sg root solving.")
+    ap.add_argument("--mosaicity-sigma-deg", type=float, default=0.0, help="Projected Gaussian mosaicity sigma in degrees; never inferred from the XDS reflecting range automatically.")
+    ap.add_argument("--mosaicity-max-sigma-deg", type=float, default=0.5, help="Hard upper bound for the projected mosaicity sigma.")
+    ap.add_argument("--mosaicity-points", type=int, default=3, help="Gauss-Hermite points for direct angular mosaicity quadrature.")
+    ap.add_argument("--geometry-path", default="", help="Optional geometry-only Chebyshev slew/two-axis tilt JSON produced independently of intensities.")
+    ap.add_argument("--profile-coordinate", choices=["target_sg", "direct_angle"], default="target_sg", help="Integrate through solved target-Sg points or directly in recorded scan angle.")
+    ap.add_argument("--profile-angle-max-half-width-deg", type=float, default=2.0, help="Hard half-width bound for direct-angle integration.")
     ap.add_argument("--profile-quadrature", choices=["uniform", "trapezoid", "gauss_legendre"], default="uniform", help="Rocking-profile Sg quadrature rule.")
     ap.add_argument("--profile-accumulation", choices=["sum", "mean"], default="sum", help="Accumulate rocking-profile samples as summed detector sub-exposures or legacy normalized means.")
     ap.add_argument("--topup-d-min", type=float, default=0.8)
@@ -4945,6 +5390,13 @@ def main():
         sg_jitter_points=args.sg_jitter_points,
         sg_jitter_student_df=args.sg_jitter_student_df,
         sg_jitter_width_factor=args.sg_jitter_width_factor,
+        mosaicity_mode=args.mosaicity_mode,
+        mosaicity_sigma_deg=args.mosaicity_sigma_deg,
+        mosaicity_max_sigma_deg=args.mosaicity_max_sigma_deg,
+        mosaicity_points=args.mosaicity_points,
+        geometry_path_file=args.geometry_path,
+        profile_coordinate=args.profile_coordinate,
+        profile_angle_max_half_width_deg=args.profile_angle_max_half_width_deg,
         profile_quadrature=args.profile_quadrature,
         profile_accumulation=args.profile_accumulation,
         topup_d_min=args.topup_d_min,
@@ -5245,6 +5697,7 @@ def main():
                 data_all.cell.gamma,
             ],
             "simulation_cell_basis": data_all.working_cell_basis,
+            "integration_profile_provenance": data_all.integration_profile_provenance(),
             "res": str(Path(args.res).resolve()),
             "res_sha256": res_hash,
         },
@@ -5278,6 +5731,29 @@ def main():
             "sg_window_max_used": float(np.nanmax(pred_subset["sg_window"])) if len(indices) else float("nan"),
             "sg_window_clipped_count": int(np.count_nonzero(pred_subset["sg_window_clipped"])) if len(indices) else 0,
             "sg_jitter_mode": cfg.sg_jitter_mode,
+            "mosaicity_mode": cfg.mosaicity_mode,
+            "mosaicity_sigma_deg": cfg.mosaicity_sigma_deg,
+            "mosaicity_max_sigma_deg": cfg.mosaicity_max_sigma_deg,
+            "mosaicity_points": cfg.mosaicity_points,
+            "geometry_path": (
+                None
+                if port.geometry_path is None
+                else {
+                    "path": port.geometry_path["path"],
+                    "sha256": port.geometry_path["sha256"],
+                    "frame_center": port.geometry_path["frame_center"],
+                    "frame_half_range": port.geometry_path["frame_half_range"],
+                    "coefficients": {
+                        name: values.tolist()
+                        for name, values in port.geometry_path["coefficients"].items()
+                    },
+                    "tilt_axes_lab": port.geometry_path["tilt_axes_lab"].tolist(),
+                    "source_hkl_sha256": port.geometry_path["source_hkl_sha256"],
+                    "bounds": port.geometry_path["bounds"],
+                    "fit_source": port.geometry_path.get("fit_source"),
+                    "validation": port.geometry_path.get("validation"),
+                }
+            ),
             "profile_quadrature": cfg.profile_quadrature,
             "profile_accumulation": cfg.profile_accumulation,
             "sg_jitter_sigma_median_used": float(np.nanmedian(pred_subset["sg_jitter_sigma"])) if len(indices) else float("nan"),

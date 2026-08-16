@@ -98,6 +98,19 @@ def first_panel_metadata(detector):
     }
 
 
+def profile_model_metadata(profile):
+    if profile is None:
+        return {"model": None, "parameters": None}
+    model = type(profile).__name__
+    parameters = None
+    if hasattr(profile, "to_dict"):
+        try:
+            parameters = profile.to_dict()
+        except Exception:
+            parameters = None
+    return {"model": model, "parameters": parameters}
+
+
 def main():
     refl_path = Path(sys.argv[1])
     expt_path = Path(sys.argv[2])
@@ -237,6 +250,12 @@ def main():
             "oscillation": oscillation,
         },
         "detector": first_panel_metadata(detector),
+        "profile": profile_model_metadata(getattr(exp, "profile", None)),
+        "frame_sliced_shoebox": {
+            "available": bool("frame_sliced_shoebox" in table),
+            "used_for_intensity": False,
+            "status": "recorded_for_future_rocking_profile_import",
+        },
     }
     out_json.write_text(json.dumps(meta, indent=2) + "\n")
 
@@ -991,6 +1010,19 @@ def convert_dials_to_grond(
             )
         f.write(f"!DIALS_INTENSITY_MODE= {mode}\n")
         f.write(f"!DIALS_INTENSITY_NOTE= {intensity_note}\n")
+        profile = metadata.get("profile") or {}
+        if profile.get("model"):
+            f.write(f"!DIALS_PROFILE_MODEL= {profile['model']}\n")
+        if profile.get("parameters") is not None:
+            compact_profile = json.dumps(
+                profile["parameters"], sort_keys=True, separators=(",", ":")
+            )
+            f.write(f"!DIALS_PROFILE_PARAMETERS_JSON= {compact_profile}\n")
+        frame_sliced = metadata.get("frame_sliced_shoebox") or {}
+        f.write(
+            "!DIALS_FRAME_SLICED_SHOEBOX_AVAILABLE= "
+            f"{'TRUE' if frame_sliced.get('available') else 'FALSE'}\n"
+        )
         f.write(f"!DIALS_SIGMA_MODE= {sigma_summary['mode']}\n")
         f.write(f"!DIALS_SIGMA_MULTIPLIER= {sigma_summary['sigma_multiplier']:.12g}\n")
         f.write(f"!DIALS_SIGMA_SOURCE= {sigma_summary['source']}\n")
@@ -1145,6 +1177,8 @@ def convert_dials_to_grond(
             "rotation_axis_datum": metadata.get("goniometer", {}).get("rotation_axis_datum", []),
             "fixed_rotation": metadata.get("goniometer", {}).get("fixed_rotation", []),
             "setting_rotation": metadata.get("goniometer", {}).get("setting_rotation", []),
+            "profile": metadata.get("profile", {}),
+            "frame_sliced_shoebox": metadata.get("frame_sliced_shoebox", {}),
         },
         "sg_validation": sg_validation,
         "recommended_grond_args": {
