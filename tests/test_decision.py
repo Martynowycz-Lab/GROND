@@ -3,6 +3,8 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
+import pytest
+
 from grond.io.config import DatasetSpec
 from grond.workflows.decision import (
     apply_preflight,
@@ -81,6 +83,35 @@ def test_preflight_keeps_healthy_minimal_xds(tmp_path: Path):
     assert decision.row_count == 300
     assert decision.scout_max_rows == 300
     assert decision.recommended_min_peak == 90.0
+
+
+def test_preflight_excludes_all_zero_xds_centroids_from_geometry_diagnostics(tmp_path: Path):
+    hkl = tmp_path / "INTEGRATE.HKL"
+    _write_minimal_xds(hkl)
+    lines = hkl.read_text().splitlines()
+    for index in range(1, 61):
+        fields = lines[index].split()
+        fields[12:15] = ["0", "0", "0"]
+        lines[index] = " ".join(fields)
+    hkl.write_text("\n".join(lines) + "\n")
+    ds = DatasetSpec(name="missing_centroids", hkl=str(hkl), min_peak=90.0)
+
+    decision = preflight_dataset(
+        ds,
+        requested_min_peak=90.0,
+        requested_geometry_percentile=99.0,
+        requested_scout_rows=500,
+    )
+
+    assert decision.status == "ok"
+    assert decision.observed_geometry_fraction == pytest.approx(0.8)
+    assert decision.geometry_dr_p99_px < 1.0
+    assert decision.geometry_abs_dz_p99_frame < 1.0
+    assert decision.recommended_geometry_percentile == 99.0
+    assert any(
+        "60 rows have absent XDS observed centroids" in value
+        for value in decision.warnings
+    )
 
 
 def test_preflight_rejects_rows_with_negative_sigmas(tmp_path: Path):

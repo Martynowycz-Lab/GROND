@@ -1517,6 +1517,10 @@ def geometry_tail_mask(data: XDSData, base_mask, percentile: float = 100.0):
     return keep, {
         "status": "ok",
         "percentile": float(percentile),
+        "observed_geometry_rows": int(np.count_nonzero(geom_base)),
+        "missing_observed_geometry_rows": int(
+            np.count_nonzero(base & ~finite_dr & ~finite_dz)
+        ),
         "dr_cut_px": dr_cut,
         "abs_dz_cut_frame": dz_cut,
         "rlp_log_robust_z_cut": rlp_cut,
@@ -2757,6 +2761,8 @@ def rank_trials(trials, metric_name: str):
 _NUISANCE_CATEGORICAL_FIELDS = {
     "thickness_model",
     "sg_jitter_mode",
+    "mosaicity_mode",
+    "geometry_path_file",
     "absorption_mode",
     "dose_b_mode",
     "matrix_convention",

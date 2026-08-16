@@ -171,6 +171,8 @@ def test_nuisance_reference_matching_accepts_only_two_sided_nan_and_roundtrip_va
     nuisance = {
         "thickness_A": 1204.5805095106,
         "thickness_model": "uniform_gradient",
+        "mosaicity_mode": "none",
+        "geometry_path_file": "",
         "dose_b_ref_frame": float("nan"),
     }
 
@@ -180,6 +182,12 @@ def test_nuisance_reference_matching_accepts_only_two_sided_nan_and_roundtrip_va
     assert nuisance_reference_matches(
         {**nuisance, "thickness_A": float("nan")},
         {**nuisance, "thickness_A": float("nan")},
+    ) is False
+    assert nuisance_reference_matches(
+        {**nuisance, "mosaicity_mode": "gaussian_omega"}, nuisance
+    ) is False
+    assert nuisance_reference_matches(
+        {**nuisance, "geometry_path_file": "geometry.json"}, nuisance
     ) is False
 
 

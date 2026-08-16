@@ -2068,6 +2068,16 @@ class XDSData:
         self.xobs = arr[:, 12].astype(float)
         self.yobs = arr[:, 13].astype(float)
         self.zobs = arr[:, 14].astype(float)
+        # INTEGRATE.HKL uses an all-zero observed centroid when XOBS/YOBS/ZOBS
+        # are unavailable. It is not a measurement at the detector origin.
+        # Normalize that sentinel once so geometry diagnostics leave the row
+        # unscored while XCAL/YCAL/ZCAL remain available to the Bloch model.
+        missing_observed_centroid = (
+            (self.xobs == 0.0) & (self.yobs == 0.0) & (self.zobs == 0.0)
+        )
+        self.xobs[missing_observed_centroid] = np.nan
+        self.yobs[missing_observed_centroid] = np.nan
+        self.zobs[missing_observed_centroid] = np.nan
         self.alf0 = arr[:, 15].astype(float)
         self.bet0 = arr[:, 16].astype(float)
         self.alf1 = arr[:, 17].astype(float)

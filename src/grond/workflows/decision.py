@@ -74,6 +74,18 @@ def _safe_percentile(values, p: float) -> float:
     return float(np.nanpercentile(arr, p))
 
 
+def _xds_observed_geometry_mask(
+    xobs: np.ndarray,
+    yobs: np.ndarray,
+    zobs: np.ndarray,
+) -> np.ndarray:
+    """Identify real XDS centroids, excluding its all-zero missing sentinel."""
+
+    finite = np.isfinite(xobs) & np.isfinite(yobs) & np.isfinite(zobs)
+    missing_sentinel = (xobs == 0.0) & (yobs == 0.0) & (zobs == 0.0)
+    return finite & ~missing_sentinel
+
+
 def _parse_xds_rows(path: Path) -> tuple[dict[str, str], np.ndarray]:
     """Parse enough of an XDS HKL file for data-quality decisions."""
 
@@ -161,7 +173,7 @@ def preflight_dataset(ds: DatasetSpec, *, requested_min_peak: float, requested_g
     dvals = _d_spacings(header, hkl)
     positive_fraction = float(np.mean(iobs > 0.0))
     sigma_positive_fraction = float(np.mean(sig > 0.0))
-    geom = np.isfinite(xobs) & np.isfinite(yobs) & np.isfinite(zobs)
+    geom = _xds_observed_geometry_mask(xobs, yobs, zobs)
     observed_geometry_fraction = float(np.mean(geom))
     dr = np.sqrt((xobs - xcal) ** 2 + (yobs - ycal) ** 2)
     dz = zobs - zcal
@@ -175,6 +187,12 @@ def preflight_dataset(ds: DatasetSpec, *, requested_min_peak: float, requested_g
         warnings.append("less than half of rows have positive target intensity")
     if sigma_positive_fraction < 0.98:
         warnings.append("some rows have non-positive sigma")
+    missing_geometry_count = int(np.count_nonzero(~geom))
+    if missing_geometry_count:
+        warnings.append(
+            f"{missing_geometry_count} rows have absent XDS observed centroids; "
+            "excluded from geometry-tail diagnostics"
+        )
     if observed_geometry_fraction < 0.5:
         warnings.append("observed XDS geometry columns are mostly absent; geometry-tail filter disabled")
 

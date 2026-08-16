@@ -15,7 +15,7 @@ from grond.io.row_contract import (
     write_xds_compatibility_dir,
 )
 from grond.legacy.engine.bloch_engine import XDSBlochPort, XDSData
-from grond.legacy.engine.native_row_regularize import row_selection
+from grond.legacy.engine.native_row_regularize import geometry_tail_mask, row_selection
 from grond.workflows.decision import ALL_PROPER_SIGNED_PERMUTATIONS
 
 
@@ -42,6 +42,34 @@ def test_row_contract_template_validates_and_writes_xds_compat(tmp_path: Path):
     assert tuple(data.hkl[0]) == (1, 0, 2)
     assert data.iobs[0] == 1284.5
     assert data.peak[1] == 95.0
+
+
+def test_xds_reader_normalizes_missing_observed_centroid_without_dropping_row(tmp_path: Path):
+    rows_path, metadata_path = write_template(
+        tmp_path / "rows.csv", tmp_path / "rows_metadata.json"
+    )
+    rows = read_row_table(rows_path)
+    metadata = load_row_metadata(metadata_path)
+    hkl = write_xds_compatibility_dir(rows, metadata, tmp_path / "bridge")
+    lines = hkl.read_text().splitlines()
+    numeric = [index for index, line in enumerate(lines) if not line.startswith("!")]
+    fields = lines[numeric[0]].split()
+    fields[12:15] = ["0", "0", "0"]
+    lines[numeric[0]] = " ".join(fields)
+    hkl.write_text("\n".join(lines) + "\n")
+
+    data = XDSData(hkl)
+    assert len(data.hkl) == 2
+    assert np.isnan(data.xobs[0])
+    assert np.isnan(data.yobs[0])
+    assert np.isnan(data.zobs[0])
+
+    keep, summary = geometry_tail_mask(
+        data, np.ones(len(data.hkl), dtype=bool), 97.5
+    )
+    assert keep[0]
+    assert summary["observed_geometry_rows"] == 1
+    assert summary["missing_observed_geometry_rows"] == 1
 
 
 def test_portable_geometry_preserves_full_setting_rotation_fixed_rotation_chain(tmp_path: Path):

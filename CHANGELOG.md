@@ -4,6 +4,15 @@ This file records user-visible changes to the installable package. Version `0.2.
 
 ## 0.2.2 (unreleased)
 
+Automatic thickness promotion now compares the complete nuisance contract
+correctly after mosaicity and geometry-path provenance were added. String-valued
+fields no longer make an unchanged starting trial fail to match itself and abort
+an otherwise healthy non-fast run. XDS all-zero `XOBS/YOBS/ZOBS` sentinels are
+also treated as missing centroids rather than detector measurements at the
+origin. Such rows remain available through predicted geometry, are excluded
+from observed-geometry tail estimates, and are counted explicitly in preflight
+and row-selection diagnostics.
+
 Experts can now run the principal automatic decisions as explicit handoff
 stages. `grond scout` performs only proper-transform preflight and scouting,
 `grond thickness` aliases the existing thickness audit, `grond hand-check`
