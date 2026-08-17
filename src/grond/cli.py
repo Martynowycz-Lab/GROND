@@ -2208,6 +2208,18 @@ def make_alternate_hand_model(python: str, structure: str, out_dir: Path, logs: 
     return dst
 
 
+def resolved_row_plan_cache(args: argparse.Namespace, *, fixed_model: bool) -> str:
+    """Resolve the workflow cache policy without freezing a moving-model basis."""
+
+    mode = str(getattr(args, "row_plan_cache", "off") or "off").lower()
+    if mode == "auto":
+        # Fixed-model stages know the nuisance-grid shape and decide whether
+        # enough candidates share one geometry key to amortize a cold cache
+        # build.  Moving-model stages must not freeze a basis implicitly.
+        return "auto" if fixed_model else "off"
+    return mode
+
+
 def native_stage_cmd(
     python: str,
     ds: DatasetSpec,
@@ -2404,7 +2416,7 @@ def native_stage_cmd(
         "--compute-backend",
         args.compute_backend,
         "--row-plan-cache",
-        getattr(args, "row_plan_cache", "off"),
+        resolved_row_plan_cache(args, fixed_model=True),
         "--jax-batch-size",
         str(args.jax_batch_size),
         "--jax-matrix-bucket-size",
@@ -3022,7 +3034,7 @@ def structure_cmd(python: str, ds: DatasetSpec, structure: str, baseline_hkl: st
         "--compute-backend",
         args.compute_backend,
         "--row-plan-cache",
-        getattr(args, "row_plan_cache", "off"),
+        resolved_row_plan_cache(args, fixed_model=False),
         "--jax-batch-size",
         str(args.jax_batch_size),
         "--jax-matrix-bucket-size",
@@ -3172,7 +3184,7 @@ def shelxl_feedback_cmd(
         "--compute-backend",
         args.compute_backend,
         "--row-plan-cache",
-        getattr(args, "row_plan_cache", "off"),
+        resolved_row_plan_cache(args, fixed_model=False),
         "--jax-batch-size",
         str(args.jax_batch_size),
         "--jax-matrix-bucket-size",
@@ -9385,7 +9397,7 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
                 "--compute-backend",
                 args.compute_backend,
                 "--row-plan-cache",
-                getattr(args, "row_plan_cache", "off"),
+                resolved_row_plan_cache(args, fixed_model=False),
                 "--jax-batch-size",
                 str(args.jax_batch_size),
                 "--jax-matrix-bucket-size",
@@ -19228,7 +19240,17 @@ def add_common_run_args(ap: argparse.ArgumentParser, *, expose_lambda_controls: 
     ap.add_argument("--prediction-cache-scope", choices=["shared", "stage"], default="shared", help="Shared reuses safe hash-keyed predictions across adaptive stages; stage isolates every run.")
     ap.add_argument("--prediction-cache-compression", choices=["compressed", "none"], default="none", help="Use none for fastest local SSD/NVMe caches; compressed saves disk on slow or limited storage.")
     ap.add_argument("--compute-backend", choices=["scipy", "scipy_bethe", "scipy_expm", "scipy_expm_multiply", "jax", "jax_auto", "jax_cpu", "jax_mps", "jax_cuda", "jax_padded", "jax_auto_padded", "jax_cpu_padded", "jax_mps_padded", "jax_cuda_padded", "jax_cpu_real_expm", "jax_mps_real_expm", "jax_mps_real_expm_padded"], default="scipy", help="Bloch prediction backend. SciPy eigensolver is the production reference; scipy_bethe uses an opt-in promoted Bethe/Schur strong-beam reduction; SciPy expm/expm_multiply, real-embedded JAX expm, and JAX eigensolver backends are experimental agreement/speed probes. *_padded JAX backends pad matrix dimensions into small buckets to reduce compilation churn.")
-    ap.add_argument("--row-plan-cache", choices=["off", "readwrite", "rebuild"], default="off", help="Experimental frozen row-geometry cache. Off is default until full workflow benchmarks show a clear win.")
+    ap.add_argument(
+        "--row-plan-cache",
+        choices=["auto", "off", "exact", "readwrite", "rebuild"],
+        default="auto",
+        help=(
+            "Row-geometry cache policy. auto uses model-keyed exact reuse only "
+            "for fixed-model grids with at least 16 predictions per geometry key "
+            "and disables it for moving-model updates; readwrite explicitly "
+            "freezes the builder basis across model updates."
+        ),
+    )
     ap.add_argument("--jax-batch-size", type=int, default=0, help="JAX matrix batch size for accelerator backends. 0 chooses a conservative size from matrix dimension and device count.")
     ap.add_argument("--jax-matrix-bucket-size", type=int, default=0, help="Pad JAX matrix dimensions to this multiple. 0 keeps exact sizes unless a *_padded backend is selected, where 0 means 8.")
     ap.add_argument("--bethe-strong-count", type=int, default=48, help="Strong-beam block size for scipy_bethe. Values >= final N recover the dense SciPy matrix.")
@@ -19972,7 +19994,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_hand.add_argument("--chunksize", type=int, default=0)
     p_hand.add_argument(
         "--row-plan-cache",
-        choices=["off", "readwrite", "rebuild"],
+        choices=["off", "exact", "readwrite", "rebuild"],
         default="off",
     )
     p_hand.add_argument(
@@ -20046,7 +20068,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_raw.add_argument("--max-core-fraction", type=float, default=0.85)
     p_raw.add_argument("--chunksize", type=int, default=0)
     p_raw.add_argument("--compute-backend", choices=["scipy", "scipy_bethe", "scipy_expm", "scipy_expm_multiply", "jax", "jax_auto", "jax_cpu", "jax_mps", "jax_cuda", "jax_padded", "jax_auto_padded", "jax_cpu_padded", "jax_mps_padded", "jax_cuda_padded", "jax_cpu_real_expm", "jax_mps_real_expm", "jax_mps_real_expm_padded"], default="scipy")
-    p_raw.add_argument("--row-plan-cache", choices=["off", "readwrite", "rebuild"], default="off", help="Experimental frozen row-geometry cache. Off is default until full workflow benchmarks show a clear win.")
+    p_raw.add_argument("--row-plan-cache", choices=["off", "exact", "readwrite", "rebuild"], default="off", help="Row-geometry cache. exact is keyed to the current structural model.")
     p_raw.add_argument("--jax-batch-size", type=int, default=0)
     p_raw.add_argument("--jax-matrix-bucket-size", type=int, default=0)
     p_raw.add_argument("--bethe-strong-count", type=int, default=48)
@@ -20265,7 +20287,7 @@ def build_parser() -> argparse.ArgumentParser:
         p_target_ablation.add_argument("--max-core-fraction", type=float, default=0.85)
         p_target_ablation.add_argument("--chunksize", type=int, default=0)
         p_target_ablation.add_argument("--compute-backend", default="scipy")
-        p_target_ablation.add_argument("--row-plan-cache", choices=["off", "readwrite", "rebuild"], default="off")
+        p_target_ablation.add_argument("--row-plan-cache", choices=["off", "exact", "readwrite", "rebuild"], default="off")
         p_target_ablation.add_argument("--prediction-cache-compression", choices=["compressed", "none"], default="none")
         p_target_ablation.add_argument("--hand-control", action=argparse.BooleanOptionalAction, default=True)
         p_target_ablation.add_argument("--make-maps", action=argparse.BooleanOptionalAction, default=False, help="Ablation skips maps by default to keep the four branches fast.")
@@ -20342,7 +20364,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_validate_ls1.add_argument("--workers", type=int, default=auto_worker_count(0, 0.85))
     p_validate_ls1.add_argument("--chunksize", type=int, default=0)
     p_validate_ls1.add_argument("--compute-backend", choices=["scipy", "scipy_bethe", "scipy_expm", "scipy_expm_multiply", "jax", "jax_auto", "jax_cpu", "jax_mps", "jax_cuda", "jax_padded", "jax_auto_padded", "jax_cpu_padded", "jax_mps_padded", "jax_cuda_padded", "jax_cpu_real_expm", "jax_mps_real_expm", "jax_mps_real_expm_padded"], default="scipy_bethe")
-    p_validate_ls1.add_argument("--row-plan-cache", choices=["off", "readwrite", "rebuild"], default="off", help="Experimental frozen row-geometry cache. Off is default until full workflow benchmarks show a clear win.")
+    p_validate_ls1.add_argument("--row-plan-cache", choices=["off", "exact", "readwrite", "rebuild"], default="off", help="Row-geometry cache. exact is keyed to the current structural model.")
     p_validate_ls1.add_argument("--jax-batch-size", type=int, default=0)
     p_validate_ls1.add_argument("--jax-matrix-bucket-size", type=int, default=0)
     p_validate_ls1.add_argument("--bethe-strong-count", type=int, default=48)
@@ -20430,7 +20452,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_push.add_argument("--workers", type=int, default=auto_worker_count(0, 0.85))
     p_push.add_argument("--chunksize", type=int, default=4)
     p_push.add_argument("--compute-backend", choices=["scipy", "scipy_bethe", "scipy_expm", "scipy_expm_multiply", "jax", "jax_auto", "jax_cpu", "jax_mps", "jax_cuda", "jax_padded", "jax_auto_padded", "jax_cpu_padded", "jax_mps_padded", "jax_cuda_padded", "jax_cpu_real_expm", "jax_mps_real_expm", "jax_mps_real_expm_padded"], default="scipy")
-    p_push.add_argument("--row-plan-cache", choices=["off", "readwrite", "rebuild"], default="off")
+    p_push.add_argument("--row-plan-cache", choices=["off", "exact", "readwrite", "rebuild"], default="off")
     p_push.add_argument(
         "--pinned-sg-jitter-fallback",
         choices=["none", "off"],

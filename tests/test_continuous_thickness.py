@@ -16,6 +16,37 @@ from grond.legacy.engine.bloch_engine import (
     parse_model,
     sha256,
 )
+from grond.legacy.engine.native_row_regularize import (
+    AUTO_EXACT_ROW_PLAN_MIN_REUSE,
+    estimated_row_plan_reuse_per_geometry_key,
+    resolve_fixed_model_row_plan_cache,
+)
+
+
+def test_automatic_row_plan_cache_requires_enough_reuse():
+    args = SimpleNamespace(
+        thickness_grid="900 1100",
+        thickness_grad_grid="0.4",
+        thickness_sigma_frac_grid="0.1",
+        absorption_mu_grid="0.0",
+        absorption_frac_grid="0.0",
+        absorption_mu_g2_grid="0.0",
+        absorption_mu_theta2_grid="0.0",
+        absorption_tds_b_grid="0.0",
+    )
+    models = ["uniform_gradient"]
+    modes = ["none"]
+    reuse = estimated_row_plan_reuse_per_geometry_key(args, models, modes)
+    assert reuse == 2
+    assert resolve_fixed_model_row_plan_cache("auto", estimated_reuse=reuse)["resolved"] == "off"
+    assert (
+        resolve_fixed_model_row_plan_cache(
+            "auto",
+            estimated_reuse=AUTO_EXACT_ROW_PLAN_MIN_REUSE,
+        )["resolved"]
+        == "exact"
+    )
+    assert resolve_fixed_model_row_plan_cache("exact", estimated_reuse=1)["resolved"] == "exact"
 
 
 def _write_single_row_inputs(tmp_path: Path) -> tuple[Path, Path]:
@@ -254,6 +285,81 @@ def test_row_plan_cache_true_hit_is_exact_and_skips_geometry(tmp_path: Path):
     assert stale_calls["root"] > 0
     np.testing.assert_array_equal(rebuilt["dyn"], uncached["dyn"])
     np.testing.assert_array_equal(rebuilt["born"], uncached["born"])
+
+
+def test_exact_row_plan_cache_is_model_keyed(tmp_path: Path):
+    hkl_path, model_path = _write_single_row_inputs(tmp_path)
+    data = XDSData(hkl_path)
+    model = parse_model(model_path)
+    common = dict(
+        n_basis=2,
+        n_points=3,
+        sg_window=0.0001,
+        sg_window_min=0.0001,
+        sg_window_max=0.0001,
+        topup_d_min=2.0,
+        ug_d_min=2.0,
+        thickness_A=75.0,
+        thickness_model="uniform_gradient",
+        thickness_grad_frac=0.2,
+        thickness_points=3,
+        row_plan_cache="exact",
+    )
+    cache_dir = tmp_path / "cache"
+    indices = np.asarray([0], dtype=int)
+
+    first_port = XDSBlochPort(
+        data,
+        model,
+        Config(**common),
+        cache_dir=cache_dir,
+        res_hash=sha256(model_path),
+    )
+    first = first_port.predict_rows(indices, workers=1)
+    assert first["row_plan_cache_status"]["status"] == "built"
+    assert first["row_plan_cache_status"]["mode"] == "exact"
+
+    same_port = XDSBlochPort(
+        data,
+        model,
+        Config(**common),
+        cache_dir=cache_dir,
+        res_hash=sha256(model_path),
+    )
+    calls = {"basis": 0}
+    original_basis = same_port.select_basis
+
+    def counted_basis(*args, **kwargs):
+        calls["basis"] += 1
+        return original_basis(*args, **kwargs)
+
+    same_port.select_basis = counted_basis
+    same = same_port.predict_rows(indices, workers=1)
+    assert same["row_plan_cache_status"]["status"] == "hit"
+    assert calls["basis"] == 0
+    np.testing.assert_array_equal(first["dyn"], same["dyn"])
+
+    moved_model = copy.deepcopy(model)
+    moved_model["atoms"][0]["x"] += 2e-4
+    moved_port = XDSBlochPort(
+        data,
+        moved_model,
+        Config(**common),
+        cache_dir=cache_dir,
+        res_hash="moved",
+    )
+    moved_calls = {"basis": 0}
+    moved_basis = moved_port.select_basis
+
+    def counted_moved_basis(*args, **kwargs):
+        moved_calls["basis"] += 1
+        return moved_basis(*args, **kwargs)
+
+    moved_port.select_basis = counted_moved_basis
+    moved = moved_port.predict_rows(indices, workers=1)
+    assert moved["row_plan_cache_status"]["status"] == "built"
+    assert moved_calls["basis"] > 0
+    assert moved["row_plan_cache_status"]["path"] != first["row_plan_cache_status"]["path"]
 
 
 def test_proper_sign_transform_native_smoke_has_no_cell_precision_score_drift(

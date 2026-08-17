@@ -26,7 +26,32 @@ Structure-update blocks have a plateau stop. Leave it enabled for routine work; 
 
 Dense SciPy `eig` and `eigh` are the reference implementation and the default. They are the first choice for an unfamiliar dataset and the comparison standard for every accelerated backend.
 
-`--compute-backend scipy_bethe` is the opt-in strong/weak-beam Schur path. It can save substantial time when rows genuinely require large matrices, but gives little benefit when adaptive support already keeps most matrices small. Agreement depends on the strong-beam count and promotion thresholds, so new data should be checked against dense SciPy before using it for a final result.
+`--compute-backend scipy_bethe` is the opt-in strong/weak-beam Schur path. The
+signed target reflection is always retained in the strong block; weak beams
+renormalize that block through a Schur/Bethe correction. It can save
+substantial time when rows genuinely require large matrices, but gives little
+benefit when adaptive support already keeps most matrices small. Agreement
+depends on the strong-beam count and promotion thresholds, so new data should
+be checked against dense SciPy before using it for a final result. This is the
+GROND form of the strong-plus-target divide-and-conquer calculation; it does
+not restore weak-to-weak multiple-scattering paths removed by the reduction.
+
+On the 256-row 370 development contract at N=128/Q=20, the adaptive bases had
+a median of 43 beams and a maximum of 74. A 48-beam Bethe block changed raw
+intensities by at most 6.52e-5 relative and a 32-beam block by at most 2.16e-4,
+but neither shortened the approximately 6.4 s whole calculation. Most rows
+were already at or below the reduced matrix size, and process/setup overhead
+dominated the few larger solves. This backend is therefore reserved for large-
+matrix datasets until a full-reference sentinel demonstrates both agreement
+and an end-to-end gain.
+
+`scipy_expm_multiply` remains an agreement probe rather than a speed default.
+On the 256-row 370 development contract described below it reproduced the
+dense Hermitian result to numerical precision but took 24.90 s rather than
+6.44 s with the warm reference eigensolver. Matrix exponential action may
+still be useful for much larger sparse matrices, but GROND's present matrices
+are dense and its thickness/profile quadrature reuses a complete Hermitian
+eigensystem efficiently.
 
 The JAX, CUDA, Apple-Metal, and real-embedded matrix-exponential backends are experimental. GROND raises an error when a requested backend cannot perform the required calculation; it does not silently replace that backend with SciPy. These paths should be judged by complete row intensities and endpoint products, not by an isolated matrix microbenchmark.
 
@@ -38,7 +63,28 @@ Prediction caches belong to a run, not to the installed package. `GROND auto` wr
 
 Installed package directories should remain read-only. Do not put run caches, model outputs, or benchmark arrays inside `src/grond`.
 
-The optional row-plan cache is enabled with `--row-plan-cache readwrite`. It freezes row identity, support, geometry, and quadrature while allowing structure factors to change between feedback cycles. Cache keys include the source rows and numerical contract, and incompatible entries are rebuilt. Cache reuse is now exercised directly by the native finite-difference model updater. A 24-row 370 development fixture produced byte-identical cached and uncached Born/Bloch predictions for both the cache-building model and a moved-coordinate model, while a true cache hit made no basis-selection or Bragg-root calls; a matched one-coordinate optimizer also returned the identical parameter, residual, and objective. This remains opt-in because a new moving model still pays for its model-dependent dense Fourier-potential construction, which limited the measured whole-evaluation gain on that deliberately small fixture even when row prediction itself became substantially faster. Treat this result as a correctness and reuse check, not a general runtime promise.
+`grond auto` uses `--row-plan-cache auto`. The cache key includes the
+structural-model content and RES hash, so a coordinate or ADP change selects a
+different cache. Moving-model updates resolve `auto` to `off`. Fixed-model
+stages resolve it to `exact` only when at least 16 thickness or absorption
+predictions share one geometry key. Smaller searches stay uncached because the
+cold row-plan builder is serial and can cost more than it saves. The decision,
+reuse estimate, and threshold are recorded in the row summary.
+
+On a 256-row 370 development contract at N=128/Q=20, a first exact-cache run
+took 11.13 s and the repeated calculation took 5.98 s. The uncached reference,
+cold exact-cache, and warm exact-cache row CSV files were byte-identical. A
+six-candidate grid with only two predictions per geometry key was slower with
+the cache (44.12 s rather than 35.14 s), which is why automatic mode uses the
+conservative reuse threshold instead of enabling the cache for every grid.
+These measurements demonstrate the decision boundary, not a universal runtime
+claim.
+
+The older cross-model behavior is retained as the explicit
+`--row-plan-cache readwrite` mode for finite-difference development. It freezes
+the support selected by the builder model while recomputing current structure
+factors. Use it only when that approximation is intended and audited; `auto`
+never selects it.
 
 ## Cheap Post-Processing
 

@@ -442,7 +442,7 @@ def main() -> None:
     ap.add_argument("--workers", type=int, default=1)
     ap.add_argument("--chunksize", type=int, default=8)
     ap.add_argument("--compute-backend", choices=["scipy", "scipy_bethe", "scipy_expm", "scipy_expm_multiply", "jax", "jax_auto", "jax_cpu", "jax_mps", "jax_cuda", "jax_padded", "jax_auto_padded", "jax_cpu_padded", "jax_mps_padded", "jax_cuda_padded", "jax_cpu_real_expm", "jax_mps_real_expm", "jax_mps_real_expm_padded"], default="scipy_bethe")
-    ap.add_argument("--row-plan-cache", choices=["off", "readwrite", "rebuild"], default="off")
+    ap.add_argument("--row-plan-cache", choices=["off", "exact", "readwrite", "rebuild"], default="off")
     ap.add_argument("--jax-batch-size", type=int, default=0)
     ap.add_argument("--jax-matrix-bucket-size", type=int, default=0)
     ap.add_argument("--bethe-strong-count", type=int, default=48)

@@ -462,6 +462,68 @@ def absorption_parameter_grid(args, mode: str) -> list[dict[str, float | str]]:
     return out
 
 
+AUTO_EXACT_ROW_PLAN_MIN_REUSE = 16
+
+
+def estimated_row_plan_reuse_per_geometry_key(
+    args,
+    thickness_models: list[str],
+    absorption_modes: list[str],
+) -> int:
+    """Count prediction candidates that can share one immutable row plan.
+
+    Thickness distributions and absorption coefficients change the propagated
+    matrix but not the row basis, scan geometry, or profile quadrature stored in
+    the cache.  Frame offsets, jitter, mosaicity, dose, and geometry-path terms
+    do change the cache key and are deliberately excluded from this count.
+    """
+
+    thickness_candidates = 0
+    for _thickness in parse_float_grid(args.thickness_grid):
+        for model in thickness_models:
+            if model not in {"single", "uniform_gradient", "gaussian", "gaussian_gradient"}:
+                raise ValueError(f"unknown thickness_model {model!r}")
+            grad_values = (
+                parse_float_grid(args.thickness_grad_grid)
+                if model in {"uniform_gradient", "gaussian_gradient"}
+                else [0.0]
+            )
+            sigma_values = (
+                parse_float_grid(args.thickness_sigma_frac_grid)
+                if model in {"gaussian", "gaussian_gradient"}
+                else [0.0]
+            )
+            thickness_candidates += len(grad_values) * len(sigma_values)
+    absorption_candidates = sum(
+        len(absorption_parameter_grid(args, mode)) for mode in absorption_modes
+    )
+    return int(thickness_candidates * absorption_candidates)
+
+
+def resolve_fixed_model_row_plan_cache(
+    requested_mode: str,
+    *,
+    estimated_reuse: int,
+    minimum_reuse: int = AUTO_EXACT_ROW_PLAN_MIN_REUSE,
+) -> dict[str, int | str]:
+    """Resolve automatic caching only when its serial build can amortize."""
+
+    requested = str(requested_mode or "off").lower()
+    resolved = (
+        "exact" if int(estimated_reuse) >= int(minimum_reuse) else "off"
+    ) if requested == "auto" else requested
+    if resolved not in {"off", "exact", "readwrite", "rebuild"}:
+        raise ValueError(
+            f"unknown row_plan_cache={requested!r}; expected auto, off, exact, readwrite, or rebuild"
+        )
+    return {
+        "requested": requested,
+        "resolved": resolved,
+        "estimated_reuse_per_geometry_key": int(estimated_reuse),
+        "auto_exact_minimum_reuse": int(minimum_reuse),
+    }
+
+
 _SHELX_FLOAT_TOKEN_RE = re.compile(r"[-+]?(?:(?:\d+(?:\.\d*)?)|(?:\.\d+))(?:[Ee][-+]?\d+)?")
 
 
@@ -3222,7 +3284,17 @@ def main():
     ap.add_argument("--prediction-cache-dir", default=str(runtime_cache_dir("native_row_regularize", "predictions")))
     ap.add_argument("--cache-compression", choices=["compressed", "none"], default="compressed", help="Use none for faster local SSD caches; compressed saves disk on slow/limited storage.")
     ap.add_argument("--compute-backend", choices=["scipy", "scipy_bethe", "scipy_expm", "scipy_expm_multiply", "jax", "jax_auto", "jax_cpu", "jax_mps", "jax_cuda", "jax_padded", "jax_auto_padded", "jax_cpu_padded", "jax_mps_padded", "jax_cuda_padded", "jax_cpu_real_expm", "jax_mps_real_expm", "jax_mps_real_expm_padded"], default="scipy", help="Prediction backend. SciPy eigensolver is the production reference; scipy_bethe uses an opt-in promoted Bethe/Schur strong-beam reduction; SciPy expm/expm_multiply, real-embedded JAX expm, and JAX eigensolver backends are experimental agreement/speed probes. *_padded JAX backends pad matrix dimensions into small buckets to reduce compilation churn.")
-    ap.add_argument("--row-plan-cache", choices=["off", "readwrite", "rebuild"], default="off", help="Experimental frozen row-geometry cache. It reuses basis/Sg/difference-HKL plans across model updates while recomputing current U_g values.")
+    ap.add_argument(
+        "--row-plan-cache",
+        choices=["auto", "off", "exact", "readwrite", "rebuild"],
+        default="off",
+        help=(
+            "Row-geometry cache. auto enables the model-keyed exact cache only "
+            "when enough fixed-model candidates share a geometry key to amortize "
+            "its serial build; readwrite is the opt-in frozen-basis mode across "
+            "model updates."
+        ),
+    )
     ap.add_argument("--jax-batch-size", type=int, default=0, help="JAX matrix batch size. 0 chooses a conservative size from matrix dimension and device count.")
     ap.add_argument("--jax-matrix-bucket-size", type=int, default=0, help="Pad JAX matrix dimensions to this multiple. 0 keeps exact sizes unless a *_padded backend is selected, where 0 means 8.")
     ap.add_argument("--bethe-strong-count", type=int, default=48, help="Strong-beam block size for scipy_bethe. Values >= n_basis recover the dense SciPy matrix.")
@@ -3345,6 +3417,23 @@ def main():
     group_width_values = parse_group_width_grid(args.group_width_grid, data)
     detector_scale_bins_values = parse_int_grid(args.detector_scale_bins)
     frame_offset_values, frame_datum = resolve_frame_offset_grid(args.frame_offset_grid, data, datum_indices)
+    row_plan_cache_decision = resolve_fixed_model_row_plan_cache(
+        args.row_plan_cache,
+        estimated_reuse=estimated_row_plan_reuse_per_geometry_key(
+            args,
+            thickness_models,
+            absorption_modes,
+        ),
+    )
+    print(
+        "row-plan cache: "
+        f"requested={row_plan_cache_decision['requested']} "
+        f"resolved={row_plan_cache_decision['resolved']} "
+        "estimated_reuse_per_geometry_key="
+        f"{row_plan_cache_decision['estimated_reuse_per_geometry_key']} "
+        f"auto_threshold={row_plan_cache_decision['auto_exact_minimum_reuse']}",
+        flush=True,
+    )
     if str(frame_datum.get("status")) == "ok":
         print(
             "XDS frame datum: median="
@@ -3422,7 +3511,7 @@ def main():
                                                             bethe_promote_denom=args.bethe_promote_denom,
                                                             bethe_denom_eps=args.bethe_denom_eps,
                                                             matrix_convention=args.matrix_convention,
-                                                            row_plan_cache=args.row_plan_cache,
+                                                            row_plan_cache=str(row_plan_cache_decision["resolved"]),
                                                             paired_inverse_hand=args.paired_inverse_hand,
                                                             free_fraction=args.free_fraction,
                                                             split_seed=args.split_seed,
@@ -3932,6 +4021,7 @@ def main():
             "group_width_deg": group_width_values,
             "frame_offset_frames": frame_offset_values,
             "xds_frame_datum": frame_datum,
+            "row_plan_cache": row_plan_cache_decision,
         },
         "selection_metric": str(args.selection_metric),
         "nuisance_trial_count": int(len(all_trials)),
@@ -3999,7 +4089,7 @@ def main():
                 bethe_promote_denom=args.bethe_promote_denom,
                 bethe_denom_eps=args.bethe_denom_eps,
                 matrix_convention=args.matrix_convention,
-                row_plan_cache=args.row_plan_cache,
+                row_plan_cache=str(row_plan_cache_decision["resolved"]),
                 paired_inverse_hand=args.paired_inverse_hand,
             )
         ),

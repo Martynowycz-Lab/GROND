@@ -213,7 +213,7 @@ def test_thickness_scout_parser_exposes_contract_diagnostic_defaults():
     assert args.prediction_cache_scope == "shared"
     assert args.prediction_cache_compression == "none"
     assert args.compute_backend == "scipy"
-    assert args.row_plan_cache == "off"
+    assert args.row_plan_cache == "auto"
     assert args.jax_batch_size == 0
     assert args.jax_matrix_bucket_size == 0
     assert args.matrix_convention == "j_minus_i"
@@ -2956,6 +2956,21 @@ def test_push_endpoint_native_weight_override_is_global_and_explicit():
 
 
 def test_experimental_row_plan_cache_flags_parse():
+    default_auto = build_parser().parse_args(
+        [
+            "auto",
+            "--out-dir",
+            "out",
+            "--xds-dir",
+            "xds",
+            "--structure",
+            "model.res",
+        ]
+    )
+    assert default_auto.row_plan_cache == "auto"
+    assert cli.resolved_row_plan_cache(default_auto, fixed_model=True) == "auto"
+    assert cli.resolved_row_plan_cache(default_auto, fixed_model=False) == "off"
+
     auto = build_parser().parse_args(
         [
             "auto",
@@ -2970,6 +2985,23 @@ def test_experimental_row_plan_cache_flags_parse():
         ]
     )
     assert auto.row_plan_cache == "readwrite"
+    assert cli.resolved_row_plan_cache(auto, fixed_model=True) == "readwrite"
+    assert cli.resolved_row_plan_cache(auto, fixed_model=False) == "readwrite"
+
+    exact = build_parser().parse_args(
+        [
+            "auto",
+            "--out-dir",
+            "out",
+            "--xds-dir",
+            "xds",
+            "--structure",
+            "model.res",
+            "--row-plan-cache",
+            "exact",
+        ]
+    )
+    assert exact.row_plan_cache == "exact"
 
     raw = build_parser().parse_args(
         [
@@ -4402,6 +4434,18 @@ def test_multi_push_row_contracts_are_complete_and_forwarded(tmp_path: Path):
         endpoint=False,
     )
     assert command[command.index("--row-contract") + 1] == str(one.resolve())
+    assert command[command.index("--row-plan-cache") + 1] == "auto"
+
+    structure_command = cli.structure_cmd(
+        "python",
+        datasets[0],
+        "model.res",
+        "baseline.hkl",
+        tmp_path / "structure",
+        args,
+        {"thickness_A": 1200.0},
+    )
+    assert structure_command[structure_command.index("--row-plan-cache") + 1] == "off"
 
     for path, name, role, raw_weight, endpoint_weight in (
         (one, "one", "downweight", "0.25", "0.30"),

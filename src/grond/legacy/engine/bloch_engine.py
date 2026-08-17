@@ -1795,7 +1795,10 @@ class Config:
                 {"truncate", "schur0", "schur_target", "schur_mean"},
             ),
             "matrix_convention": (self.matrix_convention, {"j_minus_i", "i_minus_j"}),
-            "row_plan_cache": (self.row_plan_cache, {"off", "readwrite", "rebuild"}),
+            "row_plan_cache": (
+                self.row_plan_cache,
+                {"off", "exact", "readwrite", "rebuild"},
+            ),
         }
         for name, (value, allowed) in choices.items():
             if str(value).lower() not in allowed:
@@ -3870,18 +3873,20 @@ class XDSBlochPort:
             return "off"
         if mode in {"1", "true", "yes", "on"}:
             return "readwrite"
-        if mode not in {"off", "readwrite", "rebuild"}:
-            raise ValueError(f"unknown row_plan_cache={mode!r}; expected off, readwrite, or rebuild")
+        if mode not in {"off", "exact", "readwrite", "rebuild"}:
+            raise ValueError(
+                f"unknown row_plan_cache={mode!r}; expected off, exact, readwrite, or rebuild"
+            )
         return mode
 
     def row_plan_cache_key(self, indices):
         """Return a geometry/config cache key for frozen row plans.
 
-        The key intentionally omits the current structural model.  The stored
-        basis is selected by the model that first builds the cache, then reused
-        by later macrocycles while the Fourier coefficients are recomputed from
-        the current model.  The builder model hash is saved in metadata so this
-        frozen-basis choice is auditable.
+        ``exact`` keys the cache to the current structural model.  It is safe
+        for repeated nuisance calculations at fixed coordinates because only
+        thickness, scale, or other non-basis terms change.  ``readwrite``
+        intentionally omits the current model and retains the older opt-in
+        frozen-basis behavior for native finite-difference experiments.
         """
 
         indices = np.asarray(indices, dtype=np.int64)
@@ -3936,6 +3941,14 @@ class XDSBlochPort:
                 else ""
             ),
         }
+        if self.row_plan_cache_mode() == "exact":
+            cfg_fields.update(
+                {
+                    "basis_model_content_sha256": model_content_hash(self.model),
+                    "basis_res_sha256": self.res_hash,
+                    "basis_policy": "exact_fixed_model",
+                }
+            )
         text = json.dumps(cfg_fields, sort_keys=True, allow_nan=True)
         return hashlib.sha256(text.encode()).hexdigest()[:20], cfg_fields
 
@@ -3955,7 +3968,11 @@ class XDSBlochPort:
                 "key": key,
                 "basis_model_content_sha256": model_content_hash(self.model),
                 "basis_res_sha256": self.res_hash,
-                "basis_policy": "frozen_from_cache_builder_model",
+                "basis_policy": (
+                    "exact_fixed_model"
+                    if self.row_plan_cache_mode() == "exact"
+                    else "frozen_from_cache_builder_model"
+                ),
             }
         )
         unique_diff_index: dict[tuple[int, int, int], int] = {}
@@ -4138,12 +4155,17 @@ class XDSBlochPort:
             return None
         key, meta = self.row_plan_cache_key(indices)
         path = self.row_plan_cache_path(key)
-        if mode == "readwrite" and path.exists():
+        if mode in {"exact", "readwrite"} and path.exists():
             try:
                 cache = self.load_row_plan_cache_file(path)
                 errors = row_plan_cache_validation_errors(cache, indices, key, meta)
                 if not errors:
-                    cache["status"] = {"status": "hit", "path": str(path), "key": key}
+                    cache["status"] = {
+                        "status": "hit",
+                        "mode": mode,
+                        "path": str(path),
+                        "key": key,
+                    }
                     return cache
                 print(
                     "Ignoring stale or incomplete row-plan cache "
@@ -4157,7 +4179,12 @@ class XDSBlochPort:
                 )
         cache = self.build_row_plan_cache(indices)
         self.save_row_plan_cache(path, cache)
-        cache["status"] = {"status": "built" if mode == "readwrite" else "rebuilt", "path": str(path), "key": key}
+        cache["status"] = {
+            "status": "built" if mode in {"exact", "readwrite"} else "rebuilt",
+            "mode": mode,
+            "path": str(path),
+            "key": key,
+        }
         return cache
 
     def current_unique_ug(self, unique_diffs: np.ndarray) -> np.ndarray:
@@ -5469,7 +5496,16 @@ def main():
     ap.add_argument("--bethe-variant", choices=["truncate", "schur0", "schur_target", "schur_mean"], default="schur_target", help="Strong/weak-beam reduction used by scipy_bethe.")
     ap.add_argument("--bethe-promote-denom", type=float, default=0.005, help="Promote weak beams whose diagonal denominator is this close to the Schur energy.")
     ap.add_argument("--bethe-denom-eps", type=float, default=1e-5, help="Small-denominator floor for scipy_bethe Schur corrections.")
-    ap.add_argument("--row-plan-cache", choices=["off", "readwrite", "rebuild"], default="off", help="Freeze row geometry, basis, Sg profiles, and h_j-h_i indices for reuse across model updates.")
+    ap.add_argument(
+        "--row-plan-cache",
+        choices=["off", "exact", "readwrite", "rebuild"],
+        default="off",
+        help=(
+            "Cache row geometry, basis, Sg profiles, and h_j-h_i indices. "
+            "exact keys the basis to the current model; readwrite is the "
+            "opt-in frozen-basis mode across model updates."
+        ),
+    )
     ap.add_argument("--positive-only", action="store_true", help="Ignore non-positive XDS IOBS rows for fitting/evaluation.")
     ap.add_argument("--min-peak", type=float, default=90.0, help="Default PEAK/partiality cutoff for XDS row selection. Use 0 for a true full-row diagnostic.")
     ap.add_argument("--min-corr", type=float, default=-999.0)

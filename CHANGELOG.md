@@ -4,6 +4,18 @@ This file records user-visible changes to the installable package. Version `0.2.
 
 ## 0.2.2 (unreleased)
 
+`grond auto` can now use a model-keyed exact row-plan cache inside sufficiently
+large fixed-model nuisance grids. Repeated thickness and absorption candidates
+reuse detector geometry, the signed direct/target beam basis, rocking-profile
+points, and difference-HKL lookup only while the structural-model hash is
+unchanged. Because a cold cache is built serially, automatic mode enables it
+only when at least 16 predictions share one geometry key; smaller searches stay
+uncached. Moving-model coordinate/ADP updates remain uncached by the automatic
+policy. The older cross-model frozen-basis behavior is still available only
+through an explicit `--row-plan-cache readwrite`. The requested mode, resolved
+mode, reuse estimate, threshold, and cache key remain recorded in the row
+summary.
+
 Automatic thickness promotion now compares the complete nuisance contract
 correctly after mosaicity and geometry-path provenance were added. String-valued
 fields no longer make an unchanged starting trial fail to match itself and abort
