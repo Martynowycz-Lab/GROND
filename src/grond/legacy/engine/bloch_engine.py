@@ -1647,6 +1647,9 @@ class Config:
     mosaicity_sigma_deg: float = 0.0
     mosaicity_max_sigma_deg: float = 0.5
     mosaicity_points: int = 3
+    mosaicity_support_sigma_deg: float = 0.0
+    mosaicity_support_points: int = 5
+    mosaicity_support_width_sigma: float = 4.0
     geometry_path_file: str = ""
     profile_coordinate: str = "target_sg"
     profile_angle_max_half_width_deg: float = 2.0
@@ -1694,6 +1697,7 @@ class Config:
             "n_points": (self.n_points, 1),
             "sg_jitter_points": (self.sg_jitter_points, 1),
             "mosaicity_points": (self.mosaicity_points, 1),
+            "mosaicity_support_points": (self.mosaicity_support_points, 2),
             "thickness_points": (self.thickness_points, 1),
             "jax_batch_size": (self.jax_batch_size, 0),
             "jax_matrix_bucket_size": (self.jax_matrix_bucket_size, 0),
@@ -1712,6 +1716,7 @@ class Config:
             "topup_d_min": self.topup_d_min,
             "max_support_sg": self.max_support_sg,
             "mosaicity_max_sigma_deg": self.mosaicity_max_sigma_deg,
+            "mosaicity_support_width_sigma": self.mosaicity_support_width_sigma,
             "profile_angle_max_half_width_deg": self.profile_angle_max_half_width_deg,
             "thickness_A": self.thickness_A,
             "group_width_deg": self.group_width_deg,
@@ -1732,6 +1737,7 @@ class Config:
             "sg_jitter_sigma_d_inv": self.sg_jitter_sigma_d_inv,
             "sg_jitter_sigma_frame": self.sg_jitter_sigma_frame,
             "mosaicity_sigma_deg": self.mosaicity_sigma_deg,
+            "mosaicity_support_sigma_deg": self.mosaicity_support_sigma_deg,
             "thickness_grad_frac": self.thickness_grad_frac,
             "thickness_sigma_frac": self.thickness_sigma_frac,
             "variance_a": self.variance_a,
@@ -1752,6 +1758,27 @@ class Config:
             raise ValueError(
                 "mosaicity_sigma_deg exceeds the explicit mosaicity_max_sigma_deg bound"
             )
+        if float(self.mosaicity_support_sigma_deg) > float(self.mosaicity_max_sigma_deg):
+            raise ValueError(
+                "mosaicity_support_sigma_deg exceeds the explicit mosaicity_max_sigma_deg bound"
+            )
+        if (
+            str(self.mosaicity_mode).lower() == "gaussian_cone"
+            and float(self.mosaicity_sigma_deg)
+            > float(self.mosaicity_support_sigma_deg) + 1e-15
+        ):
+            raise ValueError(
+                "gaussian_cone requires mosaicity_support_sigma_deg to be at least "
+                "mosaicity_sigma_deg so candidate widths share one enclosing beam basis"
+            )
+        if (
+            str(self.mosaicity_mode).lower() == "gaussian_cone"
+            and str(self.profile_coordinate).lower() != "direct_angle"
+        ):
+            raise ValueError(
+                "gaussian_cone currently requires profile_coordinate=direct_angle; "
+                "this keeps the physical scan interval explicit and avoids extra Sg roots"
+            )
 
         choices = {
             "sg_window_mode": (
@@ -1759,7 +1786,10 @@ class Config:
                 {"fixed", "zobs_residual", "zobs_plus_floor", "rlp_peak", "dials_bbox"},
             ),
             "sg_jitter_mode": (self.sg_jitter_mode, {"none", "gaussian", "student_t"}),
-            "mosaicity_mode": (self.mosaicity_mode, {"none", "gaussian_omega"}),
+            "mosaicity_mode": (
+                self.mosaicity_mode,
+                {"none", "gaussian_omega", "gaussian_cone"},
+            ),
             "profile_coordinate": (
                 self.profile_coordinate,
                 {"target_sg", "direct_angle"},
@@ -1867,8 +1897,9 @@ def frozen_kernel_contract(cfg: Config | None = None):
             "profile_coordinate_jacobian": "target-Sg quadrature weights include relative abs(domega/dSg) so exposure sampling is uniform in angle",
             "profile_width_mode": "fixed unless cfg.sg_window_mode explicitly requests an auditable XDS metadata-derived per-row width",
             "orientation_distribution": (
-                "optional target-Sg jitter plus a separately normalized direct-angle projected "
-                "mosaic convolution; both disabled by default"
+                "optional target-Sg jitter, projected one-axis mosaic convolution, or "
+                "an incoherent two-axis Gaussian orientation cone with one beam basis "
+                "fixed over the widest declared cone; all disabled by default"
             ),
             "geometry_path": (
                 "optional fixed geometry-only Chebyshev slew and two-axis tilt contract; "
@@ -2831,9 +2862,73 @@ class XDSBlochPort:
         ) @ _rotation_matrix_axis_angle(axes[0], tilt_x_deg)
         return (correction @ g.T).T
 
+    def mosaicity_tangent_axes(self):
+        """Return deterministic along-scan and transverse lab-frame axes.
+
+        A small crystal rotation about the incident-beam direction does not
+        change excitation errors, so an incoherent orientation distribution
+        needs only the two axes tangent to the beam sphere.  The first axis is
+        the scan axis projected into that plane; the second completes a
+        right-handed orthonormal pair.  This keeps the two fitted components
+        physically interpretable and avoids an arbitrary detector convention.
+        """
+
+        beam = np.asarray(self.data.s0, dtype=float).copy()
+        beam /= max(float(np.linalg.norm(beam)), 1e-30)
+        scan = np.asarray(self.data.axis, dtype=float).copy()
+        scan -= float(np.dot(scan, beam)) * beam
+        if float(np.linalg.norm(scan)) <= 1e-12:
+            seed = np.asarray([1.0, 0.0, 0.0], dtype=float)
+            if abs(float(np.dot(seed, beam))) > 0.9:
+                seed = np.asarray([0.0, 1.0, 0.0], dtype=float)
+            scan = seed - float(np.dot(seed, beam)) * beam
+        along = scan / float(np.linalg.norm(scan))
+        transverse = np.cross(beam, along)
+        transverse /= float(np.linalg.norm(transverse))
+        return along, transverse
+
+    def gvecs_at_orientation(
+        self,
+        hkls,
+        omega_deg,
+        mosaic_along_deg=0.0,
+        mosaic_transverse_deg=0.0,
+    ):
+        """Return reciprocal vectors at one explicit mosaic orientation."""
+
+        g = np.asarray(self.gvecs(hkls, omega_deg), dtype=float)
+        along_deg = float(mosaic_along_deg)
+        transverse_deg = float(mosaic_transverse_deg)
+        if along_deg == 0.0 and transverse_deg == 0.0:
+            return g
+        along, transverse = self.mosaicity_tangent_axes()
+        correction = _rotation_matrix_axis_angle(
+            transverse, transverse_deg
+        ) @ _rotation_matrix_axis_angle(along, along_deg)
+        return (correction @ g.T).T
+
     def sg_for_hkls(self, hkls, omega_deg):
         g = self.gvecs(hkls, omega_deg)
         return (self.data.k**2 - np.sum((self.data.s0 + g) ** 2, axis=1)) / (2.0 * self.data.k)
+
+    def sg_for_hkls_at_orientation(
+        self,
+        hkls,
+        omega_deg,
+        mosaic_along_deg=0.0,
+        mosaic_transverse_deg=0.0,
+    ):
+        if float(mosaic_along_deg) == 0.0 and float(mosaic_transverse_deg) == 0.0:
+            return self.sg_for_hkls(hkls, omega_deg)
+        g = self.gvecs_at_orientation(
+            hkls,
+            omega_deg,
+            mosaic_along_deg,
+            mosaic_transverse_deg,
+        )
+        return (self.data.k**2 - np.sum((self.data.s0 + g) ** 2, axis=1)) / (
+            2.0 * self.data.k
+        )
 
     def solve_omega_for_sg(self, hkl, omega0, target_sg, max_delta_deg=None):
         """Solve one local Ewald crossing without jumping to another branch."""
@@ -3292,6 +3387,17 @@ class XDSBlochPort:
                     "mosaicity_offset_abs_p95_deg": 0.0,
                 },
             )
+        if mode == "gaussian_cone":
+            return (
+                np.asarray([0.0], dtype=float),
+                np.asarray([1.0], dtype=float),
+                {
+                    "mosaicity_mode": mode,
+                    "mosaicity_sigma_deg": sigma,
+                    "mosaicity_kernel_points": 1,
+                    "mosaicity_offset_abs_p95_deg": 0.0,
+                },
+            )
         if mode != "gaussian_omega":
             raise ValueError(f"unknown mosaicity_mode={mode!r}")
         n = max(1, int(getattr(self.cfg, "mosaicity_points", 3)))
@@ -3311,6 +3417,98 @@ class XDSBlochPort:
                 np.quantile(np.abs(offsets), 0.95)
             ),
         }
+
+    def row_mosaicity_cone_points(self):
+        """Return tensor Gauss-Hermite points for a 2D Gaussian cone.
+
+        The two rotations are incoherent mosaic orientations.  Intensities,
+        not amplitudes, are averaged over this normalized distribution.
+        """
+
+        mode = str(getattr(self.cfg, "mosaicity_mode", "none") or "none").lower()
+        sigma = float(getattr(self.cfg, "mosaicity_sigma_deg", 0.0))
+        if mode != "gaussian_cone" or sigma <= 0.0:
+            return (
+                np.zeros((1, 2), dtype=float),
+                np.asarray([1.0], dtype=float),
+                {
+                    "mosaicity_cone_points": 1,
+                    "mosaicity_cone_quadrature": "zero_width",
+                    "mosaicity_cone_weight_sum": 1.0,
+                },
+            )
+        n = max(1, int(getattr(self.cfg, "mosaicity_points", 3)))
+        if n == 1:
+            offsets = np.asarray([0.0], dtype=float)
+            weights = np.asarray([1.0], dtype=float)
+        else:
+            nodes, raw_weights = hermgauss(n)
+            offsets = math.sqrt(2.0) * sigma * np.asarray(nodes, dtype=float)
+            weights = np.asarray(raw_weights, dtype=float) / math.sqrt(math.pi)
+            weights /= max(float(np.sum(weights)), 1e-30)
+        support_sigma = float(
+            getattr(self.cfg, "mosaicity_support_sigma_deg", 0.0)
+        )
+        support_width = float(
+            getattr(self.cfg, "mosaicity_support_width_sigma", 4.0)
+        )
+        if float(np.max(np.abs(offsets))) > support_sigma * support_width + 1e-12:
+            raise ValueError(
+                "mosaicity quadrature extends beyond the declared common-cone "
+                "basis envelope; increase mosaicity_support_sigma_deg or "
+                "mosaicity_support_width_sigma"
+            )
+        points = np.stack(
+            np.meshgrid(offsets, offsets, indexing="ij"), axis=-1
+        ).reshape(-1, 2)
+        pair_weights = np.outer(weights, weights).reshape(-1)
+        pair_weights /= max(float(np.sum(pair_weights)), 1e-30)
+        return points, pair_weights, {
+            "mosaicity_cone_points": int(len(points)),
+            "mosaicity_cone_quadrature": f"tensor_gauss_hermite_{n}x{n}",
+            "mosaicity_cone_weight_sum": float(np.sum(pair_weights)),
+            "mosaicity_cone_offset_radius_p95_deg": float(
+                np.quantile(np.linalg.norm(points, axis=1), 0.95)
+            ),
+        }
+
+    def row_profile_orientation_points(
+        self, row_idx, hkl, omega_center, center_sg, sg_window_i
+    ):
+        """Return explicit scan angles and two-axis mosaic orientations."""
+
+        (
+            base_omegas,
+            base_weights,
+            sg_resid,
+            profile_meta,
+            mosaicity_meta,
+        ) = self.row_profile_omega_points(
+            row_idx, hkl, omega_center, center_sg, sg_window_i
+        )
+        cone_points, cone_weights, cone_meta = self.row_mosaicity_cone_points()
+        count_base = len(base_omegas)
+        count_cone = len(cone_points)
+        omegas = np.repeat(np.asarray(base_omegas, dtype=float), count_cone)
+        tilts = np.tile(np.asarray(cone_points, dtype=float), (count_base, 1))
+        weights = (
+            np.asarray(base_weights, dtype=float)[:, None]
+            * np.asarray(cone_weights, dtype=float)[None, :]
+        ).reshape(-1)
+        profile_meta = dict(profile_meta)
+        profile_meta.update(
+            {
+                "sg_profile_points_total": int(len(weights)),
+                "sg_profile_weight_sum": float(np.sum(weights)),
+            }
+        )
+        mosaicity_meta = {**mosaicity_meta, **cone_meta}
+        if str(getattr(self.cfg, "mosaicity_mode", "none")).lower() == "gaussian_cone":
+            mosaicity_meta["mosaicity_kernel_points"] = int(count_cone)
+            mosaicity_meta["mosaicity_offset_abs_p95_deg"] = float(
+                cone_meta.get("mosaicity_cone_offset_radius_p95_deg", 0.0)
+            )
+        return omegas, tilts, weights, sg_resid, profile_meta, mosaicity_meta
 
     def row_profile_omega_points(self, row_idx, hkl, omega_center, center_sg, sg_window_i):
         """Build solved base-profile angles convolved with direct angular mosaicity."""
@@ -3490,6 +3688,107 @@ class XDSBlochPort:
             if len(basis) >= int(self.cfg.n_basis):
                 break
         return np.asarray(basis, dtype=int)
+
+    def cone_support_orientations(self, hkl, omega_center, sg_window_i):
+        """Return a fixed orientation envelope for common-basis selection.
+
+        The envelope depends on the declared maximum cone width, not the
+        candidate width or evaluation quadrature.  Consequently sigma=0 and
+        every tested finite sigma use exactly the same per-row beam basis.
+        """
+
+        sigma = float(getattr(self.cfg, "mosaicity_support_sigma_deg", 0.0))
+        n = max(2, int(getattr(self.cfg, "mosaicity_support_points", 5)))
+        width = float(getattr(self.cfg, "mosaicity_support_width_sigma", 4.0))
+        derivative = abs(float(self.sg_derivative_per_deg(hkl, omega_center)))
+        if not math.isfinite(derivative) or derivative <= 1e-12:
+            raise ValueError(
+                "common-cone basis requires a finite nonzero dSg/domega"
+            )
+        raw_half_width = 0.5 * float(sg_window_i) / derivative
+        maximum = float(
+            getattr(self.cfg, "profile_angle_max_half_width_deg", 2.0)
+        )
+        half_width = min(raw_half_width, maximum)
+        omega_points = np.linspace(
+            float(omega_center) - half_width,
+            float(omega_center) + half_width,
+            n,
+        )
+        cone_axis = (
+            np.asarray([0.0], dtype=float)
+            if sigma <= 0.0
+            else np.linspace(-width * sigma, width * sigma, n)
+        )
+        cone_points = np.stack(
+            np.meshgrid(cone_axis, cone_axis, indexing="ij"), axis=-1
+        ).reshape(-1, 2)
+        return omega_points, cone_points, {
+            "mosaicity_basis_mode": "common_maximum_cone",
+            "mosaicity_support_sigma_deg": sigma,
+            "mosaicity_support_points_per_axis": int(n),
+            "mosaicity_support_width_sigma": width,
+            "mosaicity_support_orientation_count": int(
+                len(omega_points) * len(cone_points)
+            ),
+            "mosaicity_support_profile_half_width_deg": float(half_width),
+        }
+
+    def select_basis_common_cone(
+        self, target_hkl, omega_center, sg_window_i, row_idx=None
+    ):
+        """Select one beam basis over the widest declared 2D mosaic cone."""
+
+        if str(getattr(self.cfg, "mosaicity_mode", "none")).lower() != "gaussian_cone":
+            return self.select_basis(target_hkl, omega_center, row_idx=row_idx), {}
+        omega_points, cone_points, meta = self.cone_support_orientations(
+            target_hkl, omega_center, sg_window_i
+        )
+        if row_idx is None:
+            pool_ug = self.pool_ug
+        else:
+            pool_ug = self.pool_ug * self.dose_attenuation_for_inv_d2(
+                self.pool_inv_d2, row_idx
+            )
+        coupling = np.abs(pool_ug) ** 2
+        best_score = np.zeros(len(self.pool_hkl), dtype=float)
+        minimum_abs_sg = np.full(len(self.pool_hkl), np.inf, dtype=float)
+        for omega in omega_points:
+            for along_deg, transverse_deg in cone_points:
+                sg_pool = self.sg_for_hkls_at_orientation(
+                    self.pool_hkl,
+                    float(omega),
+                    float(along_deg),
+                    float(transverse_deg),
+                )
+                abs_sg = np.abs(sg_pool)
+                minimum_abs_sg = np.minimum(minimum_abs_sg, abs_sg)
+                best_score = np.maximum(
+                    best_score, coupling / (abs_sg + 1e-5)
+                )
+        ok = minimum_abs_sg <= float(self.cfg.max_support_sg)
+        basis = [(0, 0, 0), tuple(int(v) for v in target_hkl)]
+        seen = set(basis)
+        candidates = np.flatnonzero(ok)
+        needed = max(0, int(self.cfg.n_basis) - len(basis))
+        if needed == 0:
+            return np.asarray(basis, dtype=int), meta
+        take = min(len(candidates), needed + 1)
+        if take < len(candidates):
+            local = np.argpartition(best_score[candidates], -take)[-take:]
+            candidates = candidates[local]
+        candidates = candidates[
+            np.lexsort((candidates, -best_score[candidates]))
+        ]
+        for idx in candidates:
+            h = tuple(int(v) for v in self.pool_hkl[idx])
+            if h in seen:
+                continue
+            basis.append(h)
+            seen.add(h)
+            if len(basis) >= int(self.cfg.n_basis):
+                break
+        return np.asarray(basis, dtype=int), meta
 
     def absorption_enabled(self):
         mode = str(getattr(self.cfg, "absorption_mode", "none") or "none").lower()
@@ -3784,19 +4083,22 @@ class XDSBlochPort:
             omega_bragg = float(omega_center)
         else:
             omega_bragg = self.solve_omega_for_sg(hkl, omega_center, 0.0)
-        basis = self.select_basis(hkl, omega_center, row_idx=row_idx)
-        if not np.array_equal(basis[0], np.asarray([0, 0, 0], dtype=int)) or not np.array_equal(basis[1], np.asarray(hkl, dtype=int)):
-            raise RuntimeError("Frozen kernel basis contract violated: basis must start with direct beam then exact signed target hkl.")
         sg_window_i, sg_width_meta = self.row_sg_window(row_idx, hkl, omega_center)
         (
             solved_omegas,
+            mosaic_tilts,
             profile_weights,
             sg_resid,
             jitter_meta,
             mosaicity_meta,
-        ) = self.row_profile_omega_points(
+        ) = self.row_profile_orientation_points(
             row_idx, hkl, omega_center, center_sg, sg_window_i
         )
+        basis, cone_basis_meta = self.select_basis_common_cone(
+            hkl, omega_center, sg_window_i, row_idx=row_idx
+        )
+        if not np.array_equal(basis[0], np.asarray([0, 0, 0], dtype=int)) or not np.array_equal(basis[1], np.asarray(hkl, dtype=int)):
+            raise RuntimeError("Frozen kernel basis contract violated: basis must start with direct beam then exact signed target hkl.")
         H_dyn_static = self.hamiltonian_static_part(basis, absorb=True, row_idx=row_idx)
         if self.absorption_enabled():
             H_born_static = self.hamiltonian_static_part(basis, absorb=False, row_idx=row_idx)
@@ -3804,8 +4106,12 @@ class XDSBlochPort:
             H_born_static = H_dyn_static
         h10_born = H_born_static[1, 0]
         dyn_matrices, born_vals, born_deltas = [], [], []
-        for omega in solved_omegas:
-            sg_basis = self.sg_for_hkls(basis, omega)
+        for omega, (along_deg, transverse_deg) in zip(
+            solved_omegas, mosaic_tilts, strict=True
+        ):
+            sg_basis = self.sg_for_hkls_at_orientation(
+                basis, omega, along_deg, transverse_deg
+            )
             H = self.hamiltonian_from_static(H_dyn_static, sg_basis)
             dyn_matrices.append(H)
             delta = float(np.real(sg_basis[1] - sg_basis[0]))
@@ -3833,6 +4139,7 @@ class XDSBlochPort:
             **sg_width_meta,
             **jitter_meta,
             **mosaicity_meta,
+            **cone_basis_meta,
         }
 
     def finish_row_prediction_plan(self, plan, dyn_vals):
@@ -3914,6 +4221,13 @@ class XDSBlochPort:
             "mosaicity_sigma_deg": float(self.cfg.mosaicity_sigma_deg),
             "mosaicity_max_sigma_deg": float(self.cfg.mosaicity_max_sigma_deg),
             "mosaicity_points": int(self.cfg.mosaicity_points),
+            "mosaicity_support_sigma_deg": float(
+                self.cfg.mosaicity_support_sigma_deg
+            ),
+            "mosaicity_support_points": int(self.cfg.mosaicity_support_points),
+            "mosaicity_support_width_sigma": float(
+                self.cfg.mosaicity_support_width_sigma
+            ),
             "profile_coordinate": str(self.cfg.profile_coordinate),
             "profile_angle_max_half_width_deg": float(
                 self.cfg.profile_angle_max_half_width_deg
@@ -4020,22 +4334,29 @@ class XDSBlochPort:
                 omega_b = float(omega_c)
             else:
                 omega_b = self.solve_omega_for_sg(hkl, omega_c, 0.0)
-            basis = self.select_basis(hkl, omega_c, row_idx=row_idx)
-            if not np.array_equal(basis[0], np.asarray([0, 0, 0], dtype=int)) or not np.array_equal(basis[1], np.asarray(hkl, dtype=int)):
-                raise RuntimeError("Frozen row-plan basis contract violated: basis must start with direct beam then exact signed target hkl.")
             sg_window_i, sg_width_meta = self.row_sg_window(row_idx, hkl, omega_c)
             (
                 solved_omegas,
+                mosaic_tilts,
                 profile_weights,
                 sg_resid_values,
                 jitter_meta,
                 _mosaicity_meta,
-            ) = self.row_profile_omega_points(
+            ) = self.row_profile_orientation_points(
                 row_idx, hkl, omega_c, c_sg, sg_window_i
             )
+            basis, _cone_basis_meta = self.select_basis_common_cone(
+                hkl, omega_c, sg_window_i, row_idx=row_idx
+            )
+            if not np.array_equal(basis[0], np.asarray([0, 0, 0], dtype=int)) or not np.array_equal(basis[1], np.asarray(hkl, dtype=int)):
+                raise RuntimeError("Frozen row-plan basis contract violated: basis must start with direct beam then exact signed target hkl.")
             sg_basis_rows = []
-            for omega in solved_omegas:
-                sg_basis = self.sg_for_hkls(basis, omega)
+            for omega, (along_deg, transverse_deg) in zip(
+                solved_omegas, mosaic_tilts, strict=True
+            ):
+                sg_basis = self.sg_for_hkls_at_orientation(
+                    basis, omega, along_deg, transverse_deg
+                )
                 sg_basis_rows.append(np.asarray(sg_basis, dtype=float))
 
             diffs = basis[None, :, :] - basis[:, None, :] if convention == "j_minus_i" else basis[:, None, :] - basis[None, :, :]
@@ -4542,6 +4863,7 @@ class XDSBlochPort:
         dyn_inverse = np.zeros(len(indices), dtype=float) if include_inverse else None
         born = np.zeros(len(indices), dtype=float)
         basis_size = np.zeros(len(indices), dtype=int)
+        basis_support_hash64 = np.zeros(len(indices), dtype=np.uint64)
         sg_resid = np.zeros(len(indices), dtype=float)
         center_sg = np.zeros(len(indices), dtype=float)
         omega_bragg = np.zeros(len(indices), dtype=float)
@@ -4570,6 +4892,12 @@ class XDSBlochPort:
                 dyn_inverse[n] = r["dyn_inverse"]
             born[n] = r["born"]
             basis_size[n] = r["basis_size"]
+            support_array = np.asarray(r["support_hkls"], dtype=np.int32)
+            basis_support_hash64[n] = int.from_bytes(
+                hashlib.sha256(support_array.tobytes(order="C")).digest()[:8],
+                byteorder="big",
+                signed=False,
+            )
             sg_resid[n] = r["max_sg_solve_residual"]
             center_sg[n] = r["center_sg_inv_A"]
             omega_bragg[n] = r["omega_bragg_deg"]
@@ -4602,6 +4930,7 @@ class XDSBlochPort:
             "dyn": dyn,
             "born": born,
             "basis_size": basis_size,
+            "basis_support_hash64": basis_support_hash64,
             "support_hkls": support_hkls,
             "sg_residual": sg_resid,
             "center_sg": center_sg,
@@ -5443,10 +5772,13 @@ def main():
     ap.add_argument("--sg-jitter-points", type=int, default=5, help="Kernel quadrature points for Sg-jitter convolution.")
     ap.add_argument("--sg-jitter-student-df", type=float, default=4.0, help="Student-t degrees of freedom for Sg-jitter mode.")
     ap.add_argument("--sg-jitter-width-factor", type=float, default=3.0, help="Truncation half-width in sigma units for Student-t jitter mode.")
-    ap.add_argument("--mosaicity-mode", choices=["none", "gaussian_omega"], default="none", help="Optional direct projected angular mosaic convolution applied after target-Sg root solving.")
+    ap.add_argument("--mosaicity-mode", choices=["none", "gaussian_omega", "gaussian_cone"], default="none", help="Optional projected one-axis or incoherent two-axis Gaussian mosaic convolution.")
     ap.add_argument("--mosaicity-sigma-deg", type=float, default=0.0, help="Projected Gaussian mosaicity sigma in degrees; never inferred from the XDS reflecting range automatically.")
     ap.add_argument("--mosaicity-max-sigma-deg", type=float, default=0.5, help="Hard upper bound for the projected mosaicity sigma.")
     ap.add_argument("--mosaicity-points", type=int, default=3, help="Gauss-Hermite points for direct angular mosaicity quadrature.")
+    ap.add_argument("--mosaicity-support-sigma-deg", type=float, default=0.0, help="Largest tested two-axis cone sigma. Every candidate uses the beam basis selected over this same envelope.")
+    ap.add_argument("--mosaicity-support-points", type=int, default=5, help="Points per scan/cone axis used only to construct the common enclosing beam basis.")
+    ap.add_argument("--mosaicity-support-width-sigma", type=float, default=4.0, help="Half-width of the common basis cone in support-sigma units.")
     ap.add_argument("--geometry-path", default="", help="Optional geometry-only Chebyshev slew/two-axis tilt JSON produced independently of intensities.")
     ap.add_argument("--profile-coordinate", choices=["target_sg", "direct_angle"], default="target_sg", help="Integrate through solved target-Sg points or directly in recorded scan angle.")
     ap.add_argument("--profile-angle-max-half-width-deg", type=float, default=2.0, help="Hard half-width bound for direct-angle integration.")
@@ -5532,6 +5864,9 @@ def main():
         mosaicity_sigma_deg=args.mosaicity_sigma_deg,
         mosaicity_max_sigma_deg=args.mosaicity_max_sigma_deg,
         mosaicity_points=args.mosaicity_points,
+        mosaicity_support_sigma_deg=args.mosaicity_support_sigma_deg,
+        mosaicity_support_points=args.mosaicity_support_points,
+        mosaicity_support_width_sigma=args.mosaicity_support_width_sigma,
         geometry_path_file=args.geometry_path,
         profile_coordinate=args.profile_coordinate,
         profile_angle_max_half_width_deg=args.profile_angle_max_half_width_deg,

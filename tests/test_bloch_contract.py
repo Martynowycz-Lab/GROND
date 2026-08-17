@@ -698,6 +698,112 @@ def test_direct_angular_mosaicity_is_normalized_and_bounded():
         )
 
 
+def test_gaussian_cone_quadrature_is_normalized_and_enclosed():
+    port = object.__new__(XDSBlochPort)
+    port.cfg = Config(
+        profile_coordinate="direct_angle",
+        mosaicity_mode="gaussian_cone",
+        mosaicity_sigma_deg=0.02,
+        mosaicity_support_sigma_deg=0.04,
+        mosaicity_points=5,
+        mosaicity_support_width_sigma=4.0,
+    )
+
+    points, weights, meta = port.row_mosaicity_cone_points()
+
+    assert points.shape == (25, 2)
+    assert np.isclose(float(np.sum(weights)), 1.0)
+    assert np.allclose(np.sum(points * weights[:, None], axis=0), 0.0, atol=1e-15)
+    assert meta["mosaicity_cone_quadrature"] == "tensor_gauss_hermite_5x5"
+    with pytest.raises(ValueError, match="support_sigma_deg"):
+        Config(
+            profile_coordinate="direct_angle",
+            mosaicity_mode="gaussian_cone",
+            mosaicity_sigma_deg=0.03,
+            mosaicity_support_sigma_deg=0.02,
+        )
+    with pytest.raises(ValueError, match="requires profile_coordinate=direct_angle"):
+        Config(
+            mosaicity_mode="gaussian_cone",
+            mosaicity_sigma_deg=0.01,
+            mosaicity_support_sigma_deg=0.01,
+        )
+
+
+def test_gaussian_cone_zero_width_preserves_profile_exactly():
+    port = object.__new__(XDSBlochPort)
+    port.cfg = Config(
+        profile_coordinate="direct_angle",
+        mosaicity_mode="gaussian_cone",
+        mosaicity_sigma_deg=0.0,
+        mosaicity_support_sigma_deg=0.04,
+    )
+    port.row_profile_omega_points = lambda *_args: (
+        np.asarray([9.5, 10.0, 10.5], dtype=float),
+        np.asarray([0.5, 1.0, 0.5], dtype=float),
+        np.asarray([], dtype=float),
+        {"sg_profile_points_total": 3, "sg_profile_weight_sum": 2.0},
+        {"mosaicity_mode": "gaussian_cone"},
+    )
+
+    omegas, tilts, weights, residuals, profile_meta, mosaic_meta = (
+        port.row_profile_orientation_points(
+            0, np.asarray([1, 0, 0]), 10.0, 0.0, 0.004
+        )
+    )
+
+    assert np.array_equal(omegas, np.asarray([9.5, 10.0, 10.5]))
+    assert np.array_equal(tilts, np.zeros((3, 2)))
+    assert np.array_equal(weights, np.asarray([0.5, 1.0, 0.5]))
+    assert residuals.size == 0
+    assert profile_meta["sg_profile_points_total"] == 3
+    assert mosaic_meta["mosaicity_cone_points"] == 1
+
+
+def test_common_cone_basis_is_independent_of_candidate_sigma():
+    def make_port(candidate_sigma):
+        port = object.__new__(XDSBlochPort)
+        port.cfg = Config(
+            n_basis=4,
+            profile_coordinate="direct_angle",
+            mosaicity_mode="gaussian_cone",
+            mosaicity_sigma_deg=candidate_sigma,
+            mosaicity_support_sigma_deg=0.04,
+            mosaicity_support_points=3,
+            max_support_sg=0.02,
+        )
+        port.pool_hkl = np.asarray(
+            [[1, 0, 0], [0, 1, 0], [1, 1, 0], [2, 0, 0], [0, 2, 0]],
+            dtype=int,
+        )
+        port.pool_ug = np.asarray([1.0, 0.8, 0.7, 0.6, 0.5], dtype=complex)
+        port.sg_derivative_per_deg = lambda *_args: 0.02
+
+        def sg_at_orientation(hkls, omega, along, transverse):
+            hkls = np.asarray(hkls, dtype=float)
+            return (
+                0.01 * hkls[:, 0]
+                - 0.006 * hkls[:, 1]
+                + 0.001 * float(omega)
+                + 0.1 * float(along)
+                - 0.05 * float(transverse)
+            )
+
+        port.sg_for_hkls_at_orientation = sg_at_orientation
+        return port
+
+    zero_basis, zero_meta = make_port(0.0).select_basis_common_cone(
+        np.asarray([1, 0, 0]), 0.0, 0.004
+    )
+    finite_basis, finite_meta = make_port(0.02).select_basis_common_cone(
+        np.asarray([1, 0, 0]), 0.0, 0.004
+    )
+
+    assert np.array_equal(zero_basis, finite_basis)
+    assert zero_meta == finite_meta
+    assert zero_meta["mosaicity_basis_mode"] == "common_maximum_cone"
+
+
 def test_direct_angular_mosaicity_does_not_request_extra_sg_roots():
     port = object.__new__(XDSBlochPort)
     port.cfg = Config(

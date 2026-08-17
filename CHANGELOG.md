@@ -17,6 +17,14 @@ frame-scale and detector-scale parameter counts. DIALS imports also preserve a
 present inverse-scale-factor column as a fixed control sidecar rather than
 silently substituting a GROND detector field.
 
+The advanced native-row engine now offers an opt-in incoherent two-axis
+Gaussian mosaic cone. Direct-angle quadrature avoids extra excitation-error
+root searches, and every candidate width uses one per-row beam basis selected
+over the widest declared cone. Result tables record row-level basis hashes so
+candidate comparisons can prove identical support. The default automatic
+workflow is unchanged; finite mosaic widths still require explicit numerical
+convergence and repeated held-out validation before use.
+
 `grond auto` can now use a model-keyed exact row-plan cache inside sufficiently
 large fixed-model nuisance grids. Repeated thickness and absorption candidates
 reuse detector geometry, the signed direct/target beam basis, rocking-profile

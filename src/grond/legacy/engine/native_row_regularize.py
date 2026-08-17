@@ -106,7 +106,7 @@ TARGET_MODE_LABELS = {
     "recorded_proxy": "IOBS*PEAK/(100*RLP)",
 }
 DEFAULT_ELECTRON_WAVELENGTH_A = 0.025079
-PREDICTION_CACHE_SCHEMA = 5
+PREDICTION_CACHE_SCHEMA = 6
 
 
 def configure_shelxl_executable(executable: str) -> str:
@@ -210,6 +210,9 @@ class Nuisance:
     mosaicity_mode: str = "none"
     mosaicity_sigma_deg: float = 0.0
     mosaicity_points: int = 1
+    mosaicity_support_sigma_deg: float = 0.0
+    mosaicity_support_points: int = 5
+    mosaicity_support_width_sigma: float = 4.0
     geometry_path_file: str = ""
     absorption_mode: str = "none"
     absorption_mu: float = 0.0
@@ -1276,6 +1279,14 @@ def prediction_cache_validation_errors(pred: dict, payload: dict, indices) -> li
         basis_size = np.asarray(pred["basis_size"])
         if basis_size.shape != (len(expected_indices),) or np.any(basis_size < 2):
             errors.append("basis_size is incomplete or invalid")
+    if int(payload.get("cache_schema", -1)) >= 6:
+        basis_support_hash64 = np.asarray(
+            pred.get("basis_support_hash64", []), dtype=np.uint64
+        )
+        if basis_support_hash64.shape != (len(expected_indices),):
+            errors.append("basis-support hash provenance is incomplete")
+        elif np.any(basis_support_hash64 == 0):
+            errors.append("basis-support hash provenance is invalid")
     if int(payload.get("cache_schema", -1)) >= 5:
         continuation_used = np.asarray(
             pred.get("sg_profile_same_branch_continuation_used", [])
@@ -1428,6 +1439,7 @@ def evaluate_trial(data, target, base_sig, pred, indices, masks, nui: Nuisance, 
     dyn_inverse = np.full(len(target), np.nan, dtype=float)
     born = np.full(len(target), np.nan, dtype=float)
     basis_size = np.zeros(len(target), dtype=int)
+    basis_support_hash64 = np.zeros(len(target), dtype=np.uint64)
     dyn[pred["indices"]] = pred["dyn"]
     if "dyn_inverse" in pred:
         dyn_inverse[pred["indices"]] = pred["dyn_inverse"]
@@ -1436,6 +1448,10 @@ def evaluate_trial(data, target, base_sig, pred, indices, masks, nui: Nuisance, 
     dyn_inverse_unmodulated = dyn_inverse.copy()
     if "basis_size" in pred:
         basis_size[pred["indices"]] = np.asarray(pred["basis_size"], dtype=int)
+    if "basis_support_hash64" in pred:
+        basis_support_hash64[pred["indices"]] = np.asarray(
+            pred["basis_support_hash64"], dtype=np.uint64
+        )
     pred_indices = np.asarray(pred["indices"], dtype=int)
 
     def expand_pred_array(name: str, *, dtype=float, default=np.nan):
@@ -1605,6 +1621,9 @@ def evaluate_trial(data, target, base_sig, pred, indices, masks, nui: Nuisance, 
             "p99": float(np.percentile(basis_size[valid], 99)) if np.count_nonzero(valid) else 0.0,
             "max": int(np.max(basis_size[valid])) if np.count_nonzero(valid) else 0,
         },
+        "basis_support_sha256": hashlib.sha256(
+            np.asarray(basis_support_hash64[valid], dtype=">u8").tobytes(order="C")
+        ).hexdigest(),
         "dyn_scales": {str(k): float(v) for k, v in dyn_scales.items()},
         "born_scales": {str(k): float(v) for k, v in born_scales.items()},
         "dyn_detector_scales": {str(k): float(v) for k, v in dyn_detector_scales.items()},
@@ -1622,6 +1641,7 @@ def evaluate_trial(data, target, base_sig, pred, indices, masks, nui: Nuisance, 
             "groups": groups,
             "detector_bins": det_bins,
             "basis_size": basis_size,
+            "basis_support_hash64": basis_support_hash64,
             **sg_arrays,
             "valid": valid,
         },
@@ -2786,7 +2806,7 @@ def write_row_table(path: Path, data: XDSData, target, best_eval, masks):
     with path.open("w", newline="") as f:
         fields = [
             "row_index", "h", "k", "l", "d_A", "target_I", "sigma_eff", "xds_sigma", "peak", "corr", "rlp",
-            "group", "detector_bin", "basis_size", "center_sg_inv_A", "omega_bragg_deg", "omega_bragg_minus_center_deg",
+            "group", "detector_bin", "basis_size", "basis_support_hash64", "center_sg_inv_A", "omega_bragg_deg", "omega_bragg_minus_center_deg",
             "sg_window_inv_A", "sg_window_raw_inv_A", "sg_window_half_frames", "sg_window_clipped",
             "sg_dSg_domega_inv_A_per_deg", "sg_dSg_dframe_inv_A", "sg_jitter_sigma_inv_A",
             "sg_jitter_d_inv_A", "sg_jitter_frame_fraction", "sg_jitter_kernel_points",
@@ -2819,6 +2839,10 @@ def write_row_table(path: Path, data: XDSData, target, best_eval, masks):
                 "group": int(arrays["groups"][i]),
                 "detector_bin": int(arrays.get("detector_bins", np.zeros(len(target), dtype=int))[i]),
                 "basis_size": int(arrays.get("basis_size", np.zeros(len(target), dtype=int))[i]),
+                "basis_support_hash64": format(
+                    int(arrays.get("basis_support_hash64", np.zeros(len(target), dtype=np.uint64))[i]),
+                    "016x",
+                ),
                 "center_sg_inv_A": float(arrays.get("center_sg", default_float)[i]),
                 "omega_bragg_deg": float(arrays.get("omega_bragg", default_float)[i]),
                 "omega_bragg_minus_center_deg": float(arrays.get("omega_delta", default_float)[i]),
@@ -3249,10 +3273,13 @@ def main():
     ap.add_argument("--sg-jitter-points", type=int, default=5, help="Kernel quadrature points for jitter convolution.")
     ap.add_argument("--sg-jitter-student-df", type=float, default=4.0)
     ap.add_argument("--sg-jitter-width-factor", type=float, default=3.0)
-    ap.add_argument("--mosaicity-mode", choices=["none", "gaussian_omega"], default="none", help="Fixed incoherent projected angular mosaic model.")
+    ap.add_argument("--mosaicity-mode", choices=["none", "gaussian_omega", "gaussian_cone"], default="none", help="Fixed projected one-axis or incoherent two-axis Gaussian mosaic model.")
     ap.add_argument("--mosaicity-sigma-deg", type=float, default=0.0, help="Projected Gaussian mosaicity sigma in degrees; one nuisance parameter when active.")
     ap.add_argument("--mosaicity-max-sigma-deg", type=float, default=0.5, help="Hard upper bound for projected mosaicity sigma.")
     ap.add_argument("--mosaicity-points", type=int, default=3, help="Gauss-Hermite points for direct-angle mosaic quadrature.")
+    ap.add_argument("--mosaicity-support-sigma-deg", type=float, default=0.0, help="Largest tested two-axis cone sigma used to construct one common beam basis for every candidate width.")
+    ap.add_argument("--mosaicity-support-points", type=int, default=5, help="Points per scan/cone axis used only for common-basis construction.")
+    ap.add_argument("--mosaicity-support-width-sigma", type=float, default=4.0, help="Half-width of the common basis cone in support-sigma units.")
     ap.add_argument("--geometry-path", default="", help="Fixed geometry-only slew/two-axis tilt contract fitted without intensities.")
     ap.add_argument("--profile-coordinate", choices=["target_sg", "direct_angle"], default="target_sg", help="Integrate through solved target-Sg points or directly in recorded scan angle.")
     ap.add_argument("--profile-angle-max-half-width-deg", type=float, default=2.0, help="Hard half-width bound for direct-angle integration.")
@@ -3574,6 +3601,9 @@ def main():
                                                             mosaicity_sigma_deg=args.mosaicity_sigma_deg,
                                                             mosaicity_max_sigma_deg=args.mosaicity_max_sigma_deg,
                                                             mosaicity_points=args.mosaicity_points,
+                                                            mosaicity_support_sigma_deg=args.mosaicity_support_sigma_deg,
+                                                            mosaicity_support_points=args.mosaicity_support_points,
+                                                            mosaicity_support_width_sigma=args.mosaicity_support_width_sigma,
                                                             geometry_path_file=args.geometry_path,
                                                             profile_coordinate=args.profile_coordinate,
                                                             profile_angle_max_half_width_deg=args.profile_angle_max_half_width_deg,
@@ -3694,6 +3724,9 @@ def main():
                                                                 mosaicity_mode=args.mosaicity_mode,
                                                                 mosaicity_sigma_deg=args.mosaicity_sigma_deg,
                                                                 mosaicity_points=args.mosaicity_points,
+                                                                mosaicity_support_sigma_deg=args.mosaicity_support_sigma_deg,
+                                                                mosaicity_support_points=args.mosaicity_support_points,
+                                                                mosaicity_support_width_sigma=args.mosaicity_support_width_sigma,
                                                                 geometry_path_file=args.geometry_path,
                                                                 dose_b_mode=dose_b_mode,
                                                                 dose_b_per_frame=dose_b_per_frame,
@@ -4144,6 +4177,15 @@ def main():
                 mosaicity_mode=best["nuisance"].get("mosaicity_mode", "none"),
                 mosaicity_sigma_deg=best["nuisance"].get("mosaicity_sigma_deg", 0.0),
                 mosaicity_points=best["nuisance"].get("mosaicity_points", 1),
+                mosaicity_support_sigma_deg=best["nuisance"].get(
+                    "mosaicity_support_sigma_deg", 0.0
+                ),
+                mosaicity_support_points=best["nuisance"].get(
+                    "mosaicity_support_points", 5
+                ),
+                mosaicity_support_width_sigma=best["nuisance"].get(
+                    "mosaicity_support_width_sigma", 4.0
+                ),
                 geometry_path_file=best["nuisance"].get("geometry_path_file", ""),
                 profile_coordinate=args.profile_coordinate,
                 profile_angle_max_half_width_deg=args.profile_angle_max_half_width_deg,

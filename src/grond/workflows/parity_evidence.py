@@ -319,6 +319,7 @@ _NUISANCE_INTEGER_FIELDS = {
     "detector_scale_min_rows",
     "sg_jitter_points",
     "mosaicity_points",
+    "mosaicity_support_points",
 }
 _NUISANCE_NULLABLE_FIELDS = {
     "dose_b_ref_frame",
@@ -333,6 +334,9 @@ _OPTIONAL_NUISANCE_DEFAULTS = {
     "mosaicity_mode": "none",
     "mosaicity_sigma_deg": 0.0,
     "mosaicity_points": 1,
+    "mosaicity_support_sigma_deg": 0.0,
+    "mosaicity_support_points": 5,
+    "mosaicity_support_width_sigma": 4.0,
     "geometry_path_file": "",
 }
 
