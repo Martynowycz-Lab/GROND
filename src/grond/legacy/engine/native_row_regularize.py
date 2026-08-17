@@ -61,6 +61,10 @@ try:  # Package import.
         sha256,
         split_masks,
     )
+    from .detector_scale_regularization import (
+        detector_field_diagnostics,
+        solve_regularized_detector_field,
+    )
     from .endpoint_modulation import modulation_manifest_fields
     from .post_bloch_sigma import fit_uniform_z_rms_sigma_scale, scale_row_sigmas
     from .shelx_diagnostics import parse_shelx_lst_pathologies, shelx_pathology_safe_for_feedback
@@ -77,6 +81,10 @@ except ImportError:  # Direct script execution from this directory.
         parse_model,
         sha256,
         split_masks,
+    )
+    from detector_scale_regularization import (
+        detector_field_diagnostics,
+        solve_regularized_detector_field,
     )
     from endpoint_modulation import modulation_manifest_fields
     from post_bloch_sigma import fit_uniform_z_rms_sigma_scale, scale_row_sigmas
@@ -217,6 +225,9 @@ class Nuisance:
     native_wght_a: float = float("nan")
     native_wght_b: float = float("nan")
     scale_smoothness: float = 0.0
+    detector_scale_ridge: float = 0.05
+    detector_scale_smoothness: float = 0.10
+    detector_scale_min_rows: int = 20
 
 
 def kernel_variance_terms(nuisance: dict) -> dict[str, float]:
@@ -991,7 +1002,22 @@ def fit_group_scales(obs, sig, pred, groups, fit_mask, wght_a: float, wght_b: fl
     return scaled, scales
 
 
-def fit_frame_detector_scales(obs, sig, pred, groups, det_bins, fit_mask, wght_a: float, wght_b: float, n_iter: int = 12, scale_smoothness: float = 0.0):
+def fit_frame_detector_scales(
+    obs,
+    sig,
+    pred,
+    groups,
+    det_bins,
+    fit_mask,
+    wght_a: float,
+    wght_b: float,
+    n_iter: int = 12,
+    scale_smoothness: float = 0.0,
+    detector_grid_size: int | None = None,
+    detector_ridge: float = 0.05,
+    detector_smoothness: float = 0.10,
+    detector_min_rows: int = 20,
+):
     obs = np.asarray(obs, dtype=float)
     sig = np.asarray(sig, dtype=float)
     pred = np.asarray(pred, dtype=float)
@@ -1006,17 +1032,23 @@ def fit_frame_detector_scales(obs, sig, pred, groups, det_bins, fit_mask, wght_a
     good = _scale_fit_mask(obs, sig, pred, fit_mask)
     global_scale = _fit_global_scale(obs, sig, pred, fit_mask, wght_a, wght_b, n_iter)
     unique_groups = np.asarray(sorted(np.unique(groups[np.isfinite(groups)])), dtype=int)
-    unique_det = np.asarray(sorted(np.unique(det_bins[np.isfinite(det_bins)])), dtype=int)
-    if len(unique_groups) == 0 or len(unique_det) == 0:
+    present_det = np.asarray(sorted(np.unique(det_bins[np.isfinite(det_bins)])), dtype=int)
+    if len(unique_groups) == 0 or len(present_det) == 0:
         return scaled, frame_scales, det_scales
     gmap = {int(g): i for i, g in enumerate(unique_groups)}
-    dmap = {int(d): i for i, d in enumerate(unique_det)}
     gi = np.asarray([gmap.get(int(g), -1) for g in groups], dtype=int)
-    di = np.asarray([dmap.get(int(d), -1) for d in det_bins], dtype=int)
+    n_bins = int(detector_grid_size or math.ceil(math.sqrt(int(np.max(present_det)) + 1)))
+    n_tiles = n_bins * n_bins
+    di = np.asarray(
+        [int(d) if np.isfinite(d) and 0 <= int(d) < n_tiles else -1 for d in det_bins],
+        dtype=int,
+    )
     frame = np.ones(len(unique_groups), dtype=float)
-    det = np.ones(len(unique_det), dtype=float)
+    det = np.ones(n_tiles, dtype=float)
     frame[:] = global_scale
     det[:] = 1.0
+    if n_bins <= 1:
+        raise ValueError("detector scale grid must be at least 2x2")
     for _ in range(int(n_iter)):
         base = pred * det[np.maximum(di, 0)]
         if scale_smoothness > 0.0:
@@ -1046,15 +1078,29 @@ def fit_frame_detector_scales(obs, sig, pred, groups, det_bins, fit_mask, wght_a
                 w = shelx_weights(y, sfit, x * frame[j], wght_a, wght_b)
                 frame[j] = max(float(np.sum(w * x * y) / max(np.sum(w * x * x), 1e-30)), 1e-30)
         base = pred * frame[np.maximum(gi, 0)]
-        for j, _d in enumerate(unique_det):
+        diag = np.zeros(n_tiles, dtype=float)
+        rhs = np.zeros(n_tiles, dtype=float)
+        counts = np.zeros(n_tiles, dtype=int)
+        for j in range(n_tiles):
             m = good & (di == j) & np.isfinite(base) & (base > 0)
-            if np.count_nonzero(m) < 10:
+            counts[j] = int(np.count_nonzero(m))
+            if counts[j] < 2:
                 continue
             x = base[m]
             y = obs[m]
             sfit = sig[m]
             w = shelx_weights(y, sfit, x * det[j], wght_a, wght_b)
-            det[j] = max(float(np.sum(w * x * y) / max(np.sum(w * x * x), 1e-30)), 1e-30)
+            diag[j] = float(np.sum(w * x * x))
+            rhs[j] = float(np.sum(w * x * y))
+        det = solve_regularized_detector_field(
+            diag,
+            rhs,
+            counts,
+            n_bins=n_bins,
+            ridge=float(detector_ridge),
+            smoothness=float(detector_smoothness),
+            min_rows=int(detector_min_rows),
+        )
         median_det = float(np.median(det[np.isfinite(det) & (det > 0)]))
         if median_det > 0:
             det /= median_det
@@ -1062,7 +1108,7 @@ def fit_frame_detector_scales(obs, sig, pred, groups, det_bins, fit_mask, wght_a
     apply = np.isfinite(pred) & (gi >= 0) & (di >= 0)
     scaled[apply] = pred[apply] * frame[gi[apply]] * det[di[apply]]
     frame_scales = {str(int(g)): float(frame[j]) for j, g in enumerate(unique_groups)}
-    det_scales = {str(int(d)): float(det[j]) for j, d in enumerate(unique_det)}
+    det_scales = {str(j): float(det[j]) for j in range(n_tiles)}
     return scaled, frame_scales, det_scales
 
 
@@ -1458,8 +1504,11 @@ def evaluate_trial(data, target, base_sig, pred, indices, masks, nui: Nuisance, 
         raise ValueError(f"unknown scale_fit_split={scale_fit_split!r}; choices are {sorted(masks)}")
     scale_fit = masks[scale_fit_split] & valid
     n_scales = len([g for g in np.unique(groups) if np.count_nonzero((groups == g) & scale_fit) >= 2])
+    frame_scale_count = int(n_scales)
+    detector_scale_count = 0
     if int(nui.detector_scale_bins) > 1:
-        n_scales += int(nui.detector_scale_bins) * int(nui.detector_scale_bins)
+        detector_scale_count = int(nui.detector_scale_bins) * int(nui.detector_scale_bins)
+        n_scales += detector_scale_count
     n_abs = int(str(nui.absorption_mode) != "none" and (
         abs(float(nui.absorption_mu)) > 0.0
         or abs(float(nui.absorption_frac)) > 0.0
@@ -1491,13 +1540,46 @@ def evaluate_trial(data, target, base_sig, pred, indices, masks, nui: Nuisance, 
         + n_weight
     )
     if int(nui.detector_scale_bins) > 1:
-        dyn_scaled, dyn_scales, dyn_detector_scales = fit_frame_detector_scales(target, sig, dyn, groups, det_bins, scale_fit, use_wght_a, use_wght_b, scale_smoothness=nui.scale_smoothness)
-        born_scaled, born_scales, born_detector_scales = fit_frame_detector_scales(target, sig, born, groups, det_bins, scale_fit, use_wght_a, use_wght_b, scale_smoothness=nui.scale_smoothness)
+        detector_fit_kwargs = {
+            "scale_smoothness": nui.scale_smoothness,
+            "detector_grid_size": int(nui.detector_scale_bins),
+            "detector_ridge": float(nui.detector_scale_ridge),
+            "detector_smoothness": float(nui.detector_scale_smoothness),
+            "detector_min_rows": int(nui.detector_scale_min_rows),
+        }
+        dyn_scaled, dyn_scales, dyn_detector_scales = fit_frame_detector_scales(
+            target, sig, dyn, groups, det_bins, scale_fit, use_wght_a, use_wght_b,
+            **detector_fit_kwargs,
+        )
+        born_scaled, born_scales, born_detector_scales = fit_frame_detector_scales(
+            target, sig, born, groups, det_bins, scale_fit, use_wght_a, use_wght_b,
+            **detector_fit_kwargs,
+        )
     else:
         dyn_scaled, dyn_scales = fit_group_scales(target, sig, dyn, groups, scale_fit, use_wght_a, use_wght_b, scale_smoothness=nui.scale_smoothness)
         born_scaled, born_scales = fit_group_scales(target, sig, born, groups, scale_fit, use_wght_a, use_wght_b, scale_smoothness=nui.scale_smoothness)
         dyn_detector_scales = {}
         born_detector_scales = {}
+    detector_counts = (
+        np.bincount(
+            det_bins[scale_fit].astype(int),
+            minlength=int(nui.detector_scale_bins) ** 2,
+        )
+        if int(nui.detector_scale_bins) > 1
+        else np.asarray([], dtype=int)
+    )
+    detector_support = detector_field_diagnostics(
+        np.asarray(
+            [
+                float(dyn_detector_scales.get(str(i), 1.0))
+                for i in range(len(detector_counts))
+            ],
+            dtype=float,
+        ),
+        detector_counts,
+        n_bins=int(nui.detector_scale_bins),
+        min_rows=int(nui.detector_scale_min_rows),
+    )
     metrics = {}
     for split, mask in masks.items():
         metrics[split] = {
@@ -1510,6 +1592,9 @@ def evaluate_trial(data, target, base_sig, pred, indices, masks, nui: Nuisance, 
         "metrics": metrics,
         "valid_rows": int(np.count_nonzero(valid)),
         "scale_count": int(n_scales),
+        "frame_scale_count": int(frame_scale_count),
+        "detector_scale_count": int(detector_scale_count),
+        "detector_scale_support": detector_support,
         "scale_fit_split": scale_fit_split,
         "row_resolution": row_mod_meta,
         "q_control": q_control_meta,
@@ -3164,7 +3249,7 @@ def main():
     ap.add_argument("--sg-jitter-points", type=int, default=5, help="Kernel quadrature points for jitter convolution.")
     ap.add_argument("--sg-jitter-student-df", type=float, default=4.0)
     ap.add_argument("--sg-jitter-width-factor", type=float, default=3.0)
-    ap.add_argument("--mosaicity-mode", choices=["none", "gaussian_omega"], default="none", help="Fixed direct-angle projected mosaic model for this run.")
+    ap.add_argument("--mosaicity-mode", choices=["none", "gaussian_omega"], default="none", help="Fixed incoherent projected angular mosaic model.")
     ap.add_argument("--mosaicity-sigma-deg", type=float, default=0.0, help="Projected Gaussian mosaicity sigma in degrees; one nuisance parameter when active.")
     ap.add_argument("--mosaicity-max-sigma-deg", type=float, default=0.5, help="Hard upper bound for projected mosaicity sigma.")
     ap.add_argument("--mosaicity-points", type=int, default=3, help="Gauss-Hermite points for direct-angle mosaic quadrature.")
@@ -3221,6 +3306,9 @@ def main():
         help="Comma grid of physical frame-scale group widths. Values are degrees; also accepts frame, 2frame, 3frames, and auto.",
     )
     ap.add_argument("--detector-scale-bins", default="0", help="Comma grid for optional NxN detector-position scale correction fitted with frame scales. Use 0 to disable.")
+    ap.add_argument("--detector-scale-ridge", type=float, default=0.05, help="Dimensionless shrinkage of detector factors toward unity.")
+    ap.add_argument("--detector-scale-smoothness", type=float, default=0.10, help="Dimensionless nearest-neighbor detector-field smoothness penalty.")
+    ap.add_argument("--detector-scale-min-rows", type=int, default=20, help="Minimum work rows required before a detector tile receives an independent data term.")
     ap.add_argument("--sigma-a-grid", default="0.0,0.03,0.06")
     ap.add_argument("--sigma-b-corr-grid", default="0.0")
     ap.add_argument("--sigma-c-peak-grid", default="0.0")
@@ -3615,6 +3703,9 @@ def main():
                                                                 native_wght_a=native_wght_a,
                                                                 native_wght_b=native_wght_b,
                                                                 scale_smoothness=args.scale_smoothness,
+                                                                detector_scale_ridge=args.detector_scale_ridge,
+                                                                detector_scale_smoothness=args.detector_scale_smoothness,
+                                                                detector_scale_min_rows=args.detector_scale_min_rows,
                                                                 **abs_par,
                                                             )
                                                             ev = evaluate_trial(data, target, base_sig, pred, indices, masks, nui, wght_a, wght_b, scale_fit_split=args.scale_fit_split, q_control_args=args)

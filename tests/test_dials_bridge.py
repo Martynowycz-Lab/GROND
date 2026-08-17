@@ -68,6 +68,8 @@ def test_bridge_writes_qe_correction_full_geometry_and_raw_sigma_default(tmp_pat
         "var_sum": np.array([4.0]),
         "i_scale": np.array([np.nan]),
         "var_scale": np.array([np.nan]),
+        "inverse_scale_factor": np.array([1.25]),
+        "inverse_scale_factor_variance": np.array([0.04]),
         "lp": np.array([2.0]),
         "qe": np.array([0.5]),
         "partiality": np.array([0.8]),
@@ -160,6 +162,13 @@ def test_bridge_writes_qe_correction_full_geometry_and_raw_sigma_default(tmp_pat
     assert summary["geometry"]["profile"]["parameters"]["sigma_m"] == pytest.approx(0.0023)
     assert data.header["DIALS_FRAME_SLICED_SHOEBOX_AVAILABLE"] == "TRUE"
     assert profile["dials"]["frame_sliced_shoebox_available"] is True
+    control = summary["dials_inverse_scale_control"]
+    assert control["status"] == "recorded_fixed_control"
+    assert control["available_rows"] == 1
+    assert data.header["DIALS_INVERSE_SCALE_CONTROL_FILE"] == "DIALS_INVERSE_SCALE_CONTROL.npz"
+    with np.load(tmp_path / "bridge" / "DIALS_INVERSE_SCALE_CONTROL.npz") as loaded:
+        assert loaded["inverse_scale_factor"][0] == pytest.approx(1.25)
+        assert loaded["inverse_scale_factor_variance"][0] == pytest.approx(0.04)
 
 
 def test_bridge_preserves_cropped_dials_scan_origin(tmp_path, monkeypatch):

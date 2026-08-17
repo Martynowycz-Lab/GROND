@@ -2331,6 +2331,12 @@ def native_stage_cmd(
         group_grid,
         "--detector-scale-bins",
         detector_scale_bins,
+        "--detector-scale-ridge",
+        str(getattr(args, "detector_scale_ridge", 0.05)),
+        "--detector-scale-smoothness",
+        str(getattr(args, "detector_scale_smoothness", 0.10)),
+        "--detector-scale-min-rows",
+        str(getattr(args, "detector_scale_min_rows", 20)),
         "--sigma-a-grid",
         sigma_a,
         "--sigma-b-corr-grid",
@@ -5587,14 +5593,32 @@ def run_endpoint_calibration(prep: PrepConfig, result: dict, args: argparse.Name
         "--publication-prefer-wght-mode",
         str(getattr(args, "endpoint_calibration_prefer_wght_mode", "freeze-zero")),
         "--publication-selection-policy",
-        str(getattr(args, "endpoint_calibration_selection_policy", "bic")),
+        str(getattr(args, "endpoint_calibration_selection_policy", "gated-smallest")),
         "--publication-information-criterion",
         str(getattr(args, "endpoint_calibration_information_criterion", "bic_fitted_variance")),
         "--instability-u",
         f"{getattr(args, 'instability_u', 0.01):g}",
+        "--detector-ridge",
+        f"{getattr(args, 'detector_scale_ridge', 0.05):g}",
+        "--detector-smoothness",
+        f"{getattr(args, 'detector_scale_smoothness', 0.10):g}",
+        "--detector-min-rows",
+        str(getattr(args, "detector_scale_min_rows", 20)),
+        "--detector-min-holdout-improvement",
+        f"{getattr(args, 'detector_scale_min_holdout_improvement', 0.002):g}",
+        "--detector-required-improved-splits",
+        str(getattr(args, "detector_scale_required_improved_splits", 2)),
+        "--detector-max-bloch-gain-loss",
+        f"{getattr(args, 'detector_scale_max_bloch_gain_loss', 0.002):g}",
+        "--detector-min-field-correlation",
+        f"{getattr(args, 'detector_scale_min_field_correlation', 0.50):g}",
+        "--detector-max-field-log-rms",
+        f"{getattr(args, 'detector_scale_max_field_log_rms', 0.10):g}",
     ]
     if bool(getattr(args, "publication_allow_npd", False)):
         cmd.append("--publication-allow-npd")
+    if bool(getattr(args, "detector_scale_independent_calibration", False)):
+        cmd.append("--detector-independent-calibration")
     try:
         run_logged(cmd, logs, f"{safe_label(label)}_endpoint_calibration", dry_run=False)
     except subprocess.CalledProcessError as exc:
@@ -5658,7 +5682,23 @@ def run_scale_window_polish(python: str, run_dir: Path, out_dir: Path, logs: Pat
         "--window-scan-deg",
         str(getattr(args, "scale_polish_window_deg", 5.0)),
         "--detector-bins",
-        getattr(args, "scale_polish_detector_bins", "exact"),
+        getattr(args, "scale_polish_detector_bins", "0,2,4,8"),
+        "--detector-ridge",
+        str(getattr(args, "detector_scale_ridge", 0.05)),
+        "--detector-smoothness",
+        str(getattr(args, "detector_scale_smoothness", 0.10)),
+        "--detector-min-rows",
+        str(getattr(args, "detector_scale_min_rows", 20)),
+        "--detector-min-holdout-improvement",
+        str(getattr(args, "detector_scale_min_holdout_improvement", 0.002)),
+        "--detector-required-improved-splits",
+        str(getattr(args, "detector_scale_required_improved_splits", 2)),
+        "--detector-max-bloch-gain-loss",
+        str(getattr(args, "detector_scale_max_bloch_gain_loss", 0.002)),
+        "--detector-min-field-correlation",
+        str(getattr(args, "detector_scale_min_field_correlation", 0.50)),
+        "--detector-max-field-log-rms",
+        str(getattr(args, "detector_scale_max_field_log_rms", 0.10)),
         "--scale-objective",
         getattr(args, "scale_polish_objective", "native"),
         "--tolerance",
@@ -5672,6 +5712,8 @@ def run_scale_window_polish(python: str, run_dir: Path, out_dir: Path, logs: Pat
     ]
     if getattr(args, "scale_polish_scan_offsets", False):
         cmd.append("--scan-offsets")
+    if getattr(args, "detector_scale_independent_calibration", False):
+        cmd.append("--detector-independent-calibration")
     try:
         run_logged(cmd, logs, f"{safe_label(label)}_scale_window_polish", dry_run=False)
     except subprocess.CalledProcessError as exc:
@@ -12171,6 +12213,15 @@ def cmd_run(args: argparse.Namespace) -> int:
             "adaptive_counts": args.scale_polish_adaptive_counts,
             "window_deg": args.scale_polish_window_deg,
             "detector_bins": args.scale_polish_detector_bins,
+            "detector_ridge_to_unity": args.detector_scale_ridge,
+            "detector_spatial_smoothness": args.detector_scale_smoothness,
+            "detector_minimum_rows_per_tile": args.detector_scale_min_rows,
+            "detector_minimum_holdout_improvement": args.detector_scale_min_holdout_improvement,
+            "detector_required_improved_splits": args.detector_scale_required_improved_splits,
+            "detector_maximum_bloch_gain_loss": args.detector_scale_max_bloch_gain_loss,
+            "detector_minimum_field_correlation": args.detector_scale_min_field_correlation,
+            "detector_maximum_field_log_rms": args.detector_scale_max_field_log_rms,
+            "detector_independent_calibration": args.detector_scale_independent_calibration,
             "objective": args.scale_polish_objective,
             "tolerance": args.scale_polish_tolerance,
             "selection_metrics": args.scale_polish_selection_metrics,
@@ -18276,9 +18327,27 @@ def cmd_scale_replay(args: argparse.Namespace) -> int:
         args.publication_selection_policy,
         "--publication-information-criterion",
         args.publication_information_criterion,
+        "--detector-ridge",
+        str(args.detector_ridge),
+        "--detector-smoothness",
+        str(args.detector_smoothness),
+        "--detector-min-rows",
+        str(args.detector_min_rows),
+        "--detector-min-holdout-improvement",
+        str(args.detector_min_holdout_improvement),
+        "--detector-required-improved-splits",
+        str(args.detector_required_improved_splits),
+        "--detector-max-bloch-gain-loss",
+        str(args.detector_max_bloch_gain_loss),
+        "--detector-min-field-correlation",
+        str(args.detector_min_field_correlation),
+        "--detector-max-field-log-rms",
+        str(args.detector_max_field_log_rms),
     ]
     if bool(getattr(args, "publication_allow_npd", False)):
         cmd.append("--publication-allow-npd")
+    if bool(getattr(args, "detector_independent_calibration", False)):
+        cmd.append("--detector-independent-calibration")
     if args.summary:
         cmd += ["--summary", str(Path(args.summary).expanduser().resolve())]
     if args.res:
@@ -19455,9 +19524,9 @@ def add_common_run_args(ap: argparse.ArgumentParser, *, expose_lambda_controls: 
     ap.add_argument("--publication-endpoint-chooser", action=argparse.BooleanOptionalAction, default=True, help="Write the publication endpoint chooser that separates physical and diagnostic corrected-HKL endpoints.")
     ap.add_argument("--publication-endpoint-min-hkl-safe-factor", type=float, default=0.25, help="Minimum fixed-width HKL safety factor for a publication endpoint.")
     ap.add_argument("--publication-endpoint-max-modulation-p95", type=float, default=20.0, help="Maximum 95th-percentile endpoint intensity modulation for a publication endpoint.")
-    ap.add_argument("--publication-allow-npd", action=argparse.BooleanOptionalAction, default=False, help="Explicit diagnostic override allowing endpoints with NPD pathology to pass publication selection gates. Default requires NPD == 0; split warnings are reported but do not block selection.")
+    ap.add_argument("--publication-allow-npd", action=argparse.BooleanOptionalAction, default=False, help="Explicit diagnostic override allowing endpoints with NPD pathology to pass publication selection gates. Default requires NPD == 0; split warnings always block publication selection.")
     ap.add_argument("--endpoint-calibration", choices=["auto", "on", "off"], default="auto", help="Replay the final frozen row table through corrected-HKL endpoint calibration after auto completes.")
-    ap.add_argument("--endpoint-calibration-specs", default="baseline,adaptive:293:det8,adaptive:200:det8,adaptive:120:det8,adaptive:80:det8,window:0.5:det8,window:1.0:det8,window:1.5:det8,window:3.0:det8,window:5.0:det8,window:1.0:det4,window:3.0:det4,window:5.0:det4,window:3.0:det1")
+    ap.add_argument("--endpoint-calibration-specs", default="baseline,adaptive:293:det0,adaptive:293:det2,adaptive:293:det4,adaptive:293:det8,adaptive:200:det0,adaptive:200:det2,adaptive:200:det4,adaptive:200:det8,adaptive:120:det0,adaptive:120:det2,adaptive:120:det4,adaptive:120:det8,adaptive:80:det0,adaptive:80:det2,adaptive:80:det4,adaptive:80:det8,window:1.0:det0,window:1.0:det4,window:1.0:det8,window:3.0:det0,window:3.0:det2,window:3.0:det4,window:3.0:det8,window:5.0:det0,window:5.0:det4,window:5.0:det8")
     if expose_lambda_controls:
         ap.add_argument(
             "--endpoint-calibration-lambda-q",
@@ -19476,8 +19545,8 @@ def add_common_run_args(ap: argparse.ArgumentParser, *, expose_lambda_controls: 
     ap.add_argument(
         "--endpoint-calibration-selection-policy",
         choices=["bic", "gated-smallest"],
-        default="bic",
-        help="Final scale-contract selector. Default applies endpoint sanity gates, then chooses the minimum BIC fitted-variance branch.",
+        default="gated-smallest",
+        help="Final scale-contract selector. Default promotes the smallest frozen-row-validated contract that also passes endpoint sanity gates; BIC remains available as a diagnostic policy.",
     )
     ap.add_argument(
         "--endpoint-calibration-information-criterion",
@@ -19498,7 +19567,7 @@ def add_common_run_args(ap: argparse.ArgumentParser, *, expose_lambda_controls: 
     ap.add_argument("--scale-polish-window-deg", type=float, default=5.0, help="Maximum physical frame-window width tested by the scale-polish gate.")
     ap.add_argument("--scale-polish-frame-models", default="adaptive,fixed", help="Frame-scale compression models tested by the scale-polish gate.")
     ap.add_argument("--scale-polish-adaptive-counts", default="auto", help="Adaptive neighboring-frame segment counts for scale polish; percentages such as 50%% are accepted.")
-    ap.add_argument("--scale-polish-detector-bins", default="exact", help="Detector flat-field grids tested by the scale-polish gate. Default exact preserves the fitted detector grid while compressing frame scales.")
+    ap.add_argument("--scale-polish-detector-bins", default="0,2,4,8", help="Detector flat-field grids tested on frozen predictions. Automatic promotion uses the smallest detector field that earns the validation gates; 8x8 remains diagnostic without independent calibration.")
     ap.add_argument("--scale-polish-objective", choices=["row_mr", "native", "sigma"], default="native")
     ap.add_argument("--scale-polish-tolerance", type=float, default=0.01)
     ap.add_argument("--scale-polish-selection-metrics", default="Rall,wRall,native_R1_all,native_wR2_all")
@@ -19600,7 +19669,16 @@ def add_common_run_args(ap: argparse.ArgumentParser, *, expose_lambda_controls: 
         default="auto",
         help="Scale-group width grid. Numeric values are degrees; frame, 2frame, 3frames, and auto resolve from XDS OSCILLATION_RANGE. Auto never goes below one physical frame; explicit numeric sub-frame values are diagnostic opt-ins.",
     )
-    ap.add_argument("--detector-scale-bins", default="8", help="Comma grid of NxN detector-position scale fields tested during full auto. Fast mode uses 0; use 8,12 for an explicit high-parameter detector diagnostic.")
+    ap.add_argument("--detector-scale-bins", default="0", help="Detector-position field used during physical nuisance selection. The default is detector-free so a flexible field cannot choose thickness or other physics; 0x0, 2x2, 4x4, and diagnostic 8x8 fields are evaluated later on the same frozen predictions.")
+    ap.add_argument("--detector-scale-ridge", type=float, default=0.05, help="Dimensionless shrinkage of detector factors toward unity.")
+    ap.add_argument("--detector-scale-smoothness", type=float, default=0.10, help="Dimensionless nearest-neighbor detector-field smoothness penalty.")
+    ap.add_argument("--detector-scale-min-rows", type=int, default=20, help="Minimum work rows required for every independently supported detector tile.")
+    ap.add_argument("--detector-scale-min-holdout-improvement", type=float, default=0.002)
+    ap.add_argument("--detector-scale-required-improved-splits", type=int, default=2)
+    ap.add_argument("--detector-scale-max-bloch-gain-loss", type=float, default=0.002)
+    ap.add_argument("--detector-scale-min-field-correlation", type=float, default=0.50)
+    ap.add_argument("--detector-scale-max-field-log-rms", type=float, default=0.10)
+    ap.add_argument("--detector-scale-independent-calibration", action="store_true", help="Permit 8x8 detector-scale promotion only when an independent detector calibration supports that field.")
     ap.add_argument("--sigma-a-grid", default="0.0")
     ap.add_argument("--sigma-b-corr-grid", default="0.0")
     ap.add_argument("--sigma-c-peak-grid", default="0.0,0.15")
@@ -20109,7 +20187,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p_raw.add_argument("--group-width-grid", default="auto")
-    p_raw.add_argument("--detector-scale-bins", type=int, default=8)
+    p_raw.add_argument("--detector-scale-bins", type=int, default=0)
     p_raw.add_argument("--thickness-points", type=int, default=5)
     p_raw.add_argument(
         "--lambda-grid",
@@ -20192,12 +20270,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_scale_replay.add_argument("--publication-free-wr2-tolerance", type=float, default=0.040)
     p_scale_replay.add_argument("--publication-max-modulation-p95", type=float, default=20.0)
     p_scale_replay.add_argument("--publication-prefer-wght-mode", default="freeze-zero")
-    p_scale_replay.add_argument("--publication-allow-npd", action=argparse.BooleanOptionalAction, default=False, help="Explicit diagnostic override allowing NPD pathology in the selected endpoint. Default requires NPD == 0; split warnings are reported but do not block selection.")
+    p_scale_replay.add_argument("--publication-allow-npd", action=argparse.BooleanOptionalAction, default=False, help="Explicit diagnostic override allowing NPD pathology in the selected endpoint. Default requires NPD == 0; split warnings always block publication selection.")
     p_scale_replay.add_argument(
         "--publication-selection-policy",
         choices=["bic", "gated-smallest"],
-        default="bic",
-        help="Endpoint scale-contract selector. Default applies endpoint sanity gates, then chooses the minimum BIC fitted-variance branch.",
+        default="gated-smallest",
+        help="Endpoint scale-contract selector. Default promotes the smallest contract passing endpoint, held-out-row, and detector-field gates; BIC remains diagnostic.",
     )
     p_scale_replay.add_argument(
         "--publication-information-criterion",
@@ -20207,6 +20285,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_scale_replay.add_argument("--instability-u", type=float, default=0.01)
     p_scale_replay.add_argument("--native-wght-a", type=float, default=None)
     p_scale_replay.add_argument("--native-wght-b", type=float, default=None)
+    p_scale_replay.add_argument("--detector-ridge", type=float, default=0.05)
+    p_scale_replay.add_argument("--detector-smoothness", type=float, default=0.10)
+    p_scale_replay.add_argument("--detector-min-rows", type=int, default=20)
+    p_scale_replay.add_argument("--detector-min-holdout-improvement", type=float, default=0.002)
+    p_scale_replay.add_argument("--detector-required-improved-splits", type=int, default=2)
+    p_scale_replay.add_argument("--detector-max-bloch-gain-loss", type=float, default=0.002)
+    p_scale_replay.add_argument("--detector-min-field-correlation", type=float, default=0.50)
+    p_scale_replay.add_argument("--detector-max-field-log-rms", type=float, default=0.10)
+    p_scale_replay.add_argument("--detector-independent-calibration", action="store_true")
     p_scale_replay.set_defaults(func=cmd_scale_replay)
 
     p_cal_endpoint = sub.add_parser("calibrate-endpoint", help="Choose a corrected-HKL publication endpoint from a frozen GROND row table.")
@@ -20244,12 +20331,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_cal_endpoint.add_argument("--publication-free-wr2-tolerance", type=float, default=0.040)
     p_cal_endpoint.add_argument("--publication-max-modulation-p95", type=float, default=20.0)
     p_cal_endpoint.add_argument("--publication-prefer-wght-mode", default="freeze-zero")
-    p_cal_endpoint.add_argument("--publication-allow-npd", action=argparse.BooleanOptionalAction, default=False, help="Explicit diagnostic override allowing NPD pathology in the selected endpoint. Default requires NPD == 0; split warnings are reported but do not block selection.")
+    p_cal_endpoint.add_argument("--publication-allow-npd", action=argparse.BooleanOptionalAction, default=False, help="Explicit diagnostic override allowing NPD pathology in the selected endpoint. Default requires NPD == 0; split warnings always block publication selection.")
     p_cal_endpoint.add_argument(
         "--publication-selection-policy",
         choices=["bic", "gated-smallest"],
-        default="bic",
-        help="Endpoint scale-contract selector. Default applies endpoint sanity gates, then chooses the minimum BIC fitted-variance branch.",
+        default="gated-smallest",
+        help="Endpoint scale-contract selector. Default promotes the smallest contract passing endpoint, held-out-row, and detector-field gates; BIC remains diagnostic.",
     )
     p_cal_endpoint.add_argument(
         "--publication-information-criterion",
@@ -20259,6 +20346,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_cal_endpoint.add_argument("--instability-u", type=float, default=0.01)
     p_cal_endpoint.add_argument("--native-wght-a", type=float, default=None)
     p_cal_endpoint.add_argument("--native-wght-b", type=float, default=None)
+    p_cal_endpoint.add_argument("--detector-ridge", type=float, default=0.05)
+    p_cal_endpoint.add_argument("--detector-smoothness", type=float, default=0.10)
+    p_cal_endpoint.add_argument("--detector-min-rows", type=int, default=20)
+    p_cal_endpoint.add_argument("--detector-min-holdout-improvement", type=float, default=0.002)
+    p_cal_endpoint.add_argument("--detector-required-improved-splits", type=int, default=2)
+    p_cal_endpoint.add_argument("--detector-max-bloch-gain-loss", type=float, default=0.002)
+    p_cal_endpoint.add_argument("--detector-min-field-correlation", type=float, default=0.50)
+    p_cal_endpoint.add_argument("--detector-max-field-log-rms", type=float, default=0.10)
+    p_cal_endpoint.add_argument("--detector-independent-calibration", action="store_true")
     p_cal_endpoint.set_defaults(func=cmd_calibrate_endpoint)
 
     if os.environ.get("GROND_ENABLE_INTERNAL_CLI", "").strip() == "1":

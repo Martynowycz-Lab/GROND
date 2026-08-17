@@ -12,12 +12,26 @@ from __future__ import annotations
 import argparse
 import copy
 import csv
+import hashlib
 import json
 import math
 import shutil
 from pathlib import Path
 
 import numpy as np
+
+try:
+    from .detector_scale_regularization import (
+        detector_field_diagnostics,
+        infer_square_grid_size,
+        solve_regularized_detector_field,
+    )
+except ImportError:  # pragma: no cover - direct script execution
+    from detector_scale_regularization import (
+        detector_field_diagnostics,
+        infer_square_grid_size,
+        solve_regularized_detector_field,
+    )
 
 
 def safe_float(value, default=float("nan")) -> float:
@@ -334,18 +348,26 @@ def fit_group_detector_scales(
     native_wght_b: float,
     instability_u: float,
     n_iter: int = 16,
+    detector_grid_size: int | None = None,
+    detector_ridge: float = 0.05,
+    detector_smoothness: float = 0.10,
+    detector_min_rows: int = 20,
 ) -> tuple[np.ndarray, dict[str, float], dict[str, float]]:
     scaled = np.full_like(raw, np.nan, dtype=float)
     good = fit_mask & np.isfinite(obs) & np.isfinite(sig) & np.isfinite(raw) & (sig > 0) & (raw > 0) & np.isfinite(groups) & np.isfinite(det_bins)
     unique_groups = np.asarray(sorted(set(groups[np.isfinite(groups)].astype(int))), dtype=int)
-    unique_det = np.asarray(sorted(set(det_bins[np.isfinite(det_bins)].astype(int))), dtype=int)
-    if len(unique_groups) == 0 or len(unique_det) == 0:
+    present_det = np.asarray(sorted(set(det_bins[np.isfinite(det_bins)].astype(int))), dtype=int)
+    if len(unique_groups) == 0 or len(present_det) == 0:
         require_scale_coverage(raw, scaled, groups, det_bins)
         return scaled, {}, {}
     gmap = {int(g): i for i, g in enumerate(unique_groups)}
-    dmap = {int(d): i for i, d in enumerate(unique_det)}
     gi = np.asarray([gmap.get(int(g), -1) if np.isfinite(g) else -1 for g in groups], dtype=int)
-    di = np.asarray([dmap.get(int(d), -1) if np.isfinite(d) else -1 for d in det_bins], dtype=int)
+    n_bins = infer_square_grid_size(det_bins, detector_grid_size)
+    n_tiles = n_bins * n_bins
+    di = np.asarray(
+        [int(d) if np.isfinite(d) and 0 <= int(d) < n_tiles else -1 for d in det_bins],
+        dtype=int,
+    )
     global_scale = fit_global_scale(
         obs,
         sig,
@@ -358,7 +380,7 @@ def fit_group_detector_scales(
         n_iter,
     )
     frame = np.full(len(unique_groups), global_scale, dtype=float)
-    det = np.ones(len(unique_det), dtype=float)
+    det = np.ones(n_tiles, dtype=float)
     for _ in range(int(n_iter)):
         base = raw * det[np.maximum(di, 0)]
         for j in range(len(unique_groups)):
@@ -369,13 +391,27 @@ def fit_group_detector_scales(
             weight = objective_weights(obs[m], sig[m], pred_scaled, objective, native_wght_a, native_wght_b, instability_u)
             frame[j] = max(solve_scale(base[m], obs[m], weight), 1e-30)
         base = raw * frame[np.maximum(gi, 0)]
-        for j in range(len(unique_det)):
+        diag = np.zeros(n_tiles, dtype=float)
+        rhs = np.zeros(n_tiles, dtype=float)
+        counts = np.zeros(n_tiles, dtype=int)
+        for j in range(n_tiles):
             m = good & (di == j) & np.isfinite(base) & (base > 0)
-            if np.count_nonzero(m) < 10:
+            counts[j] = int(np.count_nonzero(m))
+            if counts[j] < 2:
                 continue
             pred_scaled = base[m] * det[j]
             weight = objective_weights(obs[m], sig[m], pred_scaled, objective, native_wght_a, native_wght_b, instability_u)
-            det[j] = max(solve_scale(base[m], obs[m], weight), 1e-30)
+            diag[j] = float(np.sum(weight * base[m] * base[m]))
+            rhs[j] = float(np.sum(weight * base[m] * obs[m]))
+        det = solve_regularized_detector_field(
+            diag,
+            rhs,
+            counts,
+            n_bins=n_bins,
+            ridge=float(detector_ridge),
+            smoothness=float(detector_smoothness),
+            min_rows=int(detector_min_rows),
+        )
         finite = det[np.isfinite(det) & (det > 0)]
         if len(finite):
             median_det = float(np.median(finite))
@@ -386,7 +422,7 @@ def fit_group_detector_scales(
     scaled[apply] = raw[apply] * frame[gi[apply]] * det[di[apply]]
     require_scale_coverage(raw, scaled, groups, det_bins)
     frame_scales = {str(int(g)): float(frame[j]) for j, g in enumerate(unique_groups)}
-    det_scales = {str(int(d)): float(det[j]) for j, d in enumerate(unique_det)}
+    det_scales = {str(j): float(det[j]) for j in range(n_tiles)}
     return scaled, frame_scales, det_scales
 
 
@@ -509,6 +545,261 @@ def count_scale_params(groups: np.ndarray, det_bins: np.ndarray, fit_good: np.nd
     group_count = int(len([g for g in sorted(set(groups[fit_good].astype(int))) if np.count_nonzero((groups == g) & fit_good) >= 2]))
     det_count = int(target_detector_bins) * int(target_detector_bins) if int(target_detector_bins) > 1 else 0
     return group_count + det_count, group_count, det_count
+
+
+def _stable_detector_split_masks(
+    rows: list[dict[str, str]],
+    valid: np.ndarray,
+    *,
+    seeds: tuple[int, ...] = (1729, 2718, 3141),
+    holdout_fraction: float = 0.20,
+) -> list[tuple[np.ndarray, np.ndarray]]:
+    """Build deterministic row-identity splits independent of fitted residuals."""
+
+    threshold = int(round(float(holdout_fraction) * 10_000))
+    out = []
+    for seed in seeds:
+        free = np.zeros(len(rows), dtype=bool)
+        for i, row in enumerate(rows):
+            if not bool(valid[i]):
+                continue
+            identity = "|".join(
+                str(row.get(key, ""))
+                for key in ("row_index", "h", "k", "l", "group", "detector_bin")
+            )
+            digest = hashlib.blake2b(
+                f"{seed}|{identity}".encode(), digest_size=8
+            ).digest()
+            free[i] = int.from_bytes(digest, "big") % 10_000 < threshold
+        work = np.asarray(valid, dtype=bool) & ~free
+        free &= np.asarray(valid, dtype=bool)
+        if np.count_nonzero(work) >= 2 and np.count_nonzero(free) >= 2:
+            out.append((work, free))
+    return out
+
+
+def _field_agreement(left: dict[str, float], right: dict[str, float]) -> dict[str, float]:
+    keys = sorted(set(left) & set(right), key=int)
+    if not keys:
+        return {"correlation": float("nan"), "log_rms": float("inf")}
+    a = np.log(np.maximum([safe_float(left[key]) for key in keys], 1e-30))
+    b = np.log(np.maximum([safe_float(right[key]) for key in keys], 1e-30))
+    rms = float(np.sqrt(np.mean((a - b) ** 2)))
+    if len(keys) > 2 and np.std(a) > 1e-12 and np.std(b) > 1e-12:
+        corr = float(np.corrcoef(a, b)[0, 1])
+    else:
+        corr = 1.0 if rms <= 0.02 else 0.0
+    return {"correlation": corr, "log_rms": rms}
+
+
+def detector_scale_policy_diagnostics(
+    *,
+    rows: list[dict[str, str]],
+    obs: np.ndarray,
+    sig: np.ndarray,
+    raw_dyn: np.ndarray,
+    raw_born: np.ndarray,
+    groups: np.ndarray,
+    source_detector_bins: np.ndarray,
+    detector_base: int,
+    detector_target: int,
+    fit_mask: np.ndarray,
+    objective: str,
+    native_wght_a: float,
+    native_wght_b: float,
+    instability_u: float,
+    detector_ridge: float = 0.05,
+    detector_smoothness: float = 0.10,
+    detector_min_rows: int = 20,
+    min_holdout_improvement: float = 0.002,
+    required_improved_splits: int = 2,
+    max_bloch_gain_loss: float = 0.002,
+    min_field_correlation: float = 0.50,
+    max_field_log_rms: float = 0.10,
+    independent_calibration: bool = False,
+) -> dict[str, object]:
+    """Decide whether a detector field earns promotion on frozen predictions.
+
+    The no-detector fit is the reference.  Added detector parameters must help
+    on several deterministic row holdouts, retain the Born-to-Bloch advantage,
+    have adequate tile support, reproduce across data halves, and agree when
+    inferred from the Born and Bloch calculations.  An 8x8 field remains a
+    diagnostic unless independent calibration is explicitly declared.
+    """
+
+    detector_target = int(detector_target)
+    if detector_target <= 1:
+        return {
+            "status": "reference_no_detector_field",
+            "eligible": True,
+            "detector_bins": 0,
+            "reasons": [],
+        }
+    det_bins = coarsen_detector(source_detector_bins, detector_base, detector_target)
+    valid = (
+        np.isfinite(obs)
+        & np.isfinite(sig)
+        & (sig > 0)
+        & np.isfinite(raw_dyn)
+        & (raw_dyn > 0)
+        & np.isfinite(raw_born)
+        & (raw_born > 0)
+        & np.isfinite(groups)
+        & np.isfinite(det_bins)
+    )
+    fit_good = np.asarray(fit_mask, dtype=bool) & valid
+    counts = np.bincount(
+        det_bins[fit_good].astype(int), minlength=detector_target * detector_target
+    )
+
+    def fit(raw: np.ndarray, mask: np.ndarray, use_detector: bool):
+        if not use_detector:
+            scaled, frame = fit_group_scales(
+                obs,
+                sig,
+                raw,
+                groups,
+                mask,
+                objective,
+                native_wght_a,
+                native_wght_b,
+                instability_u,
+            )
+            return scaled, frame, {}
+        return fit_group_detector_scales(
+            obs,
+            sig,
+            raw,
+            groups,
+            det_bins,
+            mask,
+            objective,
+            native_wght_a,
+            native_wght_b,
+            instability_u,
+            detector_grid_size=detector_target,
+            detector_ridge=detector_ridge,
+            detector_smoothness=detector_smoothness,
+            detector_min_rows=detector_min_rows,
+        )
+
+    split_contracts: list[tuple[object, np.ndarray, np.ndarray]] = []
+    predeclared_free = valid & ~fit_good
+    if np.count_nonzero(fit_good) >= 2 and np.count_nonzero(predeclared_free) >= 2:
+        split_contracts.append(("predeclared_free", fit_good, predeclared_free))
+    split_contracts.extend(
+        (index, work, free)
+        for index, (work, free) in enumerate(
+            _stable_detector_split_masks(rows, fit_good)
+        )
+    )
+    split_rows = []
+    for split_label, work, free in split_contracts:
+        ref_dyn, _, _ = fit(raw_dyn, work, False)
+        ref_born, _, _ = fit(raw_born, work, False)
+        candidate_dyn, _, _ = fit(raw_dyn, work, True)
+        candidate_born, _, _ = fit(raw_born, work, True)
+        ref_dyn_wr2 = safe_float(
+            native_metrics(obs, sig, ref_dyn, free, native_wght_a, native_wght_b)[
+                "wR2_all"
+            ]
+        )
+        ref_born_wr2 = safe_float(
+            native_metrics(obs, sig, ref_born, free, native_wght_a, native_wght_b)[
+                "wR2_all"
+            ]
+        )
+        dyn_wr2 = safe_float(
+            native_metrics(obs, sig, candidate_dyn, free, native_wght_a, native_wght_b)[
+                "wR2_all"
+            ]
+        )
+        born_wr2 = safe_float(
+            native_metrics(obs, sig, candidate_born, free, native_wght_a, native_wght_b)[
+                "wR2_all"
+            ]
+        )
+        split_rows.append(
+            {
+                "split": split_label,
+                "reference_dyn_wR2": ref_dyn_wr2,
+                "candidate_dyn_wR2": dyn_wr2,
+                "detector_improvement": ref_dyn_wr2 - dyn_wr2,
+                "reference_bloch_gain": ref_born_wr2 - ref_dyn_wr2,
+                "candidate_bloch_gain": born_wr2 - dyn_wr2,
+                "bloch_gain_change": (born_wr2 - dyn_wr2)
+                - (ref_born_wr2 - ref_dyn_wr2),
+            }
+        )
+
+    _, _, dyn_field = fit(raw_dyn, fit_good, True)
+    _, _, born_field = fit(raw_born, fit_good, True)
+    shared_agreement = _field_agreement(dyn_field, born_field)
+    half_splits = _stable_detector_split_masks(
+        rows, fit_good, seeds=(5779,), holdout_fraction=0.50
+    )
+    if half_splits:
+        half_a, half_b = half_splits[0]
+        _, _, field_a = fit(raw_dyn, half_a, True)
+        _, _, field_b = fit(raw_dyn, half_b, True)
+        half_agreement = _field_agreement(field_a, field_b)
+    else:
+        half_agreement = {"correlation": float("nan"), "log_rms": float("inf")}
+
+    support = detector_field_diagnostics(
+        np.asarray([safe_float(dyn_field.get(str(i)), 1.0) for i in range(len(counts))]),
+        counts,
+        n_bins=detector_target,
+        min_rows=detector_min_rows,
+    )
+    improved_count = sum(
+        safe_float(row["detector_improvement"], -float("inf"))
+        >= float(min_holdout_improvement)
+        for row in split_rows
+    )
+    reasons: list[str] = []
+    if len(split_rows) < int(required_improved_splits):
+        reasons.append("insufficient_deterministic_holdout_splits")
+    elif improved_count < int(required_improved_splits):
+        reasons.append("detector_field_did_not_improve_multiple_holdouts")
+    if any(
+        safe_float(row["bloch_gain_change"], -float("inf"))
+        < -float(max_bloch_gain_loss)
+        for row in split_rows
+    ):
+        reasons.append("detector_field_reduced_heldout_born_to_bloch_advantage")
+    if not bool(support["all_tiles_adequate"]):
+        reasons.append("underpopulated_detector_tiles")
+    for label, agreement in (
+        ("data_half", half_agreement),
+        ("born_bloch", shared_agreement),
+    ):
+        if safe_float(agreement["log_rms"], float("inf")) > float(max_field_log_rms):
+            reasons.append(f"{label}_detector_field_log_rms_exceeded")
+        if safe_float(agreement["correlation"], -float("inf")) < float(
+            min_field_correlation
+        ):
+            reasons.append(f"{label}_detector_field_correlation_below_minimum")
+    if detector_target >= 8 and not bool(independent_calibration):
+        reasons.append("eight_by_eight_requires_independent_calibration")
+    return {
+        "status": "eligible" if not reasons else "diagnostic_only",
+        "eligible": not reasons,
+        "detector_bins": detector_target,
+        "reasons": reasons,
+        "holdout_splits": split_rows,
+        "improved_split_count": int(improved_count),
+        "required_improved_split_count": int(required_improved_splits),
+        "support": support,
+        "data_half_agreement": half_agreement,
+        "born_bloch_field_agreement": shared_agreement,
+        "regularization": {
+            "ridge_to_unity": float(detector_ridge),
+            "spatial_smoothness": float(detector_smoothness),
+            "minimum_rows_per_tile": int(detector_min_rows),
+        },
+        "independent_calibration": bool(independent_calibration),
+    }
 
 
 def log_scale_step_rms(scales: dict[str, float]) -> float:
@@ -682,6 +973,8 @@ def candidate_row(candidate: dict) -> dict[str, object]:
         "window_deg": candidate.get("window_deg", ""),
         "detector_bins": candidate["detector_bins"],
         "scale_params": candidate["scale_params"],
+        "frame_scale_params": candidate.get("group_scale_params", ""),
+        "detector_scale_params": candidate.get("detector_scale_params", ""),
         "total_params": candidate["total_params"],
         "Nobs": candidate["Nobs"],
         "Nall": candidate["Nall"],
@@ -707,6 +1000,16 @@ def candidate_row(candidate: dict) -> dict[str, object]:
         "baseline_within_group_log_rms": candidate.get("baseline_within_group_log_rms", ""),
         "within_strict": candidate["within_strict"],
         "within_r_only": candidate["within_r_only"],
+        "detector_policy_eligible": bool(
+            (candidate.get("detector_policy") or {}).get("eligible", False)
+        ),
+        "detector_policy_status": (candidate.get("detector_policy") or {}).get(
+            "status", ""
+        ),
+        "detector_policy_reasons": ";".join(
+            str(reason)
+            for reason in (candidate.get("detector_policy") or {}).get("reasons", [])
+        ),
     }
 
 
@@ -838,7 +1141,16 @@ def main() -> None:
     ap.add_argument("--group-strides", default="1,2,4,8,16,32,64,128,global")
     ap.add_argument("--window-scan-deg", type=float, default=0.0, help="Also scan every integer group stride up to this physical window size.")
     ap.add_argument("--scan-offsets", action="store_true", help="For each non-global stride, test every possible block-boundary offset.")
-    ap.add_argument("--detector-bins", default="exact", help="Detector flat-field models. Use exact for the source detector-bin grid, or explicit NxN values; 0 disables detector scaling.")
+    ap.add_argument("--detector-bins", default="0,2,4,8", help="Detector flat-field models. Automatic policy compares none, 2x2, 4x4, and diagnostic 8x8 fields on frozen predictions.")
+    ap.add_argument("--detector-ridge", type=float, default=0.05, help="Dimensionless shrinkage of detector factors toward unity.")
+    ap.add_argument("--detector-smoothness", type=float, default=0.10, help="Dimensionless nearest-neighbor detector-field smoothness penalty.")
+    ap.add_argument("--detector-min-rows", type=int, default=20, help="Minimum work rows required for every independently supported detector tile.")
+    ap.add_argument("--detector-min-holdout-improvement", type=float, default=0.002, help="Minimum absolute held-out wR2 improvement required on multiple deterministic splits.")
+    ap.add_argument("--detector-required-improved-splits", type=int, default=2)
+    ap.add_argument("--detector-max-bloch-gain-loss", type=float, default=0.002, help="Maximum loss of held-out Born-minus-Bloch wR2 advantage on any deterministic split.")
+    ap.add_argument("--detector-min-field-correlation", type=float, default=0.50)
+    ap.add_argument("--detector-max-field-log-rms", type=float, default=0.10)
+    ap.add_argument("--detector-independent-calibration", action="store_true", help="Allow an 8x8 detector field to be promotable because an independent detector calibration supports it.")
     ap.add_argument("--scale-objective", choices=["row_mr", "native", "sigma"], default="native")
     ap.add_argument("--tolerance", type=float, default=0.01)
     ap.add_argument("--selection-metrics", default="Rall,wRall,native_R1_all,native_wR2_all")
@@ -882,6 +1194,17 @@ def main() -> None:
     baseline_row_mr = row_mr_metrics(obs, sig, base_dyn, masks["all"], args.instability_u, args.observed_sigma_cut)
     baseline_native = native_metrics(obs, sig, base_dyn, masks["all"], native_wght_a, native_wght_b, n_params=base_total_params)
     group_width_deg = infer_group_width_deg(source_summary)
+    source_detector_bins = int(
+        safe_float(
+            ((source_summary.get("best_native") or {}).get("nuisance") or {}).get(
+                "detector_scale_bins"
+            ),
+            0.0,
+        )
+    )
+    source_detector_params = (
+        source_detector_bins * source_detector_bins if source_detector_bins > 1 else 0
+    )
     baseline = {
         "name": "baseline_full_scale",
         "mode": "current_dyn_scaled",
@@ -891,6 +1214,8 @@ def main() -> None:
         "window_deg": group_width_deg if np.isfinite(group_width_deg) else "",
         "detector_bins": "existing",
         "scale_params": base_scale_count,
+        "group_scale_params": max(0, base_scale_count - source_detector_params),
+        "detector_scale_params": source_detector_params,
         "total_params": base_total_params,
         **baseline_row_mr,
         "native": baseline_native,
@@ -898,6 +1223,17 @@ def main() -> None:
         "delta_vs_baseline": {"Robs": 0.0, "Rall": 0.0, "wRall": 0.0, "native_R1_gt": 0.0, "native_R1_all": 0.0, "native_wR2_all": 0.0},
         "within_strict": True,
         "within_r_only": True,
+        "detector_policy": {
+            "status": "legacy_source_reference",
+            "eligible": source_detector_bins < 8
+            or bool(args.detector_independent_calibration),
+            "detector_bins": source_detector_bins,
+            "reasons": (
+                []
+                if source_detector_bins < 8 or bool(args.detector_independent_calibration)
+                else ["eight_by_eight_requires_independent_calibration"]
+            ),
+        },
     }
 
     detector_base = infer_detector_base(det0)
@@ -928,7 +1264,14 @@ def main() -> None:
                 det_bins = np.zeros(len(rows), dtype=int)
             else:
                 det_bins = coarsen_detector(det0, detector_base, det_bins_target)
-                dyn_scaled, frame_scales, det_scales = fit_group_detector_scales(obs, sig, raw_dyn, groups, det_bins, fit_mask, args.scale_objective, native_wght_a, native_wght_b, args.instability_u)
+                dyn_scaled, frame_scales, det_scales = fit_group_detector_scales(
+                    obs, sig, raw_dyn, groups, det_bins, fit_mask,
+                    args.scale_objective, native_wght_a, native_wght_b,
+                    args.instability_u, detector_grid_size=det_bins_target,
+                    detector_ridge=args.detector_ridge,
+                    detector_smoothness=args.detector_smoothness,
+                    detector_min_rows=args.detector_min_rows,
+                )
                 mode = "frame_groups_plus_detector"
                 det_label = det_bins_target
             scale_params, n_group_scales, n_detector_scales = count_scale_params(groups, det_bins, fit_good, det_label)
@@ -958,6 +1301,31 @@ def main() -> None:
                 "information": information_criteria(native, total_params),
                 "arrays": {"dyn": dyn_scaled},
             }
+            candidate["detector_policy"] = detector_scale_policy_diagnostics(
+                rows=rows,
+                obs=obs,
+                sig=sig,
+                raw_dyn=raw_dyn,
+                raw_born=raw_born,
+                groups=groups,
+                source_detector_bins=det0,
+                detector_base=detector_base,
+                detector_target=det_label,
+                fit_mask=fit_mask,
+                objective=args.scale_objective,
+                native_wght_a=native_wght_a,
+                native_wght_b=native_wght_b,
+                instability_u=args.instability_u,
+                detector_ridge=args.detector_ridge,
+                detector_smoothness=args.detector_smoothness,
+                detector_min_rows=args.detector_min_rows,
+                min_holdout_improvement=args.detector_min_holdout_improvement,
+                required_improved_splits=args.detector_required_improved_splits,
+                max_bloch_gain_loss=args.detector_max_bloch_gain_loss,
+                min_field_correlation=args.detector_min_field_correlation,
+                max_field_log_rms=args.detector_max_field_log_rms,
+                independent_calibration=args.detector_independent_calibration,
+            )
             candidate["delta_vs_baseline"] = metric_delta(candidate, baseline)
             candidate["within_strict"] = within_tolerance(candidate["delta_vs_baseline"], selection_metrics, args.tolerance)
             candidate["within_r_only"] = within_tolerance(candidate["delta_vs_baseline"], ("Robs", "Rall"), args.tolerance)
@@ -997,9 +1365,25 @@ def main() -> None:
                 )
 
     non_baseline = [c for c in candidates if c["name"] != "baseline_full_scale"]
-    strict = [c for c in non_baseline if c["within_strict"]]
-    r_only = [c for c in non_baseline if c["within_r_only"]]
-    selected = min(strict, key=lambda c: (c["scale_params"], c["total_params"], c["wRall"], c["Rall"])) if strict else None
+    strict = [
+        c
+        for c in non_baseline
+        if c["within_strict"]
+        and bool((c.get("detector_policy") or {}).get("eligible", False))
+    ]
+    r_only = [
+        c
+        for c in non_baseline
+        if c["within_r_only"]
+        and bool((c.get("detector_policy") or {}).get("eligible", False))
+    ]
+    strict_added_detector = [c for c in strict if int(c.get("detector_bins", 0)) > 1]
+    strict_no_detector = [c for c in strict if int(c.get("detector_bins", 0)) <= 1]
+    promotion_pool = strict_added_detector or strict_no_detector
+    selected = min(
+        promotion_pool,
+        key=lambda c: (c["scale_params"], c["total_params"], c["wRall"], c["Rall"]),
+    ) if promotion_pool else None
     selected_information = min(
         strict,
         key=lambda c: (
@@ -1012,7 +1396,18 @@ def main() -> None:
     selected_r_only = min(r_only, key=lambda c: (c["scale_params"], c["total_params"], c["Rall"], c["wRall"])) if r_only else None
     selected_widest = max(strict, key=lambda c: (safe_float(c.get("window_deg"), -1.0), c["group_stride"], -c["scale_params"], -c["wRall"])) if strict else None
     selected_widest_r_only = max(r_only, key=lambda c: (safe_float(c.get("window_deg"), -1.0), c["group_stride"], -c["scale_params"], -c["wRall"])) if r_only else None
-    selected_for_output = selected_information or selected or selected_r_only or min(non_baseline, key=lambda c: (max(0.0, c["delta_vs_baseline"]["Rall"]), c["scale_params"]))
+    policy_eligible = [
+        c
+        for c in non_baseline
+        if bool((c.get("detector_policy") or {}).get("eligible", False))
+    ]
+    selected_for_output = selected or selected_information or selected_r_only or min(
+        policy_eligible or non_baseline,
+        key=lambda c: (
+            max(0.0, c["delta_vs_baseline"]["Rall"]),
+            c["scale_params"],
+        ),
+    )
     candidate_rows = [candidate_row(c) for c in sorted(candidates, key=lambda c: (c["scale_params"], c["wRall"], c["Rall"]))]
     candidate_csv = out / "scale_compression_candidates.csv"
     write_rows(candidate_csv, candidate_rows, list(candidate_rows[0].keys()))
@@ -1041,7 +1436,11 @@ def main() -> None:
             candidate_detector = coarsen_detector(det0, detector_base, detector_target)
             born, _, _ = fit_group_detector_scales(
                 obs, sig, raw_born, candidate_groups, candidate_detector, fit_mask,
-                args.scale_objective, native_wght_a, native_wght_b, args.instability_u,
+                args.scale_objective, native_wght_a, native_wght_b,
+                args.instability_u, detector_grid_size=detector_target,
+                detector_ridge=args.detector_ridge,
+                detector_smoothness=args.detector_smoothness,
+                detector_min_rows=args.detector_min_rows,
             )
         return {"dyn": candidate["arrays"]["dyn"], "born": born}
 
@@ -1083,9 +1482,16 @@ def main() -> None:
             "selected_widest_r_only": {k: v for k, v in (selected_widest_r_only or {}).items() if k not in {"arrays", "frame_scales", "detector_scales"}} if selected_widest_r_only else None,
             "selected_output": {k: v for k, v in candidate.items() if k not in {"arrays", "frame_scales", "detector_scales"}},
             "candidate_csv": str(candidate_csv),
+            "detector_policy": candidate.get("detector_policy") or {},
         }
         compact_summary.setdefault("best_native", {})
         compact_summary["best_native"]["scale_count"] = int(candidate["scale_params"])
+        compact_summary["best_native"]["frame_scale_count"] = int(
+            candidate.get("group_scale_params", 0)
+        )
+        compact_summary["best_native"]["detector_scale_count"] = int(
+            candidate.get("detector_scale_params", 0)
+        )
         compact_summary["best_native"]["scale_fit_split"] = fit_split
         compact_summary["best_native"]["metrics"] = {
             split: {
@@ -1127,6 +1533,18 @@ def main() -> None:
         "adaptive_frame_counts": adaptive_counts,
         "fit_split": fit_split,
         "detector_base_bins": int(detector_base),
+        "detector_policy": {
+            "candidate_grids": target_detector_bins,
+            "ridge_to_unity": float(args.detector_ridge),
+            "spatial_smoothness": float(args.detector_smoothness),
+            "minimum_rows_per_tile": int(args.detector_min_rows),
+            "minimum_holdout_improvement": float(args.detector_min_holdout_improvement),
+            "required_improved_splits": int(args.detector_required_improved_splits),
+            "maximum_bloch_gain_loss": float(args.detector_max_bloch_gain_loss),
+            "minimum_field_correlation": float(args.detector_min_field_correlation),
+            "maximum_field_log_rms": float(args.detector_max_field_log_rms),
+            "independent_calibration": bool(args.detector_independent_calibration),
+        },
         "physical_params_carried_from_source": int(physical_params),
         "window_scan": window_scan,
         "scan_offsets": bool(args.scan_offsets),

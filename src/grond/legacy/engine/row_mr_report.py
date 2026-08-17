@@ -776,6 +776,12 @@ def scale_polish_table_rows(scale_payloads: list[dict]) -> list[dict]:
                 "Status": status,
                 "Model": selected.get("name", "n/a"),
                 "Scale params (full -> compact)": scale_parameter_text(baseline, selected, "scale_params"),
+                "Frame scales (full -> compact)": scale_parameter_text(
+                    baseline, selected, "group_scale_params"
+                ),
+                "Detector scales (full -> compact)": scale_parameter_text(
+                    baseline, selected, "detector_scale_params"
+                ),
                 "Total params (full -> compact)": scale_parameter_text(baseline, selected, "total_params"),
                 "Penalty dRall pp": fmt_delta_percent(delta.get("Rall")),
                 "Penalty dwRall pp": fmt_delta_percent(delta.get("wRall")),
@@ -839,13 +845,22 @@ def summary_metadata(rows: list[dict], model: dict, run_summaries: list[dict]) -
     max_support_sg = []
     group_width = []
     detector_bins = []
+    frame_scale_counts = []
+    detector_scale_counts = []
     thickness_model = []
     absorption_mode = []
     sg_jitter_mode = []
     matrix_convention = []
     for rec in run_summaries:
         cfg = rec.get("config", {})
-        best = (rec.get("best_native") or {}).get("nuisance", {})
+        best_native = rec.get("best_native") or {}
+        best = best_native.get("nuisance", {})
+        if "frame_scale_count" in best_native:
+            frame_scale_counts.append(safe_float(best_native.get("frame_scale_count")))
+        if "detector_scale_count" in best_native:
+            detector_scale_counts.append(
+                safe_float(best_native.get("detector_scale_count"))
+            )
         if "n_basis" in cfg:
             n_basis.append(str(cfg.get("n_basis")))
         if "n_points" in cfg:
@@ -906,6 +921,8 @@ def summary_metadata(rows: list[dict], model: dict, run_summaries: list[dict]) -
         "max_support_sg": uniq_text(max_support_sg, 5),
         "group_width_deg": uniq_text(group_width, 3),
         "detector_scale_bins": uniq_text(detector_bins, 0),
+        "frame_scale_counts": uniq_text(frame_scale_counts, 0),
+        "detector_scale_counts": uniq_text(detector_scale_counts, 0),
         "thickness_model": uniq_text(thickness_model),
         "absorption_mode": uniq_text(absorption_mode),
         "sg_jitter_mode": uniq_text(sg_jitter_mode),
@@ -957,7 +974,7 @@ def write_markdown(
         f"Geometry/reflection selection: `d >= {meta['min_d_spacing']} A`, `PEAK >= {meta['min_peak']}`, geometry percentile `{meta['geometry_percentile']}`.",
         f"Bloch support controls: `sg_window={meta['sg_window']} A^-1`, `max_support_sg={meta['max_support_sg']} A^-1`, `topup_d_min={meta['topup_d_min']} A`.",
         f"Mean fitted thickness: `{fmt_float(meta['thickness_A_mean'], 1)} A`.",
-        f"Thickness model: `{meta['thickness_model']}`. Group width: `{meta['group_width_deg']} deg`. Detector scale bins: `{meta['detector_scale_bins']}`.",
+        f"Thickness model: `{meta['thickness_model']}`. Group width: `{meta['group_width_deg']} deg`. Detector scale bins: `{meta['detector_scale_bins']}`. Frame-scale parameters: `{meta['frame_scale_counts']}`; detector-scale parameters: `{meta['detector_scale_counts']}`.",
         f"Absorption mode: `{meta['absorption_mode']}`. Sg jitter mode: `{meta['sg_jitter_mode']}`. Matrix convention: `{meta['matrix_convention']}`.",
         f"Raw-row resolution-envelope B values: `{meta['row_resolution_b_values']}`.",
         f"dmin: `{fmt_float(meta['dmin_A'], 3)} A`; sin(theta_max)/lambda: `{fmt_float(meta['sin_theta_over_lambda_max'], 3)} A^-1`.",
@@ -1044,6 +1061,7 @@ def write_latex(
         rf"Bloch support controls & $S_g$ window {tex_escape(meta['sg_window'])} \AA$^{{-1}}$, max support $S_g$ {tex_escape(meta['max_support_sg'])} \AA$^{{-1}}$, top-up $d_{{min}}$ {tex_escape(meta['topup_d_min'])} \AA \\",
         rf"Mean fitted thickness & {fmt_float(meta['thickness_A_mean'], 1)} \AA \\",
         rf"Thickness/group/detector model & {tex_escape(meta['thickness_model'])}; group width {tex_escape(meta['group_width_deg'])} deg; detector bins {tex_escape(meta['detector_scale_bins'])} \\",
+        rf"Scale parameters & frame {tex_escape(meta['frame_scale_counts'])}; detector {tex_escape(meta['detector_scale_counts'])} \\",
         rf"Absorption, jitter, matrix convention & {tex_escape(meta['absorption_mode'])}; {tex_escape(meta['sg_jitter_mode'])}; {tex_escape(meta['matrix_convention'])} \\",
         rf"Raw-row resolution-envelope B values & {tex_escape(meta['row_resolution_b_values'])} \\",
         r"\bottomrule\end{tabular}",

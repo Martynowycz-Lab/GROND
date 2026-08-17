@@ -146,6 +146,10 @@ def main():
         "var_prf": float_col(table, "intensity.prf.variance"),
         "i_scale": float_col(table, "intensity.scale.value"),
         "var_scale": float_col(table, "intensity.scale.variance"),
+        "inverse_scale_factor": float_col(table, "inverse_scale_factor"),
+        "inverse_scale_factor_variance": float_col(
+            table, "inverse_scale_factor_variance"
+        ),
         "lp": float_col(table, "lp", 1.0),
         "qe": float_col(table, "qe", 1.0) if "qe" in table else float_col(table, "dqe", 1.0),
         "partiality": float_col(table, "partiality", 1.0),
@@ -995,6 +999,50 @@ def convert_dials_to_grond(
     image_size = detector.get("image_size_px", [0, 0])
     pixel_size = detector.get("pixel_size_mm", [0.0, 0.0])
 
+    inverse_scale = np.asarray(
+        arrays.get("inverse_scale_factor", np.full(len(hkl), np.nan)), dtype=float
+    )
+    inverse_scale_variance = np.asarray(
+        arrays.get(
+            "inverse_scale_factor_variance", np.full(len(hkl), np.nan)
+        ),
+        dtype=float,
+    )
+    inverse_scale_available = finite & np.isfinite(inverse_scale) & (inverse_scale > 0.0)
+    inverse_scale_control_path = out / "DIALS_INVERSE_SCALE_CONTROL.npz"
+    inverse_scale_control = {
+        "status": "unavailable",
+        "note": (
+            "DIALS inverse-scale values are retained only as a fixed control or prior; "
+            "GROND does not silently replace them with a fitted detector field."
+        ),
+        "available_rows": int(np.count_nonzero(inverse_scale_available)),
+        "written_rows": int(np.count_nonzero(finite)),
+    }
+    if np.any(inverse_scale_available):
+        selected = np.where(finite)[0]
+        np.savez_compressed(
+            inverse_scale_control_path,
+            source_row_index=selected.astype(np.int64),
+            hkl=np.asarray(hkl[selected], dtype=np.int32),
+            inverse_scale_factor=np.asarray(inverse_scale[selected], dtype=float),
+            inverse_scale_factor_variance=np.asarray(
+                inverse_scale_variance[selected], dtype=float
+            ),
+            xyzcal=np.asarray(xyzcal[selected], dtype=float),
+            panel=np.asarray(panel[selected], dtype=np.int32),
+        )
+        available_values = inverse_scale[inverse_scale_available]
+        inverse_scale_control.update(
+            {
+                "status": "recorded_fixed_control",
+                "path": str(inverse_scale_control_path),
+                "minimum": float(np.min(available_values)),
+                "median": float(np.median(available_values)),
+                "maximum": float(np.max(available_values)),
+            }
+        )
+
     hkl_path = out / "INTEGRATE.HKL"
     with hkl_path.open("w") as f:
         f.write("!OUTPUT_FILE=INTEGRATE.HKL\n")
@@ -1037,6 +1085,11 @@ def convert_dials_to_grond(
             )
         f.write(f"!DIALS_ROWS_READ= {len(hkl)}\n")
         f.write(f"!DIALS_ROWS_WRITTEN= {int(np.count_nonzero(finite))}\n")
+        if inverse_scale_control.get("status") == "recorded_fixed_control":
+            f.write(
+                "!DIALS_INVERSE_SCALE_CONTROL_FILE= "
+                f"{inverse_scale_control_path.name}\n"
+            )
         f.write("!DIALS_PARTIALITY_AS_PEAK= TRUE\n")
         f.write("!DIALS_BBOX_Z_RANGE_AS_ALF0_BET0= TRUE\n")
         f.write(f"!DIALS_A_AT_SCAN_POINTS_FILE= {scan_points_path.name}\n")
@@ -1118,6 +1171,7 @@ def convert_dials_to_grond(
         "row_selection": effective_selection,
         "intensity_note": intensity_note,
         "sigma_model": sigma_summary,
+        "dials_inverse_scale_control": inverse_scale_control,
         "rows_read": int(len(hkl)),
         "rows_written": int(np.count_nonzero(finite)),
         "rows_excluded": int(len(hkl) - np.count_nonzero(finite)),

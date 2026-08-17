@@ -219,7 +219,10 @@ def test_thickness_scout_parser_exposes_contract_diagnostic_defaults():
     assert args.matrix_convention == "j_minus_i"
     assert args.profile_quadrature == "uniform"
     assert args.profile_accumulation == "sum"
-    assert args.detector_scale_bins == "8"
+    assert args.detector_scale_bins == "0"
+    assert args.detector_scale_ridge == 0.05
+    assert args.detector_scale_smoothness == 0.10
+    assert args.detector_scale_min_rows == 20
     assert args.lambda_grid == "1.0"
     assert args.scale_smoothness == 0.0
     assert args.endpoint_b_grid == "0.0"
@@ -236,7 +239,7 @@ def test_thickness_scout_parser_exposes_contract_diagnostic_defaults():
     assert args.endpoint_calibration_goof_max == 1.15
     assert args.endpoint_calibration_max_r1_cost == 0.010
     assert args.endpoint_calibration_free_wr2_tolerance == 0.040
-    assert args.endpoint_calibration_selection_policy == "bic"
+    assert args.endpoint_calibration_selection_policy == "gated-smallest"
     assert args.endpoint_calibration_information_criterion == "bic_fitted_variance"
     assert args.endpoint_calibration_sigma_min_scale == 0.05
     assert args.endpoint_calibration_shelxl_iterations == 3
@@ -1710,7 +1713,7 @@ def test_auto_parser_hides_lambda_controls(capsys):
     assert args.structure_n_basis == 24
     assert args.scale_polish_frame_models == "adaptive,fixed"
     assert args.scale_polish_adaptive_counts == "auto"
-    assert args.scale_polish_detector_bins == "exact"
+    assert args.scale_polish_detector_bins == "0,2,4,8"
     assert args.scale_polish_selection_metrics == "Rall,wRall,native_R1_all,native_wR2_all"
     assert args.scale_polish_scan_offsets is False
     assert args.resolution_limit_gate is True
@@ -2524,7 +2527,7 @@ def test_utility_commands_parse():
     assert calibrate.post_bloch_sigma_min_scale == 0.05
     assert calibrate.publication_goof_min == 0.85
     assert calibrate.publication_free_wr2_tolerance == 0.040
-    assert calibrate.publication_selection_policy == "bic"
+    assert calibrate.publication_selection_policy == "gated-smallest"
     assert calibrate.publication_information_criterion == "bic_fitted_variance"
     ls1 = build_parser().parse_args(
         [
@@ -2903,9 +2906,9 @@ def test_auto_parser_is_simple_run_alias():
     assert args.command == "auto"
     assert args.mode == "auto"
     assert args.resume is True
-    assert args.detector_scale_bins == "8"
+    assert args.detector_scale_bins == "0"
     assert args.final_basis_max == 500
-    assert args.scale_polish_detector_bins == "exact"
+    assert args.scale_polish_detector_bins == "0,2,4,8"
     assert args.make_maps is False
 
 

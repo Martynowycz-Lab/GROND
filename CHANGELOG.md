@@ -4,6 +4,19 @@ This file records user-visible changes to the installable package. Version `0.2.
 
 ## 0.2.2 (unreleased)
 
+Detector-position scaling is no longer fixed unconditionally at 8x8. Physical
+nuisance selection is detector-free by default; the subsequent frozen-row
+scale audit evaluates detector-free, 2x2, 4x4, and diagnostic 8x8 fields. Added fields must improve
+multiple held-out splits, preserve the Born-to-Bloch advantage, have adequate
+rows in every tile, reproduce across data halves, agree when inferred from
+Born and Bloch predictions, and survive the fixed-weight endpoint GooF,
+NPD, and split gates. An 8x8 field cannot be promoted without explicitly
+declared independent calibration. Detector fits now include dimensionless
+shrinkage toward unity and nearest-neighbor smoothness, and reports separate
+frame-scale and detector-scale parameter counts. DIALS imports also preserve a
+present inverse-scale-factor column as a fixed control sidecar rather than
+silently substituting a GROND detector field.
+
 `grond auto` can now use a model-keyed exact row-plan cache inside sufficiently
 large fixed-model nuisance grids. Repeated thickness and absorption candidates
 reuse detector geometry, the signed direct/target beam basis, rocking-profile

@@ -59,7 +59,10 @@ def test_compact_detector_bin_seen_only_in_free_rows_stays_finite_without_leakag
     np.testing.assert_allclose(scaled, np.full(n_work + 1, 20.0))
     np.testing.assert_allclose(changed_scaled, scaled)
     assert frame_scales == changed_frame_scales == {"0": 2.0}
-    assert detector_scales == changed_detector_scales == {"0": 1.0, "50": 1.0}
+    assert detector_scales == changed_detector_scales
+    assert len(detector_scales) == 64
+    assert detector_scales["0"] == detector_scales["50"] == 1.0
+    assert set(detector_scales.values()) == {1.0}
 
 
 def test_compact_scale_fit_fails_closed_without_two_fit_rows():

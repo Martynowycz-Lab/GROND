@@ -30,6 +30,14 @@ Those files can be large because they preserve pixel-level shoebox data for each
 
 The important point is that the GROND input remains a row-preserving reflection table and matching experiment list. It must not be merged or symmetry-averaged before the Bloch calculation. The default path uses `integrated.refl` and `integrated.expt`. A `scaled.refl` table still contains the raw summation columns, so a deliberate alternative is `--dials-row-selection scaled` (or `--row-selection scaled` with `import-dials`): this keeps `intensity.sum.value` and its variance while restricting the rows to observations accepted by `dials.scale`. That is useful after a documented scaling rejection such as delta-CC1/2, and is distinct from `--dials-intensity-mode scale`, which changes the intensity values themselves. The selected row contract is recorded in `dials_bridge_summary.json`; requesting scaled selection from a table with no scaled rows fails closed.
 
+When the reflection table contains DIALS `inverse_scale_factor` values, the
+bridge preserves them and their reported variance in
+`DIALS_INVERSE_SCALE_CONTROL.npz`, with source row indices, signed HKLs,
+calculated centroids, and panel IDs. GROND does not apply these values to the
+summation target automatically. They are a fixed prior or comparison for the
+detector-scale audit, not a license to silently exchange the DIALS scaling
+model for a flexible GROND detector surface.
+
 DIALS does not need to be integrated in P1 just to preserve signed rows. The reflection table stores the signed `miller_index` assigned to each observation. GROND keeps that exact signed row identity for simulation and performs transform alignment against the solved structure. The DIALS crystal and laboratory frames are proper, right-handed rotations. GROND therefore keeps automatic setting selection to determinant-positive transforms, ranks them with a coordinate-hand-invariant matched-Born work-row target, and fixes the selected transform before comparing dynamical hands. If you are testing unusual indexing or space-group alternatives, keep separate DIALS output directories so each GROND run has a clear row contract.
 
 ## One-Command Use

@@ -51,7 +51,7 @@ def test_publication_endpoint_prefers_boring_goof_over_low_r_diagnostic():
     assert selected["publication_endpoint"]["spec"] == "adaptive_120_det_8"
 
 
-def test_publication_endpoint_default_uses_bic_after_sanity_gates():
+def test_publication_endpoint_bic_policy_uses_bic_after_sanity_gates():
     rows = [
         {
             "spec": "few_scales",
@@ -94,6 +94,7 @@ def test_publication_endpoint_default_uses_bic_after_sanity_gates():
         max_r1_cost=0.010,
         free_wr2_tolerance=0.030,
         prefer_wght_mode="freeze-zero",
+        selection_policy="bic",
     )
 
     assert selected["status"] == "passed"

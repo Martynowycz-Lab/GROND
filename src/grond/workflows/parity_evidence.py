@@ -316,6 +316,7 @@ _NUISANCE_CATEGORICAL_FIELDS = {
 }
 _NUISANCE_INTEGER_FIELDS = {
     "detector_scale_bins",
+    "detector_scale_min_rows",
     "sg_jitter_points",
     "mosaicity_points",
 }
@@ -326,6 +327,9 @@ _NUISANCE_NULLABLE_FIELDS = {
 }
 _NUISANCE_FIELDS = tuple(Nuisance.__dataclass_fields__)
 _OPTIONAL_NUISANCE_DEFAULTS = {
+    "detector_scale_ridge": 0.05,
+    "detector_scale_smoothness": 0.10,
+    "detector_scale_min_rows": 20,
     "mosaicity_mode": "none",
     "mosaicity_sigma_deg": 0.0,
     "mosaicity_points": 1,

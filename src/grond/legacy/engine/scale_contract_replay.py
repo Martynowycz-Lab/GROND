@@ -49,6 +49,7 @@ try:
         coarsen_groups,
         col,
         count_scale_params,
+        detector_scale_policy_diagnostics,
         fit_group_detector_scales,
         fit_group_scales,
         infer_detector_base,
@@ -94,6 +95,7 @@ except ImportError:  # pragma: no cover - direct script execution
         coarsen_groups,
         col,
         count_scale_params,
+        detector_scale_policy_diagnostics,
         fit_group_detector_scales,
         fit_group_scales,
         infer_detector_base,
@@ -396,6 +398,15 @@ def build_replay_rows(
     native_wght_a: float,
     native_wght_b: float,
     instability_u: float,
+    detector_ridge: float = 0.05,
+    detector_smoothness: float = 0.10,
+    detector_min_rows: int = 20,
+    detector_min_holdout_improvement: float = 0.002,
+    detector_required_improved_splits: int = 2,
+    detector_max_bloch_gain_loss: float = 0.002,
+    detector_min_field_correlation: float = 0.50,
+    detector_max_field_log_rms: float = 0.10,
+    detector_independent_calibration: bool = False,
 ) -> tuple[list[dict[str, object]], dict]:
     obs = col(rows, "target_I")
     sig = col(rows, "sigma_eff")
@@ -418,6 +429,22 @@ def build_replay_rows(
         groups = groups0
         det_bins = det0
         frame_scales = {}
+        source_detector_bins = int(
+            float(((summary.get("best_native") or {}).get("nuisance") or {}).get(
+                "detector_scale_bins", 0
+            ))
+        )
+        detector_policy = {
+            "status": "legacy_source_reference",
+            "eligible": source_detector_bins < 8
+            or bool(detector_independent_calibration),
+            "detector_bins": source_detector_bins,
+            "reasons": (
+                []
+                if source_detector_bins < 8 or bool(detector_independent_calibration)
+                else ["eight_by_eight_requires_independent_calibration"]
+            ),
+        }
     else:
         baseline_log_scale = baseline_scale_log_by_row(summary, groups0)
         if np.count_nonzero(np.isfinite(baseline_log_scale) & fit_good) < 2:
@@ -435,9 +462,46 @@ def build_replay_rows(
             detector_scales = {}
         else:
             det_bins = coarsen_detector(det0, detector_base, det_target)
-            dyn_scaled, frame_scales, detector_scales = fit_group_detector_scales(obs, sig, raw_dyn, groups, det_bins, fit_mask, "native", native_wght_a, native_wght_b, instability_u)
-            born_scaled, _, _ = fit_group_detector_scales(obs, sig, raw_born, groups, det_bins, fit_mask, "native", native_wght_a, native_wght_b, instability_u)
+            fit_kwargs = {
+                "detector_grid_size": det_target,
+                "detector_ridge": detector_ridge,
+                "detector_smoothness": detector_smoothness,
+                "detector_min_rows": detector_min_rows,
+            }
+            dyn_scaled, frame_scales, detector_scales = fit_group_detector_scales(
+                obs, sig, raw_dyn, groups, det_bins, fit_mask, "native",
+                native_wght_a, native_wght_b, instability_u, **fit_kwargs,
+            )
+            born_scaled, _, _ = fit_group_detector_scales(
+                obs, sig, raw_born, groups, det_bins, fit_mask, "native",
+                native_wght_a, native_wght_b, instability_u, **fit_kwargs,
+            )
         scale_params, group_scale_params, detector_scale_params = count_scale_params(groups, det_bins, fit_good, int(spec.get("detector_bins", detector_base)))
+        detector_policy = detector_scale_policy_diagnostics(
+            rows=rows,
+            obs=obs,
+            sig=sig,
+            raw_dyn=raw_dyn,
+            raw_born=raw_born,
+            groups=groups,
+            source_detector_bins=det0,
+            detector_base=detector_base,
+            detector_target=det_target,
+            fit_mask=fit_mask,
+            objective="native",
+            native_wght_a=native_wght_a,
+            native_wght_b=native_wght_b,
+            instability_u=instability_u,
+            detector_ridge=detector_ridge,
+            detector_smoothness=detector_smoothness,
+            detector_min_rows=detector_min_rows,
+            min_holdout_improvement=detector_min_holdout_improvement,
+            required_improved_splits=detector_required_improved_splits,
+            max_bloch_gain_loss=detector_max_bloch_gain_loss,
+            min_field_correlation=detector_min_field_correlation,
+            max_field_log_rms=detector_max_field_log_rms,
+            independent_calibration=detector_independent_calibration,
+        )
     total_params = int(scale_params + physical_params)
     row_metrics = row_mr_metrics(obs, sig, dyn_scaled, masks["all"], instability_u, 3.0)
     row_metrics_work = row_mr_metrics(obs, sig, dyn_scaled, masks["work"], instability_u, 3.0)
@@ -489,6 +553,7 @@ def build_replay_rows(
         "born_work": born_work,
         "born_free": born_free,
         "information": information_criteria(native, total_params),
+        "detector_policy": detector_policy,
     }
     updated = []
     fields = list(rows[0].keys())
@@ -529,19 +594,18 @@ def choose_publication_endpoint(
     max_r1_cost: float,
     free_wr2_tolerance: float,
     prefer_wght_mode: str,
-    selection_policy: str = "bic",
+    selection_policy: str = "gated-smallest",
     information_criterion: str = "bic_fitted_variance",
     allow_npd: bool = False,
     max_modulation_p95: float = 20.0,
+    detector_independent_calibration: bool = False,
 ) -> dict[str, object]:
     """Choose a publication endpoint from replayed scale contracts.
 
     The low-R and held-out row branches are kept as diagnostics.  By default,
-    the publication branch must pass only the hard endpoint sanity gates
-    (preferred weight mode and conventional GooF range), then GROND selects the
-    minimum-information-criterion scale contract.  The older "smallest scale
-    count after R/free gates" rule remains available as ``gated-smallest`` for
-    reproducibility of older audits.
+    the publication branch applies the endpoint, held-out-row, and detector
+    validation gates, then promotes the smallest passing scale contract.  An
+    information-criterion selector remains available as a diagnostic policy.
     """
 
     finite = [
@@ -557,9 +621,19 @@ def choose_publication_endpoint(
             "rejections": [],
         }
 
-    low_r = min(finite, key=lambda r: (_finite_float(r.get("shelxl_R1all"), float("inf")), int(r.get("scale_params", 10**9))))
+    def detector_reference_eligible(row: dict[str, object]) -> bool:
+        detector_bins = int(_finite_float(row.get("detector_bins"), 0.0))
+        eligible = bool(row.get("detector_policy_eligible", detector_bins <= 1))
+        if detector_bins >= 8 and not bool(detector_independent_calibration):
+            return False
+        return detector_bins <= 1 or eligible
+
+    # Diagnostic detector fields must not define the low-R or best-free
+    # reference and thereby veto every prospectively eligible endpoint.
+    reference_rows = [row for row in finite if detector_reference_eligible(row)] or finite
+    low_r = min(reference_rows, key=lambda r: (_finite_float(r.get("shelxl_R1all"), float("inf")), int(r.get("scale_params", 10**9))))
     best_free = min(
-        finite,
+        reference_rows,
         key=lambda r: (
             _finite_float(r.get("native_free_wR2_all"), float("inf")),
             _finite_float(r.get("native_wR2_all"), float("inf")),
@@ -569,7 +643,7 @@ def choose_publication_endpoint(
     low_r_r1 = _finite_float(low_r.get("shelxl_R1all"), float("inf"))
     best_free_wr2 = _finite_float(best_free.get("native_free_wR2_all"), float("inf"))
     prefer = str(prefer_wght_mode)
-    policy = str(selection_policy or "bic").strip().lower()
+    policy = str(selection_policy or "gated-smallest").strip().lower()
     ic_name = str(information_criterion or "bic_fitted_variance").strip()
     if policy not in {"bic", "information", "gated-smallest", "legacy"}:
         policy = "bic"
@@ -590,6 +664,10 @@ def choose_publication_endpoint(
             npd_count = int(row.get("shelxl_npd_count", 0) or 0)
         except (TypeError, ValueError):
             npd_count = 0
+        try:
+            split_count = int(row.get("shelxl_split_count", 0) or 0)
+        except (TypeError, ValueError):
+            split_count = 0
         if str(row.get("wght_mode")) != prefer:
             reasons.append(f"not preferred weight mode {prefer!r}")
         if goof < float(goof_min) or goof > float(goof_max):
@@ -598,6 +676,20 @@ def choose_publication_endpoint(
             atoms = str(row.get("shelxl_npd_atoms", "") or "")
             atom_text = f" ({atoms})" if atoms else ""
             reasons.append(f"NPD {npd_count}{atom_text}; publication endpoints require NPD == 0")
+        if split_count > 0 or bool(row.get("shelxl_has_split_warnings")):
+            reasons.append(
+                f"split warnings {split_count}; publication endpoints require zero split pathology"
+            )
+        detector_bins = int(_finite_float(row.get("detector_bins"), 0.0))
+        detector_eligible = bool(row.get("detector_policy_eligible", detector_bins <= 1))
+        if detector_bins > 1 and not detector_eligible:
+            policy_reasons = str(row.get("detector_policy_reasons", "") or "")
+            reasons.append(
+                "detector field failed frozen-row validation"
+                + (f": {policy_reasons}" if policy_reasons else "")
+            )
+        if detector_bins >= 8 and not bool(detector_independent_calibration):
+            reasons.append("8x8 detector field requires independent calibration")
         if not math.isfinite(modulation_p95):
             reasons.append("missing finite scale-invariant endpoint modulation p95")
         elif modulation_p95 > float(max_modulation_p95):
@@ -700,6 +792,9 @@ def choose_publication_endpoint(
             "information_criterion": ic_name,
             "allow_npd": bool(allow_npd),
             "max_modulation_p95": float(max_modulation_p95),
+            "detector_independent_calibration": bool(
+                detector_independent_calibration
+            ),
         },
         "passing_count": len(passing),
         "candidate_count": len(finite),
@@ -714,10 +809,10 @@ def write_publication_report(path: Path, selection: dict[str, object], rows_out:
     lines = [
         "# GROND Endpoint Calibration Report",
         "",
-        "This report separates the low-R diagnostic corrected-HKL export from the BIC-selected publication export. "
+        "This report separates the low-R diagnostic corrected-HKL export from the prospectively selected publication export. "
         "The publication branch uses fixed row corrections, a declared scale contract, endpoint sigma calibration, "
-        "and a fixed `WGHT 0 0` branch unless requested otherwise. The default selector applies hard endpoint sanity gates, "
-        "then chooses the scale contract with the lowest information criterion.",
+        "and a fixed `WGHT 0 0` branch unless requested otherwise. The default selector applies endpoint, held-out-row, "
+        "and detector-field validation gates, then chooses the smallest passing scale contract.",
         "",
         f"Runtime: `{elapsed_s:.2f}` seconds.",
         f"Selection status: `{selection.get('status')}`.",
@@ -832,7 +927,7 @@ def main() -> None:
             "No corrected-HKL export or SHELXL call is made."
         ),
     )
-    ap.add_argument("--specs", default="baseline,adaptive:293:det8,adaptive:200:det8,window:1.0:det8,window:1.5:det8,window:3.0:det8,window:5.0:det8")
+    ap.add_argument("--specs", default="baseline,adaptive:293:det0,adaptive:293:det2,adaptive:293:det4,adaptive:293:det8,adaptive:200:det0,adaptive:200:det2,adaptive:200:det4,adaptive:200:det8,adaptive:120:det0,adaptive:120:det2,adaptive:120:det4,adaptive:120:det8,adaptive:80:det0,adaptive:80:det2,adaptive:80:det4,adaptive:80:det8,window:1.0:det0,window:1.0:det4,window:1.0:det8,window:3.0:det0,window:3.0:det2,window:3.0:det4,window:3.0:det8,window:5.0:det0,window:5.0:det4,window:5.0:det8")
     ap.add_argument("--fit-split", default="")
     ap.add_argument(
         "--lambda-q",
@@ -855,12 +950,12 @@ def main() -> None:
     ap.add_argument("--publication-free-wr2-tolerance", type=float, default=0.040)
     ap.add_argument("--publication-max-modulation-p95", type=float, default=20.0)
     ap.add_argument("--publication-prefer-wght-mode", default="freeze-zero")
-    ap.add_argument("--publication-allow-npd", action=argparse.BooleanOptionalAction, default=False, help="Explicit diagnostic override allowing NPD pathology in the selected endpoint. Default requires NPD == 0; split warnings are reported but do not block selection.")
+    ap.add_argument("--publication-allow-npd", action=argparse.BooleanOptionalAction, default=False, help="Explicit diagnostic override allowing NPD pathology in the selected endpoint. Default requires NPD == 0; split warnings always block publication selection.")
     ap.add_argument(
         "--publication-selection-policy",
         choices=["bic", "gated-smallest"],
-        default="bic",
-        help="Endpoint scale-count selector. 'bic' applies hard sanity gates then chooses the minimum information criterion; 'gated-smallest' reproduces the older smallest-passing-scale rule.",
+        default="gated-smallest",
+        help="Endpoint scale-count selector. The default promotes the smallest contract passing endpoint, held-out-row, and detector-field gates; BIC remains diagnostic.",
     )
     ap.add_argument(
         "--publication-information-criterion",
@@ -869,6 +964,15 @@ def main() -> None:
         help="Information criterion used when --publication-selection-policy=bic.",
     )
     ap.add_argument("--instability-u", type=float, default=0.01)
+    ap.add_argument("--detector-ridge", type=float, default=0.05)
+    ap.add_argument("--detector-smoothness", type=float, default=0.10)
+    ap.add_argument("--detector-min-rows", type=int, default=20)
+    ap.add_argument("--detector-min-holdout-improvement", type=float, default=0.002)
+    ap.add_argument("--detector-required-improved-splits", type=int, default=2)
+    ap.add_argument("--detector-max-bloch-gain-loss", type=float, default=0.002)
+    ap.add_argument("--detector-min-field-correlation", type=float, default=0.50)
+    ap.add_argument("--detector-max-field-log-rms", type=float, default=0.10)
+    ap.add_argument("--detector-independent-calibration", action="store_true")
     ap.add_argument("--native-wght-a", type=float, default=float("nan"))
     ap.add_argument("--native-wght-b", type=float, default=float("nan"))
     args = ap.parse_args()
@@ -909,6 +1013,21 @@ def main() -> None:
             native_wght_a=native_wght_a,
             native_wght_b=native_wght_b,
             instability_u=float(args.instability_u),
+            detector_ridge=float(args.detector_ridge),
+            detector_smoothness=float(args.detector_smoothness),
+            detector_min_rows=int(args.detector_min_rows),
+            detector_min_holdout_improvement=float(
+                args.detector_min_holdout_improvement
+            ),
+            detector_required_improved_splits=int(
+                args.detector_required_improved_splits
+            ),
+            detector_max_bloch_gain_loss=float(args.detector_max_bloch_gain_loss),
+            detector_min_field_correlation=float(args.detector_min_field_correlation),
+            detector_max_field_log_rms=float(args.detector_max_field_log_rms),
+            detector_independent_calibration=bool(
+                args.detector_independent_calibration
+            ),
         )
         spec_dir.mkdir(parents=True, exist_ok=True)
         write_rows(spec_dir / "native_dyn_calc.csv", replay_rows, meta["fieldnames"])
@@ -916,6 +1035,10 @@ def main() -> None:
         spec_summary = dict(summary)
         best_native = dict(spec_summary.get("best_native") or {})
         best_native["scale_count"] = int(candidate["scale_params"])
+        best_native["frame_scale_count"] = int(candidate["group_scale_params"])
+        best_native["detector_scale_count"] = int(
+            candidate["detector_scale_params"]
+        )
         best_native["scale_fit_split"] = fit_split
         best_native["metrics"] = {
             "all": {"dyn": candidate["native"], "born": candidate["born"]},
@@ -969,6 +1092,23 @@ def main() -> None:
                 "wght_mode": wght_mode,
                 "scale_params": meta["candidate"]["scale_params"],
                 "total_params": meta["candidate"]["total_params"],
+                "frame_scale_params": meta["candidate"]["group_scale_params"],
+                "detector_scale_params": meta["candidate"]["detector_scale_params"],
+                "detector_bins": meta["candidate"]["detector_policy"].get(
+                    "detector_bins", 0
+                ),
+                "detector_policy_eligible": meta["candidate"][
+                    "detector_policy"
+                ].get("eligible", False),
+                "detector_policy_status": meta["candidate"][
+                    "detector_policy"
+                ].get("status", ""),
+                "detector_policy_reasons": ";".join(
+                    str(reason)
+                    for reason in meta["candidate"]["detector_policy"].get(
+                        "reasons", []
+                    )
+                ),
                 "row_Robs": meta["candidate"]["Robs"],
                 "row_Rall": meta["candidate"]["Rall"],
                 "row_wRall": meta["candidate"]["wRall"],
@@ -1041,6 +1181,9 @@ def main() -> None:
             information_criterion=str(args.publication_information_criterion),
             allow_npd=bool(args.publication_allow_npd),
             max_modulation_p95=float(args.publication_max_modulation_p95),
+            detector_independent_calibration=bool(
+                args.detector_independent_calibration
+            ),
         )
     )
     summary_out = {
