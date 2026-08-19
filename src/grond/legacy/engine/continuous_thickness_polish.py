@@ -213,7 +213,10 @@ def propagation_spec(H: np.ndarray, absorptive: bool) -> dict[str, np.ndarray]:
     if absorptive:
         spectral = XDSBlochPort._nonhermitian_spectral_target_coupling(H)
         if spectral is None:
-            return {"matrix": np.asarray(H, dtype=np.complex128)}
+            return {
+                "matrix": np.asarray(H, dtype=np.complex128),
+                "absorptive": True,
+            }
         vals, coupling = spectral
     else:
         vals, vecs = eigh(H)
@@ -221,6 +224,7 @@ def propagation_spec(H: np.ndarray, absorptive: bool) -> dict[str, np.ndarray]:
     return {
         "vals": np.asarray(vals, dtype=np.complex128),
         "coupling": np.asarray(coupling, dtype=np.complex128),
+        "absorptive": bool(absorptive),
     }
 
 
@@ -323,6 +327,98 @@ def predict_from_response(records: list[dict], n_rows: int, t0: float, grad: flo
         "basis_size": basis,
         "response_rows_total": int(n_rows),
     }
+
+
+def predict_candidates_from_response(
+    records: list[dict],
+    n_rows: int,
+    thicknesses: np.ndarray,
+    gradients: np.ndarray,
+    points: int,
+) -> list[dict]:
+    """Vectorize an exact uniform-gradient response over many candidates.
+
+    The eigensystems and the row/profile support are unchanged.  Only the
+    thickness propagation phases are broadcast over the candidate axis.  An
+    absorptive response cache falls back to the scalar implementation because
+    its direct matrix exponential does not share the Hermitian spectral form.
+    """
+
+    thicknesses = np.asarray(thicknesses, dtype=float)
+    gradients = np.asarray(gradients, dtype=float)
+    if thicknesses.shape != gradients.shape or thicknesses.ndim != 1:
+        raise ValueError(
+            "thickness and gradient candidate arrays must be one-dimensional "
+            "and have identical shapes"
+        )
+    if any(
+        bool(spec.get("absorptive", False))
+        for record in records
+        for spec in record["dyn_specs"]
+    ):
+        return [
+            predict_from_response(records, n_rows, float(t0), float(grad), int(points))
+            for t0, grad in zip(thicknesses, gradients, strict=True)
+        ]
+
+    nodes, thickness_weights = leggauss(int(points))
+    thickness_weights = thickness_weights / np.sum(thickness_weights)
+    quadrature = thicknesses[:, None] * (
+        1.0 + gradients[:, None] * nodes[None, :]
+    )
+    dynamic = np.zeros((len(thicknesses), len(records)), dtype=float)
+    born = np.zeros_like(dynamic)
+    for row_number, record in enumerate(records):
+        profile_weights = np.asarray(record["profile_weights"], dtype=float)
+        dynamic_orientation = np.zeros(
+            (len(thicknesses), len(record["dyn_specs"])), dtype=float
+        )
+        born_orientation = np.zeros_like(dynamic_orientation)
+        for orientation_number, (spec, born_spec) in enumerate(
+            zip(record["dyn_specs"], record["born_specs"], strict=True)
+        ):
+            values = np.asarray(spec["vals"], dtype=np.complex128)
+            coupling = np.asarray(spec["coupling"], dtype=np.complex128)
+            phase = np.exp(
+                (2j * np.pi)
+                * values[:, None, None]
+                * quadrature[None, :, :]
+            )
+            per_node = np.abs(
+                np.sum(coupling[:, None, None] * phase, axis=0)
+            ) ** 2
+            dynamic_orientation[:, orientation_number] = (
+                per_node @ thickness_weights
+            )
+
+            argument = np.pi * float(born_spec["delta"]) * quadrature
+            sinc = np.ones_like(argument)
+            nonzero = np.abs(argument) >= 1e-12
+            sinc[nonzero] = np.sin(argument[nonzero]) / argument[nonzero]
+            born_per_node = (
+                (2.0 * np.pi) ** 2
+                * float(born_spec["h10_abs2"])
+                * quadrature**2
+                * sinc**2
+            )
+            born_orientation[:, orientation_number] = (
+                born_per_node @ thickness_weights
+            )
+        dynamic[:, row_number] = dynamic_orientation @ profile_weights
+        born[:, row_number] = born_orientation @ profile_weights
+
+    indices = np.asarray([record["row_index"] for record in records], dtype=int)
+    basis_sizes = np.asarray([record["basis_size"] for record in records], dtype=int)
+    return [
+        {
+            "indices": indices,
+            "dyn": dynamic[candidate],
+            "born": born[candidate],
+            "basis_size": basis_sizes,
+            "response_rows_total": int(n_rows),
+        }
+        for candidate in range(len(thicknesses))
+    ]
 
 
 def make_nuisance(args, t0: float, grad: float) -> nrf.Nuisance:
@@ -590,12 +686,51 @@ def main() -> int:
         float(args.grad_max) + 0.5 * float(args.grid_grad_step),
         float(args.grid_grad_step),
     )
+    grid_candidates = [
+        (float(tv), float(gv)) for tv in t_values for gv in g_values
+    ]
+    grid_predictions = predict_candidates_from_response(
+        records,
+        len(target),
+        np.asarray([candidate[0] for candidate in grid_candidates]),
+        np.asarray([candidate[1] for candidate in grid_candidates]),
+        int(args.thickness_points),
+    )
     grid_best = None
-    for tv in t_values:
-        for gv in g_values:
-            val, ev = evaluate(float(tv), float(gv), "guard_grid")
-            if grid_best is None or val < grid_best[0]:
-                grid_best = (val, float(tv), float(gv), ev)
+    for (tv, gv), pred in zip(
+        grid_candidates, grid_predictions, strict=True
+    ):
+        nui = make_nuisance(args, tv, gv)
+        ev = nrf.evaluate_trial(
+            data,
+            target,
+            base_sig,
+            pred,
+            indices,
+            masks,
+            nui,
+            wght_a,
+            wght_b,
+            scale_fit_split=str(args.scale_fit_split),
+        )
+        val = metric_value(ev, str(args.selection_metric))
+        eval_history.append(
+            {
+                "label": "guard_grid_batched",
+                "thickness_A": tv,
+                "thickness_nm": tv / 10.0,
+                "thickness_grad_frac": gv,
+                "objective": float(val),
+                "all_wR2": float(ev["metrics"]["all"]["dyn"]["wR2_all"]),
+                "all_R1": float(ev["metrics"]["all"]["dyn"]["R1_all"]),
+                "all_R1gt": float(ev["metrics"]["all"]["dyn"]["R1_gt"]),
+                "free_wR2": float(ev["metrics"]["free"]["dyn"]["wR2_all"]),
+                "scale_count": int(ev["scale_count"]),
+                "valid_rows": int(ev["valid_rows"]),
+            }
+        )
+        if grid_best is None or val < grid_best[0]:
+            grid_best = (val, tv, gv, ev)
     grid_seconds = time.perf_counter() - grid_t0
     print(
         f"guard grid best t={grid_best[1]:.3f} A grad={grid_best[2]:.3f} "

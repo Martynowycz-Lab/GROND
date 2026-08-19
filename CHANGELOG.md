@@ -4,6 +4,14 @@ This file records user-visible changes to the installable package. Version `0.2.
 
 ## 0.2.2 (unreleased)
 
+Fixed-model row-plan calculations now skip the dense Fourier-potential cube
+and evaluate only the exact reciprocal-space differences used by the cached
+beam bases. Dense storage remains the default when row plans are not frozen.
+The continuous-thickness guard grid also broadcasts candidates through each
+cached eigensystem instead of repeating scalar propagation. Both changes are
+algebraically exact and leave the selected rows, beam support, Born/Bloch
+intensities, and nuisance objective unchanged.
+
 Detector-position scaling is no longer fixed unconditionally at 8x8. Physical
 nuisance selection is detector-free by default; the subsequent frozen-row
 scale audit evaluates detector-free, 2x2, 4x4, and diagnostic 8x8 fields. Added fields must improve

@@ -1689,6 +1689,7 @@ class Config:
     bethe_denom_eps: float = 1e-5
     matrix_convention: str = "j_minus_i"
     row_plan_cache: str = "off"
+    ug_storage_mode: str = "auto"
     paired_inverse_hand: bool = False
 
     def __post_init__(self):
@@ -1706,6 +1707,12 @@ class Config:
         for name, (value, minimum) in integer_minima.items():
             if isinstance(value, bool) or int(value) != value or int(value) < minimum:
                 raise ValueError(f"{name} must be an integer of at least {minimum}")
+
+        ug_storage_mode = str(self.ug_storage_mode or "auto").lower()
+        if ug_storage_mode not in {"auto", "dense", "sparse_active"}:
+            raise ValueError(
+                "ug_storage_mode must be auto, dense, or sparse_active"
+            )
 
         positive_fields = {
             "sg_window": self.sg_window,
@@ -2578,7 +2585,28 @@ class XDSBlochPort:
         self.cache_dir = Path(cache_dir) if cache_dir else None
         self.model["cell"] = (data.cell.a, data.cell.b, data.cell.c, data.cell.alpha, data.cell.beta, data.cell.gamma)
         self.h_lim, self.k_lim, self.l_lim = data.cell.get_hkl_limits(float(self.cfg.ug_d_min))
-        self.ug_cube = self.load_or_build_ug_cube()
+        requested_ug_storage = str(
+            getattr(self.cfg, "ug_storage_mode", "auto") or "auto"
+        ).lower()
+        row_plan_mode = str(
+            getattr(self.cfg, "row_plan_cache", "off") or "off"
+        ).lower()
+        self.ug_storage_mode = (
+            "sparse_active"
+            if requested_ug_storage == "auto" and row_plan_mode != "off"
+            else ("dense" if requested_ug_storage == "auto" else requested_ug_storage)
+        )
+        if self.ug_storage_mode == "sparse_active":
+            self.ug_cube = None
+            self.ug_cache_status = {
+                "status": "sparse_active",
+                "allocation": {
+                    "dense_cube_skipped": True,
+                    "reason": "row-plan cache evaluates only its exact active HKL differences",
+                },
+            }
+        else:
+            self.ug_cube = self.load_or_build_ug_cube()
         self.pool_hkl, self.pool_ug = self.build_pool()
         self.pool_inv_d2 = self.inv_d2_for_hkls(self.pool_hkl)
         self.thick, self.thick_w = self.thickness_grid()
@@ -2672,8 +2700,17 @@ class XDSBlochPort:
     def ug(self, hkl):
         h, k, l = (int(v) for v in hkl)
         i, j, m = h + self.h_lim, k + self.k_lim, l + self.l_lim
-        if i < 0 or j < 0 or m < 0 or i >= self.ug_cube.shape[0] or j >= self.ug_cube.shape[1] or m >= self.ug_cube.shape[2]:
+        if i < 0 or j < 0 or m < 0 or i > 2 * self.h_lim or j > 2 * self.k_lim or m > 2 * self.l_lim:
             return 0.0 + 0.0j
+        if self.ug_cube is None:
+            factor = float(self.gamma) / (math.pi * self.data.cell.volume)
+            value = fcalc_res_grid(
+                self.model,
+                np.asarray([h], dtype=float),
+                np.asarray([k], dtype=float),
+                np.asarray([l], dtype=float),
+            )
+            return complex(factor * np.asarray(value).reshape(-1)[0])
         return self.ug_cube[i, j, m]
 
     def ug_array(self, hkls):
@@ -2687,12 +2724,22 @@ class XDSBlochPort:
             (i >= 0)
             & (j >= 0)
             & (m >= 0)
-            & (i < self.ug_cube.shape[0])
-            & (j < self.ug_cube.shape[1])
-            & (m < self.ug_cube.shape[2])
+            & (i <= 2 * self.h_lim)
+            & (j <= 2 * self.k_lim)
+            & (m <= 2 * self.l_lim)
         )
         out = np.zeros(len(flat), dtype=np.complex128)
-        out[ok] = self.ug_cube[i[ok], j[ok], m[ok]]
+        if self.ug_cube is None:
+            if np.any(ok):
+                factor = float(self.gamma) / (math.pi * self.data.cell.volume)
+                out[ok] = factor * fcalc_res_grid(
+                    self.model,
+                    flat[ok, 0],
+                    flat[ok, 1],
+                    flat[ok, 2],
+                )
+        else:
+            out[ok] = self.ug_cube[i[ok], j[ok], m[ok]]
         return out.reshape(shape)
 
     def inv_d2_for_hkls(self, hkls):

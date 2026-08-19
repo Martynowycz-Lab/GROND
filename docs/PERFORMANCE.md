@@ -86,6 +86,23 @@ the support selected by the builder model while recomputing current structure
 factors. Use it only when that approximation is intended and audited; `auto`
 never selects it.
 
+When any row-plan cache is explicitly active, the engine also uses exact
+sparse-active Fourier-potential storage. It constructs the top-up pool and the
+cache's unique difference-HKL values directly and does not allocate or fill
+the larger dense cube. This changes storage and setup only; the complex
+potential values and row predictions are identical. On matched 256-row,
+single-thread Apple-silicon development tests, three moved-coordinate models
+were byte-identical to dense storage and total model-evaluation time improved
+by 1.92-fold for 370 and 1.68-fold for SINGLA tyrosine. Dense storage remains
+the automatic choice when the row basis is not cached.
+
+The continuous-thickness guard grid similarly broadcasts its candidate
+thicknesses and gradients over each cached eigensystem. A 31-candidate,
+256-row test reproduced scalar Born and Bloch predictions within
+`9e-16` and reduced propagation time by 3.68-fold for 370 and 3.72-fold for
+SINGLA tyrosine. Absorptive/non-Hermitian response caches deliberately fall
+back to scalar propagation.
+
 ## Cheap Post-Processing
 
 Scale compression, endpoint selection, and resolution-limit reporting operate on completed row tables and summaries. They do not repeat the Bloch calculation. Multi-dataset inclusion decisions and post-dynamical overlap scaling are similarly inexpensive compared with row prediction. If a completed run needs only refreshed reports or maps, use `GROND finish --run-dir ...` instead of rerunning `GROND auto`.

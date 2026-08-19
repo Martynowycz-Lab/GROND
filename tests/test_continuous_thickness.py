@@ -131,6 +131,57 @@ def test_response_cache_matches_core_forward_model_with_frame_offset(tmp_path: P
     assert cached["born"][0] == pytest.approx(direct["born"], rel=1e-12, abs=1e-14)
 
 
+def test_batched_thickness_candidates_match_scalar_response(tmp_path: Path):
+    hkl_path, model_path = _write_single_row_inputs(tmp_path)
+    data = XDSData(hkl_path)
+    model = parse_model(model_path)
+    cfg = Config(
+        n_basis=2,
+        n_points=3,
+        sg_window=0.0001,
+        sg_window_min=0.0001,
+        sg_window_max=0.0001,
+        topup_d_min=2.0,
+        ug_d_min=2.0,
+        thickness_A=75.0,
+        thickness_model="uniform_gradient",
+        thickness_grad_frac=0.2,
+        thickness_points=5,
+    )
+    continuous.args_progress_every = 1000
+    records = continuous.build_response_cache(
+        data,
+        model,
+        cfg,
+        np.asarray([0], dtype=int),
+        sha256(model_path),
+        tmp_path / "cache",
+    )
+    thicknesses = np.asarray([60.0, 75.0, 90.0])
+    gradients = np.asarray([0.0, 0.2, 0.6])
+    batched = continuous.predict_candidates_from_response(
+        records,
+        1,
+        thicknesses,
+        gradients,
+        cfg.thickness_points,
+    )
+    scalar = [
+        continuous.predict_from_response(
+            records,
+            1,
+            float(thickness),
+            float(gradient),
+            cfg.thickness_points,
+        )
+        for thickness, gradient in zip(thicknesses, gradients, strict=True)
+    ]
+
+    for expected, actual in zip(scalar, batched, strict=True):
+        np.testing.assert_allclose(actual["dyn"], expected["dyn"], rtol=1e-14, atol=1e-16)
+        np.testing.assert_allclose(actual["born"], expected["born"], rtol=1e-14, atol=1e-16)
+
+
 def test_row_plan_cache_true_hit_is_exact_and_skips_geometry(tmp_path: Path):
     hkl_path, model_path = _write_single_row_inputs(tmp_path)
     data = XDSData(hkl_path)
@@ -170,6 +221,9 @@ def test_row_plan_cache_true_hit_is_exact_and_skips_geometry(tmp_path: Path):
         cache_dir=cache_dir,
         res_hash=sha256(model_path),
     )
+    assert build_port.ug_storage_mode == "sparse_active"
+    assert build_port.ug_cube is None
+    assert build_port.ug_cache_status["status"] == "sparse_active"
     built = build_port.predict_rows(indices, workers=1)
     assert built["row_plan_cache_status"]["status"] == "rebuilt"
 
@@ -446,6 +500,33 @@ def test_response_cache_uses_direct_exponential_for_defective_absorptive_matrix(
     expected = abs((expm(2j * np.pi * thickness[0] * hamiltonian) @ psi0)[1]) ** 2
 
     assert got == pytest.approx(expected, rel=1e-12)
+
+
+def test_batched_thickness_candidates_fall_back_exactly_for_absorptive_response():
+    hamiltonian = np.asarray(
+        [[0.0 + 1e-5j, 0.01], [0.01, 0.002 + 2e-5j]],
+        dtype=np.complex128,
+    )
+    record = {
+        "row_index": 0,
+        "basis_size": 2,
+        "profile_weights": np.asarray([1.0]),
+        "dyn_specs": [continuous.propagation_spec(hamiltonian, absorptive=True)],
+        "born_specs": [{"h10_abs2": 1e-4, "delta": 0.002}],
+    }
+    thicknesses = np.asarray([50.0, 75.0])
+    gradients = np.asarray([0.0, 0.4])
+    batched = continuous.predict_candidates_from_response(
+        [record], 1, thicknesses, gradients, 5
+    )
+    scalar = [
+        continuous.predict_from_response([record], 1, float(t), float(g), 5)
+        for t, g in zip(thicknesses, gradients, strict=True)
+    ]
+
+    for expected, actual in zip(scalar, batched, strict=True):
+        np.testing.assert_array_equal(actual["dyn"], expected["dyn"])
+        np.testing.assert_array_equal(actual["born"], expected["born"])
 
 
 def test_optimizer_proposal_above_one_is_rejected_before_promotion():
