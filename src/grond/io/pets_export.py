@@ -75,7 +75,7 @@ def _required_float(block: gemmi.cif.Block, tag: str) -> float:
 
 
 def _validate_and_repair_pets(path: Path) -> dict[str, Any]:
-    """Validate the interoperable contract and repair DIALS' zero dstarmax."""
+    """Validate PETS output and repair writer details rejected by consumers."""
 
     document = gemmi.cif.read_file(str(path))
     block = document.sole_block()
@@ -120,6 +120,31 @@ def _validate_and_repair_pets(path: Path) -> dict[str, Any]:
     zone_ids = {str(value) for value in block.find_values("_diffrn_zone_axis_id")}
     if not zone_ids:
         raise ValueError("PETS export has no zone-axis geometry loop")
+    used_zone_ids = {str(value) for value in reflection_zone_ids}
+    empty_zone_ids = zone_ids - used_zone_ids
+    if empty_zone_ids:
+        zone_column = block.find_loop("_diffrn_zone_axis_id")
+        zone_loop = zone_column.get_loop()
+        zone_tags = list(zone_loop.tags)
+        zone_width = zone_loop.width()
+        zone_id_column = zone_tags.index("_diffrn_zone_axis_id")
+        zone_rows = [
+            zone_loop.values[offset : offset + zone_width]
+            for offset in range(0, len(zone_loop.values), zone_width)
+        ]
+        kept_zone_rows = [
+            row for row in zone_rows if str(row[zone_id_column]) in used_zone_ids
+        ]
+        if not kept_zone_rows:
+            raise ValueError("PETS export has no zone-axis geometry used by reflections")
+        zone_loop.set_all_values(
+            [
+                [row[column] for row in kept_zone_rows]
+                for column in range(zone_width)
+            ]
+        )
+        document.write_file(str(path))
+        zone_ids = used_zone_ids
 
     cell = gemmi.UnitCell(*cell_values)
     maximum_d_star = 0.0
@@ -169,6 +194,7 @@ def _validate_and_repair_pets(path: Path) -> dict[str, Any]:
     return {
         "rows": row_count,
         "zone_axes": len(zone_ids),
+        "zone_axes_removed_empty": len(empty_zone_ids),
         "wavelength_angstrom": wavelength,
         "unit_cell": cell_values,
         "ub_determinant": determinant,

@@ -5,6 +5,7 @@ import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
+import gemmi
 import numpy as np
 import pytest
 
@@ -120,6 +121,20 @@ def test_pets_validation_repairs_dstarmax(tmp_path: Path) -> None:
     assert payload["zone_axes"] == 1
     assert payload["dstarmax_inverse_angstrom"] == pytest.approx(2.0 / 11.0)
     assert "dstarmax:  0.181818" in path.read_text()
+
+
+def test_pets_validation_prunes_zone_axes_without_observations(tmp_path: Path) -> None:
+    path = tmp_path / "empty_zone.cif_pets"
+    text = _pets_text().replace(
+        "1 0 0 1 0 0 0 0 1\n\nloop_",
+        "1 0 0 1 0 0 0 0 1\n2 0 1 0 0 1 0 0 1\n\nloop_",
+    )
+    path.write_text(text)
+    payload = _validate_and_repair_pets(path)
+    block = gemmi.cif.read_file(str(path)).sole_block()
+    assert payload["zone_axes"] == 1
+    assert payload["zone_axes_removed_empty"] == 1
+    assert list(block.find_values("_diffrn_zone_axis_id")) == ["1"]
 
 
 def test_pets_validation_rejects_unknown_zone_id(tmp_path: Path) -> None:
