@@ -418,6 +418,84 @@ def test_local_sg_solver_does_not_jump_to_distant_ewald_crossing():
         port.solve_omega_for_sg((1, 0, 0), 10.0, 0.0)
 
 
+def test_fixed_xds_sg_solver_matches_numerical_local_root():
+    axis = np.asarray([0.31, -0.82, 0.48], dtype=float)
+    axis /= np.linalg.norm(axis)
+    axis_cross = np.asarray(
+        [
+            [0.0, -axis[2], axis[1]],
+            [axis[2], 0.0, -axis[0]],
+            [-axis[1], axis[0], 0.0],
+        ]
+    )
+    a_matrix = np.asarray(
+        [[0.111, 0.003, -0.002], [0.0, 0.093, 0.004], [0.001, 0.0, 0.077]]
+    )
+    data = SimpleNamespace(
+        header={"GROND_SOURCE": "XDS"},
+        A=a_matrix,
+        A_at_scan_points=None,
+        A_for_omega=lambda _omega: a_matrix,
+        axis=axis,
+        axis_eye=np.eye(3),
+        axis_cross=axis_cross,
+        axis_cross2=axis_cross @ axis_cross,
+        setting_rotation=rotation_matrix(np.asarray([0.0, 1.0, 0.0]), -11.0),
+        fixed_rotation=rotation_matrix(np.asarray([0.0, 0.0, 1.0]), 17.0),
+        s0=np.asarray([0.0, 0.0, -39.873]),
+        k=39.873,
+        oscillation_range=0.5,
+    )
+    port = object.__new__(XDSBlochPort)
+    port.data = data
+    port.geometry_path = None
+    hkl = np.asarray([2, -3, 1])
+    omega0 = 7.0
+    expected = 7.43
+    target = float(port.sg_for_hkls(np.asarray([hkl]), expected)[0])
+
+    analytic = port.solve_omega_for_sg(hkl, omega0, target, max_delta_deg=1.0)
+    numerical = port._numerical_omega_for_sg(
+        hkl, omega0, target, max_delta_deg=1.0
+    )
+
+    assert analytic == pytest.approx(expected, abs=1e-10)
+    assert analytic == pytest.approx(numerical, abs=1e-10)
+    assert float(port.sg_for_hkls(np.asarray([hkl]), analytic)[0]) == pytest.approx(
+        target, abs=1e-12
+    )
+    step = 1e-5
+    numerical_derivative = (
+        float(port.sg_for_hkls(np.asarray([hkl]), expected + step)[0])
+        - float(port.sg_for_hkls(np.asarray([hkl]), expected - step)[0])
+    ) / (2.0 * step)
+    assert port.sg_derivative_per_deg(hkl, expected) == pytest.approx(
+        numerical_derivative, abs=1e-9
+    )
+
+
+def test_scan_varying_dials_sg_solver_keeps_numerical_fallback(monkeypatch):
+    port = object.__new__(XDSBlochPort)
+    port.data = SimpleNamespace(
+        header={"DIALS_EXPERIMENT_UUID": "test-experiment"},
+        oscillation_range=0.5,
+    )
+    port.geometry_path = None
+    port.sg_for_hkls = lambda _hkls, omega: np.asarray([float(omega) - 2.0])
+    calls = []
+    original = port._numerical_omega_for_sg
+
+    def counted(*args, **kwargs):
+        calls.append((args, kwargs))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(port, "_numerical_omega_for_sg", counted)
+
+    assert port.solve_omega_for_sg((1, 0, 0), 1.5, 0.0) == pytest.approx(2.0)
+    assert len(calls) == 1
+    assert port.sg_derivative_per_deg((1, 0, 0), 1.5) == pytest.approx(1.0)
+
+
 def test_row_profile_stays_centered_on_frame_offset_geometry():
     def make_plan(frame_offset):
         port = object.__new__(XDSBlochPort)

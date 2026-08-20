@@ -2977,25 +2977,116 @@ class XDSBlochPort:
             2.0 * self.data.k
         )
 
-    def solve_omega_for_sg(self, hkl, omega0, target_sg, max_delta_deg=None):
-        """Solve one local Ewald crossing without jumping to another branch."""
+    def _fixed_xds_analytic_geometry_data(self):
+        """Return fixed XDS geometry, or ``None`` when exact algebra is invalid."""
+
+        data = getattr(self, "data", None)
+        header = getattr(data, "header", {})
+        source_text = str(header.get("GROND_SOURCE", "") or "").strip().upper()
+        if source_text:
+            source_kind = source_text
+        else:
+            source_kind = (
+                "DIALS"
+                if any(str(key).upper().startswith("DIALS_") for key in header)
+                else "XDS"
+            )
+        required = (
+            "fixed_rotation",
+            "setting_rotation",
+            "axis",
+            "s0",
+            "A",
+            "k",
+        )
+        if (
+            source_kind != "XDS"
+            or getattr(data, "A_at_scan_points", None) is not None
+            or getattr(self, "geometry_path", None) is not None
+            or any(not hasattr(data, name) for name in required)
+        ):
+            return None
+        return data
+
+    def _analytic_fixed_xds_omega_for_sg(
+        self,
+        hkl,
+        omega0,
+        target_sg,
+        max_delta_deg,
+    ):
+        """Return the exact local Sg root for a fixed XDS orientation matrix.
+
+        This path is valid only when the source is XDS, ``A`` does not vary
+        over the scan, and no fitted geometry path is active.  It solves the
+        sinusoidal Ewald equation directly and retains the same nearest-local-
+        branch contract as the numerical fallback.
+        """
+
+        data = self._fixed_xds_analytic_geometry_data()
+        if data is None:
+            raise NotImplementedError
+
+        hkl_array = np.asarray(hkl, dtype=float)
+        g0 = np.asarray(data.fixed_rotation, dtype=float) @ np.asarray(
+            data.A, dtype=float
+        ) @ hkl_array
+        axis = np.asarray(data.axis, dtype=float)
+        beam = np.asarray(data.setting_rotation, dtype=float).T @ np.asarray(
+            data.s0, dtype=float
+        )
+        parallel = axis * float(np.dot(axis, g0))
+        perpendicular = g0 - parallel
+        cross = np.cross(axis, g0)
+        constant = float(np.dot(beam, parallel))
+        cosine = float(np.dot(beam, perpendicular))
+        sine = float(np.dot(beam, cross))
+        radius = math.hypot(cosine, sine)
+        right_hand_side = (
+            -float(data.k) * float(target_sg)
+            - 0.5 * float(np.dot(g0, g0))
+            - constant
+        )
+        if radius <= 1e-15:
+            raise LocalSgCrossingError(
+                "fixed XDS geometry has no orientation-dependent Sg crossing"
+            )
+        ratio = right_hand_side / radius
+        if ratio < -1.0 - 1e-12 or ratio > 1.0 + 1e-12:
+            raise LocalSgCrossingError(
+                "fixed XDS geometry has no real Sg crossing"
+            )
+        ratio = float(np.clip(ratio, -1.0, 1.0))
+        phase = math.atan2(sine, cosine)
+        offset = math.acos(ratio)
+        omega0_radians = math.radians(float(omega0))
+        candidates = []
+        for base in (phase - offset, phase + offset):
+            central_turn = round((omega0_radians - base) / (2.0 * math.pi))
+            for turn in (central_turn - 1, central_turn, central_turn + 1):
+                candidate = math.degrees(base + 2.0 * math.pi * turn)
+                if abs(candidate - float(omega0)) <= float(max_delta_deg) + 1e-10:
+                    candidates.append(candidate)
+        if not candidates:
+            raise LocalSgCrossingError(
+                "fixed XDS geometry has no crossing on the requested local branch"
+            )
+        return float(min(candidates, key=lambda value: abs(value - float(omega0))))
+
+    def _numerical_omega_for_sg(
+        self,
+        hkl,
+        omega0,
+        target_sg,
+        max_delta_deg,
+    ):
+        """Numerical local-root fallback for scan-varying or fitted geometry."""
 
         hkl_array = np.asarray([hkl], dtype=int)
-        omega0 = float(omega0)
-        target_sg = float(target_sg)
 
         def residual(omega):
             return float(self.sg_for_hkls(hkl_array, float(omega))[0]) - target_sg
 
-        initial = residual(omega0)
-        if abs(initial) <= 1e-10:
-            return omega0
-        oscillation = abs(float(self.data.oscillation_range))
-        if max_delta_deg is None:
-            max_delta_deg = max(2.0 * oscillation, min(2.0, 10.0 * oscillation))
-        max_delta_deg = float(max_delta_deg)
-        if not math.isfinite(max_delta_deg) or max_delta_deg <= 0.0:
-            raise ValueError("local Sg root-search range must be finite and positive")
         offsets = np.linspace(-max_delta_deg, max_delta_deg, 65)
         values = np.asarray([residual(omega0 + offset) for offset in offsets], dtype=float)
         close = np.where(np.abs(values) <= 1e-10)[0]
@@ -3021,6 +3112,61 @@ class XDSBlochPort:
             raise ValueError(
                 f"local Sg solver failed for HKL {tuple(int(v) for v in hkl)}: "
                 f"residual={final_residual:.3g}, delta_omega={omega - omega0:.3g} degrees"
+            )
+        return omega
+
+    def solve_omega_for_sg(self, hkl, omega0, target_sg, max_delta_deg=None):
+        """Solve one local Ewald crossing without jumping to another branch."""
+
+        hkl_array = np.asarray([hkl], dtype=int)
+        omega0 = float(omega0)
+        target_sg = float(target_sg)
+
+        def residual(omega):
+            return float(self.sg_for_hkls(hkl_array, float(omega))[0]) - target_sg
+
+        initial = residual(omega0)
+        if abs(initial) <= 1e-10:
+            return omega0
+        oscillation = abs(float(self.data.oscillation_range))
+        if max_delta_deg is None:
+            max_delta_deg = max(2.0 * oscillation, min(2.0, 10.0 * oscillation))
+        max_delta_deg = float(max_delta_deg)
+        if not math.isfinite(max_delta_deg) or max_delta_deg <= 0.0:
+            raise ValueError("local Sg root-search range must be finite and positive")
+
+        try:
+            omega = self._analytic_fixed_xds_omega_for_sg(
+                hkl,
+                omega0,
+                target_sg,
+                max_delta_deg,
+            )
+        except NotImplementedError:
+            return self._numerical_omega_for_sg(
+                hkl,
+                omega0,
+                target_sg,
+                max_delta_deg,
+            )
+        except LocalSgCrossingError:
+            # Preserve the established numerical boundary behavior close to a
+            # tangency or a rounded XDS limit.  Ordinary reachable roots never
+            # enter this slow path.
+            return self._numerical_omega_for_sg(
+                hkl,
+                omega0,
+                target_sg,
+                max_delta_deg,
+            )
+
+        final_residual = residual(omega)
+        if abs(final_residual) > 1e-9:
+            return self._numerical_omega_for_sg(
+                hkl,
+                omega0,
+                target_sg,
+                max_delta_deg,
             )
         return omega
 
@@ -3229,7 +3375,36 @@ class XDSBlochPort:
             )
         return None
 
+    def _analytic_fixed_xds_sg_derivative_per_deg(self, hkl, omega_deg):
+        """Exact dSg/domega for the same fixed-XDS contract as the root solver."""
+
+        data = self._fixed_xds_analytic_geometry_data()
+        if data is None:
+            raise NotImplementedError
+        g0 = np.asarray(data.fixed_rotation, dtype=float) @ np.asarray(
+            data.A, dtype=float
+        ) @ np.asarray(hkl, dtype=float)
+        theta = math.radians(float(omega_deg))
+        cosine = math.cos(theta)
+        sine = math.sin(theta)
+        axis = np.asarray(data.axis, dtype=float)
+        rotated = (
+            cosine * g0
+            + sine * np.cross(axis, g0)
+            + (1.0 - cosine) * axis * float(np.dot(axis, g0))
+        )
+        derivative = np.cross(axis, rotated)
+        beam = np.asarray(data.setting_rotation, dtype=float).T @ np.asarray(
+            data.s0, dtype=float
+        )
+        per_radian = -float(np.dot(beam, derivative)) / float(data.k)
+        return per_radian * (math.pi / 180.0)
+
     def sg_derivative_per_deg(self, hkl, omega_deg):
+        try:
+            return self._analytic_fixed_xds_sg_derivative_per_deg(hkl, omega_deg)
+        except NotImplementedError:
+            pass
         step = 1e-4
         hp = np.asarray([hkl], dtype=int)
         sp = float(self.sg_for_hkls(hp, float(omega_deg) + step)[0])

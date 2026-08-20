@@ -20,6 +20,14 @@ For a shared server, keep the product of `--transform-scout-jobs` and `--transfo
 
 Plain `GROND auto` runs the full endpoint path. Before the expensive final prediction, it narrows transform and hand candidates, scans the row support actually required by the selected data, and chooses a final basis with a safety margin. The support pool follows the selected data resolution so high-resolution observations are not evaluated against a shallower coupled-beam pool.
 
+For fixed-geometry XDS input, local target-Sg crossings and their angular
+Jacobians are solved directly from the sinusoidal Ewald equation. On matched
+256-row, N64/Q20 development calculations, complete serial row prediction was
+1.9-fold faster for both 370 and SINGLA tyrosine. Beam supports were identical;
+the maximum relative intensity change from replacing the bracketed numerical
+root by the analytic root was below `9e-9`. Scan-varying DIALS matrices and
+fitted geometry paths continue to use the numerical solver.
+
 Structure-update blocks have a plateau stop. Leave it enabled for routine work; disabling it can spend a long time repeating coordinate or displacement-parameter probes after the data residual has stopped improving.
 
 ## Backends

@@ -4,6 +4,13 @@ This file records user-visible changes to the installable package. Version `0.2.
 
 ## 0.2.2 (unreleased)
 
+Fixed-geometry XDS rows now solve the local Ewald crossing and its
+`dSg/domega` Jacobian analytically. Scan-varying DIALS orientation matrices
+and fitted geometry paths retain the established numerical solver. The new
+path preserves the nearest local branch and falls back to the numerical
+solver at tangencies or rounded domain limits; it changes no beam-selection or
+physics contract.
+
 Fixed-model row-plan calculations now skip the dense Fourier-potential cube
 and evaluate only the exact reciprocal-space differences used by the cached
 beam bases. Dense storage remains the default when row plans are not frozen.
