@@ -19,6 +19,7 @@ class EndpointSafetyDecision:
 
     status: str
     reasons: list[str]
+    warnings: list[str]
     hkl_safe_factor: float
     modulation_p95: float
     wR2_all: float
@@ -76,9 +77,10 @@ def classify_endpoint_candidate(
 ) -> EndpointSafetyDecision:
     """Classify whether an endpoint is promotable or diagnostic-only.
 
-    A corrected-HKL endpoint can look excellent by R1 while relying on huge
-    resolution modulation or a near-singular HKL fixed-width rescale. This gate
-    keeps that case visible but prevents it from being silently promoted.
+    A near-singular fixed-width HKL rescale and incomplete endpoint metrics are
+    promotion failures. Intensity modulation remains visible as a diagnostic
+    warning, but is not itself evidence of invalid mathematics and never
+    changes promotion status.
     """
 
     shelxl = candidate.get("shelxl") if isinstance(candidate.get("shelxl"), Mapping) else candidate
@@ -88,13 +90,14 @@ def classify_endpoint_candidate(
     r1_all = _float(shelxl.get("R1_all"))
     r1_gt = _float(shelxl.get("R1_gt"))
     reasons: list[str] = []
+    warnings: list[str] = []
 
     if safe < min_hkl_safe_factor:
         reasons.append(f"HKL safety factor {safe:.4g} is below {min_hkl_safe_factor:.4g}")
     if not math.isfinite(mod95):
-        reasons.append("95th percentile endpoint modulation is unavailable")
+        warnings.append("95th percentile endpoint modulation is unavailable")
     elif mod95 > max_modulation_p95:
-        reasons.append(f"95th percentile endpoint modulation {mod95:.4g} exceeds {max_modulation_p95:.4g}")
+        warnings.append(f"95th percentile endpoint modulation {mod95:.4g} exceeds warning level {max_modulation_p95:.4g}")
     if best_wR2_all is not None and math.isfinite(wr2):
         penalty = wr2 - float(best_wR2_all)
         if penalty > max_wR2_penalty:
@@ -105,6 +108,7 @@ def classify_endpoint_candidate(
     return EndpointSafetyDecision(
         status="promote" if not reasons else "diagnostic",
         reasons=reasons,
+        warnings=warnings,
         hkl_safe_factor=safe,
         modulation_p95=mod95,
         wR2_all=wr2,

@@ -121,6 +121,13 @@ grond hand-check \
   --hand-check-method explicit --hand-check-absorption preserve
 ```
 
+`grond auto` uses the same negative-thickness contract only after thickness,
+geometry, nuisance, and structural refinement are complete. It does not run
+hand-specific thickness or jitter searches. If the matched final all/free-row
+evidence favors the inverse beyond the declared gates, auto materializes the
+inverted coordinates once and replays the already selected full nuisance
+contract; otherwise it retains the input coordinate hand.
+
 The fast hand check is evidence at a fixed model and nuisance state. It does
 not replace a fully refined inverse-hand control when that stronger experiment
 is required, and it does not use a known chemical configuration to select the

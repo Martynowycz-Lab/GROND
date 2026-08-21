@@ -562,7 +562,7 @@ def _stub_multi_tail(monkeypatch, observed: dict[str, object]) -> None:
     monkeypatch.setattr(cli, "run_logged", lambda *args, **kwargs: None)
 
 
-def test_multi_selected_shared_hand_reaches_all_nonfast_model_stages(tmp_path: Path, monkeypatch):
+def test_multi_defers_hand_until_after_all_nonfast_model_stages(tmp_path: Path, monkeypatch):
     model = tmp_path / "model.res"
     alternate = tmp_path / "model_alternate.res"
     hkl = tmp_path / "rows.hkl"
@@ -590,11 +590,7 @@ def test_multi_selected_shared_hand_reaches_all_nonfast_model_stages(tmp_path: P
         return ["native", stage]
 
     def fake_shared(*_args, **_kwargs):
-        return (
-            "alternate",
-            {"selected": "alternate", "selected_hand": "alternate", "status": "selected_alternate"},
-            {"a": tmp_path / "alt_a", "b": tmp_path / "alt_b"},
-        )
+        raise AssertionError("pre-refinement shared hand scout must not run")
 
     def fake_feature(_prep, ds, _args, _python, _logs, _root, *, family, active_model, active_run, active_nui):
         observed["features"].append((ds.name, family, active_model))
@@ -622,20 +618,20 @@ def test_multi_selected_shared_hand_reaches_all_nonfast_model_stages(tmp_path: P
     input_screen = [row for row in observed["native"] if row[1] == "screen"]
     downstream = [row for row in observed["native"] if row[1] in {"multi_thickness_polish", "final"}]
     assert input_screen and all(row[2] == str(model) for row in input_screen)
-    assert downstream and all(row[2] == str(alternate) for row in downstream)
-    assert observed["features"] and all(row[2] == str(alternate) for row in observed["features"])
-    assert observed["feedback"] == [str(alternate)]
-    assert observed["materializations"] == [str(model)]
-    assert observed["combine_models"] == [str(alternate)]
+    assert downstream and all(row[2] == str(model) for row in downstream)
+    assert observed["features"] and all(row[2] == str(model) for row in observed["features"])
+    assert observed["feedback"] == [str(model)]
+    assert observed["materializations"] == []
+    assert observed["combine_models"] == [str(model)]
     assert observed["thickness_contracts"]
     assert all(contract["scale_fit_split_override"] == "work" for contract in observed["thickness_contracts"])
     assert all(contract["selection_metric_override"] == "work_wR2" for contract in observed["thickness_contracts"])
     assert all(contract["promotion_baseline"]["thickness_A"] == 1000.0 for contract in observed["thickness_contracts"])
-    assert result["selected_hand"] == "alternate"
-    assert result["model"] == str(alternate)
+    assert result["selected_hand"] == "original"
+    assert result["model"] == str(model)
 
 
-def test_multi_fast_reruns_full_selected_hand_before_combining(tmp_path: Path, monkeypatch):
+def test_multi_fast_does_not_run_a_pre_refinement_hand_scout(tmp_path: Path, monkeypatch):
     model = tmp_path / "model.res"
     alternate = tmp_path / "model_alternate.res"
     hkl = tmp_path / "rows.hkl"
@@ -659,10 +655,8 @@ def test_multi_fast_reruns_full_selected_hand_before_combining(tmp_path: Path, m
     monkeypatch.setattr(
         cli,
         "choose_shared_hand_by_scout",
-        lambda *args, **kwargs: (
-            "alternate",
-            {"selected": "alternate", "selected_hand": "alternate", "status": "selected_alternate"},
-            {"a": tmp_path / "alt_a", "b": tmp_path / "alt_b"},
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("pre-refinement shared hand scout must not run")
         ),
     )
     monkeypatch.setattr(cli, "make_alternate_hand_model", lambda *args, **kwargs: alternate)
@@ -672,11 +666,9 @@ def test_multi_fast_reruns_full_selected_hand_before_combining(tmp_path: Path, m
     result = cli.run_multi(prep, args, "python", tmp_path / "logs")
 
     selected_runs = [row for row in observed["native"] if row[1] == "multi_fast_selected_hand"]
-    assert len(selected_runs) == 2
-    assert all(row[2] == str(alternate) for row in selected_runs)
-    assert all(row[3].endswith("fast_N20_Q5_selected_hand") for row in selected_runs)
-    assert observed["combine_models"] == [str(alternate)]
-    assert result["runs"]["a"].endswith("fast_N20_Q5_selected_hand")
+    assert selected_runs == []
+    assert observed["combine_models"] == [str(model)]
+    assert result["runs"]["a"].endswith("fast_N20_Q5")
 
 
 def _final_hand_summary(
@@ -850,6 +842,117 @@ def _write_final_hand_rows(path: Path) -> None:
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
         writer.writerows(rows)
+
+
+def test_final_multi_hand_selection_uses_one_elastic_pair_and_switches_without_nuisance_grid(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    model = tmp_path / "model.res"
+    inverse = tmp_path / "model_alternate.res"
+    hkl = tmp_path / "rows.hkl"
+    model.write_text("TITL input\nCELL 0.025079 5 6 7 90 90 90\nLATT -1\nEND\n")
+    inverse.write_text("TITL inverse\nCELL 0.025079 5 6 7 90 90 90\nLATT -1\nEND\n")
+    hkl.write_text("! rows\n")
+    source_run = tmp_path / "runs" / "a" / "final"
+    source_rows = source_run / "native_dyn_calc.csv"
+    _write_final_hand_rows(source_rows)
+    source_summary = _final_hand_summary(32, 14, 0.30, 0.32, model, hkl, source_rows)
+    source_summary["best_native"]["nuisance"].update(
+        {
+            "absorption_mode": "midgley_like",
+            "absorption_mu": 0.25,
+            "absorption_frac": 0.1,
+        }
+    )
+    source_run.mkdir(parents=True, exist_ok=True)
+    (source_run / "summary.json").write_text(json.dumps(source_summary) + "\n")
+    prep = PrepConfig(
+        structure=str(model),
+        datasets=[DatasetSpec(name="a", hkl=str(hkl), min_peak=90.0)],
+    )
+    args = _auto_args(tmp_path, model, hkl)
+    args.hand_min_z_all = 2.0
+    args.hand_min_z_free = 0.5
+    args.hand_min_free_rows = 2
+    args.hand_accept_delta = 0.001
+    commands: list[list[str]] = []
+
+    def fake_logged(command, _logs, label, *args, **kwargs):
+        commands.append(list(command))
+        if label.endswith("elastic_hand_pair"):
+            pair_dir = Path(command[command.index("--out-dir") + 1])
+            pair_dir.mkdir(parents=True, exist_ok=True)
+            _write_final_hand_rows(pair_dir / "native_dyn_calc.csv")
+            _write_final_hand_rows(pair_dir / "native_inverse_hand_dyn_calc.csv")
+            inverse_path = pair_dir / "native_inverse_hand_dyn_calc.csv"
+            with inverse_path.open(newline="") as handle:
+                inverse_rows = list(csv.DictReader(handle))
+                fieldnames = list(inverse_rows[0])
+            for row in inverse_rows:
+                row["dyn_residual_over_sigma"] = "0.01"
+            with inverse_path.open("w", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(inverse_rows)
+            pair_summary = _final_hand_summary(
+                32,
+                14,
+                0.30,
+                0.32,
+                model,
+                hkl,
+                pair_dir / "native_dyn_calc.csv",
+            )
+            pair_summary["paired_inverse_hand"] = {
+                "status": "complete",
+                "selected_metrics": pair_summary["best_native"]["metrics"],
+                "inverse_metrics": _native_summary(0.20, 0.21)["best_native"]["metrics"],
+            }
+            (pair_dir / "summary.json").write_text(json.dumps(pair_summary) + "\n")
+        elif label.endswith("elastic_hand_diagnostic"):
+            out = Path(command[command.index("--out") + 1])
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(
+                json.dumps(
+                    {
+                        "status": "ok",
+                        "all": {"n": 4, "paired_row_t_delta_chi2": -4.0},
+                        "work": {"n": 2, "paired_row_t_delta_chi2": -3.0},
+                        "free": {"n": 2, "paired_row_t_delta_chi2": -2.0},
+                    }
+                )
+                + "\n"
+            )
+
+    monkeypatch.setattr(cli, "run_logged", fake_logged)
+    monkeypatch.setattr(cli, "make_alternate_hand_model", lambda *args, **kwargs: inverse)
+
+    result = cli.run_multi_final_elastic_hand_selection(
+        prep,
+        args,
+        "python",
+        tmp_path / "logs",
+        tmp_path,
+        final_model=str(model),
+        selected_hand="original",
+        final_runs={"a": source_run},
+        shared_hand_decision={"symmetry_policy": cli.absolute_structure_policy(str(model))},
+    )
+
+    pair_command = commands[0]
+    assert "--paired-inverse-hand" in pair_command
+    assert pair_command[pair_command.index("--absorption-mode-grid") + 1] == "none"
+    assert float(pair_command[pair_command.index("--absorption-mu-grid") + 1]) == 0.0
+    assert pair_command[pair_command.index("--sg-jitter-mode-grid") + 1] == "none"
+    assert pair_command[pair_command.index("--n-basis") + 1] == "32"
+    assert pair_command[pair_command.index("--n-points") + 1] == "14"
+    assert pair_command[pair_command.index("--compute-backend") + 1] == "scipy"
+    assert result["hand_switched"] is True
+    assert result["selected_hand_after"] == "alternate"
+    assert result["selected_model_after"] == str(inverse)
+    assert result["nuisance_refit"] is False
+    assert result["jitter_refit"] is False
 
 
 def test_multi_post_feedback_hand_diagnostic_pins_final_contract_and_warns_without_switching(

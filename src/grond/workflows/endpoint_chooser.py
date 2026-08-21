@@ -402,7 +402,8 @@ def endpoint_promotion_field_contract(endpoint: Mapping) -> dict[str, object]:
         "keep_exti": manifest.get("keep_exti") if "keep_exti" in manifest else None,
     }
     errors: list[str] = []
-    for key in ("hkl_safe_factor", "modulation_p95", "endpoint_b"):
+    warnings: list[str] = []
+    for key in ("hkl_safe_factor", "endpoint_b"):
         value = _float(direct.get(key))
         if not math.isfinite(value):
             errors.append(f"producer endpoint record is missing finite {key}")
@@ -412,6 +413,13 @@ def endpoint_promotion_field_contract(endpoint: Mapping) -> dict[str, object]:
             manifest_value = _float(corroborating)
             if not math.isfinite(manifest_value) or abs(value - manifest_value) > 1e-12:
                 errors.append(f"producer endpoint record {key} disagrees with manifest")
+    modulation = _float(direct.get("modulation_p95"))
+    if not math.isfinite(modulation):
+        warnings.append("producer endpoint record is missing finite modulation_p95")
+    elif manifest_values.get("modulation_p95") is not None:
+        manifest_modulation = _float(manifest_values.get("modulation_p95"))
+        if not math.isfinite(manifest_modulation) or abs(modulation - manifest_modulation) > 1e-12:
+            warnings.append("producer endpoint record modulation_p95 disagrees with manifest")
     direct_exti = _bool_value(direct.get("keep_exti"))
     if direct_exti is None:
         errors.append("producer endpoint record is missing boolean keep_exti")
@@ -427,6 +435,7 @@ def endpoint_promotion_field_contract(endpoint: Mapping) -> dict[str, object]:
         "manifest": manifest_values,
         "manifest_path": manifest_path_text,
         "errors": errors,
+        "warnings": warnings,
     }
 
 
@@ -610,6 +619,7 @@ def classify_publication_endpoint(
         max_modulation_p95=max_modulation_p95,
     ).to_dict()
     reasons: list[str] = list(safety.get("reasons") or [])
+    warnings: list[str] = list(safety.get("warnings") or [])
     endpoint_b = _float(candidate.get("endpoint_b"), 0.0)
     lambda_q = _float(candidate.get("lambda_q"), 1.0)
     source_kind = str(candidate.get("source_kind", ""))
@@ -656,6 +666,12 @@ def classify_publication_endpoint(
         )
         detail = str(contract.get("reason") or contract.get("status") or "missing producer promotion fields")
         reasons.append(f"endpoint producer promotion-field contract failed: {detail}")
+    promotion_contract = (
+        candidate.get("promotion_field_contract")
+        if isinstance(candidate.get("promotion_field_contract"), Mapping)
+        else {}
+    )
+    warnings.extend(str(value) for value in promotion_contract.get("warnings", []) if str(value))
     npd_count = _int(candidate.get("npd_count", 0))
     if not allow_npd and (npd_count > 0 or bool(candidate.get("has_npd", False))):
         atoms = candidate.get("npd_atoms")
@@ -678,6 +694,7 @@ def classify_publication_endpoint(
         "publication_class": "physical" if promotable else "diagnostic",
         "promotable": promotable,
         "rejection_reasons": reasons,
+        "warnings": warnings,
         "safety": safety,
     }
 
@@ -809,13 +826,13 @@ def choose_publication_endpoints(
                 "EXTI off",
                 "endpoint-B equal to zero",
                 f"HKL safety factor >= {min_hkl_safe_factor:g}",
-                f"95th percentile modulation <= {max_modulation_p95:g}",
+                f"95th percentile modulation is reported and warned above {max_modulation_p95:g}, but never blocks promotion",
                 f"SHELXL GooF between {publication_goof_min:g} and {publication_goof_max:g}",
                 "hash-bound final LST pathology audit is complete and NPD == 0; split warnings are reported but do not block promotion",
                 "stored endpoint statistics agree with hash-verified live LST statistics within SHELXL print rounding",
                 "observation-polish endpoints must pass raw-row and endpoint holdout gates",
                 "collected endpoint RES, HKL, and LST paths and SHA-256 values must match the current files",
-                "safety, modulation, endpoint-B, and EXTI fields are explicit in the producer endpoint record and manifest-consistent",
+                "safety, endpoint-B, and EXTI fields are explicit in the producer endpoint record and manifest-consistent; modulation provenance mismatches are warnings",
                 "no unresolved run-level publication blocker",
                 baseline_requirement,
             ],
@@ -835,6 +852,7 @@ def _candidate_line(candidate: Mapping) -> str:
     """Render one endpoint candidate row for Markdown."""
 
     reasons = "; ".join(str(r) for r in candidate.get("rejection_reasons", [])[:3])
+    warnings = "; ".join(str(r) for r in candidate.get("warnings", [])[:3])
     goof = _float(candidate.get("GooF"))
     goof_text = "n/a" if not math.isfinite(goof) else f"{goof:.3f}"
     pathology_status = str(candidate.get("pathology_status") or "")
@@ -853,7 +871,7 @@ def _candidate_line(candidate: Mapping) -> str:
         f"{'on' if candidate.get('keep_exti') else 'off'} | {candidate.get('publication_class', '')} | "
         f"{_percent(candidate.get('R1_gt'))} | {_percent(candidate.get('R1_all'))} | {_percent(candidate.get('wR2_all'))} | "
         f"{goof_text} | {modulation_text} | {pathology} | "
-        f"{baseline_gate_text} | {reasons} |"
+        f"{baseline_gate_text} | {warnings} | {reasons} |"
     )
 
 
@@ -908,12 +926,12 @@ def _write_markdown(out_dir: Path, decision: Mapping) -> Path:
     lines.extend(
         [
             "",
-            "Promotion rule: finite endpoint metrics, conventional SHELXL GooF inside the configured gate, full q correction, EXTI off, endpoint-B equal to zero, exact current RES/HKL/LST paths and SHA-256 values, a complete hash-bound final LST pathology audit, no NPD pathology unless explicitly overridden, safe HKL rescaling, bounded intensity modulation, and a passed observation-polish gate when a polish correction is involved. A combined endpoint must not worsen a supplied validated conventional combined-baseline R1(F)all; when that baseline is required, missing baseline evidence fails closed. Multi-dataset runs never substitute a single-dataset endpoint for a failed combined publication endpoint. Split warnings are reported but do not block promotion.",
+            "Promotion rule: finite endpoint metrics, conventional SHELXL GooF inside the configured gate, full q correction, EXTI off, endpoint-B equal to zero, exact current RES/HKL/LST paths and SHA-256 values, a complete hash-bound final LST pathology audit, no NPD pathology unless explicitly overridden, safe HKL rescaling, and a passed observation-polish gate when a polish correction is involved. Modulation p95 is always reported and warned when large, but it is not a mathematical-validity or promotion gate. A combined endpoint must not worsen a supplied validated conventional combined-baseline R1(F)all; when that baseline is required, missing baseline evidence fails closed. Multi-dataset runs never substitute a single-dataset endpoint for a failed combined publication endpoint. Split warnings are reported but do not block promotion.",
             "",
             "## Endpoint Candidates",
             "",
-            "| label | source | endpoint B | EXTI | class | R1(F)gt | R1(F)all | wR2(F^2)all | GooF | modulation p95 | pathology | combined baseline gate | main rejection reason |",
-            "|---|---|---:|:---:|---|---:|---:|---:|---:|---:|---|---|---|",
+            "| label | source | endpoint B | EXTI | class | R1(F)gt | R1(F)all | wR2(F^2)all | GooF | modulation p95 | pathology | combined baseline gate | warnings | main rejection reason |",
+            "|---|---|---:|:---:|---|---:|---:|---:|---:|---:|---|---|---|---|",
         ]
     )
     for candidate in decision.get("candidates", []):

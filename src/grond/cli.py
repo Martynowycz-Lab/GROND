@@ -4608,9 +4608,12 @@ def run_multi_shelxl_feedback_loop(
             float("nan"),
         )
         max_modulation_p95 = float(getattr(args, "publication_endpoint_max_modulation_p95", 20.0))
-        modulation_gate_passed = bool(
-            math.isfinite(endpoint_modulation_p95)
-            and endpoint_modulation_p95 <= max_modulation_p95
+        modulation_warning = (
+            "missing finite modulation p95"
+            if not math.isfinite(endpoint_modulation_p95)
+            else f"modulation p95 {endpoint_modulation_p95:.4g} exceeds warning level {max_modulation_p95:.4g}"
+            if endpoint_modulation_p95 > max_modulation_p95
+            else ""
         )
         endpoint_health = endpoint_shelxl.get("res_health")
         endpoint_health = dict(endpoint_health) if isinstance(endpoint_health, Mapping) else {}
@@ -4624,15 +4627,11 @@ def run_multi_shelxl_feedback_loop(
             "endpoint_modulation_p95": endpoint_modulation_p95,
             "endpoint_modulation_metric": str(combined_endpoint.get("modulation_metric") or ""),
             "endpoint_modulation_gate": {
-                "passed": modulation_gate_passed,
+                "passed": True,
+                "blocking": False,
                 "maximum_p95": max_modulation_p95,
-                "reason": (
-                    "passed"
-                    if modulation_gate_passed
-                    else "missing finite modulation p95"
-                    if not math.isfinite(endpoint_modulation_p95)
-                    else f"modulation p95 {endpoint_modulation_p95:.4g} exceeds {max_modulation_p95:.4g}"
-                ),
+                "status": "warning" if modulation_warning else "ok",
+                "reason": modulation_warning or "within warning level",
             },
             "combined": str(combined_dir),
             "raw_runs": {name: str(path) for name, path in raw_cycle_runs.items()},
@@ -4645,16 +4644,6 @@ def run_multi_shelxl_feedback_loop(
             summary["status"] = "failed_no_usable_endpoint_model"
             write_json(feedback_root / "multi_shelxl_feedback_loop_summary.json", summary)
             raise RuntimeError(f"{cycle_label} did not produce a usable shared SHELXL .res model in {combined_dir}")
-        if not modulation_gate_passed:
-            record["adopted_for_feedback"] = False
-            summary["status"] = "stopped_endpoint_modulation_gate"
-            summary["stopped_reason"] = (
-                "Shared SHELXL feedback cycle lacks a bounded, measured multiplicative intensity-correction "
-                f"contract; keeping the previous clean model. {record['endpoint_modulation_gate']['reason']}."
-            )
-            summary["unsafe_model"] = str(output_model)
-            write_json(feedback_root / "multi_shelxl_feedback_loop_summary.json", summary)
-            break
         if not shelxl_feedback_record_safe_for_reuse(record):
             record["adopted_for_feedback"] = False
             endpoint_status = str(record.get("endpoint_shelxl_status", "")).strip().lower()
@@ -7146,6 +7135,44 @@ def hand_diagnostic_supports_other(stats: Mapping[str, object], args: argparse.N
     return not reasons, reasons
 
 
+def elastic_hand_nuisance(nuisance: Mapping[str, object]) -> tuple[dict[str, object], dict[str, object]]:
+    """Freeze every nuisance except absorption for an exact negative-thickness hand pair."""
+
+    elastic = dict(nuisance)
+    absorption_keys = (
+        "absorption_mode",
+        "absorption_mu",
+        "absorption_frac",
+        "absorption_mu_g2",
+        "absorption_mu_theta2",
+        "absorption_tds_b",
+    )
+    source = {key: elastic.get(key) for key in absorption_keys}
+    elastic.update(
+        {
+            "absorption_mode": "none",
+            "absorption_mu": 0.0,
+            "absorption_frac": 0.0,
+            "absorption_mu_g2": 0.0,
+            "absorption_mu_theta2": 0.0,
+            "absorption_tds_b": 0.0,
+        }
+    )
+    return elastic, source
+
+
+def score_native_metrics(summary: Mapping[str, object], metrics: Mapping[str, object]) -> dict[str, object]:
+    """Score alternate metrics while retaining the source summary's non-metric context."""
+
+    best = summary.get("best_native") if isinstance(summary.get("best_native"), Mapping) else {}
+    return score_native_summary(
+        {
+            **dict(summary),
+            "best_native": {**dict(best), "metrics": dict(metrics)},
+        }
+    )
+
+
 def _positive_summary_int(config: Mapping[str, object], key: str) -> int | None:
     """Return one required positive integer from a native-stage config."""
 
@@ -7903,6 +7930,289 @@ def _paired_row_split_contract(
     }
 
 
+def _pooled_hand_pair_statistics(
+    pairs: list[tuple[str, Path, Path]],
+) -> dict[str, dict[str, object]]:
+    """Pool exact per-row hand contrasts across crystals without merging rows."""
+
+    deltas: dict[str, list[float]] = {"all": [], "work": [], "free": []}
+    for dataset, selected_path, inverse_path in pairs:
+        with selected_path.open(newline="") as handle:
+            selected_rows = list(csv.DictReader(handle))
+        with inverse_path.open(newline="") as handle:
+            inverse_rows = {
+                (row.get("row_index"), row.get("h"), row.get("k"), row.get("l")): row
+                for row in csv.DictReader(handle)
+            }
+        for selected in selected_rows:
+            key = (
+                selected.get("row_index"),
+                selected.get("h"),
+                selected.get("k"),
+                selected.get("l"),
+            )
+            inverse = inverse_rows.get(key)
+            if inverse is None:
+                raise ValueError(f"{dataset}: inverse hand table lacks row key {key}")
+            selected_residual = float(selected["dyn_residual_over_sigma"])
+            inverse_residual = float(inverse["dyn_residual_over_sigma"])
+            if not math.isfinite(selected_residual) or not math.isfinite(inverse_residual):
+                raise ValueError(f"{dataset}: nonfinite paired residual at row key {key}")
+            delta = inverse_residual * inverse_residual - selected_residual * selected_residual
+            split = str(selected.get("split") or "")
+            deltas["all"].append(delta)
+            if split in {"work", "free"}:
+                deltas[split].append(delta)
+
+    result: dict[str, dict[str, object]] = {}
+    for split, values in deltas.items():
+        n_rows = len(values)
+        mean = math.fsum(values) / n_rows if n_rows else float("nan")
+        if n_rows > 1:
+            variance = math.fsum((value - mean) ** 2 for value in values) / (n_rows - 1)
+            t_style = mean / math.sqrt(variance / n_rows) if variance > 0.0 else math.copysign(float("inf"), mean)
+        else:
+            t_style = float("nan")
+        result[split] = {
+            "n": n_rows,
+            "mean_delta_chi2_inverse_minus_selected": mean,
+            "paired_row_t_delta_chi2": t_style,
+            "positive_favors_selected": True,
+        }
+    return result
+
+
+def run_multi_final_elastic_hand_selection(
+    prep: PrepConfig,
+    args: argparse.Namespace,
+    python: str,
+    logs: Path,
+    root: Path,
+    *,
+    final_model: str,
+    selected_hand: str,
+    final_runs: Mapping[str, Path],
+    shared_hand_decision: Mapping[str, object],
+) -> dict[str, object]:
+    """Select one shared hand at the end from exact elastic negative-thickness pairs.
+
+    Every dataset retains its final N/Q, row support, scale split, thickness,
+    jitter, and other nuisance values.  Absorption alone is zeroed because the
+    negative-thickness identity is exact only for the Hermitian elastic
+    Hamiltonian.  The paired calculation shares each eigendecomposition.
+    """
+
+    artifact = root / "decisions" / "shared_final_elastic_hand_selection.json"
+    symmetry_policy = (
+        shared_hand_decision.get("symmetry_policy")
+        if isinstance(shared_hand_decision.get("symmetry_policy"), Mapping)
+        else absolute_structure_policy(final_model)
+    )
+    base: dict[str, object] = {
+        "schema_version": 1,
+        "method": "nakane_negative_thickness_elastic_pair_v1",
+        "selection_stage": "after_final_shared_structure_and_nuisance_selection",
+        "selected_hand_before": selected_hand,
+        "selected_model_before": final_model,
+        "absorption_policy": "disabled_for_hand_decision_only",
+        "shared_eigendecomposition": True,
+        "nuisance_refit": False,
+        "jitter_refit": False,
+        "known_configuration_used_for_selection": False,
+        "datasets": {},
+        "artifact": str(artifact),
+    }
+    if not bool(getattr(args, "hand_control", True)) or not bool(symmetry_policy.get("run_hand_control", True)):
+        result = {
+            **base,
+            "status": "skipped_not_applicable",
+            "hand_switched": False,
+            "selected_hand_after": selected_hand,
+            "selected_model_after": final_model,
+            "reason": str(symmetry_policy.get("reason") or "hand control disabled"),
+        }
+        write_json(artifact, result)
+        return result
+    if bool(getattr(args, "dry_run", False)):
+        result = {
+            **base,
+            "status": "skipped_dry_run",
+            "hand_switched": False,
+            "selected_hand_after": selected_hand,
+            "selected_model_after": final_model,
+        }
+        write_json(artifact, result)
+        return result
+
+    records: dict[str, dict[str, object]] = {}
+    for ds in prep.datasets:
+        source_run = Path(final_runs[ds.name])
+        source_summary = read_json(source_run / "summary.json")
+        config = source_summary.get("config") if isinstance(source_summary.get("config"), Mapping) else {}
+        nuisance = best_nuisance(source_run)
+        elastic, source_absorption = elastic_hand_nuisance(nuisance)
+        n_basis = _positive_summary_int(config, "n_basis")
+        n_points = _positive_summary_int(config, "n_points")
+        scale_fit_split = str(config.get("scale_fit_split") or "work")
+        record: dict[str, object] = {
+            "dataset": ds.name,
+            "source_run": str(source_run),
+            "source_absorption_nuisance": source_absorption,
+            "n_basis": n_basis,
+            "n_points": n_points,
+            "scale_fit_split": scale_fit_split,
+        }
+        if not nuisance or n_basis is None or n_points is None or scale_fit_split not in {"work", "all"}:
+            record.update(
+                status="incomplete",
+                reason="final run lacks a complete nuisance, N/Q, or scale-fit-split contract",
+            )
+            records[ds.name] = record
+            continue
+        pair_run = root / "runs" / ds.name / "multi_final_elastic_hand_pair"
+        diagnostic = root / "decisions" / "final_elastic_hand" / f"{safe_label(ds.name)}.json"
+        hand_args = _args_with_recorded_native_contract(args, config)
+        hand_args.compute_backend = "scipy"
+        try:
+            run_logged(
+                native_stage_cmd(
+                    python,
+                    ds,
+                    final_model,
+                    dataset_baseline_hkl(prep, ds),
+                    pair_run,
+                    hand_args,
+                    n_basis=n_basis,
+                    n_points=n_points,
+                    stage="hand",
+                    pinned=elastic,
+                    make_maps=False,
+                    endpoint=False,
+                    scale_fit_split_override=scale_fit_split,
+                    strict_pinned_contract=True,
+                    allow_pinned_jitter_fallback=False,
+                    paired_inverse_hand=True,
+                ),
+                logs,
+                f"{ds.name}_multi_final_elastic_hand_pair",
+                dry_run=False,
+            )
+            run_logged(
+                [
+                    python,
+                    str(engine_script("absolute_structure_diagnostic.py")),
+                    "--best",
+                    str(pair_run / "native_dyn_calc.csv"),
+                    "--other",
+                    str(pair_run / "native_inverse_hand_dyn_calc.csv"),
+                    "--out",
+                    str(diagnostic),
+                ],
+                logs,
+                f"{ds.name}_multi_final_elastic_hand_diagnostic",
+                dry_run=False,
+            )
+            pair_summary = read_json(pair_run / "summary.json")
+            paired = pair_summary.get("paired_inverse_hand") if isinstance(pair_summary.get("paired_inverse_hand"), Mapping) else {}
+            selected_score = score_native_metrics(
+                pair_summary,
+                paired.get("selected_metrics") if isinstance(paired.get("selected_metrics"), Mapping) else {},
+            )
+            inverse_score = score_native_metrics(
+                pair_summary,
+                paired.get("inverse_metrics") if isinstance(paired.get("inverse_metrics"), Mapping) else {},
+            )
+            stats = read_json(diagnostic)
+            all_block = stats.get("all") if isinstance(stats.get("all"), Mapping) else {}
+            free_block = stats.get("free") if isinstance(stats.get("free"), Mapping) else {}
+            exact_rows = _paired_row_split_contract(
+                pair_run / "native_dyn_calc.csv",
+                pair_run / "native_inverse_hand_dyn_calc.csv",
+                nullable_numeric_fields=_row_contract_nullable_numeric_fields(config, elastic),
+            )
+            record.update(
+                {
+                    "status": "complete" if exact_rows.get("passed") else "incomplete",
+                    "pair_run": str(pair_run),
+                    "selected_row_table": str(pair_run / "native_dyn_calc.csv"),
+                    "inverse_row_table": str(pair_run / "native_inverse_hand_dyn_calc.csv"),
+                    "diagnostic": str(diagnostic),
+                    "row_pair_contract": exact_rows,
+                    "selected_score": selected_score,
+                    "inverse_score": inverse_score,
+                    "score_delta_selected_minus_inverse": safe_float(selected_score.get("score"), float("nan"))
+                    - safe_float(inverse_score.get("score"), float("nan")),
+                    "all_t": safe_float(all_block.get("paired_row_t_delta_chi2"), float("nan")),
+                    "all_n": int(all_block.get("n", 0) or 0),
+                    "free_t": safe_float(free_block.get("paired_row_t_delta_chi2"), float("nan")),
+                    "free_n": int(free_block.get("n", 0) or 0),
+                    "positive_t_favors_selected": True,
+                }
+            )
+        except Exception as exc:
+            record.update(status="incomplete", reason=f"{type(exc).__name__}: {exc}")
+        records[ds.name] = record
+
+    complete = [record for record in records.values() if record.get("status") == "complete"]
+    pooled = _pooled_hand_pair_statistics(
+        [
+            (
+                str(record["dataset"]),
+                Path(str(record["selected_row_table"])),
+                Path(str(record["inverse_row_table"])),
+            )
+            for record in complete
+        ]
+    ) if complete else {}
+    aggregate_all_t = safe_float((pooled.get("all") or {}).get("paired_row_t_delta_chi2"), float("nan"))
+    aggregate_free_t = safe_float((pooled.get("free") or {}).get("paired_row_t_delta_chi2"), float("nan"))
+    total_free_rows = int((pooled.get("free") or {}).get("n", 0) or 0)
+    total_score_delta = sum(safe_float(record.get("score_delta_selected_minus_inverse"), 0.0) for record in complete)
+    incomplete = len(complete) != len(prep.datasets)
+    switch = bool(
+        complete
+        and not incomplete
+        and math.isfinite(aggregate_all_t)
+        and aggregate_all_t <= -float(getattr(args, "hand_min_z_all", 2.0))
+        and (
+            float(getattr(args, "hand_min_z_free", 0.5)) <= 0.0
+            or math.isfinite(aggregate_free_t)
+            and aggregate_free_t <= -float(getattr(args, "hand_min_z_free", 0.5))
+        )
+        and total_free_rows >= int(getattr(args, "hand_min_free_rows", 10))
+        and total_score_delta > float(getattr(args, "hand_accept_delta", 0.0))
+        and is_shelx_model(final_model)
+    )
+    selected_model_after = final_model
+    selected_hand_after = selected_hand
+    if switch:
+        selected_model_after = str(make_alternate_hand_model(python, final_model, root, logs, False))
+        selected_hand_after = "alternate" if selected_hand == "original" else "original"
+    result = {
+        **base,
+        "status": "switched" if switch else "kept" if not incomplete else "incomplete_kept",
+        "datasets": records,
+        "aggregate": {
+            "method": "exact pooled per-row inverse-minus-selected squared normalized-residual contrast",
+            "all_t_style": aggregate_all_t,
+            "free_t_style": aggregate_free_t,
+            "free_rows": total_free_rows,
+            "score_delta_selected_minus_inverse": total_score_delta,
+            "negative_favors_inverse": True,
+            "splits": pooled,
+        },
+        "hand_switched": switch,
+        "selected_hand_after": selected_hand_after,
+        "selected_model_after": selected_model_after,
+        "decision_rule": (
+            "switch only after every dataset has a complete exact row pair, aggregate all/free evidence and the "
+            "aggregate composite score favor the inverse beyond the declared thresholds"
+        ),
+    }
+    write_json(artifact, result)
+    return result
+
+
 def run_multi_post_feedback_hand_diagnostic(
     prep: PrepConfig,
     args: argparse.Namespace,
@@ -8567,12 +8877,19 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
     active_nui = best_nuisance(screen)
     absolute_structure_decision = absolute_structure_policy(prep.structure)
     active_hand = "original"
-    if args.hand_control and absolute_structure_decision.get("run_hand_control", True) and not args.dry_run:
-        selected_hand, absolute_structure_decision, alternate_probe = choose_hand_by_scout(prep, ds, args, python, logs, root, screen, scout_max_rows=scout_rows)
-        if selected_hand == "alternate" and is_shelx_model(prep.structure):
-            active_model = str(make_alternate_hand_model(python, prep.structure, root, logs, args.dry_run))
-            active_nui = best_nuisance(alternate_probe) or active_nui
-            active_hand = "alternate"
+    if args.hand_control and absolute_structure_decision.get("run_hand_control", True):
+        absolute_structure_decision.update(
+            {
+                "status": "deferred_until_final_model",
+                "selected": "original",
+                "selection_stage": "final_elastic_negative_thickness_pair",
+                "reason": (
+                    "hand selection is deferred until thickness, geometry, nuisance, and structure refinement are "
+                    "complete; the final elastic pair shares one eigendecomposition and does not rerun nuisance grids"
+                ),
+                "absorption_policy": "disabled_for_hand_decision_only",
+            }
+        )
 
     regularized_nui = active_nui
     thickness_run = screen
@@ -8766,30 +9083,44 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
     absolute_structure_diagnostic = ""
     post_feedback_hand_promotion: dict = {}
     if args.hand_control and absolute_structure_decision.get("run_hand_control", True) and not args.dry_run:
-        other = root / "runs" / ds.name / "adaptive_other_hand_check"
-        # Hand inversion is involutive.  Probe the opposite of the *refined
-        # current model* in both directions so the paired diagnostic is not
-        # confounded by comparing refined coordinates with the input model.
-        other_model = final_model
-        alternate_other = True
+        hand_pair = root / "runs" / ds.name / "adaptive_final_elastic_hand_pair"
+        final_summary = read_json(final / "summary.json")
+        final_config = (
+            final_summary.get("config")
+            if isinstance(final_summary.get("config"), Mapping)
+            else {}
+        )
+        hand_nuisance, source_absorption = elastic_hand_nuisance(
+            best_nuisance(final) or regularized_nui
+        )
+        hand_args = _args_with_recorded_native_contract(args, final_config)
+        hand_args.compute_backend = "scipy"
+        hand_n_basis = _positive_summary_int(final_config, "n_basis") or (20 if args.fast else final_n_basis)
+        hand_n_points = _positive_summary_int(final_config, "n_points") or (5 if args.fast else args.n_points)
+        scale_fit_split = str(final_config.get("scale_fit_split") or "work")
+        if scale_fit_split not in {"work", "all"}:
+            scale_fit_split = "work"
         run_logged(
             native_stage_cmd(
                 python,
                 ds,
-                other_model,
+                final_model,
                 dataset_baseline_hkl(prep, ds),
-                other,
-                args,
-                n_basis=20 if args.fast else final_n_basis,
-                n_points=5 if args.fast else args.n_points,
-                stage="adaptive_other_hand",
-                pinned=best_nuisance(final) or regularized_nui,
-                alternate_hand=alternate_other,
+                hand_pair,
+                hand_args,
+                n_basis=hand_n_basis,
+                n_points=hand_n_points,
+                stage="hand",
+                pinned=hand_nuisance,
                 make_maps=False,
                 endpoint=False,
+                scale_fit_split_override=scale_fit_split,
+                strict_pinned_contract=True,
+                allow_pinned_jitter_fallback=False,
+                paired_inverse_hand=True,
             ),
             logs,
-            f"{ds.name}_adaptive_other_hand_check",
+            f"{ds.name}_adaptive_final_elastic_hand_pair",
             dry_run=args.dry_run,
         )
         stats_path = root / "runs" / ds.name / "adaptive_absolute_structure_diagnostic.json"
@@ -8798,9 +9129,9 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
                 python,
                 str(engine_script("absolute_structure_diagnostic.py")),
                 "--best",
-                str(final / "native_dyn_calc.csv"),
+                str(hand_pair / "native_dyn_calc.csv"),
                 "--other",
-                str(other / "native_dyn_calc.csv"),
+                str(hand_pair / "native_inverse_hand_dyn_calc.csv"),
                 "--out",
                 str(stats_path),
             ],
@@ -8809,13 +9140,28 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
             dry_run=args.dry_run,
         )
         absolute_structure_diagnostic = str(stats_path)
-        final_summary = read_json(final / "summary.json")
-        other_summary = read_json(other / "summary.json")
-        final_score = score_native_summary(final_summary)
-        other_score = score_native_summary(other_summary)
+        pair_summary = read_json(hand_pair / "summary.json")
+        pair_contract = (
+            pair_summary.get("paired_inverse_hand")
+            if isinstance(pair_summary.get("paired_inverse_hand"), Mapping)
+            else {}
+        )
+        final_score = score_native_metrics(
+            pair_summary,
+            pair_contract.get("selected_metrics")
+            if isinstance(pair_contract.get("selected_metrics"), Mapping)
+            else {},
+        )
+        other_score = score_native_metrics(
+            pair_summary,
+            pair_contract.get("inverse_metrics")
+            if isinstance(pair_contract.get("inverse_metrics"), Mapping)
+            else {},
+        )
         post_feedback_delta = final_score.get("score", float("inf")) - other_score.get("score", float("inf"))
         post_feedback_hand_promotion = {
             "status": "not_promoted",
+            "method": "nakane_negative_thickness_elastic_pair_v1",
             "active_hand": active_hand,
             "opposite_hand": "alternate" if active_hand == "original" else "original",
             "final_score": final_score,
@@ -8823,7 +9169,12 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
             "score_delta_final_minus_opposite": post_feedback_delta,
             "accept_delta": float(args.hand_accept_delta),
             "diagnostic": str(stats_path),
-            "opposite_run": str(other),
+            "paired_run": str(hand_pair),
+            "source_absorption_nuisance": source_absorption,
+            "hand_decision_absorption": "disabled",
+            "shared_eigendecomposition": True,
+            "nuisance_refit": False,
+            "jitter_refit": False,
         }
         diagnostic_gate_ok, diagnostic_gate_reasons = hand_diagnostic_supports_other(
             try_read_json(stats_path) or {},
@@ -8846,39 +9197,46 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
                     n_points=5 if args.fast else args.n_points,
                     stage="adaptive_promoted_hand_final",
                     pinned=best_nuisance(final) or regularized_nui,
-                    alternate_hand=False,
                     make_maps=args.make_maps,
                     endpoint=True,
+                    strict_pinned_contract=True,
+                    allow_pinned_jitter_fallback=False,
                 ),
                 logs,
                 f"{ds.name}_adaptive_promoted_hand_final",
                 dry_run=args.dry_run,
             )
-            promoted_summary = read_json(promoted / "summary.json")
-            promoted_score = score_native_summary(promoted_summary)
-            final_score_after = score_native_summary(read_json(final / "summary.json"))
-            promoted_delta = final_score_after.get("score", float("inf")) - promoted_score.get("score", float("inf"))
             post_feedback_hand_promotion.update(
                 {
-                    "status": "promoted" if promoted_delta > float(args.hand_accept_delta) else "tested_not_promoted",
+                    "status": "promoted",
                     "promoted_run": str(promoted),
                     "promoted_model_input": str(promoted_model),
-                    "promoted_score": promoted_score,
-                    "score_delta_final_minus_promoted": promoted_delta,
+                    "promotion_policy": (
+                        "the matched final elastic hand decision is authoritative; the selected coordinate hand is "
+                        "materialized once under the already selected full nuisance contract"
+                    ),
                 }
             )
-            if promoted_delta > float(args.hand_accept_delta):
-                final = promoted
-                final_model = str(best_endpoint_model(promoted) or promoted_model)
-                active_hand = post_feedback_hand_promotion["opposite_hand"]
-                absolute_structure_decision = {
-                    **absolute_structure_decision,
-                    "post_feedback_selected": active_hand,
-                    "post_feedback_selected_hand": active_hand,
-                    "post_feedback_promotion": post_feedback_hand_promotion,
-                }
+            final = promoted
+            final_model = str(best_endpoint_model(promoted) or promoted_model)
+            active_hand = post_feedback_hand_promotion["opposite_hand"]
+            absolute_structure_decision = {
+                **absolute_structure_decision,
+                "status": "complete",
+                "post_feedback_selected": active_hand,
+                "post_feedback_selected_hand": active_hand,
+                "post_feedback_promotion": post_feedback_hand_promotion,
+            }
         elif post_feedback_delta > float(args.hand_accept_delta) and not diagnostic_gate_ok:
             post_feedback_hand_promotion["status"] = "rejected_by_diagnostic_quality_gate"
+        else:
+            absolute_structure_decision = {
+                **absolute_structure_decision,
+                "status": "complete",
+                "post_feedback_selected": active_hand,
+                "post_feedback_selected_hand": active_hand,
+                "post_feedback_promotion": post_feedback_hand_promotion,
+            }
 
     no_h_run = None
     if args.h_omit in {"on", "both", "only"} and is_shelx_model(final_model):
@@ -9171,7 +9529,6 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
     """Run one structure against multiple datasets and combine endpoints."""
 
     root = Path(args.out_dir)
-    scout_rows_by_name = {ds.name: int(getattr(args, "scout_max_rows", 1000)) for ds in prep.datasets}
     if args.auto_decide:
         def decide_dataset(ds0: DatasetSpec) -> tuple[DatasetSpec, int]:
             preflight = preflight_dataset(
@@ -9190,20 +9547,16 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
 
         if len(prep.datasets) > 1 and not args.dry_run:
             decided_by_name: dict[str, DatasetSpec] = {}
-            decided_scout_rows: dict[str, int] = {}
             max_workers = min(len(prep.datasets), transform_scout_job_count(args))
             with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="grond-dataset-transform") as pool:
                 futures = {pool.submit(decide_dataset, ds0): ds0.name for ds0 in prep.datasets}
                 for future in as_completed(futures):
-                    decided, scout_rows = future.result()
+                    decided, _scout_rows = future.result()
                     decided_by_name[decided.name] = decided
-                    decided_scout_rows[decided.name] = scout_rows
             decided = [decided_by_name[ds0.name] for ds0 in prep.datasets]
-            scout_rows_by_name = {ds0.name: decided_scout_rows[ds0.name] for ds0 in prep.datasets}
         else:
             decided_rows = [decide_dataset(ds0) for ds0 in prep.datasets]
             decided = [item[0] for item in decided_rows]
-            scout_rows_by_name = {item[0].name: item[1] for item in decided_rows}
         prep = PrepConfig(
             structure=prep.structure,
             datasets=decided,
@@ -9242,20 +9595,29 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
         initial_runs[ds.name] = run_dir
         nuisance[ds.name] = best_nuisance(run_dir)
 
-    selected_hand, shared_hand_decision, alternate_hand_runs = choose_shared_hand_by_scout(
-        prep,
-        args,
-        python,
-        logs,
-        root,
-        screen_runs,
-        scout_rows_by_name,
-    )
+    selected_hand = "original"
+    symmetry_policy = absolute_structure_policy(prep.structure)
+    shared_hand_decision = {
+        "schema_version": 2,
+        "status": (
+            "deferred_until_final_model"
+            if args.hand_control and symmetry_policy.get("run_hand_control", True)
+            else "skipped_not_applicable"
+        ),
+        "selection_scope": "shared_multi_dataset_model",
+        "selected": selected_hand,
+        "symmetry_policy": symmetry_policy,
+        "selection_stage": "final_elastic_negative_thickness_pair",
+        "method": "nakane_negative_thickness_elastic_pair_v1",
+        "absorption_policy": "disabled_for_hand_decision_only",
+        "nuisance_refit": False,
+        "jitter_refit": False,
+        "known_configuration_used_for_selection": False,
+        "reason": (
+            "hand selection is deferred until all thickness, geometry, nuisance, and shared-structure work is complete"
+        ),
+    }
     shared_model = prep.structure
-    if selected_hand == "alternate":
-        shared_model = str(make_alternate_hand_model(python, prep.structure, root, logs, args.dry_run))
-        for ds in prep.datasets:
-            nuisance[ds.name] = best_nuisance(alternate_hand_runs[ds.name]) or nuisance[ds.name]
     shared_hand_decision["selected_model"] = shared_model
     write_json(root / "decisions" / "shared_absolute_structure_decision.json", shared_hand_decision)
     for ds in prep.datasets:
@@ -9263,30 +9625,6 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
         decision = try_read_json(decision_path)
         decision["selected_model"] = shared_model
         write_json(decision_path, decision)
-
-    if args.fast and selected_hand == "alternate":
-        for ds in prep.datasets:
-            selected_run = root / "runs" / ds.name / "fast_N20_Q5_selected_hand"
-            run_logged(
-                native_stage_cmd(
-                    python,
-                    ds,
-                    shared_model,
-                    dataset_baseline_hkl(prep, ds),
-                    selected_run,
-                    args,
-                    n_basis=20,
-                    n_points=5,
-                    stage="multi_fast_selected_hand",
-                    pinned=nuisance[ds.name],
-                    make_maps=False,
-                ),
-                logs,
-                f"{ds.name}_multi_fast_selected_hand",
-                dry_run=args.dry_run,
-            )
-            initial_runs[ds.name] = selected_run
-            nuisance[ds.name] = best_nuisance(selected_run) or nuisance[ds.name]
 
     for ds in prep.datasets:
         active_run = initial_runs[ds.name]
@@ -9566,7 +9904,7 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
         full_input_runs = weighted_runs
         full_publication_runs = policy_active_runs(weighted_runs, final_dataset_policy)
         require_policy_active_runs(full_publication_runs, context="final publication")
-    post_feedback_multi_hand_diagnostic = run_multi_post_feedback_hand_diagnostic(
+    post_feedback_multi_hand_diagnostic = run_multi_final_elastic_hand_selection(
         prep,
         args,
         python,
@@ -9575,9 +9913,120 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
         final_model=final_model,
         selected_hand=selected_hand,
         final_runs=final_runs,
-        publication_runs=full_publication_runs,
         shared_hand_decision=shared_hand_decision,
     )
+    if bool(post_feedback_multi_hand_diagnostic.get("hand_switched", False)):
+        final_model = str(post_feedback_multi_hand_diagnostic["selected_model_after"])
+        selected_hand = str(post_feedback_multi_hand_diagnostic["selected_hand_after"])
+        switched_runs: dict[str, Path] = {}
+        for ds in prep.datasets:
+            source_run = final_runs[ds.name]
+            source_summary = read_json(source_run / "summary.json")
+            source_config = source_summary.get("config") if isinstance(source_summary.get("config"), Mapping) else {}
+            source_nuisance = best_nuisance(source_run) or nuisance[ds.name]
+            selected_run = root / "runs" / ds.name / "final_selected_hand"
+            selected_args = _args_with_recorded_native_contract(args, source_config)
+            run_logged(
+                native_stage_cmd(
+                    python,
+                    ds,
+                    final_model,
+                    dataset_baseline_hkl(prep, ds),
+                    selected_run,
+                    selected_args,
+                    n_basis=_positive_summary_int(source_config, "n_basis") or int(args.final_basis_fallback),
+                    n_points=_positive_summary_int(source_config, "n_points") or int(args.n_points),
+                    stage="final",
+                    pinned=source_nuisance,
+                    make_maps=args.make_maps,
+                    endpoint=True,
+                    scale_fit_split_override=str(source_config.get("scale_fit_split") or "work"),
+                    strict_pinned_contract=True,
+                    allow_pinned_jitter_fallback=False,
+                ),
+                logs,
+                f"{ds.name}_final_selected_hand",
+                dry_run=False,
+            )
+            switched_runs[ds.name] = selected_run
+        final_runs = switched_runs
+        scale_polish_runs = {}
+        resolution_limits = {}
+        forensic_runs = {}
+        for ds in prep.datasets:
+            run_dir = final_runs[ds.name]
+            scale_polish_runs[ds.name] = run_scale_window_polish(
+                python,
+                run_dir,
+                root / "scale_polish_selected_hand" / ds.name,
+                logs,
+                f"{ds.name}_final_selected_hand",
+                args,
+            )
+            resolution_limits[ds.name] = run_resolution_limit_gate(
+                python,
+                {ds.name: run_dir},
+                final_model,
+                root / "resolution_limits_selected_hand" / ds.name,
+                logs,
+                ds.name,
+                args,
+                title=f"GROND resolution-limit promotion: {ds.name}",
+                scope="dataset",
+            )
+            forensic_runs[ds.name] = run_forensic_gate(
+                python,
+                run_dir / "native_dyn_calc.csv",
+                ds.hkl,
+                final_model,
+                root / "forensics_selected_hand" / ds.name,
+                logs,
+                ds.name,
+                args,
+            )
+        final_dataset_policy = run_dataset_policy_gate(
+            final_runs,
+            root / "dataset_policy" / "final_selected_hand",
+            args,
+            label="final_selected_hand",
+        )
+        require_materialized_dataset_policy(
+            final_dataset_policy,
+            context="final selected hand",
+            dry_run=False,
+        )
+        if final_dataset_policy.get("status") in {"disabled", "single_dataset", "missing_row_table"}:
+            full_input_runs = final_runs
+            full_publication_runs = final_runs
+        else:
+            weighted_runs = write_policy_weighted_runs(
+                final_runs,
+                final_dataset_policy,
+                root / "dataset_policy" / "final_selected_hand" / "weighted_runs",
+                include_endpoint_only=True,
+            )
+            full_input_runs = weighted_runs
+            full_publication_runs = policy_active_runs(weighted_runs, final_dataset_policy)
+            require_policy_active_runs(full_publication_runs, context="final selected-hand publication")
+        shared_hand_decision = {
+            **shared_hand_decision,
+            "status": "complete",
+            "selected": selected_hand,
+            "selected_model": final_model,
+            "final_elastic_selection": post_feedback_multi_hand_diagnostic,
+        }
+        write_json(root / "decisions" / "shared_absolute_structure_decision.json", shared_hand_decision)
+    else:
+        shared_hand_decision = {
+            **shared_hand_decision,
+            "status": "complete"
+            if post_feedback_multi_hand_diagnostic.get("status") in {"kept", "skipped_not_applicable"}
+            else str(post_feedback_multi_hand_diagnostic.get("status") or "incomplete"),
+            "selected": selected_hand,
+            "selected_model": final_model,
+            "final_elastic_selection": post_feedback_multi_hand_diagnostic,
+        }
+        write_json(root / "decisions" / "shared_absolute_structure_decision.json", shared_hand_decision)
     combined_input_runs, publication_runs, scale_contract_selection = run_multi_scale_contract_selection(
         python=python,
         full_runs=final_runs,
@@ -19294,7 +19743,7 @@ def add_common_run_args(ap: argparse.ArgumentParser, *, expose_lambda_controls: 
     ap.add_argument("--full-fast-n-points", type=int, default=10, help="Quadrature points used by --full-fast.")
     ap.add_argument("--full-fast-structure-rows", type=int, default=0, help="Maximum objective rows for lightweight --full-fast structure update; 0 chooses an atom-count-aware budget.")
     ap.add_argument("--full-fast-structure-max-nfev", type=int, default=0, help="Maximum function evaluations per lightweight --full-fast structure block; 0 chooses an atom-count-aware budget.")
-    ap.add_argument("--auto-decide", dest="auto_decide", action="store_true", default=True, help="Run preflight, transform/hand scouts, and adaptive thickness decisions before final work.")
+    ap.add_argument("--auto-decide", dest="auto_decide", action="store_true", default=True, help="Run preflight, transform scouting, adaptive nuisance decisions, and the final elastic hand check.")
     ap.add_argument("--no-auto-decide", dest="auto_decide", action="store_false")
     ap.add_argument("--native-only", action="store_true", help="Do not write corrected-HKL endpoints.")
     ap.add_argument("--python", default="")
@@ -19420,10 +19869,10 @@ def add_common_run_args(ap: argparse.ArgumentParser, *, expose_lambda_controls: 
     )
     ap.add_argument("--no-maps", dest="make_maps", action="store_false")
     ap.add_argument("--h-omit", choices=["off", "on", "only", "both"], default="off")
-    ap.add_argument("--hand-control", dest="hand_control", action="store_true", default=True, help="Run the alternate-hand diagnostic when model symmetry makes that check meaningful.")
+    ap.add_argument("--hand-control", dest="hand_control", action="store_true", default=True, help="Run one final elastic negative-thickness hand decision when model symmetry makes it meaningful.")
     ap.add_argument("--no-hand-control", dest="hand_control", action="store_false", help="Skip the alternate-hand diagnostic.")
-    ap.add_argument("--hand-n-basis", dest="hand_n_basis", metavar="N", type=int, default=24, help="Basis size for default hand-diagnostic runs; keep cheap unless the call is ambiguous.")
-    ap.add_argument("--hand-n-points", dest="hand_n_points", metavar="Q", type=int, default=10, help="Quadrature points for default hand-diagnostic runs.")
+    ap.add_argument("--hand-n-basis", dest="hand_n_basis", metavar="N", type=int, default=24, help="Deprecated auto compatibility option; final hand selection now reuses the exact final N value.")
+    ap.add_argument("--hand-n-points", dest="hand_n_points", metavar="Q", type=int, default=10, help="Deprecated auto compatibility option; final hand selection now reuses the exact final Q value.")
     ap.add_argument(
         "--production-scales",
         action="store_true",
@@ -19523,7 +19972,7 @@ def add_common_run_args(ap: argparse.ArgumentParser, *, expose_lambda_controls: 
     ap.add_argument("--endpoint-feedback", choices=["auto", "on", "off"], default="auto", help="Optionally feed the polished B=0 no-EXTI endpoint model into one more Bloch endpoint cycle. Full auto uses auto; --fast skips it.")
     ap.add_argument("--publication-endpoint-chooser", action=argparse.BooleanOptionalAction, default=True, help="Write the publication endpoint chooser that separates physical and diagnostic corrected-HKL endpoints.")
     ap.add_argument("--publication-endpoint-min-hkl-safe-factor", type=float, default=0.25, help="Minimum fixed-width HKL safety factor for a publication endpoint.")
-    ap.add_argument("--publication-endpoint-max-modulation-p95", type=float, default=20.0, help="Maximum 95th-percentile endpoint intensity modulation for a publication endpoint.")
+    ap.add_argument("--publication-endpoint-max-modulation-p95", type=float, default=20.0, help="Warning level for 95th-percentile endpoint intensity modulation; never a promotion or validity gate.")
     ap.add_argument("--publication-allow-npd", action=argparse.BooleanOptionalAction, default=False, help="Explicit diagnostic override allowing endpoints with NPD pathology to pass publication selection gates. Default requires NPD == 0; split warnings always block publication selection.")
     ap.add_argument("--endpoint-calibration", choices=["auto", "on", "off"], default="auto", help="Replay the final frozen row table through corrected-HKL endpoint calibration after auto completes.")
     ap.add_argument("--endpoint-calibration-specs", default="baseline,adaptive:293:det0,adaptive:293:det2,adaptive:293:det4,adaptive:293:det8,adaptive:200:det0,adaptive:200:det2,adaptive:200:det4,adaptive:200:det8,adaptive:120:det0,adaptive:120:det2,adaptive:120:det4,adaptive:120:det8,adaptive:80:det0,adaptive:80:det2,adaptive:80:det4,adaptive:80:det8,window:1.0:det0,window:1.0:det4,window:1.0:det8,window:3.0:det0,window:3.0:det2,window:3.0:det4,window:3.0:det8,window:5.0:det0,window:5.0:det4,window:5.0:det8")
@@ -20268,7 +20717,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_scale_replay.add_argument("--publication-goof-max", type=float, default=1.15)
     p_scale_replay.add_argument("--publication-max-r1-cost", type=float, default=0.010)
     p_scale_replay.add_argument("--publication-free-wr2-tolerance", type=float, default=0.040)
-    p_scale_replay.add_argument("--publication-max-modulation-p95", type=float, default=20.0)
+    p_scale_replay.add_argument("--publication-max-modulation-p95", type=float, default=20.0, help="Warning level only; modulation p95 never blocks endpoint selection.")
     p_scale_replay.add_argument("--publication-prefer-wght-mode", default="freeze-zero")
     p_scale_replay.add_argument("--publication-allow-npd", action=argparse.BooleanOptionalAction, default=False, help="Explicit diagnostic override allowing NPD pathology in the selected endpoint. Default requires NPD == 0; split warnings always block publication selection.")
     p_scale_replay.add_argument(
@@ -20329,7 +20778,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_cal_endpoint.add_argument("--publication-goof-max", type=float, default=1.15)
     p_cal_endpoint.add_argument("--publication-max-r1-cost", type=float, default=0.010)
     p_cal_endpoint.add_argument("--publication-free-wr2-tolerance", type=float, default=0.040)
-    p_cal_endpoint.add_argument("--publication-max-modulation-p95", type=float, default=20.0)
+    p_cal_endpoint.add_argument("--publication-max-modulation-p95", type=float, default=20.0, help="Warning level only; modulation p95 never blocks endpoint selection.")
     p_cal_endpoint.add_argument("--publication-prefer-wght-mode", default="freeze-zero")
     p_cal_endpoint.add_argument("--publication-allow-npd", action=argparse.BooleanOptionalAction, default=False, help="Explicit diagnostic override allowing NPD pathology in the selected endpoint. Default requires NPD == 0; split warnings always block publication selection.")
     p_cal_endpoint.add_argument(

@@ -144,7 +144,7 @@ def test_publication_endpoint_legacy_policy_keeps_smallest_passing_scale_count()
     assert selected["publication_endpoint"]["spec"] == "few_scales"
 
 
-def test_publication_endpoint_modulation_gate_rejects_missing_and_excessive_values():
+def test_publication_endpoint_modulation_is_warning_only():
     rows = [
         {
             "spec": "missing",
@@ -177,7 +177,7 @@ def test_publication_endpoint_modulation_gate_rejects_missing_and_excessive_valu
         max_modulation_p95=20.0,
     )
 
-    assert selected["status"] == "no_candidate_passed_all_gates"
-    reasons = {row["spec"]: row["reasons"] for row in selected["rejections"]}
-    assert any("missing finite" in reason for reason in reasons["missing"])
-    assert any("exceeds" in reason for reason in reasons["excessive"])
+    assert selected["status"] == "passed"
+    warnings = {row["spec"]: row["warnings"] for row in selected["modulation_warnings"]}
+    assert any("missing finite" in warning for warning in warnings["missing"])
+    assert any("exceeds warning level" in warning for warning in warnings["excessive"])

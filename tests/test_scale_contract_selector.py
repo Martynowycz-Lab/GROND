@@ -239,7 +239,6 @@ def test_existing_split_warning_is_not_counted_as_a_new_compact_pathology() -> N
         ({"safe_for_feedback": False}, "endpoint_res_unsafe_for_feedback"),
         ({"artifacts_exist": False}, "endpoint_artifacts_missing"),
         ({"hkl_safe_factor": 0.249}, "endpoint_hkl_safety_below_minimum"),
-        ({"modulation_p95": 20.001}, "endpoint_modulation_exceeded"),
     ],
 )
 def test_compact_endpoint_health_and_physical_safety_fail_closed(
@@ -252,6 +251,16 @@ def test_compact_endpoint_health_and_physical_safety_fail_closed(
 
     assert result["accepted"] is False
     assert expected_reason in result["reasons"]
+
+
+def test_compact_endpoint_modulation_is_warning_only() -> None:
+    full, compact = _passing_pair()
+    compact["endpoint"]["modulation_p95"] = 20.001
+
+    result = _select(full, compact)
+
+    assert result["accepted"] is True
+    assert any("exceeds warning level" in warning for warning in result["warnings"])
 
 
 @pytest.mark.parametrize("split", ["all", "work", "free"])

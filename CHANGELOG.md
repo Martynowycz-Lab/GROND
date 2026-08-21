@@ -4,6 +4,18 @@ This file records user-visible changes to the installable package. Version `0.2.
 
 ## 0.2.2 (unreleased)
 
+Endpoint modulation p95 is now a reporting diagnostic, not a validity or
+publication gate. Missing or large values remain explicit warnings, but no
+longer reject an otherwise healthy endpoint, veto a compact scale contract,
+or stop a shared LS1 feedback loop. Automatic absolute-structure selection is
+now deferred until the final thickness, geometry, nuisance, and structural
+model. It uses the exact elastic negative-thickness identity to evaluate both
+hands from each eigendecomposition with absorption disabled only for that
+decision. No hand-specific thickness, jitter, or nuisance grids are rerun. If
+the matched all/free-row evidence and score materially favor the inverse,
+GROND materializes that coordinate hand once and continues with the already
+selected full nuisance contract.
+
 Fixed-geometry XDS rows now solve the local Ewald crossing and its
 `dSg/domega` Jacobian analytically. Scan-varying DIALS orientation matrices
 and fitted geometry paths retain the established numerical solver. The new

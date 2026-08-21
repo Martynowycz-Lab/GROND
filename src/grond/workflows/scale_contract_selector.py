@@ -81,7 +81,7 @@ def select_multi_scale_contract(
             for split in ("all", "work", "free")
         }
         compact_hkl_safe_factor = _finite(compact_endpoint, "hkl_safe_factor")
-        compact_modulation_p95 = _finite(compact_endpoint, "modulation_p95")
+        compact_modulation_p95 = float(compact_endpoint.get("modulation_p95", float("nan")))
         compact_returncode = _integer(compact_endpoint, "returncode")
         compact_status = str(compact_endpoint["status"]).strip().lower()
         compact_safe_for_feedback = compact_endpoint["safe_for_feedback"] is True
@@ -157,13 +157,20 @@ def select_multi_scale_contract(
             reasons.append("endpoint_artifacts_missing")
     if compact_hkl_safe_factor + epsilon < float(min_hkl_safe_factor):
         reasons.append("endpoint_hkl_safety_below_minimum")
-    if compact_modulation_p95 > float(max_modulation_p95) + epsilon:
-        reasons.append("endpoint_modulation_exceeded")
+    modulation_warnings: list[str] = []
+    if not math.isfinite(compact_modulation_p95):
+        modulation_warnings.append("endpoint modulation p95 is unavailable")
+    elif compact_modulation_p95 > float(max_modulation_p95) + epsilon:
+        modulation_warnings.append(
+            f"endpoint modulation p95 {compact_modulation_p95:.4g} exceeds warning level {float(max_modulation_p95):.4g}"
+        )
+    diagnostics["warnings"] = modulation_warnings
 
     accepted = not reasons
     return {
         "selected_contract": "compact" if accepted else "full",
         "accepted": accepted,
         "reasons": reasons,
+        "warnings": modulation_warnings,
         "diagnostics": diagnostics,
     }

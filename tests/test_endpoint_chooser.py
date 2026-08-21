@@ -178,12 +178,15 @@ def test_real_collector_rejects_manifest_disagreement_and_canonicalizes_endpoint
 
     decision = write_publication_endpoint_choice({"dataset": run}, tmp_path / "chooser")
 
-    diagnostic = decision["best_diagnostic_endpoint"]
-    assert diagnostic["res"] == str(Path(artifacts["res"]).resolve())
-    assert diagnostic["hkl"] == str(Path(artifacts["hkl"]).resolve())
-    assert diagnostic["lst"] == str(Path(artifacts["lst"]).resolve())
-    assert diagnostic["promotion_fields_ok"] is False
-    assert "modulation_p95 disagrees with manifest" in diagnostic["promotion_field_contract"]["reason"]
+    physical = decision["best_physical_endpoint"]
+    assert physical["res"] == str(Path(artifacts["res"]).resolve())
+    assert physical["hkl"] == str(Path(artifacts["hkl"]).resolve())
+    assert physical["lst"] == str(Path(artifacts["lst"]).resolve())
+    assert physical["promotion_fields_ok"] is True
+    assert any(
+        "modulation_p95 disagrees with manifest" in warning
+        for warning in physical["promotion_field_contract"]["warnings"]
+    )
 
 
 def test_global_publication_blocker_keeps_otherwise_physical_endpoint_diagnostic():
@@ -285,7 +288,7 @@ def test_endpoint_chooser_rejects_nonunit_q_exponent_for_publication():
     assert any("non-unit q exponent" in reason for reason in rejected_qexp["rejection_reasons"])
 
 
-def test_endpoint_chooser_rejects_missing_modulation_measurement():
+def test_endpoint_chooser_warns_on_missing_modulation_measurement():
     candidate = {
         "id": "missing_modulation",
         "label": "dataset",
@@ -302,10 +305,10 @@ def test_endpoint_chooser_rejects_missing_modulation_measurement():
 
     decision = choose_publication_endpoints([candidate])
 
-    assert decision["status"] == "diagnostic_only"
+    assert decision["status"] == "ok"
     assert any(
         "modulation is unavailable" in reason
-        for reason in decision["best_diagnostic_endpoint"]["rejection_reasons"]
+        for reason in decision["best_physical_endpoint"]["warnings"]
     )
 
 
@@ -321,7 +324,7 @@ def test_endpoint_summary_normalization_does_not_invent_modulation(tmp_path: Pat
     assert decision["status"] == "diagnostic_only"
     normalized = decision["best_diagnostic_endpoint"]
     assert normalized["modulation_p95"] != normalized["modulation_p95"]
-    assert any("modulation is unavailable" in reason for reason in normalized["rejection_reasons"])
+    assert any("modulation is unavailable" in reason for reason in normalized["warnings"])
 
 
 def test_endpoint_chooser_rejects_high_goof_for_publication():

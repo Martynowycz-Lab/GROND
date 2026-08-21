@@ -655,6 +655,7 @@ def choose_publication_endpoint(
     rejections: list[dict[str, object]] = []
     for row in finite:
         reasons = []
+        warnings = []
         goof = _finite_float(row.get("shelxl_GooF"), float("inf"))
         r1 = _finite_float(row.get("shelxl_R1all"), float("inf"))
         free_wr2 = _finite_float(row.get("native_free_wR2_all"), float("inf"))
@@ -691,11 +692,12 @@ def choose_publication_endpoint(
         if detector_bins >= 8 and not bool(detector_independent_calibration):
             reasons.append("8x8 detector field requires independent calibration")
         if not math.isfinite(modulation_p95):
-            reasons.append("missing finite scale-invariant endpoint modulation p95")
+            warnings.append("missing finite scale-invariant endpoint modulation p95")
         elif modulation_p95 > float(max_modulation_p95):
-            reasons.append(
-                f"endpoint modulation p95 {modulation_p95:.4g} exceeds {float(max_modulation_p95):.4g}"
+            warnings.append(
+                f"endpoint modulation p95 {modulation_p95:.4g} exceeds warning level {float(max_modulation_p95):.4g}"
             )
+        row["modulation_warnings"] = warnings
         if policy == "bic" and not math.isfinite(ic_value):
             reasons.append(f"missing finite information criterion {ic_name!r}")
         if policy == "gated-smallest":
@@ -799,6 +801,15 @@ def choose_publication_endpoint(
         "passing_count": len(passing),
         "candidate_count": len(finite),
         "rejections": rejections,
+        "modulation_warnings": [
+            {
+                "spec": row.get("spec"),
+                "wght_mode": row.get("wght_mode"),
+                "warnings": list(row.get("modulation_warnings") or []),
+            }
+            for row in finite
+            if row.get("modulation_warnings")
+        ],
     }
 
 
@@ -812,7 +823,8 @@ def write_publication_report(path: Path, selection: dict[str, object], rows_out:
         "This report separates the low-R diagnostic corrected-HKL export from the prospectively selected publication export. "
         "The publication branch uses fixed row corrections, a declared scale contract, endpoint sigma calibration, "
         "and a fixed `WGHT 0 0` branch unless requested otherwise. The default selector applies endpoint, held-out-row, "
-        "and detector-field validation gates, then chooses the smallest passing scale contract.",
+        "and detector-field validation gates, then chooses the smallest passing scale contract. Endpoint modulation p95 "
+        "is reported as a warning diagnostic and never blocks selection.",
         "",
         f"Runtime: `{elapsed_s:.2f}` seconds.",
         f"Selection status: `{selection.get('status')}`.",

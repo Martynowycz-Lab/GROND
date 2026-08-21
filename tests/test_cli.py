@@ -4132,7 +4132,7 @@ def test_multi_shelxl_feedback_zero_cycles_can_recompute_rows_without_ls1(tmp_pa
 
 
 @pytest.mark.parametrize("modulation_p95", [None, 20.1])
-def test_multi_shelxl_feedback_rejects_missing_or_excessive_modulation(
+def test_multi_shelxl_feedback_warns_but_adopts_missing_or_excessive_modulation(
     tmp_path: Path,
     monkeypatch,
     modulation_p95: float | None,
@@ -4155,7 +4155,7 @@ def test_multi_shelxl_feedback_rejects_missing_or_excessive_modulation(
     monkeypatch.setattr(cli, "run_logged", lambda *args, **kwargs: None)
     prep = PrepConfig(structure=str(start_model), datasets=[DatasetSpec(name="a", hkl="a.hkl")])
     args = argparse.Namespace(
-        shelxl_feedback_cycles=2,
+        shelxl_feedback_cycles=1,
         shelxl_feedback_shelxl_iterations=1,
         publication_endpoint_max_modulation_p95=20.0,
         dry_run=False,
@@ -4173,10 +4173,12 @@ def test_multi_shelxl_feedback_rejects_missing_or_excessive_modulation(
         structure_dataset_policy={"status": "disabled"},
     )
 
-    assert current_model == str(start_model)
-    assert summary["status"] == "stopped_endpoint_modulation_gate"
-    assert summary["cycles"][0]["adopted_for_feedback"] is False
-    assert summary["cycles"][0]["endpoint_modulation_gate"]["passed"] is False
+    assert current_model == str(output_model)
+    assert summary["status"] == "ok"
+    assert summary["cycles"][0]["adopted_for_feedback"] is True
+    assert summary["cycles"][0]["endpoint_modulation_gate"]["passed"] is True
+    assert summary["cycles"][0]["endpoint_modulation_gate"]["blocking"] is False
+    assert summary["cycles"][0]["endpoint_modulation_gate"]["status"] == "warning"
 
 
 def test_multi_shelxl_feedback_stops_on_invalid_record_with_usable_res(tmp_path: Path, monkeypatch):
