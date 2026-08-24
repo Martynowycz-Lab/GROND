@@ -27,7 +27,8 @@ Long manual child stages now tee their high-level `STEP`, `DONE`, elapsed-time,
 and ETA stream to both the terminal and the stage-local `manual_*.log` file.
 Child Python output is unbuffered, so a healthy thickness search no longer
 looks frozen while its detailed per-trial logs continue in the stage `logs/`
-directory.
+directory. If a child emits no high-level line for 30 seconds, the controller
+prints an elapsed-time heartbeat until output resumes.
 
 Experimental XDS target-transform fits now restore their corrected HKLF4
 endpoints to the ordinary XDS IOBS intensity and uncertainty convention before

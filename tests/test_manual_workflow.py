@@ -53,18 +53,20 @@ def _write_source_summary(path: Path, model: Path, hkl: Path, transform: str, th
     )
 
 
-def test_manual_child_progress_is_teed_live_and_logged(tmp_path: Path, capsys):
+def test_manual_child_progress_is_teed_live_and_logged(tmp_path: Path, capsys, monkeypatch):
+    monkeypatch.setenv("GROND_MANUAL_HEARTBEAT_SECONDS", "0.01")
     record = _run_stage_command(
         [
             sys.executable,
             "-c",
-            "print('STEP live progress', flush=True)",
+            "import time; print('STEP live progress', flush=True); time.sleep(0.04)",
             "--out-dir",
             str(tmp_path),
         ]
     )
     captured = capsys.readouterr().out
     assert "STEP live progress" in captured
+    assert "WAIT" in captured
     assert "DONE" in captured
     log = Path(str(record["log"]))
     assert "STEP live progress" in log.read_text()

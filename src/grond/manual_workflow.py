@@ -3,10 +3,12 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import queue
 import shlex
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Mapping
 from dataclasses import asdict
@@ -77,6 +79,10 @@ def _run_stage_command(command: list[str]) -> dict[str, object]:
     inherited = str(env.get("PYTHONPATH", "") or "")
     env["PYTHONPATH"] = package_src + (f"{os.pathsep}{inherited}" if inherited else "")
     env["PYTHONUNBUFFERED"] = "1"
+    heartbeat_seconds = max(
+        0.01,
+        float(env.get("GROND_MANUAL_HEARTBEAT_SECONDS", "30") or 30.0),
+    )
     out_dir: Path | None = None
     if "--out-dir" in command:
         out_dir = Path(command[command.index("--out-dir") + 1]).expanduser().resolve()
@@ -100,11 +106,34 @@ def _run_stage_command(command: list[str]) -> dict[str, object]:
             bufsize=1,
         )
         assert process.stdout is not None
-        for line in process.stdout:
+        output_queue: queue.Queue[str | None] = queue.Queue()
+
+        def read_output() -> None:
+            assert process.stdout is not None
+            for line in process.stdout:
+                output_queue.put(line)
+            output_queue.put(None)
+
+        reader = threading.Thread(target=read_output, daemon=True)
+        reader.start()
+        while True:
+            try:
+                line = output_queue.get(timeout=heartbeat_seconds)
+            except queue.Empty:
+                running_seconds = time.perf_counter() - started
+                print(
+                    f"WAIT {child_name} still running ({running_seconds:.0f}s); "
+                    f"controller log {log_path}",
+                    flush=True,
+                )
+                continue
+            if line is None:
+                break
             print(line, end="", flush=True)
             log.write(line)
             log.flush()
         returncode = process.wait()
+        reader.join(timeout=1.0)
     elapsed = time.perf_counter() - started
     record = {
         "command": command,
