@@ -76,6 +76,7 @@ def _run_stage_command(command: list[str]) -> dict[str, object]:
     package_src = str(Path(__file__).resolve().parents[1])
     inherited = str(env.get("PYTHONPATH", "") or "")
     env["PYTHONPATH"] = package_src + (f"{os.pathsep}{inherited}" if inherited else "")
+    env["PYTHONUNBUFFERED"] = "1"
     out_dir: Path | None = None
     if "--out-dir" in command:
         out_dir = Path(command[command.index("--out-dir") + 1]).expanduser().resolve()
@@ -87,26 +88,32 @@ def _run_stage_command(command: list[str]) -> dict[str, object]:
     with log_path.open("w") as log:
         log.write(f"$ {_command_text(command)}\n\n")
         log.flush()
-        completed = subprocess.run(
+        process = subprocess.Popen(
             command,
-            check=False,
             env=env,
-            stdout=log,
-            stderr=subprocess.STDOUT,
+            stdout=subprocess.PIPE,
             text=True,
+            stderr=subprocess.STDOUT,
+            bufsize=1,
         )
+        assert process.stdout is not None
+        for line in process.stdout:
+            print(line, end="", flush=True)
+            log.write(line)
+            log.flush()
+        returncode = process.wait()
     elapsed = time.perf_counter() - started
     record = {
         "command": command,
         "command_text": _command_text(command),
-        "returncode": int(completed.returncode),
+        "returncode": int(returncode),
         "elapsed_seconds": float(elapsed),
         "log": str(log_path.resolve()),
     }
-    if completed.returncode != 0:
+    if returncode != 0:
         tail = "\n".join(log_path.read_text(errors="replace").splitlines()[-20:])
         raise RuntimeError(
-            f"Manual stage command failed with return code {completed.returncode}: "
+            f"Manual stage command failed with return code {returncode}: "
             f"{record['command_text']}\nLog: {log_path}\nLast log lines:\n{tail}"
         )
     print(f"DONE {child_name} in {elapsed:.1f}s; log {log_path}", flush=True)

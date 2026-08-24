@@ -23,6 +23,11 @@ hash-bound checkpoint containing the selected per-dataset nuisance summaries;
 it does not rerun transform scouting or thickness selection. The selected
 clean feedback cycle is recomputed without another coordinate move so its row
 tables and native maps use the same model.
+Long manual child stages now tee their high-level `STEP`, `DONE`, elapsed-time,
+and ETA stream to both the terminal and the stage-local `manual_*.log` file.
+Child Python output is unbuffered, so a healthy thickness search no longer
+looks frozen while its detailed per-trial logs continue in the stage `logs/`
+directory.
 
 Experimental XDS target-transform fits now restore their corrected HKLF4
 endpoints to the ordinary XDS IOBS intensity and uncertainty convention before

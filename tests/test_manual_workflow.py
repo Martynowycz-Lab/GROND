@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 from grond import cli
-from grond.manual_workflow import _hand_evidence, _manual_checkpoint
+from grond.manual_workflow import _hand_evidence, _manual_checkpoint, _run_stage_command
 
 
 def _run(*arguments: str) -> int:
@@ -50,6 +51,24 @@ def _write_source_summary(path: Path, model: Path, hkl: Path, transform: str, th
         )
         + "\n"
     )
+
+
+def test_manual_child_progress_is_teed_live_and_logged(tmp_path: Path, capsys):
+    record = _run_stage_command(
+        [
+            sys.executable,
+            "-c",
+            "print('STEP live progress', flush=True)",
+            "--out-dir",
+            str(tmp_path),
+        ]
+    )
+    captured = capsys.readouterr().out
+    assert "STEP live progress" in captured
+    assert "DONE" in captured
+    log = Path(str(record["log"]))
+    assert "STEP live progress" in log.read_text()
+    assert record["returncode"] == 0
 
 
 def test_manual_state_handoffs_and_multi_checkpoint(tmp_path: Path):
