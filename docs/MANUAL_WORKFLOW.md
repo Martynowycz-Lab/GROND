@@ -127,6 +127,14 @@ The earliest clean no-NPD cycle within the row-residual tolerance is selected,
 and its rows are recomputed without another coordinate step so maps and row
 statistics use the same model.
 
+For a one-crystal sensitivity or leave-one-out workflow, setup may omit
+`--baseline-hkl`. The controller then prevents a larger-cohort baseline stored
+inside a reused thickness summary from entering the one-crystal endpoint. If a
+genuine conventional HKL for that crystal is available, supply it at setup and
+it overrides the summary provenance. Final reports print starting conventional
+statistics only when that HKL is hash-identical to the HKL beside the starting
+model LST.
+
 Use `--n-basis N` only for a deliberate fixed-basis experiment. Zero retains
 adaptive production basis selection. `--n-points` defaults to 20.
 

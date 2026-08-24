@@ -23,6 +23,9 @@ def test_manual_help_is_stage_specific():
     thickness = parser.parse_args(["manual", "thickness", "--n-basis-grid", "24,48"])
     feedback = parser.parse_args(["manual", "feedback", "--cycles", "3"])
     status = parser.parse_args(["manual", "status", "--json"])
+    single_replay = parser.parse_args(
+        ["refine", "--out-dir", "out", "--ignore-source-baseline-hkl"]
+    )
     assert thickness.stage == "thickness"
     assert thickness.n_basis_grid == "24,48"
     assert not hasattr(thickness, "cycles")
@@ -30,6 +33,7 @@ def test_manual_help_is_stage_specific():
     assert feedback.cycles == 3
     assert not hasattr(feedback, "thickness_grid_nm")
     assert status.json is True
+    assert single_replay.ignore_source_baseline_hkl is True
 
 
 def test_manual_child_stream_is_concise_by_default():
@@ -240,6 +244,41 @@ def test_manual_hand_evidence_is_explicit_and_sign_consistent():
     assert _hand_evidence(mixed)["recommendation"] == "ambiguous"
 
 
+def test_manual_single_dataset_checkpoint_promotes_source_summary(tmp_path: Path):
+    model = tmp_path / "model.res"
+    model.write_text(
+        "TITL model\nCELL 0.025079 5 6 7 90 90 90\nLATT -1\nSFAC C\nUNIT 1\n"
+        "C1 1 0 0 0 1 0.05\nHKLF 4\nEND\n"
+    )
+    dataset_dir = tmp_path / "dataset"
+    dataset_dir.mkdir()
+    hkl = dataset_dir / "INTEGRATE.HKL"
+    hkl.write_text("!UNIT_CELL_CONSTANTS= 5 6 7 90 90 90\n!END_OF_HEADER\n!END_OF_DATA\n")
+    summary = tmp_path / "source" / "summary.json"
+    _write_source_summary(summary, model, hkl, "identity", 1000.0)
+    root = tmp_path / "manual"
+    assert _run("setup", "--out-dir", str(root), "--structure", str(model), "--dataset", f"one={dataset_dir}") == 0
+    workflow_path = root / "manual_workflow.json"
+    assert _run("scout", "--workflow", str(workflow_path), "--skip") == 0
+    assert (
+        _run(
+            "thickness",
+            "--workflow",
+            str(workflow_path),
+            "--skip",
+            "--summary",
+            f"one={summary}",
+        )
+        == 0
+    )
+    assert _run("hand", "--workflow", str(workflow_path), "--skip") == 0
+    state = json.loads(workflow_path.read_text())
+    checkpoint = _manual_checkpoint(state, root / "checkpoint.json")
+    assert checkpoint["dataset_count"] == 1
+    assert checkpoint["source_summary"] == str(summary.resolve())
+    assert checkpoint["source_run"] == str(summary.parent.resolve())
+
+
 def test_manual_finish_writes_openable_handoff_without_maps(tmp_path: Path):
     model = tmp_path / "endpoint.res"
     model.write_text("TITL endpoint\nCELL 0.025079 5 6 7 90 90 90\nEND\n")
@@ -279,10 +318,13 @@ def test_manual_finish_writes_openable_handoff_without_maps(tmp_path: Path):
     assert payload["endpoint"]["R1_all"] == 0.1116
     assert payload["endpoint"]["GooF"] == 0.775
     assert payload["endpoint"]["npd_count"] == 0
-    assert payload["feedback_architecture"]["coordinate_step"] == "one shared SHELXL LS1 update per macrocycle"
+    assert payload["starting_endpoint"]["comparable_to_selected_support"] is False
+    assert payload["feedback_architecture"]["coordinate_step"] == (
+        "one single-crystal SHELXL LS1 update per macrocycle"
+    )
     assert payload["scales"]["applied"]["frame_parameters"] == 0
     assert (root / "MANUAL_TOP_LEVEL_SUMMARY.md").exists()
-    assert "one inverse-variance/model-symmetry merge" in (root / "MANUAL_TOP_LEVEL_SUMMARY.md").read_text()
+    assert "one SHELXL LS1 coordinate update" in (root / "MANUAL_TOP_LEVEL_SUMMARY.md").read_text()
     assert (root / "06_finish" / "handoff.json").exists()
 
     # Going back to an earlier stage keeps its old files but invalidates later

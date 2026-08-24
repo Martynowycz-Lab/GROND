@@ -768,6 +768,7 @@ def _manual_checkpoint(workflow: Mapping[str, object], output: Path) -> dict[str
             }
         )
     model = Path(str(workflow.get("chosen_model") or prep.structure)).resolve()
+    single_dataset = datasets[0] if len(datasets) == 1 else None
     checkpoint = {
         "schema_version": 1,
         "kind": "grond_continue_checkpoint",
@@ -776,8 +777,8 @@ def _manual_checkpoint(workflow: Mapping[str, object], output: Path) -> dict[str
         "run_dir": str(output.parent),
         "dataset_count": len(datasets),
         "dataset": datasets[0]["name"],
-        "source_run": "",
-        "source_summary": "",
+        "source_run": str(single_dataset["source_run"]) if single_dataset else "",
+        "source_summary": str(single_dataset["source_summary"]) if single_dataset else "",
         "recommended_start_res": str(model),
         "hkl": datasets[0]["hkl"],
         "baseline_hkl": prep.baseline_hkl,
@@ -805,7 +806,9 @@ def manual_feedback(args) -> int:
     out = root / "04_feedback"
     out.mkdir(parents=True, exist_ok=True)
     checkpoint_path = out / "input_checkpoint.json"
-    _manual_checkpoint(workflow, checkpoint_path)
+    checkpoint = _manual_checkpoint(workflow, checkpoint_path)
+    single_dataset = int(checkpoint.get("dataset_count", 0) or 0) == 1
+    ignore_source_baseline = single_dataset and not str(checkpoint.get("baseline_hkl") or "").strip()
     command_line = [
         *_child_base(args),
         "refine",
@@ -839,20 +842,44 @@ def manual_feedback(args) -> int:
     ]
     if int(args.n_basis) > 0:
         command_line += ["--n-basis", str(args.n_basis), "--final-n-basis", str(args.n_basis)]
+    if ignore_source_baseline:
+        command_line.append("--ignore-source-baseline-hkl")
     command = _run_stage_command(command_line, verbose=_verbose_child_output(args))
-    push_summary = _read_json(out / "push_endpoint_summary.json")
-    decision = _read_json(out / "multi_endpoint_push_decision.json")
-    selected = decision.get("selected_cycle") or decision.get("best_native_cycle")
+    if single_dataset:
+        push_summary_path = out / "shelxl_feedback_loop_summary.json"
+        decision_path = out / "endpoint_push_decision.json"
+        feedback_summary_path = push_summary_path
+        report_path = out / "ENDPOINT_PUSH_REPORT.md"
+        push_summary = _read_json(push_summary_path)
+        decision = _read_json(decision_path)
+        selected = decision.get("selected_safe_cycle") or decision.get("best_native_cycle")
+    else:
+        push_summary_path = out / "push_endpoint_summary.json"
+        decision_path = out / "multi_endpoint_push_decision.json"
+        feedback_summary_path = out / "runs" / "shared_shelxl_feedback" / "multi_shelxl_feedback_loop_summary.json"
+        report_path = out / "MULTI_ENDPOINT_PUSH_REPORT.md"
+        push_summary = _read_json(push_summary_path)
+        decision = _read_json(decision_path)
+        selected = decision.get("selected_cycle") or decision.get("best_native_cycle")
     if not isinstance(selected, Mapping) or not selected.get("model"):
         raise RuntimeError("Feedback produced no clean selected model; inspect ENDPOINT_PUSH_REPORT.md")
     selected_model = str(Path(str(selected["model"])).resolve())
-    feedback_summary_path = out / "runs" / "shared_shelxl_feedback" / "multi_shelxl_feedback_loop_summary.json"
     feedback_summary = _read_json(feedback_summary_path)
     cycle_number = int(selected.get("cycle", 0) or 0)
-    cycle_record = next(
-        (row for row in feedback_summary.get("cycles", []) if int(row.get("cycle", 0) or 0) == cycle_number),
-        {},
-    )
+    if single_dataset:
+        cycle_record = next(
+            (
+                row
+                for row in feedback_summary.get("runs", [])
+                if str(row.get("label") or "") == f"cycle_{cycle_number:02d}"
+            ),
+            {},
+        )
+    else:
+        cycle_record = next(
+            (row for row in feedback_summary.get("cycles", []) if int(row.get("cycle", 0) or 0) == cycle_number),
+            {},
+        )
     selected_rows_out = out / "selected_rows"
     recompute_command = [
         *_child_base(args),
@@ -880,15 +907,26 @@ def manual_feedback(args) -> int:
     ]
     if int(args.n_basis) > 0:
         recompute_command += ["--n-basis", str(args.n_basis), "--final-n-basis", str(args.n_basis)]
+    if ignore_source_baseline:
+        recompute_command.append("--ignore-source-baseline-hkl")
     recompute = _run_stage_command(recompute_command, verbose=_verbose_child_output(args))
     selected_feedback_path = (
-        selected_rows_out / "runs" / "shared_shelxl_feedback" / "multi_shelxl_feedback_loop_summary.json"
+        selected_rows_out / "shelxl_feedback_loop_summary.json"
+        if single_dataset
+        else selected_rows_out / "runs" / "shared_shelxl_feedback" / "multi_shelxl_feedback_loop_summary.json"
     )
     selected_feedback = _read_json(selected_feedback_path)
-    final_rows = selected_feedback.get("final_row_recompute")
-    if not isinstance(final_rows, Mapping) or final_rows.get("status") != "ok":
-        raise RuntimeError("Selected-model row recomputation did not complete")
-    raw_runs = dict(final_rows.get("raw_runs") or {})
+    if single_dataset:
+        final_run_text = str(selected_feedback.get("final_row_stats_run") or "")
+        final_run = Path(final_run_text)
+        if not final_run.is_dir() or not (final_run / "native_dyn_calc.csv").is_file():
+            raise RuntimeError("Selected-model single-dataset row recomputation did not complete")
+        raw_runs = {str(checkpoint.get("dataset") or "dataset"): str(final_run.resolve())}
+    else:
+        final_rows = selected_feedback.get("final_row_recompute")
+        if not isinstance(final_rows, Mapping) or final_rows.get("status") != "ok":
+            raise RuntimeError("Selected-model row recomputation did not complete")
+        raw_runs = dict(final_rows.get("raw_runs") or {})
     workflow["chosen_model"] = selected_model
     handoff = _record_stage(
         workflow_path,
@@ -900,21 +938,27 @@ def manual_feedback(args) -> int:
             "checkpoint": str(checkpoint_path),
             "selected_model": selected_model,
             "selected_cycle": cycle_number,
-            "selected_endpoint_combined_dir": str(cycle_record.get("combined", "")),
+            "selected_endpoint_combined_dir": str(
+                cycle_record.get("combined") or Path(selected_model).parent
+            ),
             "selected_row_runs": raw_runs,
             "feedback_summary": str(feedback_summary_path),
             "selected_row_recompute_summary": str(selected_feedback_path),
-            "report": str(out / "MULTI_ENDPOINT_PUSH_REPORT.md"),
-            "push_summary": str(out / "push_endpoint_summary.json"),
-            "feedback_status": push_summary.get("status", ""),
-            "decision": str(out / "multi_endpoint_push_decision.json"),
+            "report": str(report_path),
+            "push_summary": str(push_summary_path),
+            "feedback_status": push_summary.get("status") or ("ready" if selected_model else ""),
+            "decision": str(decision_path),
             "headline": {
                 "selected_cycle": cycle_number,
                 "endpoint_R1all": f"{100.0 * float(selected.get('endpoint_R1_all', float('nan'))):.2f}%",
                 "endpoint_wR2all": f"{100.0 * float(selected.get('endpoint_wR2_all', float('nan'))):.2f}%",
                 "endpoint_GooF": selected.get("endpoint_GooF", "n/a"),
-                "NPD/split": f"{selected.get('npd_count', 'n/a')}/{selected.get('split_count', 'n/a')}",
-                "coordinate_updates": "one joint inverse-variance SHELXL LS1 per macrocycle",
+                "NPD/split": f"{selected.get('npd_count', len(selected.get('npd_atoms') or []))}/{selected.get('split_count', 'n/a')}",
+                "coordinate_updates": (
+                    "one single-crystal SHELXL LS1 per macrocycle"
+                    if single_dataset
+                    else "one joint inverse-variance SHELXL LS1 per macrocycle"
+                ),
             },
         },
         command={"feedback": command, "selected_row_recompute": recompute},
@@ -1188,6 +1232,11 @@ def _manual_markdown_summary(payload: Mapping[str, object]) -> str:
     hand = payload.get("hand") if isinstance(payload.get("hand"), Mapping) else {}
     scales = payload.get("scales") if isinstance(payload.get("scales"), Mapping) else {}
     applied_scales = scales.get("applied") if isinstance(scales.get("applied"), Mapping) else {}
+    starting_note = (
+        ""
+        if baseline.get("comparable_to_selected_support", False)
+        else f"Starting endpoint note: {baseline.get('reason', 'not available')}."
+    )
     lines = [
         "# GROND Manual Workflow Summary",
         "",
@@ -1200,9 +1249,10 @@ def _manual_markdown_summary(payload: Mapping[str, object]) -> str:
         f"| Starting conventional | {_percent(baseline.get('R1_gt'))} | {_percent(baseline.get('R1_all'))} | {_percent(baseline.get('wR2_all'))} | {baseline.get('GooF', 'n/a')} | {baseline.get('npd_count', 'n/a')}/{baseline.get('split_count', 'n/a')} |",
         f"| Selected GROND | {_percent(endpoint.get('R1_gt'))} | {_percent(endpoint.get('R1_all'))} | {_percent(endpoint.get('wR2_all'))} | {endpoint.get('GooF', 'n/a')} | {endpoint.get('npd_count', 'n/a')}/{endpoint.get('split_count', 'n/a')} |",
         "",
+        starting_note,
+        "" if starting_note else "",
         f"Selected feedback cycle: **{payload.get('selected_cycle', 'n/a')}**. "
-        "Each macrocycle recomputes rows separately, performs one inverse-variance/model-symmetry merge, "
-        "and executes one shared SHELXL LS1 coordinate update.",
+        f"{(payload.get('feedback_architecture') or {}).get('summary', '')}",
         "",
         "## JANA/PETS-style matched row statistics",
         "",
@@ -1316,6 +1366,7 @@ def manual_finish(args) -> int:
     out.mkdir(parents=True, exist_ok=True)
     model = Path(str(feedback["outputs"]["selected_model"])).resolve()
     row_runs = {name: Path(path) for name, path in feedback["outputs"]["selected_row_runs"].items()}
+    single_dataset_endpoint = len(row_runs) == 1
     maps: dict[str, object]
     started = time.perf_counter()
     if args.skip or args.map_mode == "off":
@@ -1342,11 +1393,25 @@ def manual_finish(args) -> int:
     source_model_text = str(workflow.get("source_model") or "").strip()
     source_model = Path(source_model_text) if source_model_text else None
     source_lst = source_model.with_suffix(".lst") if source_model is not None else None
+    source_hkl = source_model.with_suffix(".hkl") if source_model is not None else None
+    setup_stage = _stage(workflow, "setup")
+    setup_outputs = setup_stage.get("outputs") if isinstance(setup_stage.get("outputs"), Mapping) else {}
+    baseline_hkl_text = str(setup_outputs.get("baseline_hkl") or "").strip()
+    baseline_hkl = Path(baseline_hkl_text) if baseline_hkl_text else None
+    starting_endpoint_comparable = bool(
+        source_lst is not None
+        and source_lst.is_file()
+        and source_hkl is not None
+        and source_hkl.is_file()
+        and baseline_hkl is not None
+        and baseline_hkl.is_file()
+        and _sha256(source_hkl) == _sha256(baseline_hkl)
+    )
     starting_metrics = (
-        parse_shelx_lst_metrics(source_lst) if source_lst is not None and source_lst.is_file() else {}
+        parse_shelx_lst_metrics(source_lst) if starting_endpoint_comparable else {}
     )
     starting_pathology = (
-        parse_shelx_lst_pathologies(source_lst) if source_lst is not None and source_lst.is_file() else {}
+        parse_shelx_lst_pathologies(source_lst) if starting_endpoint_comparable else {}
     )
     prep_path = Path(str(workflow.get("prep") or ""))
     transforms: dict[str, str] = {}
@@ -1383,12 +1448,33 @@ def manual_finish(args) -> int:
     decision_path = Path(str(feedback_outputs.get("decision") or root / "04_feedback" / "multi_endpoint_push_decision.json"))
     decision = _read_json(decision_path) if decision_path.is_file() else {}
     selected_cycle = int(feedback_outputs.get("selected_cycle", 0) or 0)
+    feedback_summary_path = Path(str(feedback_outputs.get("feedback_summary") or ""))
+    feedback_summary = _read_json(feedback_summary_path) if feedback_summary_path.is_file() else {}
+    single_run_metrics = {
+        int(str(run.get("label") or "0").split("_")[-1]): run.get("metrics", {})
+        for run in feedback_summary.get("runs", [])
+        if str(run.get("label") or "").startswith("cycle_")
+    }
     feedback_cycles = []
     for row in decision.get("rows", []):
         if not isinstance(row, Mapping):
             continue
-        feedback_cycles.append({**dict(row), "selected": int(row.get("cycle", 0) or 0) == selected_cycle})
-    selected_decision = decision.get("selected_cycle") if isinstance(decision.get("selected_cycle"), Mapping) else {}
+        cycle = int(row.get("cycle", 0) or 0)
+        run_metrics = single_run_metrics.get(cycle, {})
+        feedback_cycles.append(
+            {
+                **dict(row),
+                "dyn_R1_all": row.get("dyn_R1_all", run_metrics.get("native_dyn_R1_all")),
+                "dyn_wR2_all": row.get(
+                    "dyn_wR2_all",
+                    run_metrics.get("native_dyn_wR2_all", row.get("native_wR2_all")),
+                ),
+                "npd_count": row.get("npd_count", len(row.get("npd_atoms") or [])),
+                "selected": cycle == selected_cycle,
+            }
+        )
+    selected_decision_raw = decision.get("selected_cycle") or decision.get("selected_safe_cycle")
+    selected_decision = selected_decision_raw if isinstance(selected_decision_raw, Mapping) else {}
     stage_timings = {}
     for stage_name, stage in workflow.get("stages", {}).items():
         command_record = stage.get("command") if isinstance(stage.get("command"), Mapping) else {}
@@ -1402,14 +1488,34 @@ def manual_finish(args) -> int:
         "selected_cycle": selected_cycle,
         "selection_reason": decision.get("selection_reason", ""),
         "feedback_architecture": {
-            "per_dataset_step": "Bloch/Born row recomputation and pinned nuisance-scale fit; no coordinate refinement",
-            "joint_step": "model-symmetry merge with cross-dataset overlap scaling and inverse-variance weights",
-            "coordinate_step": "one shared SHELXL LS1 update per macrocycle",
+            "per_dataset_step": "Bloch/Born row recomputation and pinned nuisance-scale fit; no separate coordinate refinement",
+            "joint_step": (
+                "not applicable for one crystal"
+                if single_dataset_endpoint
+                else "model-symmetry merge with cross-dataset overlap scaling and inverse-variance weights"
+            ),
+            "coordinate_step": (
+                "one single-crystal SHELXL LS1 update per macrocycle"
+                if single_dataset_endpoint
+                else "one shared SHELXL LS1 update per macrocycle"
+            ),
+            "summary": (
+                "Each macrocycle recomputes the crystal rows/scales and executes one SHELXL LS1 coordinate update."
+                if single_dataset_endpoint
+                else "Each macrocycle recomputes rows separately, performs one inverse-variance/model-symmetry merge, and executes one shared SHELXL LS1 coordinate update."
+            ),
             "rows_recomputed_after_selection": True,
         },
         "starting_endpoint": {
             "model": str(source_model) if source_model is not None else "",
             "lst": str(source_lst) if source_lst is not None and source_lst.is_file() else "",
+            "baseline_hkl": str(baseline_hkl) if baseline_hkl is not None else "",
+            "comparable_to_selected_support": starting_endpoint_comparable,
+            "reason": (
+                "source-model LST and supplied baseline HKL are hash-matched"
+                if starting_endpoint_comparable
+                else "starting SHELXL statistics omitted because the source-model LST is not tied to the supplied baseline HKL"
+            ),
             **starting_metrics,
             **starting_pathology,
         },
@@ -1419,8 +1525,8 @@ def manual_finish(args) -> int:
             "lst": str(endpoint_lst) if endpoint_lst.exists() else "",
             **metrics,
             **pathology,
-            "parameters": selected_decision.get("endpoint_parameters"),
-            "restraints": selected_decision.get("endpoint_restraints"),
+            "parameters": selected_decision.get("endpoint_parameters", selected_decision.get("parameters")),
+            "restraints": selected_decision.get("endpoint_restraints", selected_decision.get("restraints")),
         },
         "datasets": dataset_payload,
         "hand": hand_summary,

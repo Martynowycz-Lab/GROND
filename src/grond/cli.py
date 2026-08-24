@@ -18196,6 +18196,8 @@ def cmd_push_endpoint(args: argparse.Namespace) -> int:
         cmd += ["--hkl", args.hkl]
     if args.baseline_hkl:
         cmd += ["--baseline-hkl", args.baseline_hkl]
+    if bool(getattr(args, "ignore_source_baseline_hkl", False)):
+        cmd.append("--ignore-source-baseline-hkl")
     if args.hkl_transform:
         cmd += [f"--hkl-transform={args.hkl_transform}"]
     if args.make_maps_on_final:
@@ -21173,6 +21175,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_push.add_argument("--dry-run", action="store_true")
     p_push.add_argument("--hkl", default="", help="Override HKL path if the source summary does not record it.")
     p_push.add_argument("--baseline-hkl", default="", help="Optional conventional HKL for baseline/reference endpoint comparisons.")
+    p_push.add_argument(
+        "--ignore-source-baseline-hkl",
+        action="store_true",
+        help=(
+            "Do not inherit a conventional baseline HKL embedded in --source-summary. "
+            "This prevents a larger-cohort baseline from entering a single-crystal leave-one-out endpoint."
+        ),
+    )
     p_push.add_argument("--hkl-transform", default="", help="Override signed HKL transform. Defaults to the source summary.")
     p_push.add_argument(
         "--multi-endpoint-merge-key",

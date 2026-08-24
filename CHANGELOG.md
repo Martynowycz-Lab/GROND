@@ -41,6 +41,15 @@ they were not replayed into the shared endpoint. The report states explicitly
 that per-crystal feedback jobs only recompute rows/scales and that each
 macrocycle contains one joint inverse-variance/model-symmetry merge and one
 shared SHELXL LS1 coordinate update.
+Single-dataset manual workflows now promote their pinned source summary into the
+top-level continuation checkpoint and understand the single-dataset feedback,
+decision, and final-row-recompute artifact layout. A leave-one-crystal-out run
+can explicitly suppress a larger-cohort baseline HKL inherited from a reused
+nuisance summary with `--ignore-source-baseline-hkl`; the manual controller
+does this automatically when no baseline was supplied at setup. Final reports
+show starting SHELXL statistics only when the source-model HKL and configured
+baseline HKL are hash-identical, preventing an unrelated cohort baseline from
+appearing in a single-crystal comparison.
 
 Experimental XDS target-transform fits now restore their corrected HKLF4
 endpoints to the ordinary XDS IOBS intensity and uncertainty convention before

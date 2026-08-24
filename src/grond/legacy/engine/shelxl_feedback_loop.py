@@ -259,7 +259,11 @@ def native_command(
     inputs = source_summary.get("inputs") or {}
     cfg = source_summary.get("config") or {}
     hkl = args.hkl or inputs.get("hkl") or cfg.get("hkl")
-    baseline_hkl = args.baseline_hkl or inputs.get("baseline_hkl") or cfg.get("baseline_hkl") or ""
+    baseline_hkl = (
+        ""
+        if bool(getattr(args, "ignore_source_baseline_hkl", False))
+        else args.baseline_hkl or inputs.get("baseline_hkl") or cfg.get("baseline_hkl") or ""
+    )
     hkl_transform = args.hkl_transform or inputs.get("hkl_transform") or cfg.get("hkl_transform") or "identity"
     if not hkl:
         raise SystemExit("No HKL was supplied and source summary does not record inputs.hkl/config.hkl")
@@ -524,6 +528,14 @@ def main() -> None:
     ap.add_argument("--python", default=sys.executable)
     ap.add_argument("--hkl", default="")
     ap.add_argument("--baseline-hkl", default="")
+    ap.add_argument(
+        "--ignore-source-baseline-hkl",
+        action="store_true",
+        help=(
+            "Do not inherit baseline_hkl from the source summary. Use this for a single-crystal leave-one-out "
+            "replay when the pinned nuisance summary came from a larger cohort."
+        ),
+    )
     ap.add_argument("--hkl-transform", default="")
     ap.add_argument("--cycles", type=int, default=3)
     ap.add_argument("--n-basis", type=int, default=20)
