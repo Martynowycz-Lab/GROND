@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import queue
 import shlex
@@ -72,7 +73,16 @@ def _command_text(command: list[str]) -> str:
     return shlex.join(command)
 
 
-def _run_stage_command(command: list[str]) -> dict[str, object]:
+def _manual_stream_line(line: str, *, verbose: bool) -> bool:
+    """Return whether a child line belongs on the concise controller stream."""
+
+    if verbose:
+        return True
+    stripped = line.lstrip()
+    return stripped.startswith(("STEP", "DONE", "FAILED", "WARN", "WAIT", "RERUN", "ERROR"))
+
+
+def _run_stage_command(command: list[str], *, verbose: bool = False) -> dict[str, object]:
     started = time.perf_counter()
     env = dict(os.environ)
     package_src = str(Path(__file__).resolve().parents[1])
@@ -129,7 +139,8 @@ def _run_stage_command(command: list[str]) -> dict[str, object]:
                 continue
             if line is None:
                 break
-            print(line, end="", flush=True)
+            if _manual_stream_line(line, verbose=verbose):
+                print(line, end="", flush=True)
             log.write(line)
             log.flush()
         returncode = process.wait()
@@ -181,6 +192,10 @@ def _tool_args(args) -> list[str]:
     if bool(getattr(args, "allow_missing_tools", False)):
         out.append("--allow-missing-tools")
     return out
+
+
+def _verbose_child_output(args) -> bool:
+    return bool(getattr(args, "verbose_child_output", False))
 
 
 def _next_command(stage: str, workflow_path: Path, extra: str = "") -> str:
@@ -235,6 +250,15 @@ def _record_stage(
 
 def _print_handoff(handoff: Mapping[str, object]) -> None:
     outputs = handoff.get("outputs") if isinstance(handoff.get("outputs"), Mapping) else {}
+    headline = outputs.get("headline") if isinstance(outputs.get("headline"), Mapping) else {}
+    print(f"\nRESULT {handoff.get('stage')}: {handoff.get('status')}")
+    for label, value in headline.items():
+        print(f"  {str(label).replace('_', ' ')}: {value}")
+    for warning in handoff.get("warnings") or []:
+        print(f"  warning: {warning}")
+    if handoff.get("next_command"):
+        print(f"  next: {handoff['next_command']}")
+    print()
     payload: dict[str, object] = {
         "stage": handoff.get("stage"),
         "status": handoff.get("status"),
@@ -250,6 +274,7 @@ def _print_handoff(handoff: Mapping[str, object]) -> None:
         "summary_json",
         "summary_markdown",
         "map_manifest",
+        "headline",
     ):
         if outputs.get(key):
             payload[key] = outputs[key]
@@ -340,6 +365,11 @@ def manual_setup(args) -> int:
         "structure_sha256": _sha256(structure),
         "baseline_hkl": str(baseline) if baseline else "",
         "datasets": {dataset.name: dataset.hkl for dataset in datasets},
+        "headline": {
+            "datasets": len(datasets),
+            "starting_model": str(structure),
+            "baseline_hkl": str(baseline) if baseline else "not supplied",
+        },
     }
     handoff = _record_stage(
         workflow_path,
@@ -383,7 +413,7 @@ def manual_scout(args) -> int:
             "proper-only",
             *_tool_args(args),
         ]
-        command = _run_stage_command(command_line)
+        command = _run_stage_command(command_line, verbose=_verbose_child_output(args))
         scouted_prep = out / "scouted_prep.json"
         status = "ready"
     if not scouted_prep.is_file():
@@ -401,6 +431,13 @@ def manual_scout(args) -> int:
             "scout_handoff": str(out / "scout_handoff.json") if not args.skip else "",
             "selected_transforms": {
                 dataset.name: dataset.hkl_transform for dataset in load_prep(scouted_prep).datasets
+            },
+            "headline": {
+                "proper_transforms": ", ".join(
+                    f"{dataset.name}={dataset.hkl_transform}"
+                    for dataset in load_prep(scouted_prep).datasets
+                ),
+                "selection": "user asserted" if args.skip else "chemistry-blind scout",
             },
         },
         command=command,
@@ -471,7 +508,7 @@ def manual_thickness(args) -> int:
             "0",
             *_tool_args(args),
         ]
-        command = _run_stage_command(command_line)
+        command = _run_stage_command(command_line, verbose=_verbose_child_output(args))
         source_handoff = _read_json(out / "thickness_handoff.json")
         selected = {
             name: str(row["selected_summary"])
@@ -483,13 +520,21 @@ def manual_thickness(args) -> int:
         raise RuntimeError("Thickness handoff does not contain exactly one selected summary per dataset")
     for path in selected.values():
         _summary_nuisance(Path(path))
+    thickness_headline: dict[str, object] = {}
+    for name, path in selected.items():
+        _summary, nuisance, _config = _summary_nuisance(Path(path))
+        thickness_headline[name] = (
+            f"{float(nuisance.get('thickness_A', float('nan'))) / 10.0:.1f} nm; "
+            f"gradient={nuisance.get('thickness_grad_frac', 'n/a')}; "
+            f"frame offset={nuisance.get('frame_offset', 'n/a')}"
+        )
     handoff = _record_stage(
         workflow_path,
         workflow,
         name="thickness",
         output_dir=out,
         status=status,
-        outputs={"selected_summaries": selected, "report": report},
+        outputs={"selected_summaries": selected, "report": report, "headline": thickness_headline},
         command=command,
         warnings=warnings,
         next_command=_next_command("hand", workflow_path),
@@ -553,7 +598,15 @@ def manual_hand(args) -> int:
             name="hand",
             output_dir=out,
             status="skipped",
-            outputs={"choice": "input", "chosen_model": prep.structure, "diagnostics": {}},
+            outputs={
+                "choice": "input",
+                "chosen_model": prep.structure,
+                "diagnostics": {},
+                "headline": {
+                    "recommendation": "not calculated",
+                    "recorded_choice": "input coordinates retained",
+                },
+            },
             command={"status": "skipped_user_choice"},
             warnings=["Absolute-structure checking was explicitly skipped."],
             next_command=_next_command("feedback", workflow_path),
@@ -577,8 +630,11 @@ def manual_hand(args) -> int:
             diagnostics = {name: _read_json(Path(path)) for name, path in diagnostic_paths.items()}
             handoffs = {name: _read_json(Path(path)) for name, path in handoff_paths.items()}
             commands = {
-                "status": "reused_existing_hand_report_without_recalculation",
-                "elapsed_seconds": 0.0,
+                "selection": {
+                    "status": "reused_existing_hand_report_without_recalculation",
+                    "elapsed_seconds": 0.0,
+                },
+                "evidence_calculation": dict(existing.get("command") or {}),
             }
     if not reuse_report:
         for dataset in prep.datasets:
@@ -598,7 +654,10 @@ def manual_hand(args) -> int:
                 "elastic",
                 *_tool_args(args),
             ]
-            commands[dataset.name] = _run_stage_command(command_line)
+            commands[dataset.name] = _run_stage_command(
+                command_line,
+                verbose=_verbose_child_output(args),
+            )
             diagnostics[dataset.name] = _read_json(dataset_out / "absolute_structure_diagnostic.json")
             handoffs[dataset.name] = _read_json(dataset_out / "hand_handoff.json")
     evidence = _hand_evidence(diagnostics)
@@ -628,6 +687,21 @@ def manual_hand(args) -> int:
         raise SystemExit("--choice must be report, input, inverse, or skip")
     if chosen_model:
         workflow["chosen_model"] = chosen_model
+    selected_sign = -1.0 if choice == "inverse" else 1.0
+    headline_coordinate_label = "selected" if choice in {"input", "inverse"} else "input"
+    hand_headline: dict[str, object] = {
+        "recommendation": evidence["recommendation"],
+        "recorded_choice": choice if choice != "report" else "awaiting explicit choice",
+    }
+    for dataset_name, diagnostic in diagnostics.items():
+        all_block = diagnostic.get("all") if isinstance(diagnostic.get("all"), Mapping) else {}
+        free_block = diagnostic.get("free") if isinstance(diagnostic.get("free"), Mapping) else {}
+        all_z = all_block.get("klar_palatinus_adjusted_hand_z", {})
+        free_z = free_block.get("klar_palatinus_adjusted_hand_z", {})
+        hand_headline[f"{dataset_name}_ZKP_{headline_coordinate_label}_all/free"] = (
+            f"{selected_sign * float(all_z.get('z', float('nan'))):+.2f} / "
+            f"{selected_sign * float(free_z.get('z', float('nan'))):+.2f}"
+        )
     handoff = _record_stage(
         workflow_path,
         workflow,
@@ -643,6 +717,7 @@ def manual_hand(args) -> int:
             "dataset_diagnostics": {
                 name: str(out / name / "absolute_structure_diagnostic.json") for name in diagnostics
             },
+            "headline": hand_headline,
         },
         command={"datasets": commands},
         warnings=(
@@ -764,7 +839,7 @@ def manual_feedback(args) -> int:
     ]
     if int(args.n_basis) > 0:
         command_line += ["--n-basis", str(args.n_basis), "--final-n-basis", str(args.n_basis)]
-    command = _run_stage_command(command_line)
+    command = _run_stage_command(command_line, verbose=_verbose_child_output(args))
     push_summary = _read_json(out / "push_endpoint_summary.json")
     decision = _read_json(out / "multi_endpoint_push_decision.json")
     selected = decision.get("selected_cycle") or decision.get("best_native_cycle")
@@ -805,7 +880,7 @@ def manual_feedback(args) -> int:
     ]
     if int(args.n_basis) > 0:
         recompute_command += ["--n-basis", str(args.n_basis), "--final-n-basis", str(args.n_basis)]
-    recompute = _run_stage_command(recompute_command)
+    recompute = _run_stage_command(recompute_command, verbose=_verbose_child_output(args))
     selected_feedback_path = (
         selected_rows_out / "runs" / "shared_shelxl_feedback" / "multi_shelxl_feedback_loop_summary.json"
     )
@@ -832,6 +907,15 @@ def manual_feedback(args) -> int:
             "report": str(out / "MULTI_ENDPOINT_PUSH_REPORT.md"),
             "push_summary": str(out / "push_endpoint_summary.json"),
             "feedback_status": push_summary.get("status", ""),
+            "decision": str(out / "multi_endpoint_push_decision.json"),
+            "headline": {
+                "selected_cycle": cycle_number,
+                "endpoint_R1all": f"{100.0 * float(selected.get('endpoint_R1_all', float('nan'))):.2f}%",
+                "endpoint_wR2all": f"{100.0 * float(selected.get('endpoint_wR2_all', float('nan'))):.2f}%",
+                "endpoint_GooF": selected.get("endpoint_GooF", "n/a"),
+                "NPD/split": f"{selected.get('npd_count', 'n/a')}/{selected.get('split_count', 'n/a')}",
+                "coordinate_updates": "one joint inverse-variance SHELXL LS1 per macrocycle",
+            },
         },
         command={"feedback": command, "selected_row_recompute": recompute},
         next_command=_next_command("scales", workflow_path),
@@ -853,7 +937,11 @@ def manual_scales(args) -> int:
             name="scales",
             output_dir=out,
             status="skipped",
-            outputs={"datasets": {}},
+            outputs={
+                "datasets": {},
+                "application": "not run; full pinned scales remain active",
+                "headline": {"application": "full pinned frame scales retained; compact audit skipped"},
+            },
             command={"status": "skipped_user_choice"},
             next_command=_next_command("finish", workflow_path),
         )
@@ -875,7 +963,7 @@ def manual_scales(args) -> int:
             str(dataset_out),
             *_tool_args(args),
         ]
-        commands[name] = _run_stage_command(command_line)
+        commands[name] = _run_stage_command(command_line, verbose=_verbose_child_output(args))
         summary_path = dataset_out / "scale_compression_summary.json"
         summary = _read_json(summary_path)
         selected = summary.get("selected") if isinstance(summary.get("selected"), Mapping) else {}
@@ -898,13 +986,30 @@ def manual_scales(args) -> int:
                 )
             },
         }
+    compact_frame_total = sum(
+        int((row.get("selected") or {}).get("group_scale_params") or 0)
+        for row in outputs.values()
+        if isinstance(row, Mapping)
+    )
+    compact_detector_total = sum(
+        int((row.get("selected") or {}).get("detector_scale_params") or 0)
+        for row in outputs.values()
+        if isinstance(row, Mapping)
+    )
     handoff = _record_stage(
         workflow_path,
         workflow,
         name="scales",
         output_dir=out,
         status="ready",
-        outputs={"datasets": outputs, "application": "audit_only; full pinned scales remain active"},
+        outputs={
+            "datasets": outputs,
+            "application": "audit_only; full pinned scales remain active",
+            "headline": {
+                "compact_audit": f"{compact_frame_total} frame + {compact_detector_total} detector parameters",
+                "application": "audit only; endpoint still uses the full pinned scale grouping",
+            },
+        },
         command={"datasets": commands},
         warnings=["Scale compression is audited but not silently applied to the shared endpoint."],
         next_command=_next_command("finish", workflow_path),
@@ -913,30 +1018,293 @@ def manual_scales(args) -> int:
     return 0
 
 
+def _finite_float(value: object) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _percent(value: object) -> str:
+    number = _finite_float(value)
+    return "n/a" if number is None else f"{100.0 * number:.2f}%"
+
+
+def _number(value: object, digits: int = 2, *, signed: bool = False) -> str:
+    number = _finite_float(value)
+    if number is None:
+        return "n/a"
+    sign = "+" if signed else ""
+    return f"{number:{sign}.{digits}f}"
+
+
+def _selected_hand_summary(workflow: Mapping[str, object]) -> dict[str, object]:
+    hand = _stage(workflow, "hand")
+    outputs = hand.get("outputs") if isinstance(hand.get("outputs"), Mapping) else {}
+    choice = str(outputs.get("choice") or "unknown")
+    orientation = -1.0 if choice == "inverse" else 1.0
+    dataset_paths = outputs.get("dataset_diagnostics")
+    datasets: dict[str, object] = {}
+    combined: dict[str, object] = {}
+    numerators = {"all": 0.0, "free": 0.0}
+    variances = {"all": 0.0, "free": 0.0}
+    usable = {"all": 0, "free": 0}
+    if isinstance(dataset_paths, Mapping):
+        for name, path_text in dataset_paths.items():
+            path = Path(str(path_text))
+            if not path.is_file():
+                continue
+            diagnostic = _read_json(path)
+            row: dict[str, object] = {"diagnostic": str(path)}
+            for support in ("all", "free"):
+                support_block = diagnostic.get(support)
+                support_block = support_block if isinstance(support_block, Mapping) else {}
+                kp = support_block.get("klar_palatinus_adjusted_hand_z")
+                kp = kp if isinstance(kp, Mapping) else {}
+                z_input = _finite_float(kp.get("z"))
+                n = int(kp.get("n", 0) or 0)
+                k_effective = _finite_float(kp.get("k_effective_selected_wins_plus_half_ties"))
+                w = _finite_float(kp.get("w"))
+                z_selected = orientation * z_input if z_input is not None else None
+                row[support] = {
+                    "n": n,
+                    "z_input_coordinates": z_input,
+                    "z_selected_coordinates": z_selected,
+                    "paired_row_t_input_coordinates": _finite_float(
+                        support_block.get("paired_row_t_delta_chi2")
+                    ),
+                }
+                if k_effective is not None and w is not None and n > w:
+                    numerators[support] += orientation * (2.0 * k_effective - n)
+                    variances[support] += n - w
+                    usable[support] += 1
+            datasets[str(name)] = row
+    for support in ("all", "free"):
+        combined[support] = {
+            "z_selected_coordinates": (
+                numerators[support] / math.sqrt(variances[support])
+                if usable[support] > 0 and variances[support] > 0.0
+                else None
+            ),
+            "dataset_count": usable[support],
+            "combination": "independent sum-score diagnostic: sum(2k_eff-N)/sqrt(sum(N-w))",
+        }
+    return {
+        "choice": choice,
+        "recommendation": outputs.get("recommendation", "not calculated"),
+        "selected_model": outputs.get("chosen_model", ""),
+        "known_chemistry_used": False,
+        "sign_definition": "positive Z favors the coordinates selected for feedback",
+        "datasets": datasets,
+        "combined": combined,
+    }
+
+
+def _manual_row_statistics(row_runs: Mapping[str, Path], model: Path) -> tuple[dict[str, object], dict[str, object]]:
+    from .legacy.engine.bloch_engine import parse_model
+    from .legacy.engine.row_mr_report import (
+        compute_per_dataset_row_mr,
+        compute_row_mr_summary,
+        read_csv_rows,
+        standard_json_data,
+    )
+
+    rows: list[dict] = []
+    for name, run in row_runs.items():
+        rows.extend(read_csv_rows(run / "native_dyn_calc.csv", name))
+    parsed_model = parse_model(model)
+    combined = compute_row_mr_summary(rows, parsed_model, instability_u=0.01)
+    per_dataset = compute_per_dataset_row_mr(rows, parsed_model, instability_u=0.01)
+    return standard_json_data(combined), standard_json_data(per_dataset)
+
+
+def _manual_scale_summary(
+    workflow: Mapping[str, object],
+    row_runs: Mapping[str, Path],
+) -> dict[str, object]:
+    datasets: dict[str, object] = {}
+    frame_total = 0
+    detector_total = 0
+    row_total = 0
+    for name, run in row_runs.items():
+        summary = _read_json(run / "summary.json")
+        best = summary.get("best_native") if isinstance(summary.get("best_native"), Mapping) else {}
+        frame = int(best.get("frame_scale_count", 0) or 0)
+        detector = int(best.get("detector_scale_count", 0) or 0)
+        n_rows = int(best.get("valid_rows", 0) or 0)
+        frame_total += frame
+        detector_total += detector
+        row_total += n_rows
+        datasets[name] = {
+            "rows": n_rows,
+            "frame_parameters": frame,
+            "detector_parameters": detector,
+            "rows_per_scale_parameter": n_rows / max(frame + detector, 1),
+            "fit_split": best.get("scale_fit_split", ""),
+        }
+    scales_stage = _stage(workflow, "scales")
+    scale_outputs = scales_stage.get("outputs") if isinstance(scales_stage.get("outputs"), Mapping) else {}
+    audit_datasets = scale_outputs.get("datasets") if isinstance(scale_outputs.get("datasets"), Mapping) else {}
+    compact: dict[str, object] = {}
+    compact_frame_total = 0
+    compact_detector_total = 0
+    for name, audit in audit_datasets.items():
+        selected = audit.get("selected") if isinstance(audit, Mapping) else {}
+        selected = selected if isinstance(selected, Mapping) else {}
+        frame = int(selected.get("group_scale_params", 0) or 0)
+        detector = int(selected.get("detector_scale_params", 0) or 0)
+        compact_frame_total += frame
+        compact_detector_total += detector
+        compact[str(name)] = dict(selected)
+    return {
+        "applied_contract": "full pinned frame grouping",
+        "application_note": scale_outputs.get(
+            "application", "scale audit not run; full pinned scales remain active"
+        ),
+        "applied": {
+            "rows": row_total,
+            "frame_parameters": frame_total,
+            "detector_parameters": detector_total,
+            "rows_per_scale_parameter": row_total / max(frame_total + detector_total, 1),
+            "datasets": datasets,
+        },
+        "compact_audit": {
+            "applied_to_endpoint": False,
+            "frame_parameters": compact_frame_total,
+            "detector_parameters": compact_detector_total,
+            "datasets": compact,
+        },
+    }
+
+
 def _manual_markdown_summary(payload: Mapping[str, object]) -> str:
     endpoint = payload.get("endpoint") if isinstance(payload.get("endpoint"), Mapping) else {}
+    baseline = payload.get("starting_endpoint") if isinstance(payload.get("starting_endpoint"), Mapping) else {}
+    row_stats = payload.get("row_statistics") if isinstance(payload.get("row_statistics"), Mapping) else {}
+    combined_rows = row_stats.get("combined") if isinstance(row_stats.get("combined"), Mapping) else {}
+    born = combined_rows.get("born") if isinstance(combined_rows.get("born"), Mapping) else {}
+    dynamic = combined_rows.get("dynamic") if isinstance(combined_rows.get("dynamic"), Mapping) else {}
+    hand = payload.get("hand") if isinstance(payload.get("hand"), Mapping) else {}
+    scales = payload.get("scales") if isinstance(payload.get("scales"), Mapping) else {}
+    applied_scales = scales.get("applied") if isinstance(scales.get("applied"), Mapping) else {}
     lines = [
         "# GROND Manual Workflow Summary",
         "",
         f"Selected model: `{payload.get('model', '')}`",
         "",
-        "## Endpoint",
+        "## Headline result",
         "",
-        f"- RES: `{endpoint.get('res', '')}`",
-        f"- HKL: `{endpoint.get('hkl', '')}`",
-        f"- LST: `{endpoint.get('lst', '')}`",
-        f"- R1gt: `{endpoint.get('R1_gt', 'n/a')}`",
-        f"- R1all: `{endpoint.get('R1_all', 'n/a')}`",
-        f"- wR2all: `{endpoint.get('wR2_all', 'n/a')}`",
-        f"- GooF: `{endpoint.get('GooF', 'n/a')}`",
-        f"- NPD/split: `{endpoint.get('npd_count', 'n/a')}/{endpoint.get('split_count', 'n/a')}`",
+        "| Endpoint | R1gt | R1all | wR2all | GooF | NPD/split |",
+        "|---|---:|---:|---:|---:|---:|",
+        f"| Starting conventional | {_percent(baseline.get('R1_gt'))} | {_percent(baseline.get('R1_all'))} | {_percent(baseline.get('wR2_all'))} | {baseline.get('GooF', 'n/a')} | {baseline.get('npd_count', 'n/a')}/{baseline.get('split_count', 'n/a')} |",
+        f"| Selected GROND | {_percent(endpoint.get('R1_gt'))} | {_percent(endpoint.get('R1_all'))} | {_percent(endpoint.get('wR2_all'))} | {endpoint.get('GooF', 'n/a')} | {endpoint.get('npd_count', 'n/a')}/{endpoint.get('split_count', 'n/a')} |",
         "",
-        "## Dataset row tables",
+        f"Selected feedback cycle: **{payload.get('selected_cycle', 'n/a')}**. "
+        "Each macrocycle recomputes rows separately, performs one inverse-variance/model-symmetry merge, "
+        "and executes one shared SHELXL LS1 coordinate update.",
         "",
+        "## JANA/PETS-style matched row statistics",
+        "",
+        "| Model | Robs | Rall | wRall | MRobs | MRall | MwRall |",
+        "|---|---:|---:|---:|---:|---:|---:|",
+        f"| Born | {_percent(born.get('Robs'))} | {_percent(born.get('Rall'))} | {_percent(born.get('wRall'))} | {_percent(born.get('MRobs'))} | {_percent(born.get('MRall'))} | {_percent(born.get('MwRall'))} |",
+        f"| Bloch | {_percent(dynamic.get('Robs'))} | {_percent(dynamic.get('Rall'))} | {_percent(dynamic.get('wRall'))} | {_percent(dynamic.get('MRobs'))} | {_percent(dynamic.get('MRall'))} | {_percent(dynamic.get('MwRall'))} |",
+        "",
+        "| Dataset | Bloch Rall | Bloch wRall | Bloch MRall | Bloch MwRall | Born to Bloch Rall gain |",
+        "|---|---:|---:|---:|---:|---:|",
     ]
+    per_dataset_stats = row_stats.get("per_dataset") if isinstance(row_stats.get("per_dataset"), Mapping) else {}
+    for name, row in per_dataset_stats.items():
+        dataset_born = row.get("born") if isinstance(row, Mapping) and isinstance(row.get("born"), Mapping) else {}
+        dataset_dynamic = row.get("dynamic") if isinstance(row, Mapping) and isinstance(row.get("dynamic"), Mapping) else {}
+        born_rall = _finite_float(dataset_born.get("Rall"))
+        dyn_rall = _finite_float(dataset_dynamic.get("Rall"))
+        gain = born_rall - dyn_rall if born_rall is not None and dyn_rall is not None else None
+        lines.append(
+            f"| {name} | {_percent(dataset_dynamic.get('Rall'))} | {_percent(dataset_dynamic.get('wRall'))} | "
+            f"{_percent(dataset_dynamic.get('MRall'))} | {_percent(dataset_dynamic.get('MwRall'))} | {_percent(gain)} |"
+        )
+    lines.extend(
+        [
+        "",
+        "## Hand decision",
+        "",
+        f"Coordinate choice: **{hand.get('choice', 'n/a')}**; calculation recommendation: **{hand.get('recommendation', 'n/a')}**. Positive values below favor the coordinates selected for feedback.",
+        "",
+        "| Dataset | ZKP all | ZKP free |",
+        "|---|---:|---:|",
+        ]
+    )
+    for name, row in (hand.get("datasets") or {}).items():
+        all_block = row.get("all") or {}
+        free_block = row.get("free") or {}
+        lines.append(
+            f"| {name} | {_number(all_block.get('z_selected_coordinates'), signed=True)} | "
+            f"{_number(free_block.get('z_selected_coordinates'), signed=True)} |"
+        )
+    combined_hand = hand.get("combined") if isinstance(hand.get("combined"), Mapping) else {}
+    lines.append(
+        f"| Explicit combined score | {_number((combined_hand.get('all') or {}).get('z_selected_coordinates'), signed=True)} | "
+        f"{_number((combined_hand.get('free') or {}).get('z_selected_coordinates'), signed=True)} |"
+    )
+    lines.extend(
+        [
+            "",
+            "## Per-dataset physics and applied scales",
+            "",
+            "| Dataset | Transform | Thickness | Gradient | Frame offset | Frame scales | Detector scales |",
+            "|---|---|---:|---:|---:|---:|---:|",
+        ]
+    )
     for name, row in (payload.get("datasets") or {}).items():
-        lines.append(f"- {name}: `{row.get('row_table', '')}`; summary `{row.get('summary', '')}`")
-    lines.extend(["", "## Maps", "", f"Manifest: `{payload.get('map_manifest', '')}`", ""])
+        nuisance = row.get("nuisance") or {}
+        scale_row = (applied_scales.get("datasets") or {}).get(name, {})
+        thickness_A = _finite_float(nuisance.get("thickness_A"))
+        thickness = "n/a" if thickness_A is None else f"{thickness_A / 10.0:.1f} nm"
+        lines.append(
+            f"| {name} | `{row.get('hkl_transform', '')}` | {thickness} | "
+            f"{nuisance.get('thickness_grad_frac', 'n/a')} | {nuisance.get('frame_offset', 'n/a')} | "
+            f"{scale_row.get('frame_parameters', 'n/a')} | {scale_row.get('detector_parameters', 'n/a')} |"
+        )
+    compact = scales.get("compact_audit") if isinstance(scales.get("compact_audit"), Mapping) else {}
+    lines.extend(
+        [
+            "",
+            f"The selected endpoint uses **{applied_scales.get('frame_parameters', 'n/a')} frame** and **{applied_scales.get('detector_parameters', 'n/a')} detector** parameters across {applied_scales.get('rows', 'n/a')} rows. The compact audit found {compact.get('frame_parameters', 'n/a')} frame and {compact.get('detector_parameters', 'n/a')} detector parameters, but **did not apply them to this endpoint**.",
+            "",
+            "## Feedback-cycle audit",
+            "",
+            "| Cycle | Lagged native row R1all | Lagged native row wR2all | Endpoint R1all | Endpoint wR2all | GooF | NPD/split | Selected |",
+            "|---:|---:|---:|---:|---:|---:|---:|---|",
+        ]
+    )
+    for cycle in payload.get("feedback_cycles") or []:
+        lines.append(
+            f"| {cycle.get('cycle', '')} | {_percent(cycle.get('dyn_R1_all'))} | {_percent(cycle.get('dyn_wR2_all'))} | "
+            f"{_percent(cycle.get('endpoint_R1_all'))} | {_percent(cycle.get('endpoint_wR2_all'))} | "
+            f"{cycle.get('endpoint_GooF', 'n/a')} | {cycle.get('npd_count', 'n/a')}/{cycle.get('split_count', 'n/a')} | "
+            f"{'yes' if cycle.get('selected') else ''} |"
+        )
+    lines.extend(
+        [
+            "",
+            "The cycle table contains the lagged row objective used for cycle selection. The JANA/PETS-style table above is recomputed once from the selected endpoint coordinates, without another coordinate update, and is the row table to report for the final model.",
+        ]
+    )
+    lines.extend(
+        [
+            "",
+            "## Files",
+            "",
+            f"RES: `{endpoint.get('res', '')}`  ",
+            f"HKL: `{endpoint.get('hkl', '')}`  ",
+            f"LST: `{endpoint.get('lst', '')}`  ",
+            f"JANA row statistics: `{row_stats.get('json', '')}`  ",
+            f"Map manifest: `{payload.get('map_manifest', '')}`",
+            "",
+        ]
+    )
     return "\n".join(lines)
 
 
@@ -971,6 +1339,20 @@ def manual_finish(args) -> int:
     endpoint_lst = endpoint_res.with_suffix(".lst")
     metrics = parse_shelx_lst_metrics(endpoint_lst) if endpoint_lst.is_file() else {}
     pathology = parse_shelx_lst_pathologies(endpoint_lst) if endpoint_lst.is_file() else {}
+    source_model_text = str(workflow.get("source_model") or "").strip()
+    source_model = Path(source_model_text) if source_model_text else None
+    source_lst = source_model.with_suffix(".lst") if source_model is not None else None
+    starting_metrics = (
+        parse_shelx_lst_metrics(source_lst) if source_lst is not None and source_lst.is_file() else {}
+    )
+    starting_pathology = (
+        parse_shelx_lst_pathologies(source_lst) if source_lst is not None and source_lst.is_file() else {}
+    )
+    prep_path = Path(str(workflow.get("prep") or ""))
+    transforms: dict[str, str] = {}
+    if prep_path.is_file():
+        prep = load_prep(prep_path)
+        transforms = {dataset.name: dataset.hkl_transform for dataset in prep.datasets}
     dataset_payload: dict[str, object] = {}
     for name, run in row_runs.items():
         summary = _read_json(run / "summary.json")
@@ -980,21 +1362,81 @@ def manual_finish(args) -> int:
             "summary": str(run / "summary.json"),
             "metrics": best.get("metrics", {}),
             "nuisance": best.get("nuisance", {}),
+            "hkl_transform": transforms.get(name, ""),
         }
+    try:
+        combined_row_stats, per_dataset_row_stats = _manual_row_statistics(row_runs, model)
+        row_statistics_status = "complete"
+        row_statistics_reason = ""
+    except (OSError, ValueError, KeyError) as exc:
+        combined_row_stats = {}
+        per_dataset_row_stats = {}
+        row_statistics_status = "unavailable"
+        row_statistics_reason = str(exc)
+    jana_json = out / "JANA_ROW_STATISTICS.json"
+    jana_per_dataset_json = out / "JANA_ROW_STATISTICS_PER_DATASET.json"
+    _write_json(jana_json, combined_row_stats)
+    _write_json(jana_per_dataset_json, per_dataset_row_stats)
+    hand_summary = _selected_hand_summary(workflow)
+    scale_summary = _manual_scale_summary(workflow, row_runs)
+    feedback_outputs = feedback.get("outputs") if isinstance(feedback.get("outputs"), Mapping) else {}
+    decision_path = Path(str(feedback_outputs.get("decision") or root / "04_feedback" / "multi_endpoint_push_decision.json"))
+    decision = _read_json(decision_path) if decision_path.is_file() else {}
+    selected_cycle = int(feedback_outputs.get("selected_cycle", 0) or 0)
+    feedback_cycles = []
+    for row in decision.get("rows", []):
+        if not isinstance(row, Mapping):
+            continue
+        feedback_cycles.append({**dict(row), "selected": int(row.get("cycle", 0) or 0) == selected_cycle})
+    selected_decision = decision.get("selected_cycle") if isinstance(decision.get("selected_cycle"), Mapping) else {}
+    stage_timings = {}
+    for stage_name, stage in workflow.get("stages", {}).items():
+        command_record = stage.get("command") if isinstance(stage.get("command"), Mapping) else {}
+        stage_timings[stage_name] = _command_elapsed(command_record)
     map_outputs = maps.get("outputs") if isinstance(maps.get("outputs"), Mapping) else {}
     payload = {
         "schema_version": 1,
         "kind": "grond_manual_final_summary",
         "workflow": str(workflow_path),
         "model": str(model),
+        "selected_cycle": selected_cycle,
+        "selection_reason": decision.get("selection_reason", ""),
+        "feedback_architecture": {
+            "per_dataset_step": "Bloch/Born row recomputation and pinned nuisance-scale fit; no coordinate refinement",
+            "joint_step": "model-symmetry merge with cross-dataset overlap scaling and inverse-variance weights",
+            "coordinate_step": "one shared SHELXL LS1 update per macrocycle",
+            "rows_recomputed_after_selection": True,
+        },
+        "starting_endpoint": {
+            "model": str(source_model) if source_model is not None else "",
+            "lst": str(source_lst) if source_lst is not None and source_lst.is_file() else "",
+            **starting_metrics,
+            **starting_pathology,
+        },
         "endpoint": {
             "res": str(endpoint_res),
             "hkl": str(endpoint_hkl) if endpoint_hkl.exists() else "",
             "lst": str(endpoint_lst) if endpoint_lst.exists() else "",
             **metrics,
             **pathology,
+            "parameters": selected_decision.get("endpoint_parameters"),
+            "restraints": selected_decision.get("endpoint_restraints"),
         },
         "datasets": dataset_payload,
+        "hand": hand_summary,
+        "row_statistics": {
+            "definition": "JANA/PETS-style GROND calculation; distinct from SHELXL endpoint statistics",
+            "status": row_statistics_status,
+            "reason": row_statistics_reason,
+            "instability_u": 0.01,
+            "combined": combined_row_stats,
+            "per_dataset": per_dataset_row_stats,
+            "json": str(jana_json),
+            "per_dataset_json": str(jana_per_dataset_json),
+        },
+        "scales": scale_summary,
+        "feedback_cycles": feedback_cycles,
+        "timings_seconds": stage_timings,
         "map_manifest": str(map_outputs.get("manifest", "")),
         "maps": maps,
         "elapsed_seconds": elapsed,
@@ -1003,6 +1445,11 @@ def manual_finish(args) -> int:
     summary_md = out / "MANUAL_FINAL_SUMMARY.md"
     _write_json(summary_json, payload)
     summary_md.write_text(_manual_markdown_summary(payload))
+    root_summary_json = root / "MANUAL_TOP_LEVEL_SUMMARY.json"
+    root_summary_md = root / "MANUAL_TOP_LEVEL_SUMMARY.md"
+    shutil.copy2(summary_json, root_summary_json)
+    shutil.copy2(summary_md, root_summary_md)
+    applied_scales = scale_summary.get("applied") if isinstance(scale_summary.get("applied"), Mapping) else {}
     handoff = _record_stage(
         workflow_path,
         workflow,
@@ -1012,10 +1459,27 @@ def manual_finish(args) -> int:
         outputs={
             "summary_json": str(summary_json),
             "summary_markdown": str(summary_md),
+            "top_level_summary_json": str(root_summary_json),
+            "top_level_summary_markdown": str(root_summary_md),
             "model": str(model),
             "endpoint_hkl": str(endpoint_hkl) if endpoint_hkl.exists() else "",
             "map_status": maps.get("status", ""),
             "map_manifest": str(map_outputs.get("manifest", "")),
+            "headline": {
+                "endpoint": (
+                    f"R1gt {_percent(metrics.get('R1_gt'))}; R1all {_percent(metrics.get('R1_all'))}; "
+                    f"wR2all {_percent(metrics.get('wR2_all'))}; GooF {metrics.get('GooF', 'n/a')}"
+                ),
+                "hand": (
+                    f"{hand_summary.get('choice', 'n/a')} selected; "
+                    f"recommendation {hand_summary.get('recommendation', 'n/a')}"
+                ),
+                "scales": (
+                    f"{applied_scales.get('frame_parameters', 'n/a')} frame + "
+                    f"{applied_scales.get('detector_parameters', 'n/a')} detector; full pinned contract applied"
+                ),
+                "summary": str(root_summary_md),
+            },
         },
         command={"elapsed_seconds": elapsed, "map_mode": args.map_mode},
         next_command="",
@@ -1040,19 +1504,34 @@ def manual_status(args) -> int:
                 "handoff": stage.get("handoff"),
             }
         )
-    print(
-        json.dumps(
-            {
-                "workflow": str(workflow_path),
-                "current_stage": workflow.get("current_stage"),
-                "chosen_model": workflow.get("chosen_model"),
-                "next_command": workflow.get("next_command"),
-                "stages": rows,
-            },
-            indent=2,
-            allow_nan=True,
-        )
-    )
+    payload = {
+        "workflow": str(workflow_path),
+        "current_stage": workflow.get("current_stage"),
+        "chosen_model": workflow.get("chosen_model"),
+        "next_command": workflow.get("next_command"),
+        "stages": rows,
+    }
+    if bool(getattr(args, "json", False)):
+        print(json.dumps(payload, indent=2, allow_nan=True))
+        return 0
+    print("GROND manual workflow")
+    print(f"  state: {workflow_path}")
+    print(f"  current stage: {workflow.get('current_stage', 'not started')}")
+    print("\n  stages:")
+    for row in rows:
+        elapsed = row.get("elapsed_seconds")
+        elapsed_text = "n/a" if elapsed is None else f"{float(elapsed):.1f}s"
+        print(f"    {str(row['stage']):10s} {str(row['status']):12s} {elapsed_text:>10s}")
+    if workflow.get("chosen_model"):
+        print(f"\n  selected model: {workflow['chosen_model']}")
+    finish = _stage(workflow, "finish")
+    finish_outputs = finish.get("outputs") if isinstance(finish.get("outputs"), Mapping) else {}
+    if finish_outputs.get("top_level_summary_markdown"):
+        print(f"  final summary: {finish_outputs['top_level_summary_markdown']}")
+    if workflow.get("next_command"):
+        print(f"\n  next: {workflow['next_command']}")
+    elif finish:
+        print("\n  workflow complete")
     return 0
 
 

@@ -20183,37 +20183,198 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_manual = sub.add_parser(
         "manual",
-        help="Run one simple stateful stage: setup, scout, thickness, hand, feedback, scales, finish, or status.",
+        help="Run a readable, resumable expert workflow one stage at a time.",
+        description=(
+            "Run GROND as explicit setup, transform-scout, thickness, hand, shared-feedback, "
+            "scale-audit, and finish stages. Each stage reads the same manual_workflow.json "
+            "and prints the next command. Use `GROND manual STAGE --help` for only that stage's options."
+        ),
     )
-    p_manual.add_argument(
-        "stage",
-        choices=["setup", "status", "scout", "thickness", "hand", "feedback", "scales", "finish"],
+    manual_stages = p_manual.add_subparsers(dest="stage", required=True, metavar="STAGE")
+
+    def add_manual_workflow_arg(stage_parser: argparse.ArgumentParser) -> None:
+        stage_parser.add_argument(
+            "--workflow",
+            default="",
+            help="Workflow state written by setup. Defaults to ./manual_workflow.json.",
+        )
+
+    def add_manual_compute_args(stage_parser: argparse.ArgumentParser) -> None:
+        add_manual_workflow_arg(stage_parser)
+        stage_parser.add_argument(
+            "--workers",
+            type=int,
+            default=0,
+            help="Parallel workers. Zero lets GROND choose from available CPUs.",
+        )
+        stage_parser.add_argument(
+            "--python",
+            default="",
+            help="Python used for the underlying expert command. Defaults to the current interpreter.",
+        )
+        stage_parser.add_argument(
+            "--verbose-child-output",
+            action="store_true",
+            help="Echo every underlying child line. By default the terminal shows milestones while the complete stream remains in manual_STAGE.log.",
+        )
+        add_tool_config_args(stage_parser)
+
+    p_manual_setup = manual_stages.add_parser(
+        "setup",
+        help="Create the workflow state from a model, merged HKL, and one or more dataset directories.",
+        description="Create 00_setup/prep.json and the manual_workflow.json used by every later stage.",
     )
-    p_manual.add_argument("--workflow", default="", help="manual_workflow.json written by the setup stage. Defaults to ./manual_workflow.json.")
-    p_manual.add_argument("--out-dir", default="", help="Workflow root; required only for manual setup.")
-    p_manual.add_argument("--structure", default="", help="Starting RES/INS; required only for manual setup.")
-    p_manual.add_argument("--baseline-hkl", default="", help="Conventional merged HKL used for endpoint comparisons.")
-    p_manual.add_argument("--dataset", action="append", default=[], help="Setup input NAME=PATH[,dmin=...,hkl_transform=...]. Repeat per crystal.")
-    p_manual.add_argument("--hkl-transform", default="identity", help="Setup default transform. Scout normally replaces this per dataset.")
-    p_manual.add_argument("--geometry-percentile", type=float, default=99.0)
-    p_manual.add_argument("--notes", default="")
-    p_manual.add_argument("--workers", type=int, default=0)
-    p_manual.add_argument("--python", default="")
-    p_manual.add_argument("--shelxl", default="shelxl")
-    add_tool_config_args(p_manual)
-    p_manual.add_argument("--skip", action="store_true", help="Explicitly skip a supported optional stage. Scout trusts prep transforms; hand keeps input coordinates; scales keeps full scales; finish skips maps.")
-    p_manual.add_argument("--summary", action="append", default=[], help="With `manual thickness --skip`, bind DATASET=/path/to/summary.json for every dataset.")
-    p_manual.add_argument("--expanded", action="store_true", help="Thickness sensitivity audit: also evaluate production scale and final diagnostic feature contracts.")
-    p_manual.add_argument("--n-basis-grid", default="24,48")
-    p_manual.add_argument("--thickness-grid-nm", default="50,75,110,150,180,220,260,300")
-    p_manual.add_argument("--gradient-grid", default="0.0,0.4,0.8,1.0")
-    p_manual.add_argument("--n-basis", type=int, default=0, help="Feedback basis override. Zero retains adaptive production selection.")
-    p_manual.add_argument("--n-points", type=int, default=20, help="Feedback Q; thickness uses min(Q,10).")
-    p_manual.add_argument("--cycles", type=int, default=5, help="Fresh Bloch/LS1 feedback macrocycles.")
-    p_manual.add_argument("--choice", choices=["report", "input", "inverse", "skip"], default="report", help="Hand stage action. report computes evidence and pauses; input/inverse records the explicit user choice.")
-    p_manual.add_argument("--map-mode", choices=["native", "off"], default="native")
-    p_manual.add_argument("--native-map-spacing", type=float, default=0.25)
-    p_manual.set_defaults(func=cmd_manual)
+    p_manual_setup.add_argument("--out-dir", required=True, help="New workflow root directory.")
+    p_manual_setup.add_argument("--structure", required=True, help="Starting SHELX RES or INS model.")
+    p_manual_setup.add_argument(
+        "--baseline-hkl",
+        default="",
+        help="Conventional merged HKL used for the shared endpoint and starting-model comparison.",
+    )
+    p_manual_setup.add_argument(
+        "--dataset",
+        action="append",
+        required=True,
+        help="Dataset as NAME=PATH[,dmin=...,hkl_transform=...]. Repeat once per crystal.",
+    )
+    p_manual_setup.add_argument(
+        "--hkl-transform",
+        default="identity",
+        help="Initial transform assertion. The scout normally replaces it independently for each crystal.",
+    )
+    p_manual_setup.add_argument("--geometry-percentile", type=float, default=99.0)
+    p_manual_setup.add_argument("--notes", default="", help="Free-text provenance note stored in prep.json.")
+    p_manual_setup.set_defaults(func=cmd_manual)
+
+    p_manual_status = manual_stages.add_parser(
+        "status",
+        help="Show completed stages, decisions, timings, outputs, and the exact next command.",
+    )
+    add_manual_workflow_arg(p_manual_status)
+    p_manual_status.add_argument(
+        "--json",
+        action="store_true",
+        help="Print the machine-readable status object instead of the concise human report.",
+    )
+    p_manual_status.set_defaults(func=cmd_manual)
+
+    p_manual_scout = manual_stages.add_parser(
+        "scout",
+        help="Choose one chemistry-blind proper HKL transform per dataset.",
+        description="Rank determinant-positive transform candidates without using known configuration or hand.",
+    )
+    add_manual_compute_args(p_manual_scout)
+    p_manual_scout.add_argument(
+        "--skip",
+        action="store_true",
+        help="Trust the transforms recorded by setup. This is recorded as a user assertion.",
+    )
+    p_manual_scout.set_defaults(func=cmd_manual)
+
+    p_manual_thickness = manual_stages.add_parser(
+        "thickness",
+        help="Select and pin thickness, gradient, frame offset, and the primary nuisance contract.",
+        description=(
+            "Run the detector-free primary thickness experiment at the requested N/Q grid. "
+            "This stage does not move coordinates."
+        ),
+    )
+    add_manual_compute_args(p_manual_thickness)
+    p_manual_thickness.add_argument(
+        "--skip",
+        action="store_true",
+        help="Reuse audited summaries supplied with one --summary DATASET=summary.json per crystal.",
+    )
+    p_manual_thickness.add_argument(
+        "--summary",
+        action="append",
+        default=[],
+        help="Pinned DATASET=/path/to/summary.json binding required with --skip.",
+    )
+    p_manual_thickness.add_argument(
+        "--expanded",
+        action="store_true",
+        help="Also calculate production-scale and final-diagnostic sensitivity branches; not needed for the primary run.",
+    )
+    p_manual_thickness.add_argument("--n-basis-grid", default="24,48", help="Comma-separated basis sizes for scout and confirmation.")
+    p_manual_thickness.add_argument(
+        "--thickness-grid-nm",
+        default="50,75,110,150,180,220,260,300",
+        help="Comma-separated mean thickness candidates in nm.",
+    )
+    p_manual_thickness.add_argument(
+        "--gradient-grid",
+        default="0.0,0.4,0.8,1.0",
+        help="Comma-separated fractional uniform-gradient widths.",
+    )
+    p_manual_thickness.add_argument(
+        "--n-points",
+        type=int,
+        default=20,
+        help="Requested rocking quadrature Q; thickness caps the scout at Q=10.",
+    )
+    p_manual_thickness.set_defaults(func=cmd_manual)
+
+    p_manual_hand = manual_stages.add_parser(
+        "hand",
+        help="Evaluate the final elastic negative-thickness hand control, then record an explicit choice.",
+        description=(
+            "The first call computes per-crystal all/free Klar-Palatinus evidence and pauses. "
+            "Repeat with --choice input or --choice inverse; the evidence is reused without recalculation."
+        ),
+    )
+    add_manual_compute_args(p_manual_hand)
+    p_manual_hand.add_argument(
+        "--choice",
+        choices=["report", "input", "inverse", "skip"],
+        default="report",
+        help="report computes evidence; input/inverse records the coordinate choice; skip keeps input coordinates without a hand claim.",
+    )
+    p_manual_hand.add_argument("--skip", action="store_true", help="Alias for --choice skip.")
+    p_manual_hand.set_defaults(func=cmd_manual)
+
+    p_manual_feedback = manual_stages.add_parser(
+        "feedback",
+        help="Run shared Bloch/one-cycle-SHELXL feedback and select the earliest clean row-optimal cycle.",
+        description=(
+            "For each macrocycle GROND recomputes each crystal's rows and nuisance scales, merges the corrected "
+            "observations with overlap and inverse-variance weighting, and performs exactly one shared SHELXL LS1. "
+            "Per-crystal row jobs never refine separate coordinates."
+        ),
+    )
+    add_manual_compute_args(p_manual_feedback)
+    p_manual_feedback.add_argument("--shelxl", default="shelxl", help="SHELXL executable used for the one shared LS1 endpoint update.")
+    p_manual_feedback.add_argument("--cycles", type=int, default=5, help="Maximum Bloch/shared-LS1 macrocycles.")
+    p_manual_feedback.add_argument(
+        "--n-basis",
+        type=int,
+        default=0,
+        help="Fixed production basis size; zero retains adaptive production selection.",
+    )
+    p_manual_feedback.add_argument("--n-points", type=int, default=20, help="Rocking quadrature points Q for feedback.")
+    p_manual_feedback.set_defaults(func=cmd_manual)
+
+    p_manual_scales = manual_stages.add_parser(
+        "scales",
+        help="Audit compact frame/detector scale models without silently changing the selected endpoint.",
+        description=(
+            "Fit compact scale candidates to the frozen selected rows. The report separates frame and detector "
+            "parameter counts. This stage is audit-only until a compact contract is explicitly replayed."
+        ),
+    )
+    add_manual_compute_args(p_manual_scales)
+    p_manual_scales.add_argument("--skip", action="store_true", help="Keep full pinned scales and skip compact-scale diagnostics.")
+    p_manual_scales.set_defaults(func=cmd_manual)
+
+    p_manual_finish = manual_stages.add_parser(
+        "finish",
+        help="Write maps plus the top-level endpoint, hand, thickness, row, scale, and timing summary.",
+    )
+    add_manual_workflow_arg(p_manual_finish)
+    p_manual_finish.add_argument("--skip", action="store_true", help="Skip map generation but still write all final summaries.")
+    p_manual_finish.add_argument("--map-mode", choices=["native", "off"], default="native")
+    p_manual_finish.add_argument("--native-map-spacing", type=float, default=0.25, help="Native map grid spacing in Angstrom.")
+    p_manual_finish.set_defaults(func=cmd_manual)
 
     p_prep = sub.add_parser("prep", help="Write a JSON prep file for one structure and one or more XDS datasets.")
     p_prep.add_argument("--structure", required=True)

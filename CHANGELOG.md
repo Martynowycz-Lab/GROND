@@ -29,6 +29,18 @@ Child Python output is unbuffered, so a healthy thickness search no longer
 looks frozen while its detailed per-trial logs continue in the stage `logs/`
 directory. If a child emits no high-level line for 30 seconds, the controller
 prints an elapsed-time heartbeat until output resumes.
+Each manual stage now has its own focused `--help` page. The controller keeps
+the complete child stream in the stage log but prints only milestones by
+default; `--verbose-child-output` restores the full stream. `manual finish`
+also writes `MANUAL_TOP_LEVEL_SUMMARY.md` and JSON in the run root. Those files
+place starting and selected SHELXL endpoints, combined and per-crystal
+JANA/PETS-style row statistics, selected-coordinate hand evidence, thickness,
+transforms, feedback cycles, and separate applied frame/detector parameter
+counts in one report. Compact-scale candidates are labeled audit-only whenever
+they were not replayed into the shared endpoint. The report states explicitly
+that per-crystal feedback jobs only recompute rows/scales and that each
+macrocycle contains one joint inverse-variance/model-symmetry merge and one
+shared SHELXL LS1 coordinate update.
 
 Experimental XDS target-transform fits now restore their corrected HKLF4
 endpoints to the ordinary XDS IOBS intensity and uncertainty convention before

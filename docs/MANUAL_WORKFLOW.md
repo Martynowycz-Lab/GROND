@@ -12,7 +12,18 @@ setup -> scout -> thickness -> hand -> feedback -> scales -> finish
 ```
 
 `grond manual status --workflow RUN/manual_workflow.json` reports what ran,
-elapsed times, selected model, every handoff, and the next command.
+elapsed times, selected model, the final summary, and the next command. Add
+`--json` for the machine-readable form.
+
+Every stage has its own short help page. For example:
+
+```bash
+grond manual thickness --help
+grond manual feedback --help
+```
+
+The thickness help shows only thickness controls. The feedback help also says
+explicitly which work is per crystal and which coordinate update is shared.
 
 ## Setup
 
@@ -106,11 +117,15 @@ grond manual feedback \
 ```
 
 The controller creates a hash-bound multi-dataset checkpoint from the selected
-thickness summaries and hand, then runs only fresh Bloch/one-cycle-SHELXL
-macrocycles. It does not rescout transforms or refit thickness. Every cycle is
-preserved. The earliest clean no-NPD cycle within the row-residual tolerance is
-selected, and its rows are recomputed without another coordinate step so maps
-and row statistics use the same model.
+thickness summaries and hand. During each macrocycle it recomputes Bloch/Born
+rows and pinned nuisance scales separately for each crystal. Those jobs do not
+run SHELXL and do not create separate coordinate models. GROND then determines
+the cross-dataset overlap scales, merges model-symmetry equivalents with
+inverse-variance weights, and performs exactly one shared SHELXL LS1 update.
+It does not rescout transforms or refit thickness. Every cycle is preserved.
+The earliest clean no-NPD cycle within the row-residual tolerance is selected,
+and its rows are recomputed without another coordinate step so maps and row
+statistics use the same model.
 
 Use `--n-basis N` only for a deliberate fixed-basis experiment. Zero retains
 adaptive production basis selection. `--n-points` defaults to 20.
@@ -137,6 +152,14 @@ the selected RES/HKL/LST paths, per-dataset row summaries, the native dynamical
 Fo, 2Fo-Fc, and Fo-Fc maps, a dynamical CIF, and a final `handoff.json`. Use
 `--map-mode off` or `--skip` when maps are not wanted.
 
+The same report is copied to `RUN/MANUAL_TOP_LEVEL_SUMMARY.md` so it is the
+first result visible in the workflow root. It includes starting-versus-selected
+SHELXL endpoint statistics, combined and per-crystal JANA/PETS-style row
+statistics, selected-coordinate hand evidence, thickness/gradient and
+transform per crystal, the feedback-cycle decision, and separate applied frame
+and detector parameter counts. The scale section says explicitly whether a
+compact model was merely audited or actually applied.
+
 ## Status and resuming
 
 At any point:
@@ -158,10 +181,11 @@ Each stage has a fixed numbered directory:
 ```
 
 Every directory contains `handoff.json`. Child GROND calculations retain their
-normal command and progress ledgers; the manual controller keeps their verbose
-terminal output in a named `manual_*.log` and prints only concise start, finish,
-handoff, warning, and next-command lines. Repeating an unchanged stage resumes
-its fingerprint-matching calculations.
+normal command and progress ledgers; the manual controller keeps their complete
+terminal output in a named `manual_*.log` and prints only milestones, warnings,
+the stage result, and the next command. Add `--verbose-child-output` to a
+computational stage when the complete child stream is wanted interactively.
+Repeating an unchanged stage resumes its fingerprint-matching calculations.
 
 Going backward is safe. Rerunning a stage removes later stages from the active
 workflow state and lists them under `invalidated_downstream_stages`; their files

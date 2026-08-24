@@ -5,12 +5,38 @@ import sys
 from pathlib import Path
 
 from grond import cli
-from grond.manual_workflow import _hand_evidence, _manual_checkpoint, _run_stage_command
+from grond.manual_workflow import (
+    _hand_evidence,
+    _manual_checkpoint,
+    _manual_stream_line,
+    _run_stage_command,
+)
 
 
 def _run(*arguments: str) -> int:
     args = cli.build_parser().parse_args(["manual", *arguments])
     return cli.cmd_manual(args)
+
+
+def test_manual_help_is_stage_specific():
+    parser = cli.build_parser()
+    thickness = parser.parse_args(["manual", "thickness", "--n-basis-grid", "24,48"])
+    feedback = parser.parse_args(["manual", "feedback", "--cycles", "3"])
+    status = parser.parse_args(["manual", "status", "--json"])
+    assert thickness.stage == "thickness"
+    assert thickness.n_basis_grid == "24,48"
+    assert not hasattr(thickness, "cycles")
+    assert feedback.stage == "feedback"
+    assert feedback.cycles == 3
+    assert not hasattr(feedback, "thickness_grid_nm")
+    assert status.json is True
+
+
+def test_manual_child_stream_is_concise_by_default():
+    assert _manual_stream_line("STEP [....] 1/4 trial\n", verbose=False)
+    assert _manual_stream_line("WARN diagnostic\n", verbose=False)
+    assert not _manual_stream_line('{"large": "child payload"}\n', verbose=False)
+    assert _manual_stream_line('{"large": "child payload"}\n', verbose=True)
 
 
 def _write_source_summary(path: Path, model: Path, hkl: Path, transform: str, thickness: float) -> None:
@@ -185,7 +211,7 @@ def test_manual_state_handoffs_and_multi_checkpoint(tmp_path: Path):
     workflow.write_text(json.dumps(state) + "\n")
     assert _run("hand", "--workflow", str(workflow), "--choice", "input") == 0
     final_state = json.loads(workflow.read_text())
-    assert final_state["stages"]["hand"]["command"]["datasets"]["status"] == (
+    assert final_state["stages"]["hand"]["command"]["datasets"]["selection"]["status"] == (
         "reused_existing_hand_report_without_recalculation"
     )
 
@@ -253,6 +279,10 @@ def test_manual_finish_writes_openable_handoff_without_maps(tmp_path: Path):
     assert payload["endpoint"]["R1_all"] == 0.1116
     assert payload["endpoint"]["GooF"] == 0.775
     assert payload["endpoint"]["npd_count"] == 0
+    assert payload["feedback_architecture"]["coordinate_step"] == "one shared SHELXL LS1 update per macrocycle"
+    assert payload["scales"]["applied"]["frame_parameters"] == 0
+    assert (root / "MANUAL_TOP_LEVEL_SUMMARY.md").exists()
+    assert "one inverse-variance/model-symmetry merge" in (root / "MANUAL_TOP_LEVEL_SUMMARY.md").read_text()
     assert (root / "06_finish" / "handoff.json").exists()
 
     # Going back to an earlier stage keeps its old files but invalidates later

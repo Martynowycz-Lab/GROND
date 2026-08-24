@@ -108,8 +108,9 @@ GROND manual scales --workflow manual_run/manual_workflow.json
 GROND manual finish --workflow manual_run/manual_workflow.json
 ```
 
-Every stage writes a numbered directory and `handoff.json`, updates `manual_workflow.json`, records commands and elapsed time, and prints the next command. `GROND manual status --workflow manual_run/manual_workflow.json` shows the current decision and all output paths. Optional scout, hand, scale, and map stages have explicit skip controls; thickness can be skipped only by binding one existing audited summary per dataset.
-Verbose child output is saved in stage-local `manual_*.log` files. Rerunning an earlier stage preserves old artifacts but automatically invalidates every later stage in the active workflow state.
+Every stage writes a numbered directory and `handoff.json`, updates `manual_workflow.json`, records commands and elapsed time, and prints the next command. `GROND manual STAGE --help` shows only the controls relevant to that stage. `GROND manual status --workflow manual_run/manual_workflow.json` shows the current decision, timings, selected model, final summary, and next command; add `--json` for machine-readable output. Optional scout, hand, scale, and map stages have explicit skip controls; thickness can be skipped only by binding one existing audited summary per dataset.
+
+Complete child output is saved in stage-local `manual_*.log` files while the terminal shows milestones and the stage result; `--verbose-child-output` restores the full interactive stream. `manual finish` writes `MANUAL_TOP_LEVEL_SUMMARY.md` in the run root with the conventional-versus-GROND endpoint, combined and per-crystal JANA/PETS-style rows, hand evidence, thickness, transforms, feedback cycles, and separate applied frame/detector scale counts. Rerunning an earlier stage preserves old artifacts but automatically invalidates every later stage in the active workflow state.
 
 ## Read the result
 
