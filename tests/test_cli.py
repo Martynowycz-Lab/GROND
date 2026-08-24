@@ -1744,7 +1744,7 @@ def test_auto_parser_hides_lambda_controls(capsys):
     assert args.frame_offset_grid == "auto"
 
 
-def test_fresh_baseline_no_harm_gate_rejects_worse_endpoint():
+def test_fresh_baseline_no_harm_gate_warns_but_keeps_worse_endpoint_available():
     summary = {
         "baseline_exti": {
             "status": "ok",
@@ -1765,10 +1765,15 @@ def test_fresh_baseline_no_harm_gate_rejects_worse_endpoint():
         {"shelxl_R1all": 0.1330},
     )
 
-    assert rejected["status"] == "failed"
+    assert rejected["status"] == "warning_worse_than_baseline"
+    assert rejected["passed"] is True
+    assert rejected["no_harm"] is False
+    assert rejected["reasons"] == []
+    assert any("warning only" in warning for warning in rejected["warnings"])
     assert rejected["delta_R1all"] == pytest.approx(0.0027)
     assert rejected["baseline_res"] == "fresh.res"
     assert accepted["status"] == "passed"
+    assert accepted["no_harm"] is True
 
 
 def test_quick_baseline_prefers_fresh_final_run_summary(tmp_path: Path):

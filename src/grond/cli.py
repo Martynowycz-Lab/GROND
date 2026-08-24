@@ -5414,7 +5414,7 @@ def _endpoint_baseline_no_harm_gate(
     baseline_override: Mapping[str, object] | None = None,
     require_baseline: bool = False,
 ) -> dict[str, object]:
-    """Reject a corrected endpoint whose R1all is worse than a fresh baseline."""
+    """Compare endpoint R1all with baseline without withholding a usable model."""
 
     baseline = dict(baseline_override or {}) or _fresh_baseline_shelxl(summary)
     if not baseline:
@@ -5429,19 +5429,25 @@ def _endpoint_baseline_no_harm_gate(
         float("nan"),
     )
     tolerance = max(0.0, float(r1_tolerance))
-    passed = bool(math.isfinite(endpoint_r1) and endpoint_r1 <= baseline_r1 + tolerance)
+    finite_endpoint = math.isfinite(endpoint_r1)
+    no_harm = bool(finite_endpoint and endpoint_r1 <= baseline_r1 + tolerance)
     delta = endpoint_r1 - baseline_r1 if math.isfinite(endpoint_r1) else float("nan")
     reasons = []
+    warnings = []
     if not math.isfinite(endpoint_r1):
         reasons.append("corrected endpoint R1all is unavailable")
-    elif not passed:
-        reasons.append(
+    elif not no_harm:
+        warnings.append(
             f"corrected endpoint R1all {endpoint_r1:.6g} is worse than fresh conventional "
-            f"baseline {baseline_r1:.6g} by {delta:.6g}"
+            f"baseline {baseline_r1:.6g} by {delta:.6g}; warning only, keep the endpoint available "
+            "for map inspection and continued model refinement"
         )
     return {
-        "status": "passed" if passed else "failed",
-        "passed": passed,
+        "status": "passed" if no_harm else ("warning_worse_than_baseline" if finite_endpoint else "failed"),
+        "passed": finite_endpoint,
+        "no_harm": no_harm,
+        "warnings": warnings,
+        "reasons": reasons,
         "baseline_source": baseline.get("baseline_source"),
         "baseline_R1all": baseline_r1,
         "endpoint_R1all": endpoint_r1,
@@ -5450,7 +5456,6 @@ def _endpoint_baseline_no_harm_gate(
         "baseline_res": baseline.get("res", ""),
         "baseline_hkl": baseline.get("hkl", ""),
         "baseline_lst": baseline.get("lst", ""),
-        "reasons": reasons,
     }
 
 

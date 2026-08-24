@@ -9,6 +9,9 @@ continued model building when SHELXL GooF lies outside the preferred range.
 GooF remains prominently reported with weight, sigma, map, and continued-
 refinement guidance, but is now a warning rather than an endpoint, compact-
 scale, or publication-model handoff gate.
+An endpoint R1all that is finite but worse than the conventional baseline is
+handled the same way: the comparison is retained as a warning while the model
+remains openable for maps and continued refinement.
 
 Continuous-thickness polishing now packs the cached eigenvalues and
 direct-to-target couplings by basis size and evaluates scalar/Powell candidates
