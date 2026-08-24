@@ -85,7 +85,10 @@ def _run_stage_command(command: list[str]) -> dict[str, object]:
     child_name = command[3] if len(command) > 3 else Path(command[0]).name
     log_path = (out_dir or Path.cwd()) / f"manual_{child_name.replace('-', '_')}.log"
     print(f"RUN  {child_name} -> {out_dir or Path.cwd()}", flush=True)
-    with log_path.open("w") as log:
+    continuing_log = log_path.exists() and log_path.stat().st_size > 0
+    with log_path.open("a" if continuing_log else "w") as log:
+        if continuing_log:
+            log.write("\n[manual_resume]\n")
         log.write(f"$ {_command_text(command)}\n\n")
         log.flush()
         process = subprocess.Popen(

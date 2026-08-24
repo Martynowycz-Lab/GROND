@@ -70,6 +70,20 @@ def test_manual_child_progress_is_teed_live_and_logged(tmp_path: Path, capsys):
     assert "STEP live progress" in log.read_text()
     assert record["returncode"] == 0
 
+    _run_stage_command(
+        [
+            sys.executable,
+            "-c",
+            "print('STEP resumed progress', flush=True)",
+            "--out-dir",
+            str(tmp_path),
+        ]
+    )
+    resumed_text = log.read_text()
+    assert "STEP live progress" in resumed_text
+    assert "[manual_resume]" in resumed_text
+    assert "STEP resumed progress" in resumed_text
+
 
 def test_manual_state_handoffs_and_multi_checkpoint(tmp_path: Path):
     model = tmp_path / "model.res"
