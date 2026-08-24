@@ -92,6 +92,25 @@ GROND auto \
 
 Use `--fast` to check a new integration, indexing choice, or environment before starting the full calculation. Use plain `GROND auto` for the final high-support run. The middle-cost `--full-fast` profile keeps the automatic decision path but deliberately uses a smaller final calculation; treat it as an intermediate result.
 
+## Run the same workflow manually
+
+The manual interface uses one state file and one short command per stage:
+
+```bash
+GROND manual setup --out-dir manual_run --structure model.res --baseline-hkl model.hkl \
+  --dataset crystal_1=/path/to/crystal_1 --dataset crystal_2=/path/to/crystal_2
+GROND manual scout --workflow manual_run/manual_workflow.json
+GROND manual thickness --workflow manual_run/manual_workflow.json
+GROND manual hand --workflow manual_run/manual_workflow.json
+GROND manual hand --workflow manual_run/manual_workflow.json --choice input
+GROND manual feedback --workflow manual_run/manual_workflow.json --cycles 5 --shelxl /path/to/shelxl
+GROND manual scales --workflow manual_run/manual_workflow.json
+GROND manual finish --workflow manual_run/manual_workflow.json
+```
+
+Every stage writes a numbered directory and `handoff.json`, updates `manual_workflow.json`, records commands and elapsed time, and prints the next command. `GROND manual status --workflow manual_run/manual_workflow.json` shows the current decision and all output paths. Optional scout, hand, scale, and map stages have explicit skip controls; thickness can be skipped only by binding one existing audited summary per dataset.
+Verbose child output is saved in stage-local `manual_*.log` files. Rerunning an earlier stage preserves old artifacts but automatically invalidates every later stage in the active workflow state.
+
 ## Read the result
 
 Open the root-level `TABLE1_FINAL_STATISTICS.md` first for the publication-facing numbers. Its two panels deliberately keep SHELXL endpoint statistics (`R1gt`, `R1all`, `wR2all`, and GooF) separate from GROND-computed JANA/PETS-style row statistics (`Robs`, `Rall`, `wRall`, `MRobs`, `MRall`, and `MwRall`). The table compares the conventional kinematical, matched Born, and Bloch dynamical models wherever those quantities were actually calculated; an unavailable cross-family comparison is printed as `n/a`, never inferred from an unrelated residual.
@@ -125,7 +144,7 @@ Start with the [quickstart](docs/QUICKSTART.md), then use the guide that matches
 - [DIALS workflow](docs/DIALS_WORKFLOW.md)
 - [PETS, Jana2020, Dyngo, and diffBloch interoperability](docs/INTEROPERABILITY.md)
 - [Multi-dataset workflow](docs/MULTI_DATASET.md)
-- [Expert staged workflow](docs/MANUAL_WORKFLOW.md)
+- [Simple staged workflow](docs/MANUAL_WORKFLOW.md)
 - [Outputs](docs/OUTPUTS.md)
 - [Troubleshooting](docs/TROUBLESHOOTING.md)
 - [Performance and resource use](docs/PERFORMANCE.md)

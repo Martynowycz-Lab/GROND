@@ -43,6 +43,7 @@ EXPECTED_CLI_COMMANDS = {
     "import-dials",
     "init-config",
     "make-free-flags",
+    "manual",
     "prep",
     "protein-ls1",
     "publish",

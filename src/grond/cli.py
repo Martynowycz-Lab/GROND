@@ -11792,6 +11792,16 @@ def cmd_init_config(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_manual(args: argparse.Namespace) -> int:
+    """Run one stateful, inspectable manual-workflow stage."""
+
+    from .manual_workflow import run_manual_stage
+
+    if bool(getattr(args, "skip", False)) and args.stage == "hand":
+        args.choice = "skip"
+    return run_manual_stage(args)
+
+
 def cmd_row_template(args: argparse.Namespace) -> int:
     """CLI entrypoint that writes portable row-contract template files."""
 
@@ -20171,6 +20181,41 @@ def build_parser() -> argparse.ArgumentParser:
         description="GROND: Global Regularization Of Non-kinematical Diffraction.",
     )
     sub = parser.add_subparsers(dest="command", required=True)
+
+    p_manual = sub.add_parser(
+        "manual",
+        help="Run one simple stateful stage: setup, scout, thickness, hand, feedback, scales, finish, or status.",
+    )
+    p_manual.add_argument(
+        "stage",
+        choices=["setup", "status", "scout", "thickness", "hand", "feedback", "scales", "finish"],
+    )
+    p_manual.add_argument("--workflow", default="", help="manual_workflow.json written by the setup stage. Defaults to ./manual_workflow.json.")
+    p_manual.add_argument("--out-dir", default="", help="Workflow root; required only for manual setup.")
+    p_manual.add_argument("--structure", default="", help="Starting RES/INS; required only for manual setup.")
+    p_manual.add_argument("--baseline-hkl", default="", help="Conventional merged HKL used for endpoint comparisons.")
+    p_manual.add_argument("--dataset", action="append", default=[], help="Setup input NAME=PATH[,dmin=...,hkl_transform=...]. Repeat per crystal.")
+    p_manual.add_argument("--hkl-transform", default="identity", help="Setup default transform. Scout normally replaces this per dataset.")
+    p_manual.add_argument("--geometry-percentile", type=float, default=99.0)
+    p_manual.add_argument("--notes", default="")
+    p_manual.add_argument("--workers", type=int, default=0)
+    p_manual.add_argument("--python", default="")
+    p_manual.add_argument("--shelxl", default="shelxl")
+    add_tool_config_args(p_manual)
+    p_manual.add_argument("--skip", action="store_true", help="Explicitly skip a supported optional stage. Scout trusts prep transforms; hand keeps input coordinates; scales keeps full scales; finish skips maps.")
+    p_manual.add_argument("--summary", action="append", default=[], help="With `manual thickness --skip`, bind DATASET=/path/to/summary.json for every dataset.")
+    p_manual.add_argument("--expanded", action="store_true", help="Thickness sensitivity audit: also evaluate production scale and final diagnostic feature contracts.")
+    p_manual.add_argument("--n-basis-grid", default="24,48")
+    p_manual.add_argument("--thickness-grid-nm", default="50,75,110,150,180,220,260,300")
+    p_manual.add_argument("--gradient-grid", default="0.0,0.4,0.8,1.0")
+    p_manual.add_argument("--n-basis", type=int, default=0, help="Feedback basis override. Zero retains adaptive production selection.")
+    p_manual.add_argument("--n-points", type=int, default=20, help="Feedback Q; thickness uses min(Q,10).")
+    p_manual.add_argument("--cycles", type=int, default=5, help="Fresh Bloch/LS1 feedback macrocycles.")
+    p_manual.add_argument("--choice", choices=["report", "input", "inverse", "skip"], default="report", help="Hand stage action. report computes evidence and pauses; input/inverse records the explicit user choice.")
+    p_manual.add_argument("--map-mode", choices=["native", "off"], default="native")
+    p_manual.add_argument("--native-map-spacing", type=float, default=0.25)
+    p_manual.set_defaults(func=cmd_manual)
+
     p_prep = sub.add_parser("prep", help="Write a JSON prep file for one structure and one or more XDS datasets.")
     p_prep.add_argument("--structure", required=True)
     p_prep.add_argument("--baseline-hkl", default="")

@@ -13,6 +13,17 @@ An endpoint R1all that is finite but worse than the conventional baseline is
 handled the same way: the comparison is retained as a warning while the model
 remains openable for maps and continued refinement.
 
+The manual interface now uses one state file instead of requiring users to
+copy nested paths and nuisance values between expert commands. `grond manual`
+provides `setup`, `scout`, `thickness`, `hand`, `feedback`, `scales`, `finish`,
+and `status` stages. Every stage writes a numbered directory and `handoff.json`,
+updates `manual_workflow.json`, records exact child commands and elapsed time,
+and prints the next command. Multi-dataset feedback is built from a generated
+hash-bound checkpoint containing the selected per-dataset nuisance summaries;
+it does not rerun transform scouting or thickness selection. The selected
+clean feedback cycle is recomputed without another coordinate move so its row
+tables and native maps use the same model.
+
 Continuous-thickness polishing now packs the cached eigenvalues and
 direct-to-target couplings by basis size and evaluates scalar/Powell candidates
 in bounded NumPy chunks. The retained scalar loop remains the exact fallback,
@@ -93,14 +104,11 @@ origin. Such rows remain available through predicted geometry, are excluded
 from observed-geometry tail estimates, and are counted explicitly in preflight
 and row-selection diagnostics.
 
-Experts can now run the principal automatic decisions as explicit handoff
-stages. `grond scout` performs only proper-transform preflight and scouting,
-`grond thickness` aliases the existing thickness audit, `grond hand-check`
+The low-level expert commands remain available beneath the stateful manual
+controller. `grond scout` performs only proper-transform preflight and
+scouting, `grond thickness` aliases the thickness audit, `grond hand-check`
 replays a completed native row contract, and `grond refine` aliases pinned
-endpoint continuation. Scout, thickness, and hand stages write hash-bound JSON
-handoffs containing the accepted inputs and ready-to-copy commands for the next
-stage. The new expert workflow guide documents the complete `prep -> scout ->
-thickness -> hand-check -> refine -> finish` sequence.
+endpoint continuation.
 
 Elastic hand checking now implements the negative-thickness identity. One
 Hermitian eigendecomposition produces both the supplied-coordinate and
