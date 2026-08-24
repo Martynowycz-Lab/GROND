@@ -538,8 +538,10 @@ def test_proper_sign_transform_native_smoke_has_no_cell_precision_score_drift(
         np.testing.assert_allclose(
             predictions[transform],
             reference,
-            rtol=2e-15,
-            atol=2e-18,
+            # LAPACK builds on macOS and cc02 differ at a few final ulps while
+            # retaining exactly the same physical support and score.
+            rtol=3e-14,
+            atol=1e-17,
         )
         assert physical_support[transform] == reference_support
 
