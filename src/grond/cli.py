@@ -19197,8 +19197,7 @@ def _target_ablation_auto_command(args: argparse.Namespace, variant: str, out_di
         f"{float(args.min_peak):g}",
         "--geometry-percentile",
         f"{float(args.geometry_percentile):g}",
-        "--hkl-transform",
-        str(args.hkl_transform),
+        f"--hkl-transform={args.hkl_transform}",
         "--workers",
         str(int(args.workers)),
         "--max-core-fraction",
@@ -20882,7 +20881,11 @@ def build_parser() -> argparse.ArgumentParser:
         p_target_ablation.add_argument("--max-core-fraction", type=float, default=0.85)
         p_target_ablation.add_argument("--chunksize", type=int, default=0)
         p_target_ablation.add_argument("--compute-backend", default="scipy")
-        p_target_ablation.add_argument("--row-plan-cache", choices=["off", "exact", "readwrite", "rebuild"], default="off")
+        p_target_ablation.add_argument(
+            "--row-plan-cache",
+            choices=["auto", "off", "exact", "readwrite", "rebuild"],
+            default="auto",
+        )
         p_target_ablation.add_argument("--prediction-cache-compression", choices=["compressed", "none"], default="none")
         p_target_ablation.add_argument("--hand-control", action=argparse.BooleanOptionalAction, default=True)
         p_target_ablation.add_argument("--make-maps", action=argparse.BooleanOptionalAction, default=False, help="Ablation skips maps by default to keep the four branches fast.")

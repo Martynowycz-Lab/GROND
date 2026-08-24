@@ -24,6 +24,13 @@ it does not rerun transform scouting or thickness selection. The selected
 clean feedback cycle is recomputed without another coordinate move so its row
 tables and native maps use the same model.
 
+Experimental XDS target-transform fits now restore their corrected HKLF4
+endpoints to the ordinary XDS IOBS intensity and uncertainty convention before
+SHELXL feedback. This keeps a reconstructed recorded-intensity nuisance fit
+separate from the units expected by a conventional merged endpoint. The hidden
+target-ablation harness also passes leading-minus signed transforms safely and
+uses the automatic exact row-plan-cache policy by default.
+
 Continuous-thickness polishing now packs the cached eigenvalues and
 direct-to-target couplings by basis size and evaluates scalar/Powell candidates
 in bounded NumPy chunks. The retained scalar loop remains the exact fallback,

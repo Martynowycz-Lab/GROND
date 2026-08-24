@@ -85,6 +85,17 @@ integration programs produce interchangeable measurements. The manifest must
 travel with the file. Profile-fitted XDS input is refused unless the diagnostic
 `--allow-profile-fitted-xds` override is given.
 
+The recorded-intensity reconstruction is the appropriate direct target for an
+absolute rocking-intensity calculation such as diffBloch. GROND's production
+operation is different: it fits a matched Bloch/Born ratio on the declared row
+contract and writes a conventional corrected HKLF4 endpoint. When an internal
+XDS target-transform diagnostic fits the recorded-intensity reconstruction,
+GROND therefore removes that diagnostic target factor again before every
+SHELXL feedback step. The fit can change thickness and relative nuisance
+scales, but the resulting endpoint remains in ordinary XDS IOBS units and can
+be compared with the conventional endpoint. A recorded-intensity HKLF4 file
+that has not been restored in this way is not a valid endpoint comparison.
+
 ## Virtual-frame ownership
 
 The stock PETS convention writes an observation into every eligible virtual

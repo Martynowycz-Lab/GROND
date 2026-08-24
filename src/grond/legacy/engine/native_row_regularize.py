@@ -802,8 +802,8 @@ def exact_hkl_merge(hkls, intensities, sigmas):
     return rows
 
 
-def target_arrays(data: XDSData, mode: str):
-    """Return the reduced XDS row target and matching sigma convention."""
+def target_factor(data: XDSData, mode: str):
+    """Return the positive rowwise factor mapping XDS IOBS into a fit target."""
 
     if mode == "iobs":
         factor = np.ones_like(data.iobs, dtype=float)
@@ -815,7 +815,33 @@ def target_arrays(data: XDSData, mode: str):
         factor = np.maximum(data.peak, 0.0) / 100.0 / np.maximum(data.rlp, 1e-12)
     else:
         raise ValueError(f"unknown target mode {mode!r}")
+    return factor
+
+
+def target_arrays(data: XDSData, mode: str):
+    """Return the reduced XDS row target and matching sigma convention."""
+
+    factor = target_factor(data, mode)
     return data.iobs * factor, data.sigma * np.abs(factor)
+
+
+def endpoint_observation_arrays(data: XDSData, target, sigma, mode: str):
+    """Restore a diagnostic fit target to ordinary XDS IOBS endpoint units.
+
+    Alternate target modes are useful for fitting nuisance terms against a
+    reconstructed scalar observation.  SHELXL HKLF4 files, however, must stay
+    in the ordinary XDS-complete intensity convention.  Undo the declared
+    positive target factor after fitting while retaining any sigma inflation
+    already present in ``sigma``.
+    """
+
+    factor = np.asarray(target_factor(data, mode), dtype=float)
+    safe = np.isfinite(factor) & (factor > 0.0)
+    endpoint_target = np.full_like(np.asarray(target, dtype=float), np.nan)
+    endpoint_sigma = np.full_like(np.asarray(sigma, dtype=float), np.nan)
+    endpoint_target[safe] = np.asarray(target, dtype=float)[safe] / factor[safe]
+    endpoint_sigma[safe] = np.asarray(sigma, dtype=float)[safe] / factor[safe]
+    return endpoint_target, endpoint_sigma, factor
 
 
 def sigma_eff(data: XDSData, target, base_sigma, nui: Nuisance):
@@ -2635,6 +2661,7 @@ def export_corrected_endpoint(
     post_bloch_sigma_min_scale: float = 0.25,
     post_bloch_sigma_max_scale: float = 4.0,
     endpoint_wght_mode: str = "freeze-zero",
+    target_mode: str = "iobs",
 ):
     out_dir.mkdir(parents=True, exist_ok=True)
     arrays = best_eval["arrays"]
@@ -2649,11 +2676,17 @@ def export_corrected_endpoint(
         if det_bins is not None:
             for d, scale in best_eval["dyn_detector_scales"].items():
                 scales[det_bins == int(d)] *= float(scale)
+    endpoint_target, endpoint_sig, endpoint_restore_factor = endpoint_observation_arrays(
+        data,
+        target,
+        sig,
+        target_mode,
+    )
     valid = (
         arrays["valid"]
-        & np.isfinite(target)
-        & np.isfinite(sig)
-        & (np.asarray(sig, dtype=float) > 0.0)
+        & np.isfinite(endpoint_target)
+        & np.isfinite(endpoint_sig)
+        & (np.asarray(endpoint_sig, dtype=float) > 0.0)
         & np.isfinite(arrays["dyn_scaled"])
         & (arrays["dyn_scaled"] > 0.0)
         & np.isfinite(q)
@@ -2664,13 +2697,13 @@ def export_corrected_endpoint(
     if not np.any(valid):
         raise ValueError("no finite rows with positive sigma, prediction, and fitted scale are available for endpoint export")
     denom = scales * (q_clip ** float(lambda_q))
-    Icorr = target / denom
-    sigcorr = sig / denom
+    Icorr = endpoint_target / denom
+    sigcorr = endpoint_sig / denom
     modulation, modulation_meta = endpoint_resolution_modulation(data, valid, endpoint_b)
     Icorr = Icorr * modulation
     sigcorr = sigcorr * modulation
     if rescale == "median-iobs":
-        src = float(np.nanmedian(target[valid]))
+        src = float(np.nanmedian(endpoint_target[valid]))
         dst = float(np.nanmedian(Icorr[valid]))
         factor = src / max(dst, 1e-30)
         Icorr *= factor
@@ -2754,6 +2787,12 @@ def export_corrected_endpoint(
         "endpoint_ls_cycles": int(max(1, endpoint_ls_cycles)),
         "endpoint_wght_mode": str(endpoint_wght_mode),
         "post_bloch_sigma": post_bloch_sigma,
+        "fit_target_mode": str(target_mode),
+        "endpoint_target_mode": "iobs",
+        "endpoint_target_factor_restored": bool(str(target_mode) != "iobs"),
+        "endpoint_target_factor_p05": float(np.nanpercentile(endpoint_restore_factor[valid], 5)),
+        "endpoint_target_factor_median": float(np.nanmedian(endpoint_restore_factor[valid])),
+        "endpoint_target_factor_p95": float(np.nanpercentile(endpoint_restore_factor[valid], 95)),
         "rows_unmerged": len(rows_unmerged),
         "rows_merged_exact_hkl": len(rows_merged),
         "q_median": float(np.nanmedian(q_clip[valid])),
@@ -3963,6 +4002,7 @@ def main():
                             post_bloch_sigma_min_scale=args.post_bloch_sigma_min_scale,
                             post_bloch_sigma_max_scale=args.post_bloch_sigma_max_scale,
                             endpoint_wght_mode=args.endpoint_wght_mode,
+                            target_mode=args.target_mode,
                         )
                     )
     fail_if_shelxl_became_unavailable(

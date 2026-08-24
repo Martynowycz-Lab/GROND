@@ -341,6 +341,31 @@ def test_target_ablation_parser_defaults_to_four_xds_contracts(monkeypatch):
     assert args.make_maps is False
     assert args.resume is False
     assert args.min_peak == 90.0
+    assert args.row_plan_cache == "auto"
+
+
+def test_target_ablation_passes_negative_signed_transform_as_one_argument(monkeypatch, tmp_path):
+    monkeypatch.setenv("GROND_ENABLE_INTERNAL_CLI", "1")
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "target-ablation",
+            "--xds-dir",
+            "xds",
+            "--structure",
+            "model.res",
+            "--baseline-hkl",
+            "model.hkl",
+            "--out-dir",
+            "ablation",
+            "--hkl-transform=-h,k,-l",
+        ]
+    )
+    command = cli._target_ablation_auto_command(args, "recorded_proxy", tmp_path)
+    assert "--hkl-transform=-h,k,-l" in command
+    inner = parser.parse_args(command[3:])
+    assert inner.command == "auto"
+    assert inner.hkl_transform == "-h,k,-l"
 
 
 def test_finish_parser_defaults_to_existing_run_dir():
