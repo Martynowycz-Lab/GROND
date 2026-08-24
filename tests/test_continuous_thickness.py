@@ -182,6 +182,64 @@ def test_batched_thickness_candidates_match_scalar_response(tmp_path: Path):
         np.testing.assert_allclose(actual["born"], expected["born"], rtol=1e-14, atol=1e-16)
 
 
+def test_packed_thickness_response_matches_retained_scalar_reference(tmp_path: Path):
+    hkl_path, model_path = _write_single_row_inputs(tmp_path)
+    data = XDSData(hkl_path)
+    model = parse_model(model_path)
+    cfg = Config(
+        n_basis=2,
+        n_points=3,
+        sg_window=0.0001,
+        sg_window_min=0.0001,
+        sg_window_max=0.0001,
+        topup_d_min=2.0,
+        ug_d_min=2.0,
+        thickness_A=83.0,
+        thickness_model="uniform_gradient",
+        thickness_grad_frac=0.7,
+        thickness_points=7,
+    )
+    continuous.args_progress_every = 1000
+    records = continuous.build_response_cache(
+        data,
+        model,
+        cfg,
+        np.asarray([0], dtype=int),
+        sha256(model_path),
+        tmp_path / "cache",
+    )
+
+    packed = continuous.predict_from_response(records, 1, 83.0, 0.7, 7)
+    scalar = continuous.predict_from_response_scalar(records, 1, 83.0, 0.7, 7)
+
+    np.testing.assert_allclose(packed["dyn"], scalar["dyn"], rtol=2e-14, atol=1e-16)
+    np.testing.assert_allclose(packed["born"], scalar["born"], rtol=2e-14, atol=1e-16)
+    np.testing.assert_array_equal(packed["indices"], scalar["indices"])
+
+
+def test_packed_response_memory_limit_keeps_scalar_fallback(tmp_path: Path, monkeypatch):
+    hkl_path, model_path = _write_single_row_inputs(tmp_path)
+    data = XDSData(hkl_path)
+    model = parse_model(model_path)
+    cfg = Config(
+        n_basis=2, n_points=3, sg_window=0.0001, sg_window_min=0.0001,
+        sg_window_max=0.0001, topup_d_min=2.0, ug_d_min=2.0,
+        thickness_A=83.0, thickness_model="uniform_gradient",
+        thickness_grad_frac=0.2, thickness_points=3,
+    )
+    monkeypatch.setenv("GROND_MAX_PACKED_THICKNESS_GIB", "0")
+    continuous.args_progress_every = 1000
+
+    records = continuous.build_response_cache(
+        data, model, cfg, np.asarray([0], dtype=int), sha256(model_path), tmp_path / "cache"
+    )
+
+    assert records.packed is None
+    assert records.packed_status["status"] == "skipped_memory_limit"
+    prediction = continuous.predict_from_response(records, 1, 83.0, 0.2, 3)
+    assert np.isfinite(prediction["dyn"][0])
+
+
 def test_row_plan_cache_true_hit_is_exact_and_skips_geometry(tmp_path: Path):
     hkl_path, model_path = _write_single_row_inputs(tmp_path)
     data = XDSData(hkl_path)
@@ -563,6 +621,22 @@ def test_local_thickness_bounds_apply_only_explicit_clamps():
         t_min=800.0,
         t_max=1200.0,
     ) == pytest.approx((800.0, 1200.0))
+
+
+def test_inclusive_bounded_axis_includes_upper_without_crossing_it():
+    values = continuous.inclusive_bounded_axis(648.92244384285, 1347.762, 100.0)
+
+    assert values[0] == pytest.approx(648.92244384285)
+    assert values[-1] == pytest.approx(1347.762)
+    assert np.all(values <= 1347.762)
+    assert len(values) == len(np.unique(values))
+
+
+def test_local_powell_bounds_use_immediate_guard_neighbors():
+    samples = continuous.inclusive_bounded_axis(780.0, 1620.0, 100.0)
+
+    assert continuous.local_powell_thickness_bounds(samples, 1580.0, 780.0, 1620.0) == pytest.approx((1480.0, 1620.0))
+    assert continuous.local_powell_thickness_bounds(samples, 1620.0, 780.0, 1620.0) == pytest.approx((1580.0, 1620.0))
 
 
 @pytest.mark.parametrize(

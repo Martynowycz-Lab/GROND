@@ -34,9 +34,13 @@ GROND thickness-scout \
   --baseline-hkl temp_a.hkl \
   --out-dir thickness_scout_wide \
   --thickness-grid-nm 50,75,110,150,180,220,260,300,400,500 \
-  --gradient-grid 0.0,0.4,0.8,1.0,1.2
+  --gradient-grid 0.0,0.4,0.8,1.0
 ```
 
 The output directory contains `REPORT.md`, `thickness_scout_summary.json`, `thickness_scout_table.csv`, `thickness_scout_trials.csv`, and `q_field_stability.csv`. The selected-run table is the quick human view. The trials table is the full nuisance grid. The q-field table compares the selected row-wise `log(Idyn/Iborn)` fields against the promoted reference and reports the shared-row correlation and the 95th percentile absolute `delta log q`.
 
 The production rule is conservative. Use the early bare production-scale thickness to guide `GROND auto`, pin it through the LS1 loop, and treat final-feature movement as an identifiability warning. If Sg jitter or absorption moves the apparent thickness by tens of nanometers while the row metrics remain similar, the thickness is absorbing row-contract or nuisance-model differences. In that case the stable object to trust is the q-field, row residuals, final hand, maps, and endpoint validation, not the absolute fitted thickness number.
+
+The uniform-gradient model can also be written as `t = mean + half_width*x`, with `half_width = mean*gradient`. GROND restricts the gradient to `0 <= gradient <= 1`, so the quadrature cannot cross negative physical thickness. A winner at gradient one should still be described carefully: repeated movement toward larger mean thickness broadens the distribution and damps coherent cross terms. That behavior is evidence for effective dephasing, not a precise wedge-thickness measurement. Work/free profiles and `q_field_stability.csv` are the tests that distinguish a stable correction from an identifiable physical thickness.
+
+Continuous polishing stores only the eigenvalues and direct-to-target spectral couplings needed to change thickness. Those records are packed by basis size for scalar and Powell evaluation; the original scalar implementation remains the exact fallback. Packing uses at most 2 GiB of additional memory by default. Set `GROND_MAX_PACKED_THICKNESS_GIB` only after checking the available memory. The deterministic guard grid always includes its declared boundary without stepping outside it, and the subsequent Powell search stays inside the neighboring sampled thickness basin rather than traversing unrelated Pendelloesung aliases.

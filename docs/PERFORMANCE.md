@@ -111,6 +111,19 @@ thicknesses and gradients over each cached eigensystem. A 31-candidate,
 SINGLA tyrosine. Absorptive/non-Hermitian response caches deliberately fall
 back to scalar propagation.
 
+Scalar and Powell thickness evaluations now use a second exact view of the
+same response cache: eigenvalues and direct-to-target couplings are packed by
+actual basis size and propagated in bounded NumPy chunks. On local matched
+N24/Q10 tests, the complete 500-row stage changed from 24.61 to 6.82 s for 370
+(3.61-fold) and from 41.06 to 15.14 s for SINGLA tyrosine with an 8x8 detector
+field (2.71-fold). On all eligible rows, 370 changed from 80.72 to 41.86 s
+(1.93-fold; 3,715 rows) and SINGLA from 77.08 to 48.01 s (1.61-fold; 3,154
+rows). The optimized runs retained the same physical candidate set and gates;
+including the exact bracket boundary sometimes selected a marginally better
+guard-grid point than the old grid, which could stop short of its own upper
+bound. These are development timings on one Mac, not promises for other
+hardware.
+
 ## Cheap Post-Processing
 
 Scale compression, endpoint selection, and resolution-limit reporting operate on completed row tables and summaries. They do not repeat the Bloch calculation. Multi-dataset inclusion decisions and post-dynamical overlap scaling are similarly inexpensive compared with row prediction. If a completed run needs only refreshed reports or maps, use `GROND finish --run-dir ...` instead of rerunning `GROND auto`.

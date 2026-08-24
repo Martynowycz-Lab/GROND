@@ -20,6 +20,7 @@ import argparse
 import csv
 import json
 import math
+import os
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -41,6 +42,76 @@ DEFAULT_HKL = Path("INTEGRATE.HKL")
 DEFAULT_RES = Path("model.res")
 PHYSICAL_GRAD_MIN = 0.0
 PHYSICAL_GRAD_MAX = 1.0
+PACKED_PROPAGATION_CHUNK = 2048
+
+
+class ResponseRecords(list):
+    """List-compatible response cache with an exact packed propagation view."""
+
+    def __init__(self, records=(), *, packed: dict | None = None):
+        super().__init__(records)
+        self.packed = packed
+        self.packed_status: dict[str, object] = {"status": "not_built"}
+
+
+def estimated_packed_response_bytes(records: list[dict]) -> int:
+    """Estimate additional packed-array bytes before allocating them."""
+
+    total = 0
+    for record in records:
+        total += np.asarray(record["profile_weights"], dtype=float).nbytes
+        for dynamic, _born in zip(record["dyn_specs"], record["born_specs"], strict=True):
+            if "matrix" in dynamic:
+                total += np.asarray(dynamic["matrix"], dtype=np.complex128).nbytes
+            else:
+                total += np.asarray(dynamic["vals"], dtype=np.complex128).nbytes
+                total += np.asarray(dynamic["coupling"], dtype=np.complex128).nbytes
+            total += 16
+    return int(total + 32 * len(records))
+
+
+def inclusive_bounded_axis(lower: float, upper: float, step: float) -> np.ndarray:
+    """Return a deterministic inclusive grid that never crosses its bounds."""
+
+    lower = float(lower)
+    upper = float(upper)
+    step = float(step)
+    if not all(math.isfinite(value) for value in (lower, upper, step)):
+        raise ValueError("bounded grid limits and step must be finite")
+    if upper < lower:
+        raise ValueError("bounded grid upper limit must be at least its lower limit")
+    if step <= 0.0:
+        raise ValueError("bounded grid step must be positive")
+    if upper == lower:
+        return np.asarray([lower], dtype=float)
+    count = int(math.floor((upper - lower) / step))
+    values = lower + step * np.arange(count + 1, dtype=float)
+    tolerance = max(1e-12, 1e-12 * max(abs(lower), abs(upper), 1.0))
+    values = values[values <= upper + tolerance]
+    if not len(values) or values[-1] < upper - tolerance:
+        values = np.append(values, upper)
+    else:
+        values[-1] = upper
+    return np.asarray(values, dtype=float)
+
+
+def local_powell_thickness_bounds(
+    sampled_thicknesses: np.ndarray,
+    winner: float,
+    lower: float,
+    upper: float,
+) -> tuple[float, float]:
+    """Bracket Powell by the immediate sampled neighbors of the guard-grid winner."""
+
+    samples = np.asarray(sorted(set(float(value) for value in sampled_thicknesses)), dtype=float)
+    if not len(samples):
+        return float(lower), float(upper)
+    index = int(np.argmin(np.abs(samples - float(winner))))
+    local_lower = float(samples[index - 1]) if index > 0 else float(lower)
+    local_upper = float(samples[index + 1]) if index + 1 < len(samples) else float(upper)
+    if local_upper <= local_lower:
+        return float(lower), float(upper)
+    return local_lower, local_upper
 
 
 def local_thickness_search_bounds(
@@ -276,7 +347,32 @@ def build_response_cache(
                 f"response cache {n}/{len(indices)} rows | {rate:.2f} rows/s | ETA {eta/60:.1f}m",
                 flush=True,
             )
-    return records
+    response_records = ResponseRecords(records)
+    estimated_bytes = estimated_packed_response_bytes(response_records)
+    max_gib = float(os.environ.get("GROND_MAX_PACKED_THICKNESS_GIB", "2.0"))
+    max_bytes = max(0, int(max_gib * 1024**3))
+    if estimated_bytes > max_bytes:
+        response_records.packed_status = {
+            "status": "skipped_memory_limit",
+            "estimated_bytes": estimated_bytes,
+            "maximum_bytes": max_bytes,
+        }
+    else:
+        try:
+            response_records.packed = pack_response_records(response_records)
+            response_records.packed_status = {
+                "status": "built",
+                "estimated_bytes": estimated_bytes,
+                "maximum_bytes": max_bytes,
+            }
+        except MemoryError:
+            response_records.packed = None
+            response_records.packed_status = {
+                "status": "skipped_memory_error",
+                "estimated_bytes": estimated_bytes,
+                "maximum_bytes": max_bytes,
+            }
+    return response_records
 
 
 def dyn_from_spec(spec: dict[str, np.ndarray], thick: np.ndarray, weights: np.ndarray) -> float:
@@ -299,8 +395,124 @@ def born_from_spec(h10_abs2: float, delta: float, thick: np.ndarray, weights: np
     return float(np.sum(weights * per_t))
 
 
-def predict_from_response(records: list[dict], n_rows: int, t0: float, grad: float, points: int) -> dict:
-    """Return a native_row_regularize prediction dictionary for arbitrary thickness."""
+def pack_response_records(records: list[dict]) -> dict:
+    """Pack spectral profile records for chunked phase-only propagation."""
+
+    phase_buckets: dict[int, dict[str, list]] = {}
+    fallback_specs: list[tuple[int, dict]] = []
+    profile_weights: list[float] = []
+    born_h10_abs2: list[float] = []
+    born_delta: list[float] = []
+    offsets = [0]
+    row_indices = []
+    basis_sizes = []
+    for record in records:
+        weights = np.asarray(record["profile_weights"], dtype=float)
+        dyn_specs = list(record["dyn_specs"])
+        born_specs = list(record["born_specs"])
+        if not (len(weights) == len(dyn_specs) == len(born_specs)):
+            raise ValueError("response profile weights and dynamical/Born spectra have different lengths")
+        row_indices.append(int(record["row_index"]))
+        basis_sizes.append(int(record["basis_size"]))
+        for weight, dyn_spec, born_spec in zip(weights, dyn_specs, born_specs, strict=True):
+            flat_position = len(profile_weights)
+            profile_weights.append(float(weight))
+            born_h10_abs2.append(float(born_spec["h10_abs2"]))
+            born_delta.append(float(born_spec["delta"]))
+            if "matrix" in dyn_spec:
+                fallback_specs.append((flat_position, dyn_spec))
+                continue
+            values = np.asarray(dyn_spec["vals"], dtype=np.complex128)
+            coupling = np.asarray(dyn_spec["coupling"], dtype=np.complex128)
+            if values.ndim != 1 or coupling.ndim != 1 or values.shape != coupling.shape:
+                raise ValueError("spectral response values and coupling must be matching vectors")
+            bucket = phase_buckets.setdefault(
+                len(values), {"positions": [], "phase_rates": [], "couplings": []}
+            )
+            bucket["positions"].append(flat_position)
+            bucket["phase_rates"].append((2j * np.pi) * values)
+            bucket["couplings"].append(coupling)
+        offsets.append(len(profile_weights))
+    packed_buckets = {
+        int(size): {
+            "positions": np.asarray(bucket["positions"], dtype=int),
+            "phase_rates": np.stack(bucket["phase_rates"]).astype(np.complex128, copy=False),
+            "couplings": np.stack(bucket["couplings"]).astype(np.complex128, copy=False),
+        }
+        for size, bucket in phase_buckets.items()
+    }
+    return {
+        "schema_version": 1,
+        "phase_buckets": packed_buckets,
+        "fallback_specs": fallback_specs,
+        "profile_weights": np.asarray(profile_weights, dtype=float),
+        "born_h10_abs2": np.asarray(born_h10_abs2, dtype=float),
+        "born_delta": np.asarray(born_delta, dtype=float),
+        "profile_offsets": np.asarray(offsets, dtype=int),
+        "row_indices": np.asarray(row_indices, dtype=int),
+        "basis_sizes": np.asarray(basis_sizes, dtype=int),
+        "chunk_size": PACKED_PROPAGATION_CHUNK,
+    }
+
+
+def _reduce_packed_profiles(values: np.ndarray, packed: dict) -> np.ndarray:
+    weights = np.asarray(packed["profile_weights"], dtype=float)
+    offsets = np.asarray(packed["profile_offsets"], dtype=int)
+    reduced = np.zeros(len(offsets) - 1, dtype=float)
+    for row_position, (lower, upper) in enumerate(zip(offsets[:-1], offsets[1:], strict=True)):
+        reduced[row_position] = float(np.sum(weights[lower:upper] * values[lower:upper]))
+    return reduced
+
+
+def predict_from_packed_response(packed: dict, n_rows: int, t0: float, grad: float, points: int) -> dict:
+    """Evaluate exactly the same spectral response in bounded NumPy chunks."""
+
+    thick, thick_w = thickness_grid(float(t0), float(grad), int(points))
+    profile_count = len(np.asarray(packed["profile_weights"]))
+    dyn_profiles = np.zeros(profile_count, dtype=float)
+    chunk_size = max(1, int(packed.get("chunk_size", PACKED_PROPAGATION_CHUNK)))
+    for basis_size in sorted(packed["phase_buckets"]):
+        bucket = packed["phase_buckets"][basis_size]
+        positions = np.asarray(bucket["positions"], dtype=int)
+        rates = np.asarray(bucket["phase_rates"], dtype=np.complex128)
+        couplings = np.asarray(bucket["couplings"], dtype=np.complex128)
+        for lower in range(0, len(positions), chunk_size):
+            upper = min(lower + chunk_size, len(positions))
+            phase = np.exp(rates[lower:upper, :, None] * thick[None, None, :])
+            amplitude = np.sum(couplings[lower:upper, :, None] * phase, axis=1)
+            dyn_profiles[positions[lower:upper]] = np.sum(
+                thick_w[None, :] * np.abs(amplitude) ** 2, axis=1
+            )
+    for position, spec in packed["fallback_specs"]:
+        dyn_profiles[int(position)] = dyn_from_spec(spec, thick, thick_w)
+
+    delta = np.asarray(packed["born_delta"], dtype=float)
+    h10_abs2 = np.asarray(packed["born_h10_abs2"], dtype=float)
+    born_profiles = np.zeros(profile_count, dtype=float)
+    for lower in range(0, profile_count, chunk_size):
+        upper = min(lower + chunk_size, profile_count)
+        arg = np.pi * delta[lower:upper, None] * thick[None, :]
+        sinc = np.ones_like(arg, dtype=float)
+        nonzero = np.abs(arg) >= 1e-12
+        sinc[nonzero] = np.sin(arg[nonzero]) / arg[nonzero]
+        per_t = (
+            (2.0 * math.pi) ** 2
+            * h10_abs2[lower:upper, None]
+            * thick[None, :] ** 2
+            * sinc**2
+        )
+        born_profiles[lower:upper] = np.sum(thick_w[None, :] * per_t, axis=1)
+    return {
+        "indices": np.asarray(packed["row_indices"], dtype=int),
+        "dyn": _reduce_packed_profiles(dyn_profiles, packed),
+        "born": _reduce_packed_profiles(born_profiles, packed),
+        "basis_size": np.asarray(packed["basis_sizes"], dtype=int),
+        "response_rows_total": int(n_rows),
+    }
+
+
+def predict_from_response_scalar(records: list[dict], n_rows: int, t0: float, grad: float, points: int) -> dict:
+    """Reference scalar-loop response evaluation retained for exact fallback."""
 
     thick, thick_w = thickness_grid(float(t0), float(grad), int(points))
     indices = np.asarray([r["row_index"] for r in records], dtype=int)
@@ -327,6 +539,15 @@ def predict_from_response(records: list[dict], n_rows: int, t0: float, grad: flo
         "basis_size": basis,
         "response_rows_total": int(n_rows),
     }
+
+
+def predict_from_response(records: list[dict], n_rows: int, t0: float, grad: float, points: int) -> dict:
+    """Return a native prediction, using exact packed propagation when available."""
+
+    packed = getattr(records, "packed", None)
+    if packed is not None:
+        return predict_from_packed_response(packed, n_rows, t0, grad, points)
+    return predict_from_response_scalar(records, n_rows, t0, grad, points)
 
 
 def predict_candidates_from_response(
@@ -676,15 +897,9 @@ def main() -> int:
 
     # 4. Small direct grid over t and gradient to guard against local minima.
     grid_t0 = time.perf_counter()
-    t_values = np.arange(
-        lo,
-        hi + 0.5 * float(args.grid_thickness_step),
-        float(args.grid_thickness_step),
-    )
-    g_values = np.arange(
-        float(args.grad_min),
-        float(args.grad_max) + 0.5 * float(args.grid_grad_step),
-        float(args.grid_grad_step),
+    t_values = inclusive_bounded_axis(lo, hi, float(args.grid_thickness_step))
+    g_values = inclusive_bounded_axis(
+        float(args.grad_min), float(args.grad_max), float(args.grid_grad_step)
     )
     grid_candidates = [
         (float(tv), float(gv)) for tv in t_values for gv in g_values
@@ -741,11 +956,14 @@ def main() -> int:
     # 5. Bounded Powell in thickness and gradient, seeded from the guard grid.
     powell_t0 = time.perf_counter()
     x0 = np.asarray([grid_best[1], grid_best[2]], dtype=float)
+    powell_t_lower, powell_t_upper = local_powell_thickness_bounds(
+        t_values, float(grid_best[1]), lo, hi
+    )
     powell_res = minimize(
         lambda x: evaluate(float(x[0]), float(x[1]), "powell")[0],
         x0,
         method="Powell",
-        bounds=[(lo, hi), (float(args.grad_min), float(args.grad_max))],
+        bounds=[(powell_t_lower, powell_t_upper), (float(args.grad_min), float(args.grad_max))],
         options={"maxiter": int(args.powell_maxiter), "xtol": 0.05, "ftol": 1e-5},
     )
     powell_seconds = time.perf_counter() - powell_t0
@@ -840,6 +1058,27 @@ def main() -> int:
         })]
     best_label, best_val, best_t, best_g, best_ev, best_decision = min(eligible, key=lambda x: x[1])
     best_nui = make_nuisance(args, best_t, best_g)
+    boundary_tolerance = max(0.1, 0.01 * float(args.grid_thickness_step))
+    thickness_at_search_boundary = bool(
+        math.isclose(best_t, lo, rel_tol=0.0, abs_tol=boundary_tolerance)
+        or math.isclose(best_t, hi, rel_tol=0.0, abs_tol=boundary_tolerance)
+    )
+    gradient_at_physical_boundary = bool(
+        math.isclose(best_g, PHYSICAL_GRAD_MAX, rel_tol=0.0, abs_tol=1e-6)
+    )
+    identifiability_warnings = []
+    if thickness_at_search_boundary:
+        identifiability_warnings.append(
+            "selected thickness is on the local search boundary; the mean is not bracketed by this run"
+        )
+    if gradient_at_physical_boundary:
+        identifiability_warnings.append(
+            "selected gradient is at the widest physical uniform-gradient boundary; interpret it as effective dephasing unless independently calibrated"
+        )
+    elif best_g >= 0.8:
+        identifiability_warnings.append(
+            "selected thickness distribution is broad enough to suppress coherent thickness oscillations; the mean may be weakly identified"
+        )
     best_native = {k: v for k, v in best_ev.items() if k != "arrays"}
     best_native["nuisance"] = asdict(best_nui)
     best_native["continuous_thickness_strategy"] = best_label
@@ -885,6 +1124,7 @@ def main() -> int:
             "powell_seconds": float(powell_seconds),
             "total_seconds": float(time.perf_counter() - t_start),
             "evaluations": int(len(eval_history)),
+            "packed_response": dict(getattr(records, "packed_status", {})),
         },
         "strategies": {
             name: {
@@ -922,6 +1162,15 @@ def main() -> int:
             "free_wR2": float(best_ev["metrics"]["free"]["dyn"]["wR2_all"]),
             "scale_count": int(best_ev["scale_count"]),
             "valid_rows": int(best_ev["valid_rows"]),
+        },
+        "thickness_identifiability": {
+            "status": "warning" if identifiability_warnings else "locally_bracketed",
+            "mean_thickness_A": float(best_t),
+            "absolute_half_width_A": float(best_t * best_g),
+            "nominal_support_A": [float(best_t * (1.0 - best_g)), float(best_t * (1.0 + best_g))],
+            "thickness_at_local_search_boundary": thickness_at_search_boundary,
+            "gradient_at_physical_boundary": gradient_at_physical_boundary,
+            "warnings": identifiability_warnings,
         },
         "promotion_decision": {
             "selected": best_decision,
@@ -961,6 +1210,8 @@ def main() -> int:
             "",
             f"Selected result: `{best_label}` at `{best_t:.3f} A` (`{best_t / 10.0:.3f} nm`) with gradient `{best_g:.4f}`.",
             f"Promotion gate: gain `{best_decision['gain']:.6f}`, free-wR2 loss `{best_decision['free_wR2_loss']:.6f}`, all-R1 loss `{best_decision['all_R1_loss']:.6f}`.",
+            f"Thickness identifiability: `{summary['thickness_identifiability']['status']}`; absolute half-width `{summary['thickness_identifiability']['absolute_half_width_A']:.3f} A`.",
+            *(f"Warning: {warning}." for warning in summary["thickness_identifiability"]["warnings"]),
             "",
             "The important speed result is not the subset metric itself; it is that once the response cache is built, scalar, parabolic, grid, and Powell searches reuse the same eigensystems and only change propagation phases.",
         ]

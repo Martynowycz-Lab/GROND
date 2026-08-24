@@ -4,6 +4,17 @@ This file records user-visible changes to the installable package. Version `0.2.
 
 ## 0.2.2 (unreleased)
 
+Continuous-thickness polishing now packs the cached eigenvalues and
+direct-to-target couplings by basis size and evaluates scalar/Powell candidates
+in bounded NumPy chunks. The retained scalar loop remains the exact fallback,
+including for responses that cannot be packed, and a 2 GiB default additional-
+memory ceiling can be changed with `GROND_MAX_PACKED_THICKNESS_GIB`. Guard-grid
+axes now include their declared upper bound without crossing it, and Powell is
+restricted to the immediate neighboring thickness samples around the guard-
+grid winner. These changes preserve the Hamiltonians, rows, scales, weights,
+and promotion gates while avoiding repeated Python-level spectral loops and
+unproductive movement between separated thickness basins.
+
 Endpoint modulation p95 is now a reporting diagnostic, not a validity or
 publication gate. Missing or large values remain explicit warnings, but no
 longer reject an otherwise healthy endpoint, veto a compact scale contract,
