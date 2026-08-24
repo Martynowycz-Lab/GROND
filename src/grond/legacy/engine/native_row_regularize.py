@@ -1831,7 +1831,12 @@ def row_contract_selection(data: XDSData, target, path: Path) -> tuple[np.ndarra
                 d_actual = float(data.cell.calculate_d(observed_hkl))
                 if not (
                     math.isfinite(d_expected)
-                    and math.isclose(d_actual, d_expected, rel_tol=1e-10, abs_tol=1e-10)
+                    # d_A is derived from the already-bound integer HKL and
+                    # unit cell, not an independent observation. Different
+                    # libm/linear-algebra builds can differ at a few 1e-10 A;
+                    # keep this strict enough to catch a changed cell while
+                    # allowing harmless cross-platform roundoff.
+                    and math.isclose(d_actual, d_expected, rel_tol=1e-8, abs_tol=1e-9)
                 ):
                     errors.append(
                         f"line {ordinal}: row_index {idx} d_A mismatch; "

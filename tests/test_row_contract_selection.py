@@ -75,3 +75,23 @@ def test_row_contract_fails_closed_on_hkl_or_observation_mismatch(tmp_path: Path
     _write_contract(contract, [stale])
     with pytest.raises(ValueError, match="target_I mismatch"):
         row_contract_selection(data, target, contract)
+
+
+def test_row_contract_allows_cross_platform_d_spacing_roundoff_but_rejects_changed_cell(
+    tmp_path: Path,
+):
+    data = _data()
+    target = np.asarray([10.0, 20.0, 30.0])
+    contract = tmp_path / "d_spacing.csv"
+    row = _row(data, target, 0)
+    row["d_A"] = float(row["d_A"]) + 2.0e-10
+    _write_contract(contract, [row])
+
+    indices, audit = row_contract_selection(data, target, contract)
+    assert indices.tolist() == [0]
+    assert audit["d_spacing_rows_verified"] == 1
+
+    row["d_A"] = float(row["d_A"]) + 1.0e-5
+    _write_contract(contract, [row])
+    with pytest.raises(ValueError, match="d_A mismatch"):
+        row_contract_selection(data, target, contract)
