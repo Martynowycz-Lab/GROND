@@ -44,6 +44,7 @@ def select_multi_scale_contract(
     """
 
     reasons: list[str] = []
+    warnings: list[str] = []
     diagnostics: dict[str, object] = {}
     try:
         full_scales = _integer(full, "scale_params")
@@ -93,6 +94,7 @@ def select_multi_scale_contract(
             "selected_contract": "full",
             "accepted": False,
             "reasons": ["invalid_candidate_contract"],
+            "warnings": warnings,
             "diagnostics": diagnostics,
         }
 
@@ -140,8 +142,12 @@ def select_multi_scale_contract(
         reasons.append("endpoint_r1_gt_cost_exceeded")
     if compact_wr2 - full_wr2 > float(max_endpoint_wr2_cost) + epsilon:
         reasons.append("endpoint_wr2_all_cost_exceeded")
-    if not math.isfinite(compact_goof) or compact_goof < float(goof_min) - epsilon or compact_goof > float(goof_max) + epsilon:
-        reasons.append("endpoint_goof_out_of_range")
+    if not math.isfinite(compact_goof):
+        warnings.append("endpoint_goof_unavailable")
+    elif compact_goof < float(goof_min) - epsilon or compact_goof > float(goof_max) + epsilon:
+        warnings.append(
+            f"endpoint_goof_outside_preferred_range:{compact_goof:.6g} not in {float(goof_min):.6g}-{float(goof_max):.6g}"
+        )
     if compact_npd > 0:
         reasons.append("endpoint_npd_present")
     if compact_splits > full_splits:
@@ -157,20 +163,19 @@ def select_multi_scale_contract(
             reasons.append("endpoint_artifacts_missing")
     if compact_hkl_safe_factor + epsilon < float(min_hkl_safe_factor):
         reasons.append("endpoint_hkl_safety_below_minimum")
-    modulation_warnings: list[str] = []
     if not math.isfinite(compact_modulation_p95):
-        modulation_warnings.append("endpoint modulation p95 is unavailable")
+        warnings.append("endpoint modulation p95 is unavailable")
     elif compact_modulation_p95 > float(max_modulation_p95) + epsilon:
-        modulation_warnings.append(
+        warnings.append(
             f"endpoint modulation p95 {compact_modulation_p95:.4g} exceeds warning level {float(max_modulation_p95):.4g}"
         )
-    diagnostics["warnings"] = modulation_warnings
+    diagnostics["warnings"] = warnings
 
     accepted = not reasons
     return {
         "selected_contract": "compact" if accepted else "full",
         "accepted": accepted,
         "reasons": reasons,
-        "warnings": modulation_warnings,
+        "warnings": warnings,
         "diagnostics": diagnostics,
     }

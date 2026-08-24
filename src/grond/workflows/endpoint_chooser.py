@@ -683,8 +683,10 @@ def classify_publication_endpoint(
     if not math.isfinite(goof):
         reasons.append("endpoint GooF is unavailable; publication endpoints must have conventional SHELXL GooF")
     elif goof < publication_goof_min or goof > publication_goof_max:
-        reasons.append(
-            f"endpoint GooF {goof:.3f} is outside the publication gate [{publication_goof_min:.3f}, {publication_goof_max:.3f}]"
+        warnings.append(
+            f"endpoint GooF {goof:.3f} is outside the preferred range "
+            f"[{publication_goof_min:.3f}, {publication_goof_max:.3f}]; inspect weights, sigmas, maps, and "
+            "continued-refinement behavior, but keep the endpoint available for model building"
         )
     metrics_ok = math.isfinite(_float(candidate.get("wR2_all"))) and math.isfinite(_float(candidate.get("R1_all")))
     if not metrics_ok and "endpoint metrics are incomplete" not in reasons:
@@ -827,7 +829,7 @@ def choose_publication_endpoints(
                 "endpoint-B equal to zero",
                 f"HKL safety factor >= {min_hkl_safe_factor:g}",
                 f"95th percentile modulation is reported and warned above {max_modulation_p95:g}, but never blocks promotion",
-                f"SHELXL GooF between {publication_goof_min:g} and {publication_goof_max:g}",
+                f"SHELXL GooF is finite; values outside {publication_goof_min:g}-{publication_goof_max:g} are warned but do not block model handoff",
                 "hash-bound final LST pathology audit is complete and NPD == 0; split warnings are reported but do not block promotion",
                 "stored endpoint statistics agree with hash-verified live LST statistics within SHELXL print rounding",
                 "observation-polish endpoints must pass raw-row and endpoint holdout gates",
@@ -926,7 +928,7 @@ def _write_markdown(out_dir: Path, decision: Mapping) -> Path:
     lines.extend(
         [
             "",
-            "Promotion rule: finite endpoint metrics, conventional SHELXL GooF inside the configured gate, full q correction, EXTI off, endpoint-B equal to zero, exact current RES/HKL/LST paths and SHA-256 values, a complete hash-bound final LST pathology audit, no NPD pathology unless explicitly overridden, safe HKL rescaling, and a passed observation-polish gate when a polish correction is involved. Modulation p95 is always reported and warned when large, but it is not a mathematical-validity or promotion gate. A combined endpoint must not worsen a supplied validated conventional combined-baseline R1(F)all; when that baseline is required, missing baseline evidence fails closed. Multi-dataset runs never substitute a single-dataset endpoint for a failed combined publication endpoint. Split warnings are reported but do not block promotion.",
+            "Promotion rule: finite endpoint metrics, full q correction, EXTI off, endpoint-B equal to zero, exact current RES/HKL/LST paths and SHA-256 values, a complete hash-bound final LST pathology audit, no NPD pathology unless explicitly overridden, safe HKL rescaling, and a passed observation-polish gate when a polish correction is involved. SHELXL GooF outside the preferred range and large modulation p95 are reported as warnings, not mathematical-validity or model-handoff gates. A combined endpoint must not worsen a supplied validated conventional combined-baseline R1(F)all; when that baseline is required, missing baseline evidence fails closed. Multi-dataset runs never substitute a single-dataset endpoint for a failed combined publication endpoint. Split warnings are reported but do not block promotion.",
             "",
             "## Endpoint Candidates",
             "",

@@ -4,6 +4,12 @@ This file records user-visible changes to the installable package. Version `0.2.
 
 ## 0.2.2 (unreleased)
 
+Finite, provenance-valid, NPD-free corrected endpoints remain available for
+continued model building when SHELXL GooF lies outside the preferred range.
+GooF remains prominently reported with weight, sigma, map, and continued-
+refinement guidance, but is now a warning rather than an endpoint, compact-
+scale, or publication-model handoff gate.
+
 Continuous-thickness polishing now packs the cached eigenvalues and
 direct-to-target couplings by basis size and evaluates scalar/Powell candidates
 in bounded NumPy chunks. The retained scalar loop remains the exact fallback,

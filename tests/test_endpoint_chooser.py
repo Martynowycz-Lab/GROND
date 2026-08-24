@@ -327,7 +327,7 @@ def test_endpoint_summary_normalization_does_not_invent_modulation(tmp_path: Pat
     assert any("modulation is unavailable" in reason for reason in normalized["warnings"])
 
 
-def test_endpoint_chooser_rejects_high_goof_for_publication():
+def test_endpoint_chooser_warns_on_high_goof_but_keeps_model_available():
     candidates = [
         {
             "id": "low_r_bad_goof",
@@ -362,10 +362,10 @@ def test_endpoint_chooser_rejects_high_goof_for_publication():
 
     decision = choose_publication_endpoints(candidates)
 
-    assert decision["best_physical_endpoint"]["id"] == "boring_goof"
-    assert decision["best_diagnostic_endpoint"]["id"] == "low_r_bad_goof"
-    rejected = [c for c in decision["rejected_corrections"] if c["id"] == "low_r_bad_goof"][0]
-    assert any("GooF" in reason and "outside" in reason for reason in rejected["rejection_reasons"])
+    assert decision["best_physical_endpoint"]["id"] == "low_r_bad_goof"
+    selected = decision["best_physical_endpoint"]
+    assert selected["rejection_reasons"] == []
+    assert any("GooF" in warning and "outside" in warning for warning in selected["warnings"])
 
 
 def test_endpoint_chooser_requires_no_npd_by_default():

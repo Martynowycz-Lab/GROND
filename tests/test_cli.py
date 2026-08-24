@@ -1192,7 +1192,7 @@ def test_finish_does_not_promote_calibration_when_chooser_rejects_all(tmp_path: 
     assert payload["publication_endpoint"]["R1all"] is None
     assert payload["files"]["publication_res"] == ""
     text = (run / "FINAL_SUMMARY.md").read_text()
-    assert "GROND Bloch dynamical publication endpoint | not available" in text
+    assert "GROND Bloch dynamical model-handoff endpoint | not available" in text
 
 
 def test_terminal_finish_summary_is_human_readable():
@@ -1284,7 +1284,7 @@ def test_terminal_finish_summary_is_human_readable():
     assert "Final matched Born rows: R(I)all 27.00%, wR(I)all 41.00%, free wR(I)all 40.00%" in text
     assert "Change: R(I)all -0.83 pp, wR(I)all -10.31 pp" in text
     assert "Direct LS1 corrected-HKL candidate: R1(F)gt 11.00%, R1(F)all 16.00%, wR2(F^2)all 22.00%, GooF 0.950" in text
-    assert "Publication endpoint: R1(F)gt 14.46%, R1(F)all 17.85%, wR2(F^2)all 25.72%, GooF 1.036" in text
+    assert "Recommended model-handoff endpoint: R1(F)gt 14.46%, R1(F)all 17.85%, wR2(F^2)all 25.72%, GooF 1.036" in text
 
 
 def test_terminal_finish_summary_prefers_jana_pets_rows_and_links_table1():
@@ -1333,7 +1333,7 @@ def test_terminal_finish_summary_prefers_jana_pets_rows_and_links_table1():
     assert "Matched Born: Nobs/Nall 20/30, Robs 12.00%, Rall 14.00%, wRall 16.00%" in text
     assert "Bloch dynamical: Nobs/Nall 20/30, Robs 7.00%, Rall 8.00%, wRall 9.00%" in text
     assert "Legacy native-objective row diagnostics" not in text
-    assert "No corrected endpoint passed" in text
+    assert "No corrected endpoint passed the hard artifact" in text
     assert "Canonical Table 1: /tmp/grond/TABLE1_FINAL_STATISTICS.md" in text
 
 

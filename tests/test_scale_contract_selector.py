@@ -189,15 +189,16 @@ def test_each_endpoint_residual_is_independently_protected(
 
 
 @pytest.mark.parametrize("goof", [0.849_999, 1.150_001, float("nan")])
-def test_compact_endpoint_goof_must_be_finite_and_publication_like(goof: float) -> None:
+def test_compact_endpoint_goof_is_warning_only(goof: float) -> None:
     full, compact = _passing_pair()
     compact["endpoint"]["GooF"] = goof
 
     result = _select(full, compact)
 
-    assert result["accepted"] is False
-    assert result["selected_contract"] == "full"
-    assert "endpoint_goof_out_of_range" in result["reasons"]
+    assert result["accepted"] is True
+    assert result["selected_contract"] == "compact"
+    assert result["reasons"] == []
+    assert any("goof" in warning for warning in result["warnings"])
 
 
 @pytest.mark.parametrize(

@@ -672,7 +672,10 @@ def choose_publication_endpoint(
         if str(row.get("wght_mode")) != prefer:
             reasons.append(f"not preferred weight mode {prefer!r}")
         if goof < float(goof_min) or goof > float(goof_max):
-            reasons.append(f"GooF {goof:.3g} outside {goof_min:.3g}-{goof_max:.3g}")
+            warnings.append(
+                f"GooF {goof:.3g} outside preferred range {goof_min:.3g}-{goof_max:.3g}; "
+                "warning only, endpoint remains eligible for model handoff"
+            )
         if not allow_npd and (npd_count > 0 or bool(row.get("shelxl_has_npd"))):
             atoms = str(row.get("shelxl_npd_atoms", "") or "")
             atom_text = f" ({atoms})" if atoms else ""

@@ -99,8 +99,12 @@ def test_publication_endpoint_bic_policy_uses_bic_after_sanity_gates():
 
     assert selected["status"] == "passed"
     assert selected["selection_policy"] == "bic"
-    assert selected["publication_endpoint"]["spec"] == "bic_best"
-    assert selected["selected_information_criterion"] == 1500.0
+    assert selected["publication_endpoint"]["spec"] == "low_r_bad_goof"
+    assert selected["selected_information_criterion"] == 1000.0
+    assert any(
+        "GooF" in warning
+        for warning in selected["publication_endpoint"]["modulation_warnings"]
+    )
 
 
 def test_publication_endpoint_legacy_policy_keeps_smallest_passing_scale_count():

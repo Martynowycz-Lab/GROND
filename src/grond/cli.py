@@ -3845,7 +3845,7 @@ def write_multi_scale_contract_report(out_dir: Path, decision: Mapping[str, obje
     lines = [
         "# GROND Multi-Dataset Scale-Contract Selection",
         "",
-        "Full and compact candidates reuse identical frozen Bloch predictions. Compact promotion is fail-closed and requires matched physics, improved aggregate fitted-variance BIC, bounded all/work/free row costs, bounded endpoint costs, unchanged merged coverage, publication-like GooF, and no new ADP pathology.",
+        "Full and compact candidates reuse identical frozen Bloch predictions. Compact promotion is fail-closed for matched physics, aggregate fitted-variance BIC, bounded all/work/free row costs, bounded endpoint costs, unchanged merged coverage, and new ADP pathology. Non-ideal GooF is reported as a warning and never withholds an otherwise usable model.",
         "",
         f"Status: `{decision.get('status', 'unknown')}`. Reason: `{decision.get('reason', 'completed candidate gate')}`. Wall time: `{safe_float(decision.get('wall_seconds')):.3f} s`.",
         "",
@@ -13582,7 +13582,10 @@ def _quick_goof_warning(goof_value: object) -> str:
         return ""
     if 0.85 <= goof <= 1.15:
         return ""
-    return "endpoint GooF is outside 0.85-1.15; treat this endpoint as diagnostic unless the row-level and weighting audits justify it"
+    return (
+        "endpoint GooF is outside the preferred 0.85-1.15 range; inspect weights, sigmas, maps, "
+        "and continued refinement, but the endpoint remains available for model building"
+    )
 
 
 def _quick_residual_z_summary(csv_paths: Path | list[Path]) -> dict[str, dict[str, float | int]]:
@@ -14816,7 +14819,7 @@ def _write_final_statistics_table1(
         "not generated: no actual Born-corrected SHELXL endpoint refinement exists for this run"
     )
     dynamic_endpoint = _table1_shelxl_record(
-        "GROND dynamical corrected-HKL publication endpoint",
+        "GROND dynamical corrected-HKL model-handoff endpoint",
         "final merged corrected-HKL SHELXL endpoint",
         publication_shelxl,
         publication_controls,
@@ -15251,19 +15254,19 @@ def _format_terminal_finish_summary(payload: Mapping[str, object]) -> str:
     if not endpoint_available:
         endpoint_lines.extend(
             [
-                "  No corrected endpoint passed the fresh conventional-baseline no-harm gate.",
+                "  No corrected endpoint passed the hard artifact, support, endpoint-health, and no-harm checks.",
                 f"  Retain conventional baseline: R1(F)all {_quick_percent(input_shelxl.get('R1all'))}; RES {files.get('baseline_res', '')}; HKL {files.get('baseline_hkl', '')}",
             ]
         )
     elif publication_is_direct_ls1:
         endpoint_lines.append(
-            f"  Publication endpoint (direct LS1 corrected-HKL): R1(F)gt {_quick_percent(endpoint.get('R1gt'))}, R1(F)all {_quick_percent(endpoint.get('R1all'))}, wR2(F^2)all {_quick_percent(endpoint.get('wR2all'))}, GooF {_quick_number(endpoint.get('GooF'), 3)}; {_quick_shelxl_issue_text(endpoint)}"
+            f"  Recommended model-handoff endpoint (direct LS1 corrected-HKL): R1(F)gt {_quick_percent(endpoint.get('R1gt'))}, R1(F)all {_quick_percent(endpoint.get('R1all'))}, wR2(F^2)all {_quick_percent(endpoint.get('wR2all'))}, GooF {_quick_number(endpoint.get('GooF'), 3)}; {_quick_shelxl_issue_text(endpoint)}"
         )
     else:
         endpoint_lines.extend(
             [
                 f"  Direct LS1 corrected-HKL candidate: R1(F)gt {_quick_percent(feedback.get('R1gt'))}, R1(F)all {_quick_percent(feedback.get('R1all'))}, wR2(F^2)all {_quick_percent(feedback.get('wR2all'))}, GooF {_quick_number(feedback.get('GooF'), 3)}; {_quick_shelxl_issue_text(feedback)}",
-                f"  Publication endpoint: R1(F)gt {_quick_percent(endpoint.get('R1gt'))}, R1(F)all {_quick_percent(endpoint.get('R1all'))}, wR2(F^2)all {_quick_percent(endpoint.get('wR2all'))}, GooF {_quick_number(endpoint.get('GooF'), 3)}; {_quick_shelxl_issue_text(endpoint)}",
+                f"  Recommended model-handoff endpoint: R1(F)gt {_quick_percent(endpoint.get('R1gt'))}, R1(F)all {_quick_percent(endpoint.get('R1all'))}, wR2(F^2)all {_quick_percent(endpoint.get('wR2all'))}, GooF {_quick_number(endpoint.get('GooF'), 3)}; {_quick_shelxl_issue_text(endpoint)}",
             ]
         )
     if diagnostic and diagnostic.get("R1all") is not None:
@@ -16204,9 +16207,9 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
     lines.extend(
         [
             "",
-            "## Publication Endpoint",
+            "## Recommended Model-Handoff Endpoint",
             "",
-            "This is the endpoint GROND currently recommends opening for the final structure. The endpoint-calibration table below remains the conservative scale-replay audit.",
+            "This is the endpoint GROND recommends opening, inspecting, and continuing in the user's modeling program. Warnings remain attached; they do not hide an otherwise usable model. The endpoint-calibration table below remains the conservative scale-replay audit.",
             "",
             "| source | kind/spec | WGHT | scales | R1(F)gt | R1(F)all | wR2(F^2)all | GooF | params/restraints | pathology |",
             "|---|---|---|---:|---:|---:|---:|---:|---:|---|",
@@ -16513,7 +16516,7 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
         "|---|---|---:|---:|---:|---:|---:|---:|---:|",
         f"| conventional kinematic reference | {'available' if input_endpoint_available else 'not available'} | {_table1_pair({'Ngt': input_shelxl.get('N_gt'), 'Nall': input_shelxl.get('N_all')}, 'Ngt', 'Nall')} | {_quick_percent(input_shelxl.get('R1_gt'))} | {_quick_percent(input_shelxl.get('R1_all'))} | {_quick_percent(input_shelxl.get('wR2_all'))} | {_quick_number(input_shelxl.get('GooF'), 3)} | {_table1_pair({'parameters': input_shelxl.get('parameters'), 'restraints': input_shelxl.get('restraints')}, 'parameters', 'restraints')} | {_table1_pair({'NPD': input_shelxl.get('npd_count'), 'split': input_shelxl.get('split_count')}, 'NPD', 'split')} |",
         "| GROND Born corrected-HKL endpoint | not available | n/a | n/a | n/a | n/a | n/a | n/a | n/a |",
-        f"| GROND Bloch dynamical publication endpoint | {'available' if publication_endpoint_available else 'not available'} | {_table1_pair({'Ngt': publication_shelxl.get('N_gt'), 'Nall': publication_shelxl.get('N_all')}, 'Ngt', 'Nall')} | {_quick_percent(publication_shelxl.get('R1_gt'))} | {_quick_percent(publication_shelxl.get('R1_all'))} | {_quick_percent(publication_shelxl.get('wR2_all'))} | {_quick_number(publication_shelxl.get('GooF'), 3)} | {_table1_pair({'parameters': publication_shelxl.get('parameters'), 'restraints': publication_shelxl.get('restraints')}, 'parameters', 'restraints')} | {_table1_pair({'NPD': publication_shelxl.get('npd_count'), 'split': publication_shelxl.get('split_count')}, 'NPD', 'split')} |",
+        f"| GROND Bloch dynamical model-handoff endpoint | {'available' if publication_endpoint_available else 'not available'} | {_table1_pair({'Ngt': publication_shelxl.get('N_gt'), 'Nall': publication_shelxl.get('N_all')}, 'Ngt', 'Nall')} | {_quick_percent(publication_shelxl.get('R1_gt'))} | {_quick_percent(publication_shelxl.get('R1_all'))} | {_quick_percent(publication_shelxl.get('wR2_all'))} | {_quick_number(publication_shelxl.get('GooF'), 3)} | {_table1_pair({'parameters': publication_shelxl.get('parameters'), 'restraints': publication_shelxl.get('restraints')}, 'parameters', 'restraints')} | {_table1_pair({'NPD': publication_shelxl.get('npd_count'), 'split': publication_shelxl.get('split_count')}, 'NPD', 'split')} |",
         "",
         "### B. JANA/PETS-Style Row And Post-Refinement Merged Statistics",
         "",
@@ -16609,9 +16612,6 @@ def _publication_endpoint_from_result(result: Mapping[str, object]) -> Mapping[s
 
     chooser_endpoint = _chooser_publication_endpoint(result)
     if chooser_endpoint:
-        goof = chooser_endpoint.get("shelxl_GooF", chooser_endpoint.get("GooF"))
-        if _quick_goof_warning(goof):
-            return no_harm_checked(_endpoint_calibration_publication_endpoint(result))
         return no_harm_checked(chooser_endpoint)
     chooser = result.get("publication_endpoint_chooser") if isinstance(result.get("publication_endpoint_chooser"), Mapping) else {}
     chooser_status = str(chooser.get("status", "") if isinstance(chooser, Mapping) else "")
@@ -19987,8 +19987,8 @@ def add_common_run_args(ap: argparse.ArgumentParser, *, expose_lambda_controls: 
         ap.set_defaults(endpoint_calibration_lambda_q=1.0)
     ap.add_argument("--endpoint-calibration-wght-modes", default="freeze-zero,promote", help="Endpoint-calibration weight branches. The default tests fixed WGHT 0 0 before the compatibility branch.")
     ap.add_argument("--endpoint-calibration-prefer-wght-mode", default="freeze-zero")
-    ap.add_argument("--endpoint-calibration-goof-min", type=float, default=0.85)
-    ap.add_argument("--endpoint-calibration-goof-max", type=float, default=1.15)
+    ap.add_argument("--endpoint-calibration-goof-min", type=float, default=0.85, help="Lower preferred GooF warning threshold; never a model-handoff gate.")
+    ap.add_argument("--endpoint-calibration-goof-max", type=float, default=1.15, help="Upper preferred GooF warning threshold; never a model-handoff gate.")
     ap.add_argument("--endpoint-calibration-max-r1-cost", type=float, default=0.010)
     ap.add_argument("--endpoint-calibration-free-wr2-tolerance", type=float, default=0.040)
     ap.add_argument(
@@ -20774,8 +20774,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_cal_endpoint.add_argument("--shelxl", default="shelxl")
     p_cal_endpoint.add_argument("--shelxl-iterations", type=int, default=3)
     p_cal_endpoint.add_argument("--wght-modes", default="freeze-zero,promote", help="Comma list of endpoint weight policies; freeze-zero keeps active WGHT 0 0.")
-    p_cal_endpoint.add_argument("--publication-goof-min", type=float, default=0.85)
-    p_cal_endpoint.add_argument("--publication-goof-max", type=float, default=1.15)
+    p_cal_endpoint.add_argument("--publication-goof-min", type=float, default=0.85, help="Lower preferred GooF warning threshold; never a model-handoff gate.")
+    p_cal_endpoint.add_argument("--publication-goof-max", type=float, default=1.15, help="Upper preferred GooF warning threshold; never a model-handoff gate.")
     p_cal_endpoint.add_argument("--publication-max-r1-cost", type=float, default=0.010)
     p_cal_endpoint.add_argument("--publication-free-wr2-tolerance", type=float, default=0.040)
     p_cal_endpoint.add_argument("--publication-max-modulation-p95", type=float, default=20.0, help="Warning level only; modulation p95 never blocks endpoint selection.")
