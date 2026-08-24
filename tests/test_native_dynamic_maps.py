@@ -7,6 +7,7 @@ import gemmi
 import numpy as np
 import pytest
 
+import grond.maps.native_dynamic as native_dynamic
 from grond.maps.native_dynamic import NativeDynamicMapOptions, write_native_dynamic_map_package
 
 
@@ -16,7 +17,17 @@ def _periodic_fractional_distance(a, b) -> float:
     return float(np.linalg.norm(delta))
 
 
-def test_native_dynamic_map_package_uses_row_level_dynamical_coefficients(tmp_path: Path):
+def test_native_dynamic_map_package_uses_row_level_dynamical_coefficients(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    fcalc_calls: list[int] = []
+    original_fcalc = native_dynamic.fcalc_res_grid
+
+    def counted_fcalc(model, h, k, ell):
+        fcalc_calls.append(len(np.asarray(h)))
+        return original_fcalc(model, h, k, ell)
+
+    monkeypatch.setattr(native_dynamic, "fcalc_res_grid", counted_fcalc)
     model = tmp_path / "model.res"
     model.write_text(
         "\n".join(
@@ -75,6 +86,10 @@ def test_native_dynamic_map_package_uses_row_level_dynamical_coefficients(tmp_pa
     assert ccp4.grid.nu > 0
     saved = json.loads((out / "native_dynamic_maps_manifest.json").read_text())
     assert saved["outputs"]["dynamic_cif"] == manifest["outputs"]["dynamic_cif"]
+    # One vector call for input rows, one for merged orbits, and one for each
+    # of the three map coefficient kinds.  Never regress to one call per
+    # reflection or symmetry mate.
+    assert fcalc_calls == [2, 1, 1, 1, 1]
 
 
 def test_native_dynamic_fo_map_peaks_at_model_atom_not_inverted_hand(tmp_path: Path):

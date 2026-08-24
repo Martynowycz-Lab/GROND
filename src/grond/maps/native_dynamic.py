@@ -376,10 +376,25 @@ def _merge_native_amplitudes(
         signed_hkl = (int(h[idx]), int(k[idx]), int(ell[idx]))
         grouped[_canonical_model_symmetry_hkl(signed_hkl, symmetry_ops)].append(int(idx))
 
+    # Calculate the model coefficients for every merged orbit in one vector
+    # call.  Calling ``fcalc_res_grid`` once per orbit is mathematically
+    # identical but dominated native-map export for ordinary small-molecule
+    # datasets through thousands of repeated Python/array setup operations.
+    grouped_keys = sorted(grouped)
+    grouped_hkls = np.asarray(grouped_keys, dtype=int)
+    grouped_fc = (
+        fcalc_res_grid(model, grouped_hkls[:, 0], grouped_hkls[:, 1], grouped_hkls[:, 2])
+        if len(grouped_hkls)
+        else np.asarray([], dtype=np.complex128)
+    )
+    grouped_fc_by_hkl = {
+        key: complex(value) for key, value in zip(grouped_keys, grouped_fc, strict=True)
+    }
+
     merged: list[dict[str, object]] = []
     for hkl, indices in sorted(grouped.items()):
         idx = np.asarray(indices, dtype=int)
-        fc_ref = complex(fcalc_res_grid(model, np.asarray([hkl[0]]), np.asarray([hkl[1]]), np.asarray([hkl[2]]))[0])
+        fc_ref = grouped_fc_by_hkl[hkl]
         fc_ref_abs = abs(fc_ref)
         if fc_ref_abs <= 1e-12:
             continue
@@ -507,23 +522,29 @@ def _prepare_real_map_coefficients(
     expanded_candidates: dict[tuple[int, int, int], list[tuple[complex, float, tuple[int, int, int]]]] = defaultdict(
         list
     )
+    expanded_rows: list[tuple[Mapping[str, object], tuple[int, int, int], tuple[int, int, int]]] = []
+    mate_keys: set[tuple[int, int, int]] = set()
     for row in coefficients:
         source_key = (int(row["h"]), int(row["k"]), int(row["l"]))
         for mate in _symmetry_equivalent_hkls(source_key, symmetry_ops):
-            fc = complex(
-                fcalc_res_grid(
-                    model,
-                    np.asarray([mate[0]], dtype=int),
-                    np.asarray([mate[1]], dtype=int),
-                    np.asarray([mate[2]], dtype=int),
-                )[0]
-            )
-            fc_abs = abs(fc)
-            if fc_abs <= 1e-12:
-                continue
-            amplitude, sigma_coefficient = _coefficient_amplitude(row, kind, fc_abs)
-            phase_factor = fc / fc_abs
-            expanded_candidates[mate].append((amplitude * phase_factor, sigma_coefficient, source_key))
+            expanded_rows.append((row, source_key, mate))
+            mate_keys.add(mate)
+    sorted_mates = sorted(mate_keys)
+    mate_hkls = np.asarray(sorted_mates, dtype=int)
+    mate_fc = (
+        fcalc_res_grid(model, mate_hkls[:, 0], mate_hkls[:, 1], mate_hkls[:, 2])
+        if len(mate_hkls)
+        else np.asarray([], dtype=np.complex128)
+    )
+    fc_by_mate = {key: complex(value) for key, value in zip(sorted_mates, mate_fc, strict=True)}
+    for row, source_key, mate in expanded_rows:
+        fc = fc_by_mate[mate]
+        fc_abs = abs(fc)
+        if fc_abs <= 1e-12:
+            continue
+        amplitude, sigma_coefficient = _coefficient_amplitude(row, kind, fc_abs)
+        phase_factor = fc / fc_abs
+        expanded_candidates[mate].append((amplitude * phase_factor, sigma_coefficient, source_key))
 
     expanded: dict[tuple[int, int, int], tuple[complex, float, frozenset[tuple[int, int, int]]]] = {}
     overlapping_symmetry_assignments = 0
