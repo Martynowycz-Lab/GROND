@@ -4,6 +4,54 @@ This file records user-visible changes to the installable package. Version `0.2.
 
 ## 0.2.2 (unreleased)
 
+The release-candidate workflow audit now keeps user-declared row support
+immutable: preflight may suggest a lower PEAK/partiality floor or a stricter
+geometry percentile, but automatic execution no longer applies either change
+silently. Profile-fitted XDS rows produce a visible warning. The final
+multi-dataset elastic negative-thickness statuses `kept` and `switched` are now
+recognized by endpoint selection and user reports; exact pooled all/work/free
+hand evidence is shown instead of the stale “no pooled statistic” message.
+Only policy-active primary/downweighted crystals enter that shared hand
+selection. A missing conventional comparison or a corrected endpoint R1all
+worse than the conventional control is warning-only and no longer withholds an
+otherwise healthy model-handoff endpoint.
+
+The simplified manual workflow is hardened for independent use. Setup can
+persist Python, worker, config, and SHELXL defaults into every printed next
+command and can write a fresh hash-bound conventional control. Setup checks
+electron SFAC records; skipped scouts still enforce proper transforms and run
+preflight; reused thickness summaries must match the named source-HKL hash,
+transform, resolution, PEAK, and geometry contract. Manual feedback no longer
+adds an undeclared final coordinate-polish cycle when a fixed basis is
+requested, and it refuses to fall back to an NPD best-native diagnostic when no
+clean cycle exists. Reports now label its hand choice as pre-feedback and state
+that compact scales are audit-only; `auto` remains the production workflow.
+
+Multi-dataset `--h-omit` now fails explicitly instead of being ignored. The
+single-dataset branch is labeled a retrospective strip-H sensitivity control;
+`only` and `both` remain deprecated aliases for `on`. DIALS import validates
+input paths and executable permissions before launching its helper, truncates
+helper stderr, and returns a concise JSON/CLI error instead of a raw traceback
+or the embedded helper source. Symlinked virtual-environment and DIALS Python
+launchers are preserved rather than resolved to a base interpreter that may
+lack NumPy, DIALS, or dxtbx. Documentation now includes public HTTPS install,
+small-molecule doctor, detached-server, multi-experiment DIALS splitting,
+electron-SFAC recovery, and current hand-artifact guidance.
+
+Single-dataset automatic runs now enforce the same final-model row contract as
+the shared multi-dataset feedback loop. When the accepted SHELXL endpoint or a
+final hand switch changes the model hash, GROND performs one fixed-nuisance,
+endpoint-free Bloch recomputation before scale checks, calibration, row tables,
+or native maps are generated. The accepted coordinates and final native rows
+therefore cannot silently describe adjacent LS1 states. The public
+`audit-hydrogen-omit` command validates a prospective zero-H model, samples
+multiple CCP4 difference maps at independent full-H reference sites within a
+declared radius, and writes hash-bound CSV/JSON/Markdown artifacts. Parity
+calibration help now states explicitly that the current final-elastic hand
+artifact is not yet accepted by the legacy branch-symmetric/common-sigma
+calibration replay. The tracked workflow figures were rebuilt to show hand at
+the final elastic stage rather than before thickness and coordinate feedback.
+
 Finite, provenance-valid, NPD-free corrected endpoints remain available for
 continued model building when SHELXL GooF lies outside the preferred range.
 GooF remains prominently reported with weight, sigma, map, and continued-
@@ -46,10 +94,10 @@ top-level continuation checkpoint and understand the single-dataset feedback,
 decision, and final-row-recompute artifact layout. A leave-one-crystal-out run
 can explicitly suppress a larger-cohort baseline HKL inherited from a reused
 nuisance summary with `--ignore-source-baseline-hkl`; the manual controller
-does this automatically when no baseline was supplied at setup. Final reports
-show starting SHELXL statistics only when the source-model HKL and configured
-baseline HKL are hash-identical, preventing an unrelated cohort baseline from
-appearing in a single-crystal comparison.
+does this automatically when no baseline was supplied at setup. With an
+explicit configured SHELXL executable, setup writes a fresh one-cycle control
+bound to the supplied source RES and baseline HKL; final reporting prefers that
+control and otherwise retains the older hash-matched sibling-LST fallback.
 XDS PETS exports can now be filtered by the immutable `row_index` and `split`
 columns of a GROND native row table. This permits a work-only diffBloch input
 whose optimizer never sees GROND free rows; the selected source IDs, split

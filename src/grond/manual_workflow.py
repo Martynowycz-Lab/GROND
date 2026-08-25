@@ -16,6 +16,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+from .hkl_transform import parse_hkl_transform_info
 from .io.config import PrepConfig, load_prep, parse_dataset_spec, write_prep
 from .legacy.engine.shelx_diagnostics import parse_shelx_lst_metrics, parse_shelx_lst_pathologies
 from .maps.native_dynamic import NativeDynamicMapOptions, write_native_dynamic_map_package
@@ -61,6 +62,15 @@ def _load_workflow(args) -> tuple[Path, dict[str, Any]]:
     workflow = _read_json(path)
     if workflow.get("kind") != WORKFLOW_KIND:
         raise SystemExit(f"Not a GROND manual workflow: {path}")
+    defaults = workflow.get("runtime_defaults") if isinstance(workflow.get("runtime_defaults"), Mapping) else {}
+    if hasattr(args, "workers") and int(getattr(args, "workers", 0) or 0) == 0 and defaults.get("workers"):
+        args.workers = int(defaults["workers"])
+    if hasattr(args, "python") and not str(getattr(args, "python", "") or "").strip() and defaults.get("python"):
+        args.python = str(defaults["python"])
+    if hasattr(args, "config") and not str(getattr(args, "config", "") or "").strip() and defaults.get("config"):
+        args.config = str(defaults["config"])
+    if hasattr(args, "shelxl") and str(getattr(args, "shelxl", "") or "shelxl") == "shelxl" and defaults.get("shelxl"):
+        args.shelxl = str(defaults["shelxl"])
     return path, workflow
 
 
@@ -98,7 +108,12 @@ def _run_stage_command(command: list[str], *, verbose: bool = False) -> dict[str
         out_dir = Path(command[command.index("--out-dir") + 1]).expanduser().resolve()
         out_dir.mkdir(parents=True, exist_ok=True)
         env["GROND_CACHE_DIR"] = str(out_dir.parent / "cache")
-    child_name = command[3] if len(command) > 3 else Path(command[0]).name
+    if len(command) > 3 and command[1:3] == ["-m", "grond.cli"]:
+        child_name = command[3]
+    elif len(command) > 1:
+        child_name = Path(command[1]).stem
+    else:
+        child_name = Path(command[0]).name
     log_path = (out_dir or Path.cwd()) / f"manual_{child_name.replace('-', '_')}.log"
     print(f"RUN  {child_name} -> {out_dir or Path.cwd()}", flush=True)
     continuing_log = log_path.exists() and log_path.stat().st_size > 0
@@ -198,9 +213,26 @@ def _verbose_child_output(args) -> bool:
     return bool(getattr(args, "verbose_child_output", False))
 
 
-def _next_command(stage: str, workflow_path: Path, extra: str = "") -> str:
-    suffix = f" {extra.strip()}" if extra.strip() else ""
-    return f"grond manual {stage} --workflow {shlex.quote(str(workflow_path))}{suffix}"
+def _next_command(
+    stage: str,
+    workflow_path: Path,
+    extra: str = "",
+    *,
+    workflow: Mapping[str, object] | None = None,
+) -> str:
+    parts = ["grond", "manual", stage, "--workflow", str(workflow_path)]
+    defaults = workflow.get("runtime_defaults") if isinstance(workflow, Mapping) and isinstance(workflow.get("runtime_defaults"), Mapping) else {}
+    if stage in {"scout", "thickness", "hand", "feedback", "scales"}:
+        if defaults.get("workers"):
+            parts += ["--workers", str(defaults["workers"])]
+        if defaults.get("python"):
+            parts += ["--python", str(defaults["python"])]
+        if defaults.get("config"):
+            parts += ["--config", str(defaults["config"])]
+    if stage == "feedback" and defaults.get("shelxl"):
+        parts += ["--shelxl", str(defaults["shelxl"])]
+    text = shlex.join(parts)
+    return text + (f" {extra.strip()}" if extra.strip() else "")
 
 
 def _record_stage(
@@ -327,6 +359,20 @@ def manual_setup(args) -> int:
     baseline = Path(args.baseline_hkl).expanduser().resolve() if args.baseline_hkl else None
     if baseline is not None and not baseline.is_file():
         raise SystemExit(f"Baseline HKL is missing: {baseline}")
+    from .cli import check_sfac_contract
+
+    sfac_check = check_sfac_contract(structure)
+    _write_json(setup_dir / "sfac_check.json", sfac_check)
+    if not sfac_check.get("ok", False):
+        messages = [
+            str(row.get("message") or "")
+            for row in sfac_check.get("messages", [])
+            if row.get("severity") == "error"
+        ]
+        raise SystemExit(
+            "Manual workflow model SFAC check failed: "
+            + ("; ".join(messages) or f"see {setup_dir / 'sfac_check.json'}")
+        )
     datasets = [
         parse_dataset_spec(
             item,
@@ -345,9 +391,31 @@ def manual_setup(args) -> int:
         notes=str(args.notes or ""),
         default_hkl_transform=str(args.hkl_transform or "identity"),
         geometry_percentile=float(args.geometry_percentile),
+        parity_setup_id=str(getattr(args, "parity_setup_id", "") or ""),
+        parity_setup_manifest_sha256=str(
+            getattr(args, "parity_setup_manifest_sha256", "") or ""
+        ),
     )
     prep_path = setup_dir / "prep.json"
     write_prep(prep_path, prep)
+    conventional_baseline: dict[str, object] = {}
+    conventional_command: dict[str, object] = {}
+    if baseline is not None and str(args.shelxl or "shelxl") != "shelxl":
+        baseline_dir = setup_dir / "fresh_conventional_baseline"
+        command_line = [
+            str(Path(args.python).expanduser().resolve()) if str(getattr(args, "python", "") or "").strip() else sys.executable,
+            str(Path(__file__).resolve().parent / "legacy" / "engine" / "run_shelxl_baseline.py"),
+            "--res",
+            str(structure),
+            "--hkl",
+            str(baseline),
+            "--out-dir",
+            str(baseline_dir),
+            "--shelxl",
+            str(args.shelxl),
+        ]
+        conventional_command = _run_stage_command(command_line)
+        conventional_baseline = _read_json(baseline_dir / "summary.json")
     workflow: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "kind": WORKFLOW_KIND,
@@ -357,13 +425,26 @@ def manual_setup(args) -> int:
         "source_model": str(structure),
         "chosen_model": "",
         "datasets": [asdict(dataset) for dataset in datasets],
+        "runtime_defaults": {
+            "workers": int(getattr(args, "workers", 0) or 0),
+            "python": str(Path(args.python).expanduser().resolve()) if str(getattr(args, "python", "") or "").strip() else "",
+            "config": str(Path(args.config).expanduser().resolve()) if str(getattr(args, "config", "") or "").strip() else "",
+            "shelxl": str(getattr(args, "shelxl", "shelxl") or "shelxl"),
+        },
+        "conventional_baseline": (
+            str(setup_dir / "fresh_conventional_baseline" / "summary.json")
+            if conventional_baseline
+            else ""
+        ),
         "stages": {},
     }
     outputs = {
         "prep": str(prep_path),
         "structure": str(structure),
         "structure_sha256": _sha256(structure),
+        "sfac_check": str(setup_dir / "sfac_check.json"),
         "baseline_hkl": str(baseline) if baseline else "",
+        "conventional_baseline": workflow["conventional_baseline"],
         "datasets": {dataset.name: dataset.hkl for dataset in datasets},
         "headline": {
             "datasets": len(datasets),
@@ -378,8 +459,11 @@ def manual_setup(args) -> int:
         output_dir=setup_dir,
         status="ready",
         outputs=outputs,
-        command={"elapsed_seconds": 0.0, "status": "setup_only"},
-        next_command=_next_command("scout", workflow_path),
+        command={
+            "setup": {"elapsed_seconds": 0.0, "status": "setup_only"},
+            "fresh_conventional_baseline": conventional_command,
+        },
+        next_command=_next_command("scout", workflow_path, workflow=workflow),
     )
     _print_handoff(handoff)
     return 0
@@ -394,9 +478,38 @@ def manual_scout(args) -> int:
     source_prep = Path(workflow["prep"])
     warnings: list[str] = []
     if args.skip:
+        from .workflows.decision import preflight_dataset
+
+        asserted_prep = load_prep(source_prep)
+        preflight_records: dict[str, object] = {}
+        for dataset in asserted_prep.datasets:
+            transform = parse_hkl_transform_info(dataset.hkl_transform)
+            if not transform.proper:
+                raise SystemExit(
+                    f"manual scout --skip refuses improper transform {transform.canonical!r} for "
+                    f"{dataset.name!r}; supply its proper sign-paired representation or run the scout"
+                )
+            decision = preflight_dataset(
+                dataset,
+                requested_min_peak=dataset.min_peak,
+                requested_geometry_percentile=dataset.geometry_percentile,
+                requested_scout_rows=0,
+            )
+            decision_path = out / "decisions" / dataset.name / "preflight.json"
+            _write_json(decision_path, asdict(decision))
+            preflight_records[dataset.name] = str(decision_path)
+            if decision.status == "fatal":
+                raise SystemExit(
+                    f"manual scout --skip preflight failed for {dataset.name!r}: "
+                    + "; ".join(decision.warnings)
+                )
+            warnings.extend(f"{dataset.name}: {warning}" for warning in decision.warnings)
         scouted_prep = out / "scouted_prep.json"
         shutil.copy2(source_prep, scouted_prep)
-        command = {"status": "skipped_user_asserted_transforms"}
+        command = {
+            "status": "skipped_user_asserted_proper_transforms",
+            "preflight": preflight_records,
+        }
         warnings.append("Transform scouting was explicitly skipped; prep-file transforms are a user assertion.")
         status = "skipped"
     else:
@@ -442,7 +555,7 @@ def manual_scout(args) -> int:
         },
         command=command,
         warnings=warnings,
-        next_command=_next_command("thickness", workflow_path),
+        next_command=_next_command("thickness", workflow_path, workflow=workflow),
     )
     _print_handoff(handoff)
     return 0
@@ -456,6 +569,54 @@ def _summary_bindings(values: list[str] | None) -> dict[str, str]:
         name, path = value.split("=", 1)
         result[name.strip()] = str(Path(path).expanduser().resolve())
     return result
+
+
+def _validate_reused_summary_binding(dataset, summary_path: Path) -> dict[str, object]:
+    """Bind a reused thickness summary to the exact dataset and row policy."""
+
+    summary, _nuisance, config = _summary_nuisance(summary_path)
+    inputs = summary.get("inputs") if isinstance(summary.get("inputs"), Mapping) else {}
+    recorded_hkl_text = str(inputs.get("hkl") or config.get("hkl") or "").strip()
+    if not recorded_hkl_text:
+        raise SystemExit(f"Reused thickness summary does not record its source HKL: {summary_path}")
+    recorded_hkl = Path(recorded_hkl_text).expanduser().resolve()
+    expected_hkl = Path(dataset.hkl).expanduser().resolve()
+    if not recorded_hkl.is_file() or _sha256(recorded_hkl) != _sha256(expected_hkl):
+        raise SystemExit(
+            f"Reused thickness summary is not bound to dataset {dataset.name!r}: "
+            f"source HKL {recorded_hkl} does not match {expected_hkl}"
+        )
+    recorded_transform = parse_hkl_transform_info(
+        str(inputs.get("hkl_transform") or config.get("hkl_transform") or "identity")
+    ).canonical
+    expected_transform = parse_hkl_transform_info(dataset.hkl_transform).canonical
+    if recorded_transform != expected_transform:
+        raise SystemExit(
+            f"Reused thickness summary transform mismatch for {dataset.name!r}: "
+            f"{recorded_transform!r} != {expected_transform!r}"
+        )
+    for field, expected in (
+        ("min_d_spacing", float(dataset.min_d_spacing)),
+        ("min_peak", float(dataset.min_peak)),
+        ("geometry_percentile", float(dataset.geometry_percentile)),
+    ):
+        recorded = config.get(field)
+        if recorded is None or not math.isclose(float(recorded), expected, rel_tol=0.0, abs_tol=1e-9):
+            raise SystemExit(
+                f"Reused thickness summary {field} mismatch for {dataset.name!r}: "
+                f"{recorded!r} != {expected!r}"
+            )
+    return {
+        "dataset": dataset.name,
+        "summary": str(summary_path.resolve()),
+        "summary_sha256": _sha256(summary_path),
+        "source_hkl": str(recorded_hkl),
+        "source_hkl_sha256": _sha256(recorded_hkl),
+        "hkl_transform": recorded_transform,
+        "min_d_spacing": float(dataset.min_d_spacing),
+        "min_peak": float(dataset.min_peak),
+        "geometry_percentile": float(dataset.geometry_percentile),
+    }
 
 
 def manual_thickness(args) -> int:
@@ -474,9 +635,11 @@ def manual_thickness(args) -> int:
                 "Skipping thickness requires one --summary DATASET=summary.json for every dataset; "
                 f"missing: {', '.join(missing)}"
             )
-        for path in selected.values():
-            _summary_nuisance(Path(path))
-        command = {"status": "skipped_with_supplied_summaries"}
+        bindings = {
+            dataset.name: _validate_reused_summary_binding(dataset, Path(selected[dataset.name]))
+            for dataset in prep.datasets
+        }
+        command = {"status": "skipped_with_hash_bound_supplied_summaries", "bindings": bindings}
         status = "skipped"
         warnings.append("Thickness calculation skipped; supplied summaries define the pinned nuisance contracts.")
         report = ""
@@ -537,18 +700,27 @@ def manual_thickness(args) -> int:
         outputs={"selected_summaries": selected, "report": report, "headline": thickness_headline},
         command=command,
         warnings=warnings,
-        next_command=_next_command("hand", workflow_path),
+        next_command=_next_command("hand", workflow_path, workflow=workflow),
     )
     _print_handoff(handoff)
     return 0
 
 
-def _hand_evidence(diagnostics: Mapping[str, Mapping[str, object]]) -> dict[str, object]:
+def _hand_evidence(
+    diagnostics: Mapping[str, Mapping[str, object]],
+    *,
+    min_z_all: float = 2.0,
+    min_z_free: float = 0.5,
+    min_free_rows: int = 10,
+) -> dict[str, object]:
     all_delta = 0.0
     free_delta = 0.0
     all_n = 0
     free_n = 0
     rows: dict[str, object] = {}
+    z_numerators = {"all": 0.0, "free": 0.0}
+    z_variances = {"all": 0.0, "free": 0.0}
+    z_datasets = {"all": 0, "free": 0}
     for name, diagnostic in diagnostics.items():
         all_block = diagnostic.get("all") if isinstance(diagnostic.get("all"), Mapping) else {}
         free_block = diagnostic.get("free") if isinstance(diagnostic.get("free"), Mapping) else {}
@@ -564,9 +736,50 @@ def _hand_evidence(diagnostics: Mapping[str, Mapping[str, object]]) -> dict[str,
             "all": all_block,
             "free": free_block,
         }
-    if all_delta > 0.0 and free_delta >= 0.0:
+        for support, block in (("all", all_block), ("free", free_block)):
+            adjusted = block.get("klar_palatinus_adjusted_hand_z")
+            adjusted = adjusted if isinstance(adjusted, Mapping) else {}
+            n = int(adjusted.get("n", 0) or 0)
+            k_effective = float(adjusted.get("k_effective_selected_wins_plus_half_ties", float("nan")))
+            w = float(adjusted.get("w", float("nan")))
+            if (
+                str(adjusted.get("status") or "") == "ok"
+                and n > 0
+                and math.isfinite(k_effective)
+                and math.isfinite(w)
+                and n - w > 0.0
+            ):
+                z_numerators[support] += 2.0 * k_effective - n
+                z_variances[support] += n - w
+                z_datasets[support] += 1
+    combined_z = {
+        support: (
+            z_numerators[support] / math.sqrt(z_variances[support])
+            if z_datasets[support] > 0 and z_variances[support] > 0.0
+            else float("nan")
+        )
+        for support in ("all", "free")
+    }
+    decisive_support = bool(
+        free_n >= int(min_free_rows)
+        and math.isfinite(combined_z["all"])
+        and math.isfinite(combined_z["free"])
+    )
+    if (
+        decisive_support
+        and combined_z["all"] >= float(min_z_all)
+        and combined_z["free"] >= float(min_z_free)
+        and all_delta > 0.0
+        and free_delta >= 0.0
+    ):
         recommendation = "input"
-    elif all_delta < 0.0 and free_delta <= 0.0:
+    elif (
+        decisive_support
+        and combined_z["all"] <= -float(min_z_all)
+        and combined_z["free"] <= -float(min_z_free)
+        and all_delta < 0.0
+        and free_delta <= 0.0
+    ):
         recommendation = "inverse"
     else:
         recommendation = "ambiguous"
@@ -577,6 +790,11 @@ def _hand_evidence(diagnostics: Mapping[str, Mapping[str, object]]) -> dict[str,
         "combined_free_delta_chi2_inverse_minus_input": free_delta,
         "combined_all_rows": all_n,
         "combined_free_rows": free_n,
+        "combined_adjusted_z_input_favored": combined_z,
+        "minimum_adjusted_z_all": float(min_z_all),
+        "minimum_adjusted_z_free": float(min_z_free),
+        "minimum_free_rows": int(min_free_rows),
+        "decisive_support": decisive_support,
         "recommendation": recommendation,
     }
 
@@ -609,7 +827,7 @@ def manual_hand(args) -> int:
             },
             command={"status": "skipped_user_choice"},
             warnings=["Absolute-structure checking was explicitly skipped."],
-            next_command=_next_command("feedback", workflow_path),
+            next_command=_next_command("feedback", workflow_path, workflow=workflow),
         )
         _print_handoff(handoff)
         return 0
@@ -660,7 +878,12 @@ def manual_hand(args) -> int:
             )
             diagnostics[dataset.name] = _read_json(dataset_out / "absolute_structure_diagnostic.json")
             handoffs[dataset.name] = _read_json(dataset_out / "hand_handoff.json")
-    evidence = _hand_evidence(diagnostics)
+    evidence = _hand_evidence(
+        diagnostics,
+        min_z_all=float(args.min_adjusted_z_all),
+        min_z_free=float(args.min_adjusted_z_free),
+        min_free_rows=int(args.min_free_rows),
+    )
     evidence_path = out / "combined_hand_evidence.json"
     _write_json(evidence_path, evidence)
     if choice == "report":
@@ -670,11 +893,11 @@ def manual_hand(args) -> int:
         recommended_choice = str(evidence["recommendation"])
         if recommended_choice not in {"input", "inverse"}:
             recommended_choice = "input"
-        next_command = _next_command("hand", workflow_path, f"--choice {recommended_choice}")
+        next_command = _next_command("hand", workflow_path, f"--choice {recommended_choice}", workflow=workflow)
     elif choice == "input":
         status = "ready"
         chosen_model = prep.structure
-        next_command = _next_command("feedback", workflow_path)
+        next_command = _next_command("feedback", workflow_path, workflow=workflow)
     elif choice == "inverse":
         inverse_models = [Path(str(handoffs[dataset.name]["inverse_model"])) for dataset in prep.datasets]
         hashes = {_sha256(path) for path in inverse_models}
@@ -682,7 +905,7 @@ def manual_hand(args) -> int:
             raise RuntimeError("Per-dataset hand checks did not materialize one identical inverse-coordinate model")
         status = "ready"
         chosen_model = str(inverse_models[0].resolve())
-        next_command = _next_command("feedback", workflow_path)
+        next_command = _next_command("feedback", workflow_path, workflow=workflow)
     else:
         raise SystemExit("--choice must be report, input, inverse, or skip")
     if chosen_model:
@@ -841,7 +1064,7 @@ def manual_feedback(args) -> int:
         *_tool_args(args),
     ]
     if int(args.n_basis) > 0:
-        command_line += ["--n-basis", str(args.n_basis), "--final-n-basis", str(args.n_basis)]
+        command_line += ["--n-basis", str(args.n_basis)]
     if ignore_source_baseline:
         command_line.append("--ignore-source-baseline-hkl")
     command = _run_stage_command(command_line, verbose=_verbose_child_output(args))
@@ -852,7 +1075,7 @@ def manual_feedback(args) -> int:
         report_path = out / "ENDPOINT_PUSH_REPORT.md"
         push_summary = _read_json(push_summary_path)
         decision = _read_json(decision_path)
-        selected = decision.get("selected_safe_cycle") or decision.get("best_native_cycle")
+        selected = decision.get("selected_safe_cycle")
     else:
         push_summary_path = out / "push_endpoint_summary.json"
         decision_path = out / "multi_endpoint_push_decision.json"
@@ -860,10 +1083,20 @@ def manual_feedback(args) -> int:
         report_path = out / "MULTI_ENDPOINT_PUSH_REPORT.md"
         push_summary = _read_json(push_summary_path)
         decision = _read_json(decision_path)
-        selected = decision.get("selected_cycle") or decision.get("best_native_cycle")
+        selected = decision.get("selected_cycle")
     if not isinstance(selected, Mapping) or not selected.get("model"):
-        raise RuntimeError("Feedback produced no clean selected model; inspect ENDPOINT_PUSH_REPORT.md")
+        raise RuntimeError(
+            "Feedback produced no clean selected model; diagnostic best-native/NPD cycles are not eligible for "
+            f"manual handoff. Inspect {report_path}."
+        )
     selected_model = str(Path(str(selected["model"])).resolve())
+    selected_npd_count = int(selected.get("npd_count", len(selected.get("npd_atoms") or [])) or 0)
+    selected_health = selected.get("endpoint_res_health") if isinstance(selected.get("endpoint_res_health"), Mapping) else {}
+    if selected_npd_count > 0 or selected.get("has_npd") is True or selected_health.get("safe_for_feedback") is False:
+        raise RuntimeError(
+            f"Feedback selected only an unsafe diagnostic model (NPD={selected_npd_count}); "
+            f"manual handoff requires a clean cycle. Inspect {report_path}."
+        )
     feedback_summary = _read_json(feedback_summary_path)
     cycle_number = int(selected.get("cycle", 0) or 0)
     if single_dataset:
@@ -906,7 +1139,7 @@ def manual_feedback(args) -> int:
         *_tool_args(args),
     ]
     if int(args.n_basis) > 0:
-        recompute_command += ["--n-basis", str(args.n_basis), "--final-n-basis", str(args.n_basis)]
+        recompute_command += ["--n-basis", str(args.n_basis)]
     if ignore_source_baseline:
         recompute_command.append("--ignore-source-baseline-hkl")
     recompute = _run_stage_command(recompute_command, verbose=_verbose_child_output(args))
@@ -962,7 +1195,7 @@ def manual_feedback(args) -> int:
             },
         },
         command={"feedback": command, "selected_row_recompute": recompute},
-        next_command=_next_command("scales", workflow_path),
+        next_command=_next_command("scales", workflow_path, workflow=workflow),
     )
     _print_handoff(handoff)
     return 0
@@ -987,7 +1220,7 @@ def manual_scales(args) -> int:
                 "headline": {"application": "full pinned frame scales retained; compact audit skipped"},
             },
             command={"status": "skipped_user_choice"},
-            next_command=_next_command("finish", workflow_path),
+            next_command=_next_command("finish", workflow_path, workflow=workflow),
         )
         _print_handoff(handoff)
         return 0
@@ -1056,7 +1289,7 @@ def manual_scales(args) -> int:
         },
         command={"datasets": commands},
         warnings=["Scale compression is audited but not silently applied to the shared endpoint."],
-        next_command=_next_command("finish", workflow_path),
+        next_command=_next_command("finish", workflow_path, workflow=workflow),
     )
     _print_handoff(handoff)
     return 0
@@ -1135,11 +1368,12 @@ def _selected_hand_summary(workflow: Mapping[str, object]) -> dict[str, object]:
             "combination": "independent sum-score diagnostic: sum(2k_eff-N)/sqrt(sum(N-w))",
         }
     return {
+        "scope": "pre_feedback_thickness_stage_model",
         "choice": choice,
         "recommendation": outputs.get("recommendation", "not calculated"),
         "selected_model": outputs.get("chosen_model", ""),
         "known_chemistry_used": False,
-        "sign_definition": "positive Z favors the coordinates selected for feedback",
+        "sign_definition": "positive Z favors the coordinates selected before feedback; no final post-feedback hand recheck is implied",
         "datasets": datasets,
         "combined": combined,
     }
@@ -1278,9 +1512,9 @@ def _manual_markdown_summary(payload: Mapping[str, object]) -> str:
     lines.extend(
         [
         "",
-        "## Hand decision",
+        "## Pre-feedback hand decision",
         "",
-        f"Coordinate choice: **{hand.get('choice', 'n/a')}**; calculation recommendation: **{hand.get('recommendation', 'n/a')}**. Positive values below favor the coordinates selected for feedback.",
+        f"Coordinate choice before feedback: **{hand.get('choice', 'n/a')}**; calculation recommendation: **{hand.get('recommendation', 'n/a')}**. Positive values below favor those pre-feedback coordinates. This simplified workflow does not claim auto's final post-feedback shared-hand selection.",
         "",
         "| Dataset | ZKP all | ZKP free |",
         "|---|---:|---:|",
@@ -1398,7 +1632,23 @@ def manual_finish(args) -> int:
     setup_outputs = setup_stage.get("outputs") if isinstance(setup_stage.get("outputs"), Mapping) else {}
     baseline_hkl_text = str(setup_outputs.get("baseline_hkl") or "").strip()
     baseline_hkl = Path(baseline_hkl_text) if baseline_hkl_text else None
-    starting_endpoint_comparable = bool(
+    baseline_summary_text = str(workflow.get("conventional_baseline") or "").strip()
+    baseline_summary_path = Path(baseline_summary_text) if baseline_summary_text else None
+    fresh_baseline = _read_json(baseline_summary_path) if baseline_summary_path is not None and baseline_summary_path.is_file() else {}
+    fresh_inputs = fresh_baseline.get("inputs") if isinstance(fresh_baseline.get("inputs"), Mapping) else {}
+    fresh_shelxl = fresh_baseline.get("shelxl") if isinstance(fresh_baseline.get("shelxl"), Mapping) else {}
+    fresh_res_input = fresh_inputs.get("res") if isinstance(fresh_inputs.get("res"), Mapping) else {}
+    fresh_hkl_input = fresh_inputs.get("hkl") if isinstance(fresh_inputs.get("hkl"), Mapping) else {}
+    fresh_baseline_current = bool(
+        source_model is not None
+        and source_model.is_file()
+        and baseline_hkl is not None
+        and baseline_hkl.is_file()
+        and str(fresh_res_input.get("sha256") or "") == _sha256(source_model)
+        and str(fresh_hkl_input.get("sha256") or "") == _sha256(baseline_hkl)
+        and str(fresh_shelxl.get("status") or "") == "ok"
+    )
+    sibling_baseline_current = bool(
         source_lst is not None
         and source_lst.is_file()
         and source_hkl is not None
@@ -1407,12 +1657,30 @@ def manual_finish(args) -> int:
         and baseline_hkl.is_file()
         and _sha256(source_hkl) == _sha256(baseline_hkl)
     )
-    starting_metrics = (
-        parse_shelx_lst_metrics(source_lst) if starting_endpoint_comparable else {}
-    )
-    starting_pathology = (
-        parse_shelx_lst_pathologies(source_lst) if starting_endpoint_comparable else {}
-    )
+    starting_endpoint_comparable = fresh_baseline_current or sibling_baseline_current
+    if fresh_baseline_current:
+        source_lst = Path(str(fresh_shelxl.get("lst") or ""))
+        starting_metrics = dict(fresh_shelxl)
+        starting_pathology = {
+            key: fresh_shelxl.get(key)
+            for key in (
+                "pathology_status",
+                "npd_count",
+                "split_count",
+                "npd_atoms",
+                "has_npd",
+                "has_split_warnings",
+            )
+        }
+        starting_reason = "fresh one-cycle SHELXL control on the supplied source model and baseline HKL"
+    elif sibling_baseline_current:
+        starting_metrics = parse_shelx_lst_metrics(source_lst)
+        starting_pathology = parse_shelx_lst_pathologies(source_lst)
+        starting_reason = "source-model LST and supplied baseline HKL are hash-matched"
+    else:
+        starting_metrics = {}
+        starting_pathology = {}
+        starting_reason = "starting SHELXL statistics omitted because no hash-bound source-model/baseline control is available"
     prep_path = Path(str(workflow.get("prep") or ""))
     transforms: dict[str, str] = {}
     if prep_path.is_file():
@@ -1512,9 +1780,7 @@ def manual_finish(args) -> int:
             "baseline_hkl": str(baseline_hkl) if baseline_hkl is not None else "",
             "comparable_to_selected_support": starting_endpoint_comparable,
             "reason": (
-                "source-model LST and supplied baseline HKL are hash-matched"
-                if starting_endpoint_comparable
-                else "starting SHELXL statistics omitted because the source-model LST is not tied to the supplied baseline HKL"
+                starting_reason
             ),
             **starting_metrics,
             **starting_pathology,
@@ -1577,7 +1843,7 @@ def manual_finish(args) -> int:
                     f"wR2all {_percent(metrics.get('wR2_all'))}; GooF {metrics.get('GooF', 'n/a')}"
                 ),
                 "hand": (
-                    f"{hand_summary.get('choice', 'n/a')} selected; "
+                    f"pre-feedback {hand_summary.get('choice', 'n/a')} selected; "
                     f"recommendation {hand_summary.get('recommendation', 'n/a')}"
                 ),
                 "scales": (

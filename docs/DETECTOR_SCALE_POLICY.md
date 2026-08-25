@@ -15,10 +15,11 @@ absolute held-out wR2 improvement of at least 0.002 on at least two
 deterministic splits, no material reduction of the held-out Born-to-Bloch
 advantage, at least 20 fitted work rows in every tile, reproducibility between
 independent data halves, and reasonable agreement between fields inferred from
-the Born and Bloch predictions. The corrected-HKL endpoint must then pass the
-fixed-weight GooF window with no NPD atoms or split warnings. Among fields that
-pass, the smallest detector grid is used. A detector-free candidate remains
-the default when no added field earns all gates.
+the Born and Bloch predictions. The corrected-HKL endpoint must remain free of
+NPD atoms and split warnings; the preferred fixed-weight GooF window is reported
+as a warning rather than used as a mathematical-validity gate. Among fields
+that pass, the smallest detector grid is used. A detector-free candidate
+remains the default when no added field earns all gates.
 
 The tile fit uses alternating weighted least squares with the declared frame
 scales. Detector values are shrunk toward unity and nearest-neighbor jumps are

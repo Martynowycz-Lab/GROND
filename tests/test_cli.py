@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -29,6 +30,7 @@ from grond.progress import ProgressState
 EXPECTED_CLI_COMMANDS = {
     "apply-diffbloch-model",
     "apply-parity-calibration",
+    "audit-hydrogen-omit",
     "auto",
     "calibrate-endpoint",
     "canonicalize-hand",
@@ -511,8 +513,8 @@ def test_publication_endpoint_chooser_treats_combined_calibration_as_combined(tm
     assert choice["best_physical_endpoint"] == {}
     diagnostic = choice["best_diagnostic_endpoint"]
     assert diagnostic["source_kind"] == "combined_endpoint_calibration"
-    assert diagnostic["combined_baseline_gate"]["status"] == "failed_baseline_unavailable"
-    assert diagnostic["combined_baseline_gate"]["passed"] is False
+    assert diagnostic["combined_baseline_gate"]["status"] == "warning_baseline_unavailable"
+    assert diagnostic["combined_baseline_gate"]["passed"] is True
     assert choice["best_single_dataset_physical_endpoint"] == {}
 
 
@@ -1801,6 +1803,14 @@ def test_fresh_baseline_no_harm_gate_warns_but_keeps_worse_endpoint_available():
     assert rejected["baseline_res"] == "fresh.res"
     assert accepted["status"] == "passed"
     assert accepted["no_harm"] is True
+
+
+def test_h_omit_mode_is_explicit_about_single_dataset_only():
+    assert cli._validated_h_omit_mode("off", 10) == "off"
+    assert cli._validated_h_omit_mode("on", 1) == "on"
+    assert cli._validated_h_omit_mode("both", 1) == "on"
+    with pytest.raises(ValueError, match="not implemented for multi-dataset"):
+        cli._validated_h_omit_mode("on", 2)
 
 
 def test_quick_baseline_prefers_fresh_final_run_summary(tmp_path: Path):
@@ -3361,6 +3371,298 @@ def test_write_push_endpoint_report_handles_missing_output_model(tmp_path):
     decision = json.loads((out_dir / "endpoint_push_decision.json").read_text())
     assert decision["rows"][0]["model"] == ""
     assert decision["rows"][0]["status"] == "missing_or_invalid_endpoint_res"
+
+
+def test_write_push_endpoint_report_rejects_counted_npd_without_atom_label(tmp_path):
+    out_dir = tmp_path / "push"
+    out_dir.mkdir()
+    model = out_dir / "cycle.res"
+    model.write_text("TITL test\n")
+    model.with_suffix(".lst").write_text(
+        "0 atoms may be split and 2 atoms NPD\n"
+    )
+    (out_dir / "shelxl_feedback_loop_summary.json").write_text(
+        json.dumps(
+            {
+                "runs": [
+                    {
+                        "label": "cycle_01",
+                        "output_model": str(model),
+                        "endpoint_res_health": {
+                            "ok": True,
+                            "npd_count": 2,
+                            "has_npd": True,
+                            "safe_for_feedback": False,
+                        },
+                        "elapsed_seconds": 1.0,
+                        "metrics": {
+                            "native_dyn_wR2_all": 0.10,
+                            "native_dyn_free_wR2_all": 0.11,
+                        },
+                    }
+                ]
+            }
+        )
+        + "\n"
+    )
+
+    cli.write_push_endpoint_report(out_dir, best_cycle_tolerance=0.001)
+
+    decision = json.loads((out_dir / "endpoint_push_decision.json").read_text())
+    assert decision["selected_safe_cycle"] is None
+    assert decision["rows"][0]["npd_count"] == 2
+    assert decision["rows"][0]["npd_atoms"] == []
+    assert decision["rows"][0]["safe_for_feedback"] is False
+
+
+def test_single_final_row_recompute_binds_accepted_model_without_endpoint(tmp_path, monkeypatch):
+    model = tmp_path / "accepted.res"
+    model.write_text("TITL accepted\n")
+    hkl = tmp_path / "INTEGRATE.HKL"
+    hkl.write_text("! rows\n")
+    source_run = tmp_path / "source"
+    source_run.mkdir()
+    (source_run / "native_dyn_calc.csv").write_text("row_index\n0\n")
+    (source_run / "summary.json").write_text(
+        json.dumps(
+            {
+                "inputs": {"res_sha256": "stale-model-hash"},
+                "config": {"n_basis": 24, "n_points": 10, "scale_fit_split": "work"},
+                "best_native": {"nuisance": {"thickness_A": 1000.0}},
+            }
+        )
+        + "\n"
+    )
+    prep = PrepConfig(
+        structure=str(model),
+        datasets=[DatasetSpec(name="dataset", hkl=str(hkl), xds_dir=str(tmp_path))],
+    )
+    args = build_parser().parse_args(
+        ["auto", "--prep", str(tmp_path / "prep.json"), "--out-dir", str(tmp_path / "run"), "--no-maps"]
+    )
+    captured = {}
+
+    def fake_run_logged(cmd, logs, label, *, dry_run=False):
+        captured["cmd"] = list(cmd)
+        assert "--skip-endpoint-refinement" in cmd
+        run_dir = Path(cmd[cmd.index("--out-dir") + 1])
+        run_dir.mkdir(parents=True)
+        (run_dir / "native_dyn_calc.csv").write_text("row_index\n0\n")
+        (run_dir / "summary.json").write_text(
+            json.dumps(
+                {
+                    "inputs": {"res": str(model), "res_sha256": cli.sha256_file(model)},
+                    "config": {"n_basis": 24, "n_points": 10, "scale_fit_split": "work"},
+                    "best_native": {"nuisance": {"thickness_A": 1000.0}},
+                }
+            )
+            + "\n"
+        )
+
+    monkeypatch.setattr(cli, "run_logged", fake_run_logged)
+    run_dir, contract = cli.ensure_single_final_row_model_contract(
+        prep,
+        prep.datasets[0],
+        args,
+        sys.executable,
+        tmp_path / "logs",
+        tmp_path / "run",
+        source_run=source_run,
+        final_model=str(model),
+        fallback_nuisance={"thickness_A": 1000.0},
+    )
+
+    assert contract["status"] == "recomputed"
+    assert Path(contract["row_table"]).is_file()
+    assert run_dir.name == "adaptive_final_row_recompute"
+    assert captured["cmd"][captured["cmd"].index("--res") + 1] == str(model.resolve())
+
+
+def _write_hydrogen_audit_model(
+    path: Path,
+    *,
+    cell_a: float = 10.0,
+    include_h: bool,
+    symm: str = "",
+    coordinate_shift: float = 0.0,
+) -> None:
+    atoms = [
+        f"C1 1 {0.10 + coordinate_shift:.4f} 0.20 0.30 11.0 0.05",
+        f"C2 1 {0.25 + coordinate_shift:.4f} 0.35 0.40 11.0 0.05",
+        f"C3 1 {0.45 + coordinate_shift:.4f} 0.55 0.60 11.0 0.05",
+    ]
+    if include_h:
+        atoms.append("H1 2 0.15 0.20 0.30 11.0 0.05")
+    path.write_text(
+        "\n".join(
+            [
+                "TITL H audit",
+                f"CELL 0.02508 {cell_a:g} 11 12 90 90 90",
+                "LATT -1",
+                *([f"SYMM {symm}"] if symm else []),
+                "SFAC C 1 0 1 0 1 0 1 0 0",
+                "SFAC H 1 0 1 0 1 0 1 0 0",
+                "UNIT 1 1",
+                *atoms,
+                "HKLF 4",
+                "END",
+            ]
+        )
+        + "\n"
+    )
+
+
+def _write_hydrogen_audit_map(path: Path, *, cell_a: float = 10.0) -> None:
+    import gemmi
+    import numpy as np
+
+    grid = gemmi.FloatGrid(8, 8, 8)
+    grid.unit_cell = gemmi.UnitCell(cell_a, 11.0, 12.0, 90.0, 90.0, 90.0)
+    grid.spacegroup = gemmi.find_spacegroup_by_name("P 1")
+    np.asarray(grid)[:] = 0.0
+    ccp4 = gemmi.Ccp4Map()
+    ccp4.grid = grid
+    ccp4.update_ccp4_header(2, True)
+    ccp4.write_ccp4_map(str(path))
+
+
+def test_hydrogen_omit_cli_writes_hash_bound_prospective_contract(tmp_path, capsys):
+    reference = tmp_path / "full_h.res"
+    never_h = tmp_path / "never_h.res"
+    fofc = tmp_path / "fofc.map"
+    out = tmp_path / "audit"
+    _write_hydrogen_audit_model(reference, include_h=True)
+    _write_hydrogen_audit_model(never_h, include_h=False)
+    _write_hydrogen_audit_map(fofc)
+    args = build_parser().parse_args(
+        [
+            "audit-hydrogen-omit",
+            "--reference-res",
+            str(reference),
+            "--never-h-res",
+            str(never_h),
+            "--map",
+            f"native={fofc}",
+            "--out-dir",
+            str(out),
+        ]
+    )
+
+    assert args.func(args) == 0
+    contract = json.loads((out / "input_contract.json").read_text())
+    assert contract["reference_hydrogen_count"] == 1
+    assert contract["never_h_hydrogen_count"] == 0
+    assert contract["model_cell_max_length_relative_mismatch"] == pytest.approx(0.0)
+    assert contract["common_non_h_count"] == 3
+    assert contract["common_non_h_rms_A"] == pytest.approx(0.0)
+    assert contract["maps"][0]["sha256"] == cli.sha256_file(fofc)
+    assert (out / "hydrogen_omit_peaks.csv").is_file()
+    assert '"status": "ok"' in capsys.readouterr().out
+
+
+def test_hydrogen_omit_cli_rejects_unaligned_common_nonh_origin(tmp_path, capsys):
+    reference = tmp_path / "full_h.res"
+    never_h = tmp_path / "never_h_shifted.res"
+    fofc = tmp_path / "fofc.map"
+    _write_hydrogen_audit_model(reference, include_h=True)
+    _write_hydrogen_audit_model(never_h, include_h=False, coordinate_shift=0.25)
+    _write_hydrogen_audit_map(fofc)
+    args = build_parser().parse_args(
+        [
+            "audit-hydrogen-omit",
+            "--reference-res",
+            str(reference),
+            "--never-h-res",
+            str(never_h),
+            "--map",
+            str(fofc),
+            "--out-dir",
+            str(tmp_path / "audit"),
+        ]
+    )
+
+    assert args.func(args) == 2
+    assert "not aligned" in capsys.readouterr().out
+
+
+def test_hydrogen_omit_cli_rejects_h_contaminated_never_h_model(tmp_path, capsys):
+    reference = tmp_path / "full_h.res"
+    fofc = tmp_path / "fofc.map"
+    _write_hydrogen_audit_model(reference, include_h=True)
+    _write_hydrogen_audit_map(fofc)
+    args = build_parser().parse_args(
+        [
+            "audit-hydrogen-omit",
+            "--reference-res",
+            str(reference),
+            "--never-h-res",
+            str(reference),
+            "--map",
+            str(fofc),
+            "--out-dir",
+            str(tmp_path / "audit"),
+        ]
+    )
+
+    assert args.func(args) == 2
+    assert "contains hydrogen atoms" in capsys.readouterr().out
+
+
+def test_hydrogen_omit_cli_rejects_reference_model_setting_mismatch(tmp_path, capsys):
+    reference = tmp_path / "full_h.res"
+    never_h = tmp_path / "never_h_wrong_cell.res"
+    fofc = tmp_path / "fofc.map"
+    _write_hydrogen_audit_model(reference, include_h=True)
+    _write_hydrogen_audit_model(never_h, cell_a=12.0, include_h=False)
+    _write_hydrogen_audit_map(fofc)
+    args = build_parser().parse_args(
+        [
+            "audit-hydrogen-omit",
+            "--reference-res",
+            str(reference),
+            "--never-h-res",
+            str(never_h),
+            "--map",
+            str(fofc),
+            "--out-dir",
+            str(tmp_path / "audit"),
+        ]
+    )
+
+    assert args.func(args) == 2
+    assert "cell is incompatible" in capsys.readouterr().out
+
+
+def test_hydrogen_omit_cli_accepts_equivalent_half_cell_symmetry_syntax(tmp_path):
+    reference = tmp_path / "full_h.res"
+    never_h = tmp_path / "never_h.res"
+    fofc = tmp_path / "fofc.map"
+    _write_hydrogen_audit_model(
+        reference,
+        include_h=True,
+        symm="-X-1/2,-Y,Z-1/2",
+    )
+    _write_hydrogen_audit_model(
+        never_h,
+        include_h=False,
+        symm="-X+1/2,-Y,Z+1/2",
+    )
+    _write_hydrogen_audit_map(fofc)
+    args = build_parser().parse_args(
+        [
+            "audit-hydrogen-omit",
+            "--reference-res",
+            str(reference),
+            "--never-h-res",
+            str(never_h),
+            "--map",
+            str(fofc),
+            "--out-dir",
+            str(tmp_path / "audit"),
+        ]
+    )
+
+    assert args.func(args) == 0
 
 
 def test_write_quick_stats_summarizes_row_and_endpoint_tables(tmp_path):

@@ -17,7 +17,9 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -283,20 +285,48 @@ class DialsBridgeOutput:
 def _run_dials_helper(refl: Path, expt: Path, dials_python: str = "") -> tuple[dict[str, np.ndarray], dict[str, Any]]:
     """Extract DIALS reflection and experiment arrays using a DIALS-capable Python."""
 
-    python = str(dials_python or sys.executable)
+    for label, path in (("reflection table", refl), ("experiment list", expt)):
+        if not path.is_file():
+            raise FileNotFoundError(f"DIALS {label} does not exist: {path}")
+    requested_python = str(dials_python or sys.executable)
+    explicit_path = Path(os.path.abspath(Path(requested_python).expanduser())) if os.sep in requested_python else None
+    if explicit_path is not None:
+        if not explicit_path.is_file():
+            raise FileNotFoundError(f"DIALS Python executable does not exist: {explicit_path}")
+        if not os.access(explicit_path, os.X_OK):
+            raise PermissionError(f"DIALS Python is not executable: {explicit_path}")
+        # Preserve venv/DIALS launcher symlinks.  Resolving them can replace the
+        # requested environment interpreter with its base Python and thereby
+        # lose the environment's NumPy, DIALS, and dxtbx installations.
+        python = str(explicit_path)
+    else:
+        resolved_python = shutil.which(requested_python)
+        if not resolved_python:
+            raise FileNotFoundError(
+                f"DIALS Python executable was not found on PATH: {requested_python}. "
+                "Pass --dials-python /absolute/path/to/dials.python."
+            )
+        python = resolved_python
     with tempfile.TemporaryDirectory(prefix="grond_dials_") as tmp:
         tmp_path = Path(tmp)
         out_npz = tmp_path / "dials_arrays.npz"
         out_json = tmp_path / "dials_metadata.json"
         cmd = [python, "-c", DIALS_HELPER_CODE, str(refl), str(expt), str(out_npz), str(out_json)]
-        proc = subprocess.run(cmd, text=True, capture_output=True)
+        try:
+            proc = subprocess.run(cmd, text=True, capture_output=True)
+        except OSError as exc:
+            raise RuntimeError(f"Could not start DIALS Python {python}: {exc}") from None
         if proc.returncode != 0:
             hint = (
                 "Could not import DIALS reflection data. Run GROND from a DIALS Python environment "
                 "or pass --dials-python /path/to/dials.python or another Python executable that can "
                 "import dials and dxtbx."
             )
-            raise RuntimeError(f"{hint}\nCommand: {' '.join(cmd)}\nSTDERR:\n{proc.stderr.strip()}") from None
+            stderr_tail = "\n".join(proc.stderr.strip().splitlines()[-30:])
+            display = [python, "-c", "<embedded DIALS bridge helper>", str(refl), str(expt)]
+            raise RuntimeError(
+                f"{hint}\nCommand: {' '.join(display)}\nSTDERR (last {len(stderr_tail.splitlines())} lines):\n{stderr_tail}"
+            ) from None
         with np.load(out_npz, allow_pickle=False) as loaded:
             arrays = {name: np.array(loaded[name]) for name in loaded.files}
         metadata = json.loads(out_json.read_text())

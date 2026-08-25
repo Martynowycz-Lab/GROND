@@ -955,6 +955,61 @@ def test_final_multi_hand_selection_uses_one_elastic_pair_and_switches_without_n
     assert result["jitter_refit"] is False
 
 
+def test_completed_final_elastic_hand_selection_does_not_block_endpoint():
+    payload = {
+        "combined": "/tmp/combined",
+        "post_feedback_multi_hand_diagnostic": {
+            "method": "nakane_negative_thickness_elastic_pair_v1",
+            "status": "kept",
+            "hand_switched": False,
+            "datasets": {"a": {"status": "complete"}, "b": {"status": "complete"}},
+            "aggregate": {
+                "splits": {
+                    "all": {"n": 20, "paired_row_t_delta_chi2": 1.5},
+                    "work": {"n": 16, "paired_row_t_delta_chi2": 1.2},
+                    "free": {"n": 4, "paired_row_t_delta_chi2": 0.4},
+                }
+            },
+        },
+    }
+
+    assert cli._multi_hand_publication_blockers(payload) == []
+    pooled = cli._quick_final_elastic_hand_aggregate(
+        payload["post_feedback_multi_hand_diagnostic"]
+    )
+    assert pooled["all"] == {
+        "t": pytest.approx(1.5),
+        "n": 20,
+        "df": 19,
+        "mean_delta_chi2_rejected_minus_final": None,
+    }
+
+
+def test_switched_final_elastic_hand_orients_pooled_evidence_to_final_hand():
+    payload = {
+        "method": "nakane_negative_thickness_elastic_pair_v1",
+        "status": "switched",
+        "hand_switched": True,
+        "datasets": {"a": {"status": "complete"}},
+        "aggregate": {
+            "splits": {
+                "all": {
+                    "n": 12,
+                    "paired_row_t_delta_chi2": -3.0,
+                    "mean_delta_chi2_inverse_minus_selected": -2.0,
+                },
+                "work": {"n": 10, "paired_row_t_delta_chi2": -2.5},
+                "free": {"n": 2, "paired_row_t_delta_chi2": -1.0},
+            }
+        },
+    }
+
+    pooled = cli._quick_final_elastic_hand_aggregate(payload)
+    assert pooled["all"]["t"] == pytest.approx(3.0)
+    assert pooled["all"]["mean_delta_chi2_rejected_minus_final"] == pytest.approx(2.0)
+    assert pooled["free"]["df"] == 1
+
+
 def test_multi_post_feedback_hand_diagnostic_pins_final_contract_and_warns_without_switching(
     tmp_path: Path,
     monkeypatch,

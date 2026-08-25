@@ -187,6 +187,12 @@ def preflight_dataset(ds: DatasetSpec, *, requested_min_peak: float, requested_g
         warnings.append("less than half of rows have positive target intensity")
     if sigma_positive_fraction < 0.98:
         warnings.append("some rows have non-positive sigma")
+    profile_fitting = str(header.get("PROFILE_FITTING", "")).strip().upper()
+    if profile_fitting and profile_fitting not in {"FALSE", "F", "0", "NO"}:
+        warnings.append(
+            f"XDS rows declare PROFILE_FITTING={profile_fitting}; production GROND normally uses "
+            "a separate PROFILE_FITTING=FALSE summation integration"
+        )
     missing_geometry_count = int(np.count_nonzero(~geom))
     if missing_geometry_count:
         warnings.append(
@@ -209,7 +215,10 @@ def preflight_dataset(ds: DatasetSpec, *, requested_min_peak: float, requested_g
             recommended_min_peak = float(candidate)
             break
     if recommended_min_peak < requested_min_peak:
-        warnings.append(f"lowered PEAK floor from {requested_min_peak:g} to {recommended_min_peak:g} to keep enough rows")
+        warnings.append(
+            f"a PEAK floor of {recommended_min_peak:g} would retain more rows than the requested "
+            f"{requested_min_peak:g}; suggestion only, automatic execution preserves the requested floor"
+        )
 
     recommended_geometry_percentile = float(requested_geometry_percentile)
     if observed_geometry_fraction < 0.5:
@@ -219,10 +228,13 @@ def preflight_dataset(ds: DatasetSpec, *, requested_min_peak: float, requested_g
         p99 = _safe_percentile(dr[geom], 99)
         if np.isfinite(p50) and p50 > 0 and np.isfinite(p99) and p99 > 25 * p50:
             recommended_geometry_percentile = min(recommended_geometry_percentile, 97.5)
-            warnings.append("large detector-position tail detected; using stricter geometry percentile")
+            warnings.append(
+                "large detector-position tail detected; a stricter 97.5 geometry percentile is suggested, "
+                "but automatic execution preserves the requested percentile"
+            )
 
     row_budget = requested_scout_rows if requested_scout_rows > 0 else 1000
-    surviving_rows = int(np.count_nonzero(base_d & positive & usable & (peak >= recommended_min_peak)))
+    surviving_rows = int(np.count_nonzero(base_d & positive & usable & (peak >= requested_min_peak)))
     scout_max_rows = min(int(row_budget), surviving_rows)
     status = "ok"
     if usable_count < minimum_usable:
@@ -253,12 +265,18 @@ def preflight_dataset(ds: DatasetSpec, *, requested_min_peak: float, requested_g
 
 
 def apply_preflight(ds: DatasetSpec, decision: PreflightDecision) -> DatasetSpec:
-    """Return a dataset copy with the preflight-recommended filters applied."""
+    """Return a dataset copy without silently changing its declared row support.
+
+    Preflight recommendations remain visible diagnostics.  A user who wants a
+    different PEAK/partiality floor or geometry percentile must request that
+    contract explicitly so prep files, command ledgers, and final reports all
+    describe the rows that were actually used.
+    """
 
     return replace(
         ds,
-        min_peak=decision.recommended_min_peak,
-        geometry_percentile=decision.recommended_geometry_percentile,
+        min_peak=ds.min_peak,
+        geometry_percentile=ds.geometry_percentile,
     )
 
 

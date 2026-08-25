@@ -528,7 +528,7 @@ def test_endpoint_chooser_prefers_combined_endpoint_when_multi_dataset():
     assert "single-dataset endpoint" in rejected_single["rejection_reasons"][0]
 
 
-def test_required_combined_baseline_fails_closed_without_single_dataset_fallback():
+def test_missing_required_combined_baseline_warns_without_withholding_endpoint():
     candidates = [
         {
             "id": "single_best",
@@ -566,8 +566,8 @@ def test_required_combined_baseline_fails_closed_without_single_dataset_fallback
         require_combined_baseline=True,
     )
 
-    assert decision["status"] == "diagnostic_only"
-    assert decision["best_physical_endpoint"] == {}
+    assert decision["status"] == "ok"
+    assert decision["best_physical_endpoint"]["id"] == "combined"
     assert decision["best_single_dataset_physical_endpoint"]["id"] == "single_best"
     assert decision["best_single_dataset_diagnostic_endpoint"]["id"] == "single_best"
     assert decision["best_diagnostic_endpoint"]["id"] == "single_best"
@@ -576,20 +576,21 @@ def test_required_combined_baseline_fails_closed_without_single_dataset_fallback
     assert single["promotable"] is False
     combined = next(candidate for candidate in decision["candidates"] if candidate["id"] == "combined")
     assert combined["combined_baseline_gate"] == {
-        "status": "failed_baseline_unavailable",
-        "passed": False,
+        "status": "warning_baseline_unavailable",
+        "passed": True,
         "required": True,
         "available": False,
         "baseline_R1_all": None,
         "baseline_source": "",
         "endpoint_R1_all": 0.11,
         "delta_R1_all": None,
-        "reasons": combined["combined_baseline_gate"]["reasons"],
+        "reasons": [],
+        "warnings": combined["combined_baseline_gate"]["warnings"],
     }
-    assert "required but unavailable" in combined["combined_baseline_gate"]["reasons"][0]
+    assert "remains available" in combined["combined_baseline_gate"]["warnings"][0]
 
 
-def test_combined_endpoint_worse_than_validated_baseline_is_diagnostic():
+def test_combined_endpoint_worse_than_validated_baseline_warns_but_remains_available():
     candidate = {
         "id": "combined_worse",
         "label": "combined",
@@ -612,16 +613,17 @@ def test_combined_endpoint_worse_than_validated_baseline_is_diagnostic():
         combined_baseline_source="/validated/combined_baseline.lst",
     )
 
-    assert decision["best_physical_endpoint"] == {}
-    rejected = decision["best_diagnostic_endpoint"]
-    gate = rejected["combined_baseline_gate"]
-    assert gate["status"] == "failed_worse_than_baseline"
-    assert gate["passed"] is False
+    accepted = decision["best_physical_endpoint"]
+    assert accepted["id"] == "combined_worse"
+    gate = accepted["combined_baseline_gate"]
+    assert gate["status"] == "warning_worse_than_baseline"
+    assert gate["passed"] is True
     assert gate["baseline_R1_all"] == 0.145
     assert gate["baseline_source"] == "/validated/combined_baseline.lst"
     assert gate["endpoint_R1_all"] == 0.16
     assert gate["delta_R1_all"] == pytest.approx(0.015)
-    assert any("worse than conventional baseline" in reason for reason in rejected["rejection_reasons"])
+    assert gate["reasons"] == []
+    assert any("warning only" in warning for warning in gate["warnings"])
 
 
 def test_combined_endpoint_not_worse_than_validated_baseline_passes():
@@ -685,9 +687,9 @@ def test_write_combined_baseline_gate_records_policy_and_report(tmp_path: Path):
         "source": "/validated/combined_baseline.lst",
     }
     report = (out / "PUBLICATION_ENDPOINT_CHOOSER.md").read_text()
-    assert "missing baseline evidence fails closed" in report
+    assert "missing conventional comparison" in report
     assert "Multi-dataset runs never substitute a single-dataset endpoint" in report
-    assert "failed_worse_than_baseline" in report
+    assert "warning_worse_than_baseline" in report
     assert "/validated/combined_baseline.lst" in report
 
 

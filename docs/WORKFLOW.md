@@ -8,17 +8,17 @@ The report-quality LaTeX/TikZ workflow figures live in [docs/figures](figures/RE
 flowchart TD
     A[Inputs] --> B[Preflight data-quality checks]
     B --> C[Two-stage indexing-transform scout]
-    C --> D[Fast hand and thickness screen]
+    C --> D[Thickness and geometry screen]
     D --> E[Geometry and nuisance regularization]
     E --> F[Feature gates for row-resolution, absorption, jitter, error, dose, and detector scales]
     F --> G[Rowwise support scan and final Bloch prediction]
-    G --> H[No-EXTI corrected reflections]
-    H --> I[Full correction and optional endpoint-B diagnostic]
-    I --> J[Declared-WGHT SHELXL endpoint polish]
-    J --> K[Multi-dataset inclusion and downweight policy]
+    G --> H[Bloch and shared LS1 feedback]
+    H --> I[Final elastic negative-thickness hand decision]
+    I --> J[No-EXTI corrected reflections]
+    J --> K[Compact-scale and dataset-policy replay]
     K --> L[Held-out shell resolution-limit promotion]
     L --> M[Publication endpoint chooser]
-    M --> N[Maps when tools are available]
+    M --> N[Native maps; optional endpoint-map comparison]
     M --> O[Row-space forensic audits]
     O --> P[Optional observation-polish endpoint promotion]
 ```
@@ -39,6 +39,6 @@ SHELXL endpoint polishing is iterative in full mode. Before final corrected endp
 
 Each corrected-HKL endpoint declares its SHELXL weight policy. The production publication path uses calibrated endpoint sigmas with fixed `WGHT 0 0`, so stale kinematic weights from the starting model do not silently control a dynamical endpoint. GROND can still run inherited or promoted SHELXL empirical weights as compatibility diagnostics, but those branches are not allowed to replace a calibrated fixed-weight publication endpoint just because they lower a weight-sensitive statistic. Endpoint `.res` files are normalized for reopening: one active LS/CGLS cycle, the corrected-HKL `HklSrc`, one active pre-`END` `WGHT`, and no ignored post-`END` recommendation tail. GROND reports both the weight policy and the final GooF because low `wR2all` with a low GooF can simply mean the endpoint weights are too broad for the residuals being judged.
 
-The publication endpoint chooser is the final endpoint sanity check. It reports the best physical endpoint separately from the best single-dataset physical diagnostic and the lowest-residual rejected diagnostic endpoint, then lists rejected corrections with explicit reasons. For multi-dataset jobs, the combined endpoint remains the publication endpoint when it passes the physical gate, even when one crystal has a lower residual by itself. A physical endpoint must be no-EXTI, endpoint-B zero, safely scaled, and finite; nonzero endpoint-B, explicit EXTI, unsafe HKL rescaling, excessive modulation, and unaccepted observation-polish corrections remain visible but diagnostic-only.
+The publication endpoint chooser is the final endpoint sanity check. It reports the best physical endpoint separately from the best single-dataset physical diagnostic and the lowest-residual rejected diagnostic endpoint, then lists rejected corrections with explicit reasons. For multi-dataset jobs, the combined endpoint remains the publication endpoint when it passes the physical gate, even when one crystal has a lower residual by itself. A physical endpoint must be no-EXTI, endpoint-B zero, safely scaled, finite, and free of disallowed NPD pathology. Nonzero endpoint-B, explicit EXTI, unsafe HKL rescaling, and unaccepted observation-polish corrections remain diagnostic-only. Excessive modulation, non-ideal GooF, a missing conventional comparison, or a worse conventional R1all comparison are warnings attached to an otherwise usable model.
 
 The Bloch/LS1 structure-update path has its own validation workflow because it is a lagged surrogate, not exact native dynamical least squares. `GROND validate-ls1` reruns updated-q feedback cycles from a pinned nuisance summary, compares them with frozen-q and q=1 controls, optionally runs an alternate-hand Bloch control, and can finish with a matched-physics native finite-difference polish. The report answers whether the row-level `q` correction is doing real dynamical work and whether native polish still finds a material downhill direction. See [LS1_VALIDATION.md](LS1_VALIDATION.md).

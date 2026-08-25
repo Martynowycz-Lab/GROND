@@ -19,13 +19,15 @@ Native row-level Bloch calculations are Python-first. The full default small-mol
 ## Fresh Install With venv
 
 ```bash
-git clone git@github.com:Martynowycz-Lab/GROND.git
+git clone https://github.com/Martynowycz-Lab/GROND.git
 cd GROND
 python3.12 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install .
-GROND doctor --probe-bloch --strict
+GROND init-config --out grond.config.json
+# Add the SHELXL path when it is not on PATH.
+GROND doctor --workflow small-molecule --config grond.config.json --probe-bloch --strict
 ```
 
 If `python3.12` is not available but `python3.11` or `python3.13` is, use that executable for the `venv` command.
@@ -33,7 +35,7 @@ If `python3.12` is not available but `python3.11` or `python3.13` is, use that e
 The package installs both `GROND` and `grond` console commands. If a shell or managed server environment does not find console scripts reliably, use the module form instead:
 
 ```bash
-python -m grond doctor --probe-bloch --strict
+python -m grond doctor --workflow small-molecule --config grond.config.json --probe-bloch --strict
 ```
 
 ## Updating An Existing Checkout
@@ -47,7 +49,7 @@ git switch main
 git pull --ff-only origin main
 source .venv/bin/activate
 python -m pip install .
-python -m grond doctor --probe-bloch --strict
+python -m grond doctor --workflow small-molecule --config grond.config.json --probe-bloch --strict
 ```
 
 For an editable developer installation, refresh the metadata and development dependencies with `python -m pip install -e ".[dev]"` after the pull. The source changes themselves are then visible immediately. If a machine must reproduce a released calculation rather than follow `main`, check out the recorded release tag or commit before installing.
@@ -62,12 +64,13 @@ Some lab Macs may have an older self-contained bundle at `/Applications/GROND`. 
 sudo rm -rf /Applications/GROND
 sudo mkdir -p /Applications/GROND
 sudo chown -R "$USER" /Applications/GROND
-git clone git@github.com:Martynowycz-Lab/GROND.git
+git clone https://github.com/Martynowycz-Lab/GROND.git
 cd GROND
 python3.12 -m venv /Applications/GROND/grond
 /Applications/GROND/grond/bin/python -m pip install --upgrade pip
 /Applications/GROND/grond/bin/python -m pip install .
-/Applications/GROND/grond/bin/GROND doctor --probe-bloch --strict
+/Applications/GROND/grond/bin/GROND init-config --out grond.config.json
+/Applications/GROND/grond/bin/GROND doctor --workflow small-molecule --config grond.config.json --probe-bloch --strict
 ```
 
 The final doctor output should include `version: 0.2.2` or newer, a `grond.package` path under `/Applications/GROND/grond/lib/python.../site-packages/grond`, and `install_status: current_required_features_present`.
@@ -77,7 +80,7 @@ The final doctor output should include `version: 0.2.2` or newer, a `grond.packa
 Use the editable install when modifying GROND:
 
 ```bash
-git clone git@github.com:Martynowycz-Lab/GROND.git
+git clone https://github.com/Martynowycz-Lab/GROND.git
 cd GROND
 python3.12 -m venv .venv
 source .venv/bin/activate
@@ -95,7 +98,8 @@ A conda or mamba environment is useful on shared servers:
 mamba env create -f environment.yml
 mamba activate grond
 python -m pip install -e ".[dev]"
-GROND doctor --probe-bloch --strict
+GROND init-config --out grond.config.json
+GROND doctor --workflow small-molecule --config grond.config.json --probe-bloch --strict
 ```
 
 The package also works in a plain `venv`, which is usually simpler on a laptop.
@@ -113,7 +117,7 @@ Fill in absolute paths for tools that are not already on `PATH`:
 ```json
 {
   "tools": {
-    "shelxl": "/programs/x86_64-linux/system/sbgrid_bin/shelxl",
+    "shelxl": "/absolute/path/to/shelxl",
     "shelx2map": ""
   }
 }
@@ -141,6 +145,26 @@ or export it for a project:
 ```bash
 export GROND_CONFIG=/path/to/grond.config.json
 ```
+
+## Detached Runs On A Shared Server
+
+Create the virtual environment and tool config on the server itself; do not copy a macOS environment to Linux. Confirm the small-molecule readiness scope, then use `tmux`, the site scheduler, or another normal process supervisor. For example:
+
+```bash
+ssh server
+cd /path/to/GROND
+source .venv/bin/activate
+GROND doctor --workflow small-molecule --config /absolute/path/grond.config.json --probe-bloch --strict
+
+tmux new -s grond
+GROND auto \
+  --config /absolute/path/grond.config.json \
+  --prep /absolute/path/prep.json \
+  --out-dir /absolute/path/grond_out \
+  --workers 48
+```
+
+Detach from `tmux` with `Ctrl-b d` and return with `tmux attach -t grond`. If the connection or process is interrupted, repeat the identical `GROND auto` command with the same output directory; fingerprint-matching stages resume. Do not start a second copy in the same output directory while the first is still running.
 
 `GROND auto` stops early if a full small-molecule endpoint workflow needs SHELXL and it is neither configured nor discoverable on `PATH`. It does not make the legacy endpoint maps by default. After the run, `GROND finish --run-dir grond_out` writes the native dynamical maps without `shelx2map`. Add `--make-maps` to `GROND auto`, or use `GROND finish --map-mode shelx2map`, only when the quick corrected-HKL endpoint maps are specifically wanted. Use `--native-only` for row-level Bloch statistics without corrected-HKL endpoint polishing, or `--allow-missing-tools` only for an intentional incomplete diagnostic run.
 

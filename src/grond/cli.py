@@ -4767,17 +4767,29 @@ def _multi_hand_publication_blockers(result: Mapping[str, object]) -> list[str]:
         path_text = str(result.get("post_feedback_multi_hand_diagnostic_path") or "").strip()
         diagnostic = try_read_json(Path(path_text)) if path_text else {}
     status = str(diagnostic.get("status") or "missing")
+    method = str(diagnostic.get("method") or "")
+    final_datasets = diagnostic.get("datasets") if isinstance(diagnostic.get("datasets"), Mapping) else {}
     consistency = diagnostic.get("consistency_gate") if isinstance(diagnostic.get("consistency_gate"), Mapping) else {}
     explicitly_not_applicable = status in {"not_applicable", "skipped_not_applicable"} and str(
         consistency.get("status") or ""
     ) == "not_applicable"
-    if status == "consistent" or explicitly_not_applicable:
+    completed_final_elastic_selection = bool(
+        method == "nakane_negative_thickness_elastic_pair_v1"
+        and status in {"kept", "switched"}
+        and isinstance(diagnostic.get("aggregate"), Mapping)
+        and bool(final_datasets)
+        and all(
+            isinstance(record, Mapping) and record.get("status") == "complete"
+            for record in final_datasets.values()
+        )
+    )
+    if status == "consistent" or explicitly_not_applicable or completed_final_elastic_selection:
         return []
     warnings = [str(value) for value in (consistency.get("warnings") or diagnostic.get("warnings") or []) if str(value)]
-    detail = "; ".join(warnings[:4]) or "the diagnostic is missing, incomplete, disabled, or materially favors the opposite hand"
+    detail = "; ".join(warnings[:4]) or str(diagnostic.get("reason") or "the final matched hand comparison is missing or incomplete")
     return [
         f"shared post-feedback hand diagnostic status {status!r} is not publication-consistent: {detail}; "
-        "absolute structure remains unresolved and GROND does not auto-switch the hand"
+        "GROND cannot verify the final conditional hand representation"
     ]
 
 
@@ -8831,6 +8843,100 @@ def run_feature_gate(
     return active_nui, active_run, record
 
 
+def ensure_single_final_row_model_contract(
+    prep: PrepConfig,
+    ds: DatasetSpec,
+    args: argparse.Namespace,
+    python: str,
+    logs: Path,
+    root: Path,
+    *,
+    source_run: Path,
+    final_model: str,
+    fallback_nuisance: Mapping[str, object],
+) -> tuple[Path, dict[str, object]]:
+    """Bind final single-dataset rows to the exact accepted endpoint model.
+
+    A native endpoint pass predicts rows from its input model and then writes an
+    LS1-updated output model.  If that output is accepted, downstream row
+    statistics, scale checks, calibration, and native maps require one
+    endpoint-free recomputation from the accepted coordinates.
+    """
+
+    model = Path(final_model).expanduser().resolve()
+    if not model.is_file():
+        raise RuntimeError(f"accepted final model does not exist: {model}")
+    model_sha = sha256_file(model)
+    source_summary = read_json(source_run / "summary.json")
+    source_inputs = source_summary.get("inputs") if isinstance(source_summary.get("inputs"), Mapping) else {}
+    source_row = source_run / "native_dyn_calc.csv"
+    source_model_sha = str(source_inputs.get("res_sha256") or "")
+    if source_model_sha == model_sha and source_row.is_file():
+        return source_run, {
+            "status": "already_exact",
+            "model": str(model),
+            "model_sha256": model_sha,
+            "row_run": str(source_run),
+            "row_table": str(source_row),
+            "definition": "native rows already bind the exact accepted model; no recomputation was needed",
+        }
+
+    source_config = source_summary.get("config") if isinstance(source_summary.get("config"), Mapping) else {}
+    nuisance = best_nuisance(source_run) or dict(fallback_nuisance)
+    n_basis = _positive_summary_int(source_config, "n_basis")
+    n_points = _positive_summary_int(source_config, "n_points")
+    scale_fit_split = str(source_config.get("scale_fit_split") or "work")
+    if not nuisance or n_basis is None or n_points is None or scale_fit_split not in {"work", "all"}:
+        raise RuntimeError(
+            "cannot recompute final-model rows: source run lacks a complete nuisance, N/Q, or scale-fit-split contract"
+        )
+    recompute = root / "runs" / ds.name / "adaptive_final_row_recompute"
+    recompute_args = _args_with_recorded_native_contract(args, source_config)
+    run_logged(
+        native_stage_cmd(
+            python,
+            ds,
+            str(model),
+            dataset_baseline_hkl(prep, ds),
+            recompute,
+            recompute_args,
+            n_basis=n_basis,
+            n_points=n_points,
+            stage="adaptive_final_row_recompute",
+            pinned=nuisance,
+            make_maps=bool(args.make_maps),
+            endpoint=False,
+            scale_fit_split_override=scale_fit_split,
+            strict_pinned_contract=True,
+            allow_pinned_jitter_fallback=False,
+        ),
+        logs,
+        f"{ds.name}_adaptive_final_row_recompute",
+        dry_run=False,
+    )
+    recompute_summary = read_json(recompute / "summary.json")
+    recompute_inputs = (
+        recompute_summary.get("inputs")
+        if isinstance(recompute_summary.get("inputs"), Mapping)
+        else {}
+    )
+    recompute_row = recompute / "native_dyn_calc.csv"
+    if str(recompute_inputs.get("res_sha256") or "") != model_sha or not recompute_row.is_file():
+        raise RuntimeError(
+            "final row recomputation did not bind the accepted model hash and materialize native_dyn_calc.csv"
+        )
+    return recompute, {
+        "status": "recomputed",
+        "model": str(model),
+        "model_sha256": model_sha,
+        "source_run": str(source_run),
+        "source_model_sha256": source_model_sha,
+        "row_run": str(recompute),
+        "row_table": str(recompute_row),
+        "definition": "fixed-nuisance native rows for the accepted LS1 output model; no additional coordinate step",
+    }
+
+
 def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Path) -> dict:
     """Run the full automatic staged path for one dataset."""
 
@@ -8843,6 +8949,8 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
         requested_scout_rows=args.scout_max_rows,
     )
     write_json(root / "decisions" / ds0.name / "preflight.json", preflight)
+    for warning in preflight.warnings:
+        print(f"WARN preflight {ds0.name}: {warning}", flush=True)
     if preflight.status == "fatal":
         raise RuntimeError(f"fatal preflight failure for {ds0.name}: {preflight.warnings}")
     ds = apply_preflight(ds0, preflight)
@@ -9243,6 +9351,27 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
                 "post_feedback_promotion": post_feedback_hand_promotion,
             }
 
+    if args.dry_run:
+        final_row_model_contract = {
+            "status": "skipped_dry_run",
+            "model": str(final_model),
+            "row_run": str(final),
+        }
+    else:
+        final, final_row_model_contract = ensure_single_final_row_model_contract(
+            prep,
+            ds,
+            args,
+            python,
+            logs,
+            root,
+            source_run=final,
+            final_model=final_model,
+            fallback_nuisance=regularized_nui,
+        )
+    if post_feedback_hand_promotion.get("status") == "promoted":
+        post_feedback_hand_promotion["final_row_model_contract"] = final_row_model_contract
+
     no_h_run = None
     if args.h_omit in {"on", "both", "only"} and is_shelx_model(final_model):
         no_h = make_noh_model(python, final_model, root, logs, args.dry_run)
@@ -9330,6 +9459,7 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
         "endpoint_feedback_decision": endpoint_feedback_decision,
         "endpoint_feedback_run": str(endpoint_feedback_run) if endpoint_feedback_run else "",
         "post_feedback_hand_promotion": post_feedback_hand_promotion,
+        "final_row_model_contract": final_row_model_contract,
         "scale_polish": scale_polish,
         "resolution_limit": resolution_limit,
         "sg_window_scout": sg_window_scout,
@@ -9347,6 +9477,7 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
         "model": final_model,
         "absolute_structure_diagnostic": absolute_structure_diagnostic,
         "post_feedback_hand_promotion": post_feedback_hand_promotion,
+        "final_row_model_contract": final_row_model_contract,
         "forensics": forensics,
         "scale_polish": scale_polish,
         "resolution_limits": {ds.name: resolution_limit},
@@ -9543,6 +9674,8 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
                 requested_scout_rows=args.scout_max_rows,
             )
             write_json(root / "decisions" / ds0.name / "preflight.json", preflight)
+            for warning in preflight.warnings:
+                print(f"WARN preflight {ds0.name}: {warning}", flush=True)
             if preflight.status == "fatal":
                 raise RuntimeError(f"fatal preflight failure for {ds0.name}: {preflight.warnings}")
             ds = apply_preflight(ds0, preflight)
@@ -9909,15 +10042,33 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
         full_input_runs = weighted_runs
         full_publication_runs = policy_active_runs(weighted_runs, final_dataset_policy)
         require_policy_active_runs(full_publication_runs, context="final publication")
+    hand_dataset_names = set(full_publication_runs)
+    hand_prep = PrepConfig(
+        structure=prep.structure,
+        datasets=[dataset for dataset in prep.datasets if dataset.name in hand_dataset_names],
+        baseline_hkl=prep.baseline_hkl,
+        notes=prep.notes,
+        default_hkl_transform=prep.default_hkl_transform,
+        geometry_percentile=prep.geometry_percentile,
+        parity_setup_id=prep.parity_setup_id,
+        parity_setup_manifest_sha256=prep.parity_setup_manifest_sha256,
+        metadata={
+            **dict(prep.metadata or {}),
+            "final_hand_dataset_policy": "primary_and_downweighted_policy_active_datasets_only",
+            "excluded_from_final_hand_selection": sorted(
+                {dataset.name for dataset in prep.datasets} - hand_dataset_names
+            ),
+        },
+    )
     post_feedback_multi_hand_diagnostic = run_multi_final_elastic_hand_selection(
-        prep,
+        hand_prep,
         args,
         python,
         logs,
         root,
         final_model=final_model,
         selected_hand=selected_hand,
-        final_runs=final_runs,
+        final_runs={name: final_runs[name] for name in hand_dataset_names},
         shared_hand_decision=shared_hand_decision,
     )
     if bool(post_feedback_multi_hand_diagnostic.get("hand_switched", False)):
@@ -10113,20 +10264,23 @@ def prep_from_args(args: argparse.Namespace) -> PrepConfig:
             from .io.dials_bridge import convert_dials_to_grond
 
             bridge_dir = Path(args.out_dir).expanduser().resolve() / "prepared" / f"dials_{safe_label(args.dataset_name)}"
-            bridge = convert_dials_to_grond(
-                args.dials_refl,
-                args.dials_expt,
-                bridge_dir,
-                intensity_mode=args.dials_intensity_mode,
-                row_selection=args.dials_row_selection,
-                sigma_mode=args.dials_sigma_mode,
-                sigma_scale=args.dials_sigma_scale,
-                dials_python=args.dials_python,
-                min_partiality_write=args.dials_min_partiality_write,
-                keep_dont_integrate=bool(args.dials_keep_dont_integrate) and not bool(args.dials_drop_dont_integrate),
-                drop_bad_flags=not bool(args.dials_keep_bad_flags),
-                dataset_name=args.dataset_name,
-            )
+            try:
+                bridge = convert_dials_to_grond(
+                    args.dials_refl,
+                    args.dials_expt,
+                    bridge_dir,
+                    intensity_mode=args.dials_intensity_mode,
+                    row_selection=args.dials_row_selection,
+                    sigma_mode=args.dials_sigma_mode,
+                    sigma_scale=args.dials_sigma_scale,
+                    dials_python=args.dials_python,
+                    min_partiality_write=args.dials_min_partiality_write,
+                    keep_dont_integrate=bool(args.dials_keep_dont_integrate) and not bool(args.dials_drop_dont_integrate),
+                    drop_bad_flags=not bool(args.dials_keep_bad_flags),
+                    dataset_name=args.dataset_name,
+                )
+            except (FileNotFoundError, OSError, RuntimeError, ValueError) as exc:
+                raise SystemExit(f"DIALS import failed: {exc}") from exc
             hkl, xds_dir = str(bridge.hkl), str(bridge.out_dir)
             prep_metadata["dials_bridge_summary"] = str(bridge.summary)
         else:
@@ -10338,6 +10492,12 @@ def _fixed_hand_decision_binding(
     comparison = comparison if isinstance(comparison, Mapping) else {}
     common_sigma_evidence: dict[str, object] = {}
     if require_decisive:
+        if str(payload.get("method") or "") == "nakane_negative_thickness_elastic_pair_v1":
+            raise ValueError(
+                "current final-elastic negative-thickness hand artifacts are conditional hand results and are not "
+                "yet accepted by the legacy parity-calibration replay. Preserve the setup and known-chemistry "
+                "assignment externally; do not claim a named configuration from this residual sign alone."
+            )
         reasons: list[str] = []
         if str(payload.get("quality_gate_status") or "") != "passed":
             reasons.append("quality gate did not pass")
@@ -11852,6 +12012,246 @@ def cmd_sfac_check(args: argparse.Namespace) -> int:
     return 0 if payload.get("ok") else 2
 
 
+def cmd_audit_hydrogen_omit(args: argparse.Namespace) -> int:
+    """Quantify prospective never-H difference-map peaks at independent H sites."""
+
+    import gemmi
+
+    from .legacy.engine.bloch_engine import parse_model
+
+    reference = Path(args.reference_res).expanduser().resolve()
+    never_h = Path(args.never_h_res).expanduser().resolve()
+    out = Path(args.out_dir).expanduser().resolve()
+    try:
+        for label, path in (("full-H reference", reference), ("prospective never-H model", never_h)):
+            if not path.is_file():
+                raise ValueError(f"{label} does not exist: {path}")
+        reference_model = parse_model(reference)
+        never_h_model = parse_model(never_h)
+        reference_h = [
+            str(atom.get("name") or "")
+            for atom in reference_model.get("atoms", [])
+            if str(atom.get("element") or "").upper() == "H"
+        ]
+        never_h_atoms = [
+            str(atom.get("name") or "")
+            for atom in never_h_model.get("atoms", [])
+            if str(atom.get("element") or "").upper() == "H"
+        ]
+        if not reference_h:
+            raise ValueError("full-H reference contains no hydrogen atoms")
+        if never_h_atoms:
+            raise ValueError(
+                "prospective never-H model contains hydrogen atoms: "
+                + ", ".join(never_h_atoms[:12])
+            )
+        reference_cell = tuple(float(value) for value in (reference_model.get("cell") or []))
+        never_h_cell = tuple(float(value) for value in (never_h_model.get("cell") or []))
+        if len(reference_cell) != 6 or len(never_h_cell) != 6:
+            raise ValueError("full-H and never-H models must both define six unit-cell constants")
+        cell_length_mismatch = max(
+            abs(actual - expected) / max(abs(expected), 1e-12)
+            for actual, expected in zip(never_h_cell[:3], reference_cell[:3], strict=True)
+        )
+        cell_angle_mismatch = max(
+            abs(actual - expected)
+            for actual, expected in zip(never_h_cell[3:], reference_cell[3:], strict=True)
+        )
+        if cell_length_mismatch > 0.01 or cell_angle_mismatch > 1.0:
+            raise ValueError(
+                "prospective never-H model cell is incompatible with the full-H reference "
+                f"(max length mismatch {cell_length_mismatch:.4f}, "
+                f"max angle mismatch {cell_angle_mismatch:.3f} deg)"
+            )
+
+        def normalized_symmetry(
+            model: Mapping[str, object],
+        ) -> tuple[int, tuple[tuple[tuple[float, ...], tuple[float, ...]], ...]]:
+            latt = int(model.get("shelx_latt", 0) or 0)
+            operations = model.get("symmetry_ops")
+            operations = operations if isinstance(operations, (list, tuple)) else []
+            normalized: list[tuple[tuple[float, ...], tuple[float, ...]]] = []
+            for operation in operations:
+                if not isinstance(operation, Mapping):
+                    raise ValueError("model symmetry operation is not a numeric rotation/translation record")
+                rotation = operation.get("rot")
+                translation = operation.get("trans")
+                if not isinstance(rotation, (list, tuple)) or not isinstance(translation, (list, tuple)):
+                    raise ValueError("model symmetry operation lacks numeric rot/trans fields")
+                flat_rotation = tuple(
+                    0.0 if abs(float(value)) < 1e-10 else round(float(value), 10)
+                    for row in rotation
+                    for value in row
+                )
+                canonical_translation = []
+                for value in translation:
+                    modulo = float(value) % 1.0
+                    if math.isclose(modulo, 0.0, abs_tol=1e-10) or math.isclose(
+                        modulo, 1.0, abs_tol=1e-10
+                    ):
+                        modulo = 0.0
+                    canonical_translation.append(round(modulo, 10))
+                if len(flat_rotation) != 9 or len(canonical_translation) != 3:
+                    raise ValueError("model symmetry operation does not have a 3x3 rotation and 3-vector translation")
+                normalized.append((flat_rotation, tuple(canonical_translation)))
+            return latt, tuple(sorted(normalized))
+
+        reference_symmetry = normalized_symmetry(reference_model)
+        never_h_symmetry = normalized_symmetry(never_h_model)
+        if never_h_symmetry != reference_symmetry:
+            raise ValueError(
+                "prospective never-H model does not share the full-H reference SHELX LATT/SYMM setting; "
+                "align the models through common non-H atoms before auditing H peaks"
+            )
+
+        def non_h_sites(model: Mapping[str, object]) -> dict[str, tuple[str, tuple[float, float, float]]]:
+            sites: dict[str, tuple[str, tuple[float, float, float]]] = {}
+            for atom in model.get("atoms", []):
+                if not isinstance(atom, Mapping):
+                    continue
+                element = str(atom.get("element") or "").upper()
+                if element == "H":
+                    continue
+                name = str(atom.get("name") or "").upper()
+                if not name or name in sites:
+                    raise ValueError(
+                        "full-H and never-H models need unique common non-H atom labels for an origin/alignment audit"
+                    )
+                sites[name] = (
+                    element,
+                    (float(atom["x"]), float(atom["y"]), float(atom["z"])),
+                )
+            return sites
+
+        reference_non_h = non_h_sites(reference_model)
+        never_h_non_h = non_h_sites(never_h_model)
+        common_labels = sorted(set(reference_non_h) & set(never_h_non_h))
+        minimum_common = max(
+            3,
+            int(math.ceil(float(args.min_common_nonh_fraction) * min(len(reference_non_h), len(never_h_non_h)))),
+        )
+        if len(common_labels) < minimum_common:
+            raise ValueError(
+                "full-H reference and prospective never-H model do not share enough uniquely labeled non-H atoms "
+                f"for an origin/alignment audit ({len(common_labels)} found; {minimum_common} required)"
+            )
+        cell = gemmi.UnitCell(*reference_cell)
+        common_distances: list[float] = []
+        for label in common_labels:
+            reference_element, reference_frac = reference_non_h[label]
+            never_h_element, never_h_frac = never_h_non_h[label]
+            if reference_element != never_h_element:
+                raise ValueError(
+                    f"common atom {label} changes element between full-H and never-H models: "
+                    f"{reference_element} != {never_h_element}"
+                )
+            delta = [reference_frac[index] - never_h_frac[index] for index in range(3)]
+            delta = [value - round(value) for value in delta]
+            cart = cell.orthogonalize(gemmi.Fractional(*delta))
+            common_distances.append(math.sqrt(cart.x * cart.x + cart.y * cart.y + cart.z * cart.z))
+        common_nonh_rms = math.sqrt(math.fsum(distance * distance for distance in common_distances) / len(common_distances))
+        common_nonh_max = max(common_distances)
+        if common_nonh_rms > float(args.max_common_nonh_rms_A) or common_nonh_max > float(args.max_common_nonh_max_A):
+            raise ValueError(
+                "full-H reference is not aligned to the prospective never-H coordinate origin/representation: "
+                f"common non-H RMS {common_nonh_rms:.3f} A (limit {float(args.max_common_nonh_rms_A):.3f}), "
+                f"max {common_nonh_max:.3f} A (limit {float(args.max_common_nonh_max_A):.3f}). "
+                "Align from common non-H atoms without consulting H-map peaks, then rerun."
+            )
+        map_specs: list[str] = []
+        map_contracts: list[dict[str, str]] = []
+        for spec in args.map:
+            name, separator, raw_path = str(spec).partition("=")
+            if not separator:
+                raw_path = name
+                name = Path(raw_path).stem
+            map_path = Path(raw_path).expanduser().resolve()
+            if not map_path.is_file():
+                raise ValueError(f"omit map does not exist: {map_path}")
+            map_specs.append(f"{name}={map_path}")
+            map_contracts.append(
+                {"name": name, "path": str(map_path), "sha256": sha256_file(map_path)}
+            )
+        if not map_specs:
+            raise ValueError("pass at least one --map name=/path/to/fofc.map")
+    except (OSError, ValueError) as exc:
+        print(json.dumps({"status": "error", "error": str(exc)}, indent=2))
+        return 2
+
+    out.mkdir(parents=True, exist_ok=True)
+    command = [
+        sys.executable,
+        str(engine_script("map_hydrogen_omit_audit.py")),
+        "--reference-res",
+        str(reference),
+        "--out-dir",
+        str(out),
+        "--radius-A",
+        str(float(args.radius_A)),
+    ]
+    for spec in map_specs:
+        command.extend(["--map", spec])
+    proc = subprocess.run(command, text=True, capture_output=True)
+    if proc.returncode != 0:
+        stderr = "\n".join(proc.stderr.strip().splitlines()[-30:])
+        print(
+            json.dumps(
+                {
+                    "status": "error",
+                    "error": "hydrogen omit-map audit failed",
+                    "stderr_tail": stderr,
+                },
+                indent=2,
+            )
+        )
+        return 2
+    contract = {
+        "schema_version": 1,
+        "kind": "grond_prospective_never_h_map_audit_input",
+        "reference_res": str(reference),
+        "reference_res_sha256": sha256_file(reference),
+        "reference_hydrogen_count": len(reference_h),
+        "never_h_res": str(never_h),
+        "never_h_res_sha256": sha256_file(never_h),
+        "never_h_hydrogen_count": 0,
+        "reference_cell": list(reference_cell),
+        "never_h_cell": list(never_h_cell),
+        "model_cell_max_length_relative_mismatch": cell_length_mismatch,
+        "model_cell_max_angle_mismatch_deg": cell_angle_mismatch,
+        "reference_shelx_latt": reference_symmetry[0],
+        "reference_symmetry_ops": list(reference_symmetry[1]),
+        "never_h_shelx_latt": never_h_symmetry[0],
+        "never_h_symmetry_ops": list(never_h_symmetry[1]),
+        "reference_non_h_count": len(reference_non_h),
+        "never_h_non_h_count": len(never_h_non_h),
+        "common_non_h_count": len(common_labels),
+        "minimum_common_non_h_count": minimum_common,
+        "common_non_h_labels": common_labels,
+        "common_non_h_rms_A": common_nonh_rms,
+        "common_non_h_max_A": common_nonh_max,
+        "max_common_non_h_rms_A": float(args.max_common_nonh_rms_A),
+        "max_common_non_h_max_A": float(args.max_common_nonh_max_A),
+        "radius_A": float(args.radius_A),
+        "maps": map_contracts,
+        "coordinate_contract": (
+            "reference and never-H maps must share the same cell, origin, proper HKL setting, and selected hand; "
+            "the map reader verifies compatible cells but cannot infer an origin shift"
+        ),
+    }
+    write_json(out / "input_contract.json", contract)
+    summary_path = out / "summary.json"
+    summary = try_read_json(summary_path)
+    if summary:
+        summary["input_contract"] = str((out / "input_contract.json").resolve())
+        summary["never_h_res"] = str(never_h)
+        summary["never_h_hydrogen_count"] = 0
+        write_json(summary_path, summary)
+    if proc.stdout.strip():
+        print(proc.stdout.strip())
+    print(json.dumps({"status": "ok", "input_contract": str((out / "input_contract.json").resolve())}, indent=2))
+    return 0
+
+
 def cmd_make_free_flags(args: argparse.Namespace) -> int:
     """Assign deterministic macromolecular FreeR flags at unique-HKL level."""
 
@@ -12027,23 +12427,27 @@ def cmd_import_dials(args: argparse.Namespace) -> int:
 
     from .io.dials_bridge import convert_dials_to_grond
 
-    bridge = convert_dials_to_grond(
-        args.refl,
-        args.expt,
-        args.out_dir,
-        intensity_mode=args.intensity_mode,
-        row_selection=args.row_selection,
-        sigma_mode=args.sigma_mode,
-        sigma_scale=args.sigma_scale,
-        dials_python=args.dials_python,
-        min_partiality_write=args.min_partiality_write,
-        keep_dont_integrate=bool(args.keep_dont_integrate) and not bool(args.drop_dont_integrate),
-        drop_bad_flags=not bool(args.keep_bad_flags),
-        structure=args.structure or None,
-        baseline_hkl=args.baseline_hkl or None,
-        dataset_name=args.dataset_name,
-        prep_out=args.prep_out or None,
-    )
+    try:
+        bridge = convert_dials_to_grond(
+            args.refl,
+            args.expt,
+            args.out_dir,
+            intensity_mode=args.intensity_mode,
+            row_selection=args.row_selection,
+            sigma_mode=args.sigma_mode,
+            sigma_scale=args.sigma_scale,
+            dials_python=args.dials_python,
+            min_partiality_write=args.min_partiality_write,
+            keep_dont_integrate=bool(args.keep_dont_integrate) and not bool(args.drop_dont_integrate),
+            drop_bad_flags=not bool(args.keep_bad_flags),
+            structure=args.structure or None,
+            baseline_hkl=args.baseline_hkl or None,
+            dataset_name=args.dataset_name,
+            prep_out=args.prep_out or None,
+        )
+    except (FileNotFoundError, OSError, RuntimeError, ValueError) as exc:
+        print(json.dumps({"status": "error", "error": str(exc)}, indent=2))
+        return 2
     payload = {
         "out_dir": str(bridge.out_dir),
         "hkl": str(bridge.hkl),
@@ -12589,6 +12993,21 @@ def _write_run_completion_artifacts(
     return quick
 
 
+def _validated_h_omit_mode(value: object, dataset_count: int) -> str:
+    """Normalize the retrospective H-omit request and reject unsupported multi use."""
+
+    mode = str(value or "off").strip().lower()
+    if mode not in {"off", "on", "only", "both"}:
+        raise ValueError("--h-omit must be off, on, only, or both")
+    if int(dataset_count) > 1 and mode != "off":
+        raise ValueError(
+            "--h-omit is not implemented for multi-dataset auto and was not run. "
+            "For prospective hydrogen discovery, refine a separate model that has never contained H atoms; "
+            "for a retrospective single-dataset sensitivity control, run that dataset separately with --h-omit on."
+        )
+    return "on" if mode in {"on", "only", "both"} else "off"
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     """CLI entrypoint for the configurable `GROND run` workflow."""
 
@@ -12599,6 +13018,17 @@ def cmd_run(args: argparse.Namespace) -> int:
     logs = Path(args.out_dir) / "logs"
     python = choose_python(args.python)
     prep = prep_from_args(args)
+    try:
+        requested_h_omit = str(getattr(args, "h_omit", "off") or "off")
+        args.h_omit = _validated_h_omit_mode(requested_h_omit, len(prep.datasets))
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    if requested_h_omit in {"only", "both"}:
+        print(
+            f"WARN --h-omit {requested_h_omit} is a deprecated alias for --h-omit on; "
+            "the calculation is a retrospective strip-H sensitivity control, not a prospective never-H experiment.",
+            flush=True,
+        )
     if len(prep.datasets) > 1 and str(getattr(args, "endpoint_calibration", "auto")) == "on":
         raise SystemExit(
             "--endpoint-calibration on cannot be forced for a multi-dataset run. "
@@ -14059,11 +14489,39 @@ def _quick_multi_hand_diagnostic(result: Mapping[str, object]) -> dict[str, obje
     return try_read_json(Path(str(path))) if path else {}
 
 
+def _quick_final_elastic_hand_aggregate(payload: Mapping[str, object]) -> dict[str, dict[str, object]]:
+    """Orient the final elastic pooled hand contrast so positive favors the retained model."""
+
+    if str(payload.get("method") or "") != "nakane_negative_thickness_elastic_pair_v1":
+        return {}
+    aggregate = payload.get("aggregate") if isinstance(payload.get("aggregate"), Mapping) else {}
+    splits = aggregate.get("splits") if isinstance(aggregate.get("splits"), Mapping) else {}
+    sign = -1.0 if bool(payload.get("hand_switched", False)) else 1.0
+    oriented: dict[str, dict[str, object]] = {}
+    for split in ("all", "work", "free"):
+        block = splits.get(split) if isinstance(splits.get(split), Mapping) else {}
+        raw_t = _quick_float(block.get("paired_row_t_delta_chi2"))
+        n = _quick_int(block.get("n"))
+        oriented[split] = {
+            "t": sign * raw_t if math.isfinite(raw_t) else None,
+            "n": n,
+            "df": n - 1 if n is not None and n > 0 else None,
+            "mean_delta_chi2_rejected_minus_final": (
+                sign * _quick_float(block.get("mean_delta_chi2_inverse_minus_selected"))
+                if math.isfinite(_quick_float(block.get("mean_delta_chi2_inverse_minus_selected")))
+                else None
+            ),
+        }
+    return oriented
+
+
 def _quick_multi_hand_console_rows(payload: Mapping[str, object]) -> dict[str, dict[str, object]]:
     """Return compact per-dataset hand evidence for console/report consumers."""
 
     datasets = payload.get("datasets") if isinstance(payload.get("datasets"), Mapping) else {}
     rows: dict[str, dict[str, object]] = {}
+    final_elastic = str(payload.get("method") or "") == "nakane_negative_thickness_elastic_pair_v1"
+    sign = -1.0 if bool(payload.get("hand_switched", False)) else 1.0
     for name, raw in sorted(datasets.items(), key=lambda item: str(item[0])):
         record = raw if isinstance(raw, Mapping) else {}
         paired = (
@@ -14082,6 +14540,35 @@ def _quick_multi_hand_console_rows(payload: Mapping[str, object]) -> dict[str, d
             if isinstance(record.get("score_margins_positive_favors_selected"), Mapping)
             else {}
         )
+        diagnostic = try_read_json(Path(str(record.get("diagnostic") or ""))) if final_elastic and record.get("diagnostic") else {}
+        diagnostic_blocks = {
+            split: diagnostic.get(split) if isinstance(diagnostic.get(split), Mapping) else {}
+            for split in ("all", "work", "free")
+        }
+        if final_elastic:
+            counts = {split: _quick_int(block.get("n")) or 0 for split, block in diagnostic_blocks.items()}
+            paired = {
+                split: {
+                    "t": (
+                        sign * _quick_float(block.get("paired_row_t_delta_chi2"))
+                        if math.isfinite(_quick_float(block.get("paired_row_t_delta_chi2")))
+                        else None
+                    ),
+                    "df": (int(block.get("n")) - 1 if int(block.get("n", 0) or 0) > 0 else None),
+                }
+                for split, block in diagnostic_blocks.items()
+            }
+            selected_minus_inverse = _quick_float(record.get("score_delta_selected_minus_inverse"))
+            final_margin = sign * (-selected_minus_inverse) if math.isfinite(selected_minus_inverse) else None
+            margins = {}
+            selected_row_table = record.get("selected_row_table", "")
+            opposite_row_table = record.get("inverse_row_table", "")
+        else:
+            final_margin = record.get(
+                "composite_score_margin_opposite_minus_selected_positive_favors_selected"
+            )
+            selected_row_table = record.get("selected_row_table", "")
+            opposite_row_table = record.get("opposite_row_table", "")
         rows[str(name)] = {
             "status": record.get("status", "missing"),
             "rows_all": counts.get("all", 0),
@@ -14108,11 +14595,9 @@ def _quick_multi_hand_console_rows(payload: Mapping[str, object]) -> dict[str, d
                 if isinstance(margins.get("free"), Mapping)
                 else None
             ),
-            "composite_margin": record.get(
-                "composite_score_margin_opposite_minus_selected_positive_favors_selected"
-            ),
-            "selected_row_table": record.get("selected_row_table", ""),
-            "opposite_row_table": record.get("opposite_row_table", ""),
+            "composite_margin": final_margin,
+            "selected_row_table": selected_row_table,
+            "opposite_row_table": opposite_row_table,
             "diagnostic": record.get("diagnostic", ""),
         }
     return rows
@@ -14123,21 +14608,44 @@ def _quick_multi_hand_evidence_lines(
     *,
     compact: bool = False,
 ) -> list[str]:
-    """Render per-crystal paired t-style hand evidence without pooling crystals."""
+    """Render final exact-row hand evidence for old and final-elastic schemas."""
 
     rows = _quick_multi_hand_console_rows(payload)
+    pooled = _quick_final_elastic_hand_aggregate(payload)
+    final_elastic = bool(pooled)
     lines = [
-        "## Per-Dataset Final Hand Evidence",
+        "## Final Hand Evidence",
         "",
         (
-            "The final shared hand remains the initial shared-gate decision. Each row below compares one crystal's "
-            "frozen final row table with an opposite-hand recomputation at the identical pinned nuisance and N/Q. "
-            "Positive paired t-style statistics and score margins favor the selected shared hand. Each t-style "
-            "statistic is reported with n and df=n-1; it is not a calibrated normal Z score. No pooled statistic is "
-            "computed across independent crystal, sigma, scale, and free-set contracts."
+            "The final elastic negative-thickness comparison uses each crystal's exact frozen rows, nuisance, scales, "
+            "N/Q, jitter, and proper transform, with absorption disabled only for the Hermitian hand identity. "
+            "The pooled all/work/free contrast below is the predeclared shared-model selection statistic; each "
+            "crystal remains visible separately. Positive displayed t-style values favor the final retained hand. "
+            "These are paired row contrasts with n and df=n-1, not calibrated normal Z scores."
+            if final_elastic
+            else
+            "Each row below compares one crystal's frozen final row table with an opposite-hand recomputation at "
+            "the identical pinned nuisance and N/Q. Positive paired t-style statistics and score margins favor the "
+            "selected shared hand. Each t-style statistic is reported with n and df=n-1; it is not a calibrated "
+            "normal Z score. No pooled statistic is computed for this legacy diagnostic schema."
         ),
         "",
     ]
+    if final_elastic:
+        lines.extend(
+            [
+                f"Selection status: `{payload.get('status', 'missing')}`; hand switched: `{bool(payload.get('hand_switched', False))}`.",
+                "",
+                "| pooled exact rows | paired t-style | n | df |",
+                "|---|---:|---:|---:|",
+                *[
+                    f"| {split} | {_quick_number((pooled.get(split) or {}).get('t'), 3)} | "
+                    f"{(pooled.get(split) or {}).get('n', 'n/a')} | {(pooled.get(split) or {}).get('df', 'n/a')} |"
+                    for split in ("all", "work", "free")
+                ],
+                "",
+            ]
+        )
     if not rows:
         lines.extend(
             [
@@ -15614,6 +16122,7 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
             },
         }
     multi_hand_rows = _quick_multi_hand_console_rows(multi_hand_diagnostic)
+    multi_hand_pooled = _quick_final_elastic_hand_aggregate(multi_hand_diagnostic)
     if multi_hand_diagnostic:
         hand_summary["promotion_status"] = multi_hand_diagnostic.get("status", "missing")
     z_summary = _quick_residual_z_summary([path for _name, path in frozen_row_tables])
@@ -15753,14 +16262,30 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
         if per_dataset_jana_json_path.is_file()
         else "not available for this historical run"
     )
-    if result.get("combined"):
+    if result.get("combined") and multi_hand_pooled:
         hand_t_report_line = (
             "| final hand paired t-style, all/work/free | "
-            "`per-dataset evidence with n and df below; no pooled statistic is computed` |"
+            f"`{_quick_number((multi_hand_pooled.get('all') or {}).get('t'), 3)}` / "
+            f"`{_quick_number((multi_hand_pooled.get('work') or {}).get('t'), 3)}` / "
+            f"`{_quick_number((multi_hand_pooled.get('free') or {}).get('t'), 3)}`; "
+            "exact pooled rows, positive favors final selected hand; n and df are reported below; "
+            "not a calibrated normal Z score |"
+        )
+        hand_delta_report_line = (
+            "| final hand mean delta chi2, all/work/free | "
+            f"`{_quick_number((multi_hand_pooled.get('all') or {}).get('mean_delta_chi2_rejected_minus_final'), 3)}` / "
+            f"`{_quick_number((multi_hand_pooled.get('work') or {}).get('mean_delta_chi2_rejected_minus_final'), 3)}` / "
+            f"`{_quick_number((multi_hand_pooled.get('free') or {}).get('mean_delta_chi2_rejected_minus_final'), 3)}`; "
+            "positive favors final selected hand |"
+        )
+    elif result.get("combined"):
+        hand_t_report_line = (
+            "| final hand paired t-style, all/work/free | "
+            "`legacy per-dataset evidence with n and df below; no pooled statistic was recorded` |"
         )
         hand_delta_report_line = (
             "| final hand sqrt(delta chi2), all/work/free | "
-            "`per-dataset score margins below; no merged statistic is computed` |"
+            "`legacy per-dataset score margins below; no pooled statistic was recorded` |"
         )
     else:
         hand_t_report_line = (
@@ -16361,20 +16886,44 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
         "full_json": str(out_dir / "grond_summary.json"),
         "final_hand": hand_summary.get("final_hand", "n/a"),
         "final_hand_t_style_all": (
-            None
+            _quick_fraction((multi_hand_pooled.get("all") or {}).get("t"))
+            if result.get("combined") and multi_hand_pooled
+            else None
             if result.get("combined")
             else _quick_fraction(hand_all.get("paired_t_style_positive_favors_final"))
         ),
-        "final_hand_t_style_all_n": None if result.get("combined") else _quick_int(hand_all.get("n")),
-        "final_hand_t_style_all_df": None if result.get("combined") else _quick_int(hand_all.get("df")),
+        "final_hand_t_style_all_n": (
+            _quick_int((multi_hand_pooled.get("all") or {}).get("n"))
+            if result.get("combined") and multi_hand_pooled
+            else None if result.get("combined") else _quick_int(hand_all.get("n"))
+        ),
+        "final_hand_t_style_all_df": (
+            _quick_int((multi_hand_pooled.get("all") or {}).get("df"))
+            if result.get("combined") and multi_hand_pooled
+            else None if result.get("combined") else _quick_int(hand_all.get("df"))
+        ),
         "final_hand_t_style_free": (
-            None
+            _quick_fraction((multi_hand_pooled.get("free") or {}).get("t"))
+            if result.get("combined") and multi_hand_pooled
+            else None
             if result.get("combined")
             else _quick_fraction(hand_free.get("paired_t_style_positive_favors_final"))
         ),
-        "final_hand_t_style_free_n": None if result.get("combined") else _quick_int(hand_free.get("n")),
-        "final_hand_t_style_free_df": None if result.get("combined") else _quick_int(hand_free.get("df")),
-        "final_hand_t_style_scope": "per_dataset" if result.get("combined") else "single_dataset",
+        "final_hand_t_style_free_n": (
+            _quick_int((multi_hand_pooled.get("free") or {}).get("n"))
+            if result.get("combined") and multi_hand_pooled
+            else None if result.get("combined") else _quick_int(hand_free.get("n"))
+        ),
+        "final_hand_t_style_free_df": (
+            _quick_int((multi_hand_pooled.get("free") or {}).get("df"))
+            if result.get("combined") and multi_hand_pooled
+            else None if result.get("combined") else _quick_int(hand_free.get("df"))
+        ),
+        "final_hand_t_style_scope": (
+            "pooled_exact_rows"
+            if result.get("combined") and multi_hand_pooled
+            else "per_dataset" if result.get("combined") else "single_dataset"
+        ),
         "final_hand_z_all": (
             None
             if result.get("combined")
@@ -16385,7 +16934,11 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
             if result.get("combined")
             else _quick_fraction(hand_free.get("paired_t_style_positive_favors_final"))
         ),
-        "final_hand_z_scope": "per_dataset" if result.get("combined") else "single_dataset",
+        "final_hand_z_scope": (
+            "pooled_exact_rows"
+            if result.get("combined") and multi_hand_pooled
+            else "per_dataset" if result.get("combined") else "single_dataset"
+        ),
         "final_hand_z_compatibility_note": (
             "legacy field names only; values are paired Student-t-style contrasts, not calibrated normal Z scores"
         ),
@@ -16513,9 +17066,17 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
     jana_born_available = _quick_complete_jana_metrics(jana_born)
     jana_dynamic_available = _quick_complete_jana_metrics(jana_dynamic)
 
-    if result.get("combined"):
+    if result.get("combined") and multi_hand_pooled:
         final_hand_t_line = (
-            f"| final hand paired t-style, all/free | `per-dataset only with n and df; no pooled statistic`; consistency "
+            f"| final hand paired t-style, all/free | "
+            f"`{_quick_flat_hand_t_style_text(console['final_hand_t_style_all'], console['final_hand_t_style_all_n'], console['final_hand_t_style_all_df'])}` / "
+            f"`{_quick_flat_hand_t_style_text(console['final_hand_t_style_free'], console['final_hand_t_style_free_n'], console['final_hand_t_style_free_df'])}`; "
+            f"exact pooled rows, positive favors the selected hand; selection `{multi_hand_diagnostic.get('status', 'missing')}`; "
+            "not a calibrated normal Z score |"
+        )
+    elif result.get("combined"):
+        final_hand_t_line = (
+            f"| final hand paired t-style, all/free | `legacy per-dataset only with n and df; no pooled statistic recorded`; consistency "
             f"`{multi_hand_diagnostic.get('status', 'missing')}` |"
         )
     else:
@@ -18070,12 +18631,22 @@ def write_push_endpoint_report(out_dir: Path, *, best_cycle_tolerance: float) ->
         model = None if model_text in {"", "."} else Path(model_text)
         lst = model.with_suffix(".lst") if model is not None else None
         text = lst.read_text(errors="ignore") if lst is not None and lst.exists() else ""
-        npd_atoms = re.findall(r"\s([A-Z][A-Z0-9]{3})\s+\*\* NON POSITIVE DEFINITE \*\*", text)
         split_match = re.search(r"(\d+)\s+atoms may be split", text)
-        split_count = int(split_match.group(1)) if split_match else 0
         param_match = re.search(r"Total number of l\.s\. parameters =\s+(\d+)", text)
         restraint_match = re.search(r"Restrained GooF =\s+[0-9.]+ for\s+(\d+) restraints", text)
-        endpoint_health = run.get("endpoint_res_health") or {}
+        recorded_health = run.get("endpoint_res_health")
+        recorded_health = recorded_health if isinstance(recorded_health, Mapping) else {}
+        endpoint_health = _quick_shelxl_details(recorded_health, lst)
+        npd_atoms = endpoint_health.get("npd_atoms")
+        npd_atoms = list(npd_atoms) if isinstance(npd_atoms, (list, tuple, set)) else []
+        npd_count = int(endpoint_health.get("npd_count", len(npd_atoms)) or 0)
+        has_npd = bool(endpoint_health.get("has_npd", False) or npd_count > 0)
+        split_count = int(endpoint_health.get("split_count", int(split_match.group(1)) if split_match else 0) or 0)
+        safe_for_feedback = bool(
+            endpoint_health.get("lst_safe_for_feedback") is True
+            and endpoint_health.get("safe_for_feedback") is not False
+            and not has_npd
+        )
         rows.append(
             {
                 "cycle": len(rows) + 1,
@@ -18085,6 +18656,10 @@ def write_push_endpoint_report(out_dir: Path, *, best_cycle_tolerance: float) ->
                 "parameters": int(param_match.group(1)) if param_match else None,
                 "restraints": int(restraint_match.group(1)) if restraint_match else None,
                 "npd_atoms": npd_atoms,
+                "npd_count": npd_count,
+                "has_npd": has_npd,
+                "safe_for_feedback": safe_for_feedback,
+                "endpoint_res_health": endpoint_health,
                 "split_count": split_count,
                 "native_wR2_all": metrics.get("native_dyn_wR2_all"),
                 "native_free_wR2_all": metrics.get("native_dyn_free_wR2_all"),
@@ -18097,7 +18672,11 @@ def write_push_endpoint_report(out_dir: Path, *, best_cycle_tolerance: float) ->
     finite_rows = [r for r in rows if r["native_wR2_all"] is not None and math.isfinite(float(r["native_wR2_all"]))]
     best_native = min(finite_rows, key=lambda r: float(r["native_wR2_all"])) if finite_rows else None
     threshold = float(best_native["native_wR2_all"]) + best_cycle_tolerance if best_native else math.inf
-    safe_rows = [r for r in finite_rows if not r["npd_atoms"]]
+    safe_rows = [
+        r
+        for r in finite_rows
+        if r.get("safe_for_feedback") is True and int(r.get("npd_count", 0) or 0) == 0
+    ]
     within = [r for r in safe_rows if float(r["native_wR2_all"]) <= threshold]
     selected = min(within or safe_rows, key=lambda r: (r["cycle"], float(r["native_wR2_all"]))) if safe_rows else None
     decision = {
@@ -18390,6 +18969,10 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         "absolute_structure_diagnostic": str(absolute_structure_script.resolve()),
         "absolute_structure_uses_pandas": "import pandas" in absolute_structure_text or "pd.read_csv" in absolute_structure_text,
         "required_features": required_features,
+        "known_limitations": {
+            "current_final_elastic_parity_calibration_adapter": False,
+            "parity_calibration_commands_accept": "legacy branch-symmetric/common-sigma hand decisions only",
+        },
         "install_status": "current_required_features_present" if all(required_features.values()) else "stale_or_incomplete_install",
     }
     all_external_tools = external_tool_statuses(args)
@@ -19908,7 +20491,16 @@ def add_common_run_args(ap: argparse.ArgumentParser, *, expose_lambda_controls: 
         help="Generate legacy quick corrected-HKL endpoint maps with shelx2map. Native dynamical maps are made afterward with `GROND finish` and need no external map program.",
     )
     ap.add_argument("--no-maps", dest="make_maps", action="store_false")
-    ap.add_argument("--h-omit", choices=["off", "on", "only", "both"], default="off")
+    ap.add_argument(
+        "--h-omit",
+        choices=["off", "on", "only", "both"],
+        default="off",
+        help=(
+            "Single-dataset retrospective sensitivity control: strip H from the final H-containing model and "
+            "calculate omit endpoints. This is not prospective never-H evidence. Multi-dataset use fails "
+            "explicitly. only/both are deprecated aliases for on."
+        ),
+    )
     ap.add_argument("--hand-control", dest="hand_control", action="store_true", default=True, help="Run one final elastic negative-thickness hand decision when model symmetry makes it meaningful.")
     ap.add_argument("--no-hand-control", dest="hand_control", action="store_false", help="Skip the alternate-hand diagnostic.")
     ap.add_argument("--hand-n-basis", dest="hand_n_basis", metavar="N", type=int, default=24, help="Deprecated auto compatibility option; final hand selection now reuses the exact final N value.")
@@ -20013,7 +20605,7 @@ def add_common_run_args(ap: argparse.ArgumentParser, *, expose_lambda_controls: 
     ap.add_argument("--publication-endpoint-chooser", action=argparse.BooleanOptionalAction, default=True, help="Write the publication endpoint chooser that separates physical and diagnostic corrected-HKL endpoints.")
     ap.add_argument("--publication-endpoint-min-hkl-safe-factor", type=float, default=0.25, help="Minimum fixed-width HKL safety factor for a publication endpoint.")
     ap.add_argument("--publication-endpoint-max-modulation-p95", type=float, default=20.0, help="Warning level for 95th-percentile endpoint intensity modulation; never a promotion or validity gate.")
-    ap.add_argument("--publication-allow-npd", action=argparse.BooleanOptionalAction, default=False, help="Explicit diagnostic override allowing endpoints with NPD pathology to pass publication selection gates. Default requires NPD == 0; split warnings always block publication selection.")
+    ap.add_argument("--publication-allow-npd", action=argparse.BooleanOptionalAction, default=False, help="Explicit diagnostic override allowing endpoints with NPD pathology to pass publication selection gates. Default requires NPD == 0. The general endpoint chooser reports split warnings without withholding a usable model; strict compact detector/scale promotion can still require zero splits.")
     ap.add_argument("--endpoint-calibration", choices=["auto", "on", "off"], default="auto", help="Replay the final frozen row table through corrected-HKL endpoint calibration after auto completes.")
     ap.add_argument("--endpoint-calibration-specs", default="baseline,adaptive:293:det0,adaptive:293:det2,adaptive:293:det4,adaptive:293:det8,adaptive:200:det0,adaptive:200:det2,adaptive:200:det4,adaptive:200:det8,adaptive:120:det0,adaptive:120:det2,adaptive:120:det4,adaptive:120:det8,adaptive:80:det0,adaptive:80:det2,adaptive:80:det4,adaptive:80:det8,window:1.0:det0,window:1.0:det4,window:1.0:det8,window:3.0:det0,window:3.0:det2,window:3.0:det4,window:3.0:det8,window:5.0:det0,window:5.0:det4,window:5.0:det8")
     if expose_lambda_controls:
@@ -20269,6 +20861,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="Initial transform assertion. The scout normally replaces it independently for each crystal.",
     )
     p_manual_setup.add_argument("--geometry-percentile", type=float, default=99.0)
+    p_manual_setup.add_argument("--parity-setup-id", default="")
+    p_manual_setup.add_argument("--parity-setup-manifest-sha256", default="")
+    p_manual_setup.add_argument(
+        "--workers",
+        type=int,
+        default=0,
+        help="Default worker count stored in the workflow and printed in later compute-stage commands.",
+    )
+    p_manual_setup.add_argument(
+        "--python",
+        default="",
+        help="Default Python for child stages; stored as an absolute path when supplied.",
+    )
+    p_manual_setup.add_argument(
+        "--config",
+        default="",
+        help="Default GROND tool config persisted into later compute-stage commands.",
+    )
+    p_manual_setup.add_argument(
+        "--shelxl",
+        default="shelxl",
+        help="Default SHELXL executable persisted into the feedback command.",
+    )
     p_manual_setup.add_argument("--notes", default="", help="Free-text provenance note stored in prep.json.")
     p_manual_setup.set_defaults(func=cmd_manual)
 
@@ -20343,10 +20958,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_manual_hand = manual_stages.add_parser(
         "hand",
-        help="Evaluate the final elastic negative-thickness hand control, then record an explicit choice.",
+        help="Evaluate the simplified pre-feedback elastic hand control, then record an explicit choice.",
         description=(
-            "The first call computes per-crystal all/free Klar-Palatinus evidence and pauses. "
-            "Repeat with --choice input or --choice inverse; the evidence is reused without recalculation."
+            "The first call computes per-crystal all/free Klar-Palatinus evidence on the thickness-stage model "
+            "and pauses. Repeat with --choice input or --choice inverse; the evidence is reused. This simplified "
+            "expert path is not auto's final post-feedback shared-hand selector."
         ),
     )
     add_manual_compute_args(p_manual_hand)
@@ -20357,6 +20973,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="report computes evidence; input/inverse records the coordinate choice; skip keeps input coordinates without a hand claim.",
     )
     p_manual_hand.add_argument("--skip", action="store_true", help="Alias for --choice skip.")
+    p_manual_hand.add_argument("--min-adjusted-z-all", type=float, default=2.0)
+    p_manual_hand.add_argument("--min-adjusted-z-free", type=float, default=0.5)
+    p_manual_hand.add_argument("--min-free-rows", type=int, default=10)
     p_manual_hand.set_defaults(func=cmd_manual)
 
     p_manual_feedback = manual_stages.add_parser(
@@ -20452,6 +21071,25 @@ def build_parser() -> argparse.ArgumentParser:
     p_sfac.add_argument("--out", default="", help="Optional JSON report path.")
     p_sfac.set_defaults(func=cmd_sfac_check)
 
+    p_h_audit = sub.add_parser(
+        "audit-hydrogen-omit",
+        help="Quantify prospective never-H Fo-Fc peaks at independent full-H reference sites.",
+        description=(
+            "Audit one or more difference maps produced from a model that has never contained H atoms. The full-H "
+            "reference supplies expected H coordinates only. Both models/maps must share the same cell, origin, proper "
+            "HKL setting, and selected hand."
+        ),
+    )
+    p_h_audit.add_argument("--reference-res", required=True, help="Independent full-H RES used only for expected H positions.")
+    p_h_audit.add_argument("--never-h-res", required=True, help="Prospective refined model; the command fails if it contains any H atoms.")
+    p_h_audit.add_argument("--map", action="append", default=[], help="name=/absolute/path/to/fofc.map; repeat for native, GROND endpoint, and conventional comparators.")
+    p_h_audit.add_argument("--radius-A", type=float, default=0.40, help="Maximum distance from each independent H site to the reported local positive peak.")
+    p_h_audit.add_argument("--min-common-nonh-fraction", type=float, default=0.80, help="Minimum fraction of the smaller model's non-H atoms that must share unique labels/elements for the alignment audit (at least three atoms are always required).")
+    p_h_audit.add_argument("--max-common-nonh-rms-A", type=float, default=0.35, help="Maximum minimum-image RMS displacement of common labeled non-H atoms before the reference is rejected as unaligned.")
+    p_h_audit.add_argument("--max-common-nonh-max-A", type=float, default=0.75, help="Maximum single common-atom displacement before the reference is rejected as unaligned.")
+    p_h_audit.add_argument("--out-dir", required=True)
+    p_h_audit.set_defaults(func=cmd_audit_hydrogen_omit)
+
     p_free = sub.add_parser("make-free-flags", help="Assign fixed macromolecular FreeR flags at unique-HKL level.")
     p_free.add_argument("--rows", required=True, help="Signed row table used to define the unique-HKL population.")
     p_free.add_argument("--out", required=True, help="Output CSV table with h,k,l,free_flag.")
@@ -20537,8 +21175,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_create_calibration = sub.add_parser(
         "create-parity-calibration",
         help=(
-            "Create a setup-parity manifest from one reserved known calibrant only after "
-            "proper transform selection and a decisive matched-hand decision are frozen."
+            "Legacy-only: create a setup-parity manifest from a reserved known calibrant using the older "
+            "branch-symmetric/common-sigma hand-decision artifact. Current final-elastic auto artifacts are not accepted."
+        ),
+        description=(
+            "Create a setup-parity manifest from one reserved known calibrant. This replay currently accepts only "
+            "the older hash-bound branch-symmetric/common-sigma hand-decision format; it does not accept the current "
+            "final negative-thickness auto artifact."
         ),
     )
     p_create_calibration.add_argument("--setup-id", required=True)
@@ -20578,8 +21221,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_apply_calibration = sub.add_parser(
         "apply-parity-calibration",
         help=(
-            "Apply a reserved setup-parity calibration prospectively to a different "
-            "proper-locked validation decision."
+            "Legacy-only: apply a reserved setup-parity calibration to a different proper-locked validation "
+            "decision in the older branch-symmetric/common-sigma format."
+        ),
+        description=(
+            "Apply a legacy setup-parity manifest prospectively to a different validation crystal. Both the "
+            "calibrant and validation hand decisions must use the older branch-symmetric/common-sigma format; "
+            "current final-elastic auto artifacts are not yet supported."
         ),
     )
     p_apply_calibration.add_argument("--calibration", required=True)
@@ -20986,7 +21634,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_scale_replay.add_argument("--publication-free-wr2-tolerance", type=float, default=0.040)
     p_scale_replay.add_argument("--publication-max-modulation-p95", type=float, default=20.0, help="Warning level only; modulation p95 never blocks endpoint selection.")
     p_scale_replay.add_argument("--publication-prefer-wght-mode", default="freeze-zero")
-    p_scale_replay.add_argument("--publication-allow-npd", action=argparse.BooleanOptionalAction, default=False, help="Explicit diagnostic override allowing NPD pathology in the selected endpoint. Default requires NPD == 0; split warnings always block publication selection.")
+    p_scale_replay.add_argument("--publication-allow-npd", action=argparse.BooleanOptionalAction, default=False, help="Explicit diagnostic override allowing NPD pathology in the selected compact-scale endpoint. Default requires NPD == 0; this strict scale-contract promotion also requires zero split warnings, even though the general endpoint chooser reports splits without withholding model handoff.")
     p_scale_replay.add_argument(
         "--publication-selection-policy",
         choices=["bic", "gated-smallest"],
@@ -21047,7 +21695,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_cal_endpoint.add_argument("--publication-free-wr2-tolerance", type=float, default=0.040)
     p_cal_endpoint.add_argument("--publication-max-modulation-p95", type=float, default=20.0, help="Warning level only; modulation p95 never blocks endpoint selection.")
     p_cal_endpoint.add_argument("--publication-prefer-wght-mode", default="freeze-zero")
-    p_cal_endpoint.add_argument("--publication-allow-npd", action=argparse.BooleanOptionalAction, default=False, help="Explicit diagnostic override allowing NPD pathology in the selected endpoint. Default requires NPD == 0; split warnings always block publication selection.")
+    p_cal_endpoint.add_argument("--publication-allow-npd", action=argparse.BooleanOptionalAction, default=False, help="Explicit diagnostic override allowing NPD pathology in the selected calibrated endpoint. Default requires NPD == 0; strict compact scale/calibration promotion can require zero split warnings, while the general endpoint chooser reports splits without withholding model handoff.")
     p_cal_endpoint.add_argument(
         "--publication-selection-policy",
         choices=["bic", "gated-smallest"],

@@ -4,12 +4,16 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 from grond import cli
+from grond.io.config import DatasetSpec
 from grond.manual_workflow import (
     _hand_evidence,
     _manual_checkpoint,
     _manual_stream_line,
     _run_stage_command,
+    _validate_reused_summary_binding,
 )
 
 
@@ -34,6 +38,45 @@ def test_manual_help_is_stage_specific():
     assert not hasattr(feedback, "thickness_grid_nm")
     assert status.json is True
     assert single_replay.ignore_source_baseline_hkl is True
+
+
+def test_manual_scout_skip_rejects_improper_assertion(tmp_path: Path):
+    model = tmp_path / "model.res"
+    model.write_text(
+        "TITL model\nCELL 0.025079 5 6 7 90 90 90\nLATT -1\n"
+        "SFAC C 0.1361 0.3731 0.5482 3.2814 1.2266 13.0456 0.5971 41.0202 0 0\n"
+        "UNIT 1\nC1 1 0 0 0 1 0.05\nHKLF 4\nEND\n"
+    )
+    dataset = tmp_path / "dataset"
+    dataset.mkdir()
+    _write_manual_dataset_hkl(dataset / "INTEGRATE.HKL")
+    root = tmp_path / "manual"
+    assert _run(
+        "setup",
+        "--out-dir",
+        str(root),
+        "--structure",
+        str(model),
+        "--dataset",
+        f"one={dataset},hkl_transform=-h,k,l",
+    ) == 0
+    with pytest.raises(SystemExit, match="refuses improper transform"):
+        _run("scout", "--workflow", str(root / "manual_workflow.json"), "--skip")
+
+
+def test_reused_thickness_summary_is_bound_to_source_hkl(tmp_path: Path):
+    model = tmp_path / "model.res"
+    model.write_text("TITL model\n")
+    expected = tmp_path / "expected.hkl"
+    wrong = tmp_path / "wrong.hkl"
+    expected.write_text("expected\n")
+    wrong.write_text("wrong\n")
+    summary = tmp_path / "summary.json"
+    _write_source_summary(summary, model, wrong, "identity", 1000.0)
+    dataset = DatasetSpec(name="one", hkl=str(expected), hkl_transform="identity")
+
+    with pytest.raises(SystemExit, match="not bound to dataset"):
+        _validate_reused_summary_binding(dataset, summary)
 
 
 def test_manual_child_stream_is_concise_by_default():
@@ -83,6 +126,20 @@ def _write_source_summary(path: Path, model: Path, hkl: Path, transform: str, th
     )
 
 
+def _write_manual_dataset_hkl(path: Path) -> None:
+    rows = ["!UNIT_CELL_CONSTANTS= 5 6 7 90 90 90\n", "!END_OF_HEADER\n"]
+    for index in range(300):
+        h = index % 5 + 1
+        k = (index // 5) % 5
+        ell = (index // 25) % 5
+        rows.append(
+            f"{h} {k} {ell} 100 5 10 20 {index / 10:.3f} 1 95 1 10 20 {index / 10:.3f} "
+            "1 0 0 0 0 0 0\n"
+        )
+    rows.append("!END_OF_DATA\n")
+    path.write_text("".join(rows))
+
+
 def test_manual_child_progress_is_teed_live_and_logged(tmp_path: Path, capsys, monkeypatch):
     monkeypatch.setenv("GROND_MANUAL_HEARTBEAT_SECONDS", "0.01")
     record = _run_stage_command(
@@ -119,7 +176,7 @@ def test_manual_child_progress_is_teed_live_and_logged(tmp_path: Path, capsys, m
 
 def test_manual_state_handoffs_and_multi_checkpoint(tmp_path: Path):
     model = tmp_path / "model.res"
-    model.write_text("TITL model\nCELL 0.025079 5 6 7 90 90 90\nLATT -1\nSFAC C\nUNIT 1\nC1 1 0 0 0 1 0.05\nHKLF 4\nEND\n")
+    model.write_text("TITL model\nCELL 0.025079 5 6 7 90 90 90\nLATT -1\nSFAC C 0.1361 0.3731 0.5482 3.2814 1.2266 13.0456 0.5971 41.0202 0 0\nUNIT 1\nC1 1 0 0 0 1 0.05\nHKLF 4\nEND\n")
     baseline = tmp_path / "model.hkl"
     baseline.write_text("   0   0   0    0.00    0.00\n")
     datasets = []
@@ -128,7 +185,7 @@ def test_manual_state_handoffs_and_multi_checkpoint(tmp_path: Path):
         directory = tmp_path / f"ds{index}"
         directory.mkdir()
         hkl = directory / "INTEGRATE.HKL"
-        hkl.write_text("!UNIT_CELL_CONSTANTS= 5 6 7 90 90 90\n!END_OF_HEADER\n!END_OF_DATA\n")
+        _write_manual_dataset_hkl(hkl)
         datasets.append((directory, transform, hkl))
         summary = tmp_path / f"source{index}" / "summary.json"
         _write_source_summary(summary, model, hkl, transform, 900.0 + 100.0 * index)
@@ -221,25 +278,40 @@ def test_manual_state_handoffs_and_multi_checkpoint(tmp_path: Path):
 
 
 def test_manual_hand_evidence_is_explicit_and_sign_consistent():
+    def block(n: int, delta: float, z_sign: int) -> dict[str, object]:
+        # n-w=25 gives Z=(2k-N)/5.  Use +/-15 numerator for |Z|=3.
+        numerator = 15 * z_sign
+        k_effective = (n + numerator) / 2.0
+        return {
+            "n": n,
+            "delta_chi2_other_minus_best": delta,
+            "klar_palatinus_adjusted_hand_z": {
+                "status": "ok",
+                "n": n,
+                "k_effective_selected_wins_plus_half_ties": k_effective,
+                "w": n - 25,
+            },
+        }
+
     input_favored = {
         "one": {
-            "all": {"n": 100, "delta_chi2_other_minus_best": 12.0},
-            "free": {"n": 10, "delta_chi2_other_minus_best": 2.0},
+            "all": block(100, 12.0, 1),
+            "free": block(30, 2.0, 1),
         },
         "two": {
-            "all": {"n": 80, "delta_chi2_other_minus_best": 4.0},
-            "free": {"n": 8, "delta_chi2_other_minus_best": 1.0},
+            "all": block(80, 4.0, 1),
+            "free": block(30, 1.0, 1),
         },
     }
     evidence = _hand_evidence(input_favored)
     assert evidence["recommendation"] == "input"
     assert evidence["combined_all_delta_chi2_inverse_minus_input"] == 16.0
-    assert evidence["combined_free_rows"] == 18
+    assert evidence["combined_free_rows"] == 60
 
     mixed = dict(input_favored)
     mixed["two"] = {
-        "all": {"n": 80, "delta_chi2_other_minus_best": -20.0},
-        "free": {"n": 8, "delta_chi2_other_minus_best": -1.0},
+        "all": block(80, -20.0, -1),
+        "free": block(30, -1.0, -1),
     }
     assert _hand_evidence(mixed)["recommendation"] == "ambiguous"
 
@@ -247,13 +319,13 @@ def test_manual_hand_evidence_is_explicit_and_sign_consistent():
 def test_manual_single_dataset_checkpoint_promotes_source_summary(tmp_path: Path):
     model = tmp_path / "model.res"
     model.write_text(
-        "TITL model\nCELL 0.025079 5 6 7 90 90 90\nLATT -1\nSFAC C\nUNIT 1\n"
+        "TITL model\nCELL 0.025079 5 6 7 90 90 90\nLATT -1\nSFAC C 0.1361 0.3731 0.5482 3.2814 1.2266 13.0456 0.5971 41.0202 0 0\nUNIT 1\n"
         "C1 1 0 0 0 1 0.05\nHKLF 4\nEND\n"
     )
     dataset_dir = tmp_path / "dataset"
     dataset_dir.mkdir()
     hkl = dataset_dir / "INTEGRATE.HKL"
-    hkl.write_text("!UNIT_CELL_CONSTANTS= 5 6 7 90 90 90\n!END_OF_HEADER\n!END_OF_DATA\n")
+    _write_manual_dataset_hkl(hkl)
     summary = tmp_path / "source" / "summary.json"
     _write_source_summary(summary, model, hkl, "identity", 1000.0)
     root = tmp_path / "manual"

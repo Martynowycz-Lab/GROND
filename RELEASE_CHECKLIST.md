@@ -17,6 +17,7 @@ python -m grond doctor --probe-bloch --strict
 Build from a clean archive so editable-install metadata and local caches cannot leak into the artifacts:
 
 ```bash
+python -m pip install --upgrade 'setuptools>=77' wheel build
 tmp=$(mktemp -d)
 out=$(mktemp -d)
 git archive HEAD | tar -x -C "$tmp"

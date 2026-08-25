@@ -34,7 +34,7 @@ A solved SHELX `RES` or `INS` model with explicit electron scattering coefficien
 
 ## What a normal run does
 
-`GROND auto` validates the inputs, resolves indexing ambiguity, runs the meaningful hand control, searches thickness and selected nuisance terms, and calculates matched Bloch and Born predictions. Indexing and hand are deliberately separated. Automatic transform scouting considers proper transforms only and ranks them with a hand-invariant matched-Born work-row target. The chosen transform is then fixed while the two coordinate hands are compared. The hand control first evaluates the same predeclared nuisance grid for both labels, selects one common state by the mean work-row dynamical wR2 with a deterministic nuisance-hash tie-break, and replays both hands at that singleton state. This requires four bounded hand-scout evaluations instead of two, but makes the nuisance choice invariant when an input model is deliberately inverted and the branch labels exchange. The known chemistry or expected configuration is never an operator- or nuisance-selection input.
+`GROND auto` validates the inputs, resolves indexing ambiguity, searches thickness and selected nuisance terms, updates the structure, and calculates matched Bloch and Born predictions. Indexing and hand are deliberately separated. Automatic transform scouting considers proper transforms only and ranks them with a hand-invariant matched-Born work-row target. Hand is deferred until the final coordinates and nuisance contracts are fixed. GROND then disables absorption only for this Hermitian control and uses the exact negative-thickness identity to evaluate the inverse coordinates while sharing each eigendecomposition. Rows, N/Q, thickness, jitter, scales, and the proper transform remain fixed. A switch requires consistent all-row and held-out evidence; otherwise the input representation is retained with the ambiguity reported. Known chemistry is never used to choose the operator or hand.
 
 A proper transform makes the coordinate-hand comparison identifiable, but it does not by itself calibrate the sign of an acquisition and import chain. GROND therefore reports a conditional inversion preference by default. A named absolute configuration requires a separate, hash-bound sign calibration from a reserved known crystal processed through the same acquisition/import setup; that calibrant must not also be counted as validation. An explicitly requested mixed-parity transform search is diagnostic only and cannot establish a named configuration.
 
@@ -42,7 +42,7 @@ After these decisions, GROND writes row-level residuals, corrected reflection fi
 
 The default fast structure-update route is an alternating Bloch/LS1 calculation. GROND freezes the current row-wise correction, performs one conventional least-squares model update, and recalculates the Bloch rows from the updated model. This is a practical surrogate, not exact native dynamical least squares. `GROND validate-ls1` supplies fixed-q, q=1, shuffled-q, alternate-hand, and optional native finite-difference controls for judging that approximation.
 
-The complete `auto` stage order, the switches that disable optional stages, and the corresponding direct commands are documented in [docs/AUTO_WORKFLOW.md](docs/AUTO_WORKFLOW.md). Experts who want to inspect and hand off every decision can instead follow the explicit [`prep -> scout -> thickness -> hand-check -> refine -> finish` workflow](docs/MANUAL_WORKFLOW.md).
+The complete `auto` stage order, the switches that disable optional stages, and the corresponding direct commands are documented in [docs/AUTO_WORKFLOW.md](docs/AUTO_WORKFLOW.md). The staged interface in [docs/MANUAL_WORKFLOW.md](docs/MANUAL_WORKFLOW.md) is a simplified expert decomposition for inspecting transforms, thickness, a pre-feedback hand control, feedback, and scale sensitivity. It is not a manual reimplementation of every `auto` policy gate; use `auto` for the canonical production result.
 
 For several crystals, GROND keeps thickness, geometry, scale, and uncertainty decisions attached to each dataset. Accepted corrected rows are placed on a common post-dynamical scale and merged only at the shared endpoint. The production shared-model loop recalculates every dataset from one model, writes one combined corrected HKL, performs one shared SHELXL update, and returns that model to every dataset. The slower native finite-difference updater remains available as a diagnostic.
 
@@ -51,13 +51,15 @@ For several crystals, GROND keeps thickness, geometry, scale, and uncertainty de
 GROND supports Python 3.11, 3.12, and 3.13. Python 3.12 is the simplest default for a new environment.
 
 ```bash
-git clone git@github.com:Martynowycz-Lab/GROND.git
+git clone https://github.com/Martynowycz-Lab/GROND.git
 cd GROND
 python3.12 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install .
-GROND doctor --probe-bloch --strict
+GROND init-config --out grond.config.json
+# Fill in the absolute SHELXL path when it is not already on PATH.
+GROND doctor --workflow small-molecule --config grond.config.json --probe-bloch --strict
 ```
 
 Native Bloch calculations use Python, NumPy, SciPy, and Gemmi. The default small-molecule LS1 endpoint needs a separately installed SHELXL executable. Native dynamical maps are written by `GROND finish` with no external map program; `shelx2map` is optional and is used only for quick corrected-HKL endpoint maps. XDS, XDSCONV, SHELXT, DIALS, and Olex2 are not general GROND runtime requirements. A DIALS Python is needed only to import `.refl`/`.expt` observations or to write the optional PETS/Jana/diffBloch interoperability format; the XDS export uses DIALS solely for the PETS coordinate-frame writer.
@@ -92,13 +94,14 @@ GROND auto \
 
 Use `--fast` to check a new integration, indexing choice, or environment before starting the full calculation. Use plain `GROND auto` for the final high-support run. The middle-cost `--full-fast` profile keeps the automatic decision path but deliberately uses a smaller final calculation; treat it as an intermediate result.
 
-## Run the same workflow manually
+## Run the staged expert workflow
 
 The manual interface uses one state file and one short command per stage:
 
 ```bash
 GROND manual setup --out-dir manual_run --structure model.res --baseline-hkl model.hkl \
-  --dataset crystal_1=/path/to/crystal_1 --dataset crystal_2=/path/to/crystal_2
+  --dataset crystal_1=/path/to/crystal_1 --dataset crystal_2=/path/to/crystal_2 \
+  --config /absolute/path/grond.config.json --shelxl /absolute/path/shelxl --workers 10
 GROND manual scout --workflow manual_run/manual_workflow.json
 GROND manual thickness --workflow manual_run/manual_workflow.json
 GROND manual hand --workflow manual_run/manual_workflow.json
@@ -108,9 +111,9 @@ GROND manual scales --workflow manual_run/manual_workflow.json
 GROND manual finish --workflow manual_run/manual_workflow.json
 ```
 
-Every stage writes a numbered directory and `handoff.json`, updates `manual_workflow.json`, records commands and elapsed time, and prints the next command. `GROND manual STAGE --help` shows only the controls relevant to that stage. `GROND manual status --workflow manual_run/manual_workflow.json` shows the current decision, timings, selected model, final summary, and next command; add `--json` for machine-readable output. Optional scout, hand, scale, and map stages have explicit skip controls; thickness can be skipped only by binding one existing audited summary per dataset.
+Every stage writes a numbered directory and `handoff.json`, updates `manual_workflow.json`, records commands and elapsed time, and prints the next command. Setup persists the Python, worker, tool-config, and SHELXL defaults so a printed command can be copied on the same machine. `GROND manual STAGE --help` shows only the controls relevant to that stage. `GROND manual status --workflow manual_run/manual_workflow.json` shows the current decision, timings, selected model, final summary, and next command; add `--json` for machine-readable output. A skipped scout still checks proper transform parity and preflight. Reused thickness summaries are hash-bound to the named HKL and row-selection contract. Manual feedback refuses an NPD diagnostic cycle. Compact scales are audited but not applied automatically.
 
-Complete child output is saved in stage-local `manual_*.log` files while the terminal shows milestones and the stage result; `--verbose-child-output` restores the full interactive stream. `manual finish` writes `MANUAL_TOP_LEVEL_SUMMARY.md` in the run root with the conventional-versus-GROND endpoint, combined and per-crystal JANA/PETS-style rows, hand evidence, thickness, transforms, feedback cycles, and separate applied frame/detector scale counts. Rerunning an earlier stage preserves old artifacts but automatically invalidates every later stage in the active workflow state.
+Complete child output is saved in stage-local `manual_*.log` files while the terminal shows milestones and the stage result; `--verbose-child-output` restores the full interactive stream. `manual finish` writes `MANUAL_TOP_LEVEL_SUMMARY.md` in the run root with the conventional-versus-GROND endpoint, combined and per-crystal JANA/PETS-style rows, hand evidence, thickness, transforms, feedback cycles, and separate applied frame/detector scale counts. The manual hand stage is evaluated before feedback and is intentionally conservative; it is not the final shared-hand selector used by `auto`. Rerunning an earlier stage preserves old artifacts but automatically invalidates every later stage in the active workflow state.
 
 ## Read the result
 
@@ -129,7 +132,7 @@ GROND canonicalize-hand \
   --output-hkl canonical.hkl
 ```
 
-Sign calibration is deliberately separate. Before running either scout, record `--parity-setup-id` and `--parity-setup-manifest-sha256`; for a direct single-dataset run also record `--physical-crystal-id` and `--acquisition-fingerprint`, or put `physical_crystal_id=...` and `acquisition_fingerprint=...` in each `GROND prep --dataset` specification. GROND freezes those values into both decisions. It enumerates all 24 proper signed-axis permutations, filters them only by unit-cell metric compatibility, uses one candidate-invariant held-out split, and replays the ranking from bound row artifacts. Calibration replay additionally requires every transform candidate to share the exact N/Q, row budget, selected/work/free support, nuisance, kernel, and backend contract. The matched hand call is likewise replayed with one source-sigma vector and must have a sign-consistent Klar--Palatinus adjusted Z above `--hand-min-adjusted-z` before it can train a setup calibration. `GROND create-parity-calibration` then learns either setup sign from one reserved known crystal; `GROND apply-parity-calibration` accepts only a different frozen physical crystal and acquisition from the same setup. Those setup and crystal labels and their supplied manifest/fingerprint hashes remain caller-attested provenance. GROND detects stale artifacts and exact declared reuse, but it cannot cryptographically prove that a user did not assign false identifiers to the same raw acquisition.
+Sign calibration is separate from the conditional final hand comparison. Record setup, physical-crystal, and acquisition identities before scouting when a calibration study is planned, and reserve a known crystal that is not counted as validation. The current final negative-thickness `auto` artifact does not yet feed `create-parity-calibration`; that command remains available only for the older hash-bound branch-symmetric/common-sigma decision format. Do not describe a current `auto` hand as a named absolute configuration solely from residual sign. Until the final-elastic calibration adapter is implemented and validated, report the conditional inversion preference together with the external known-chemistry assignment.
 
 An interrupted run can be resumed by repeating the same command with the same output directory. GROND records completed stages and their commands in `grond_progress.json` and `logs/commands.jsonl`. To rebuild final summaries and maps from a completed calculation without rerunning the physics, use:
 

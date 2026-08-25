@@ -9,6 +9,7 @@ from grond.io.dials_bridge import (
     _dials_sigma_multiplier,
     _require_valid_dials_geometry,
     _rotation_matrix,
+    _run_dials_helper,
     convert_dials_to_grond,
     dials_sg_statistics,
 )
@@ -29,6 +30,23 @@ def test_dials_scaled_row_selection_is_independent_of_intensity_mode():
         _dials_row_selection_keep(arrays, 4, "scaled"),
         np.array([True, False, False, True]),
     )
+
+
+def test_dials_helper_fails_concisely_before_embedding_source_in_errors(tmp_path):
+    missing_refl = tmp_path / "missing.refl"
+    missing_expt = tmp_path / "missing.expt"
+    with pytest.raises(FileNotFoundError, match="reflection table does not exist"):
+        _run_dials_helper(missing_refl, missing_expt, dials_python="missing-python")
+
+    refl = tmp_path / "integrated.refl"
+    expt = tmp_path / "integrated.expt"
+    python = tmp_path / "dials.python"
+    refl.write_text("placeholder\n")
+    expt.write_text("placeholder\n")
+    python.write_text("#!/bin/sh\n")
+    python.chmod(0o644)
+    with pytest.raises(PermissionError, match="not executable"):
+        _run_dials_helper(refl, expt, dials_python=str(python))
 
 
 def test_dials_scaled_row_selection_fails_closed_without_scaled_rows():

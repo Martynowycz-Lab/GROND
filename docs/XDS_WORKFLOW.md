@@ -16,6 +16,12 @@ SHELXL initial regularization
 
 The output from this path should include a starting `model.res` or `model.ins` with explicit electron scattering coefficients. A CIF is also suitable for `GROND run` when it embeds the complete SHELX instruction block. It is fine, and usually preferred, if this model was solved against profile-fitted intensities with the best conventional XDS statistics. If you have a solved-model HKL file from XDSCONV/SHELX, keep it even when it came from that profile-fitted path. GROND uses that file as `--baseline-hkl` to compare signed HKLs and intensity overlap before it spends time on expensive Bloch transform scouts.
 
+Check the saved model with `GROND sfac-check --structure model.res`. If it has
+only `SFAC C H N O`, return to the electron-scattering Olex2/SHELXL refinement
+that produced the model and export/save its explicit numeric electron SFAC
+records. Do not substitute coefficients from a different element or an X-ray
+table.
+
 ## 2. Make A Separate GROND Integration Directory
 
 Copy the XDS processing directory to a new directory, for example:
@@ -51,6 +57,12 @@ The important output is `INTEGRATE.HKL`, but GROND also benefits from nearby XDS
 XDS commonly keeps `INTEGRATE.HKL` in the primitive P1 integration basis even when `CORRECT` reindexes the reflections and constrains the cell in the solved-model space group. GROND handles this automatically. It first applies the ordinary strict reciprocal-cell metric filter. If that rejects every candidate, and only when the row table explicitly declares `SPACE_GROUP_NUMBER=1` while the model has higher symmetry, GROND permits a bounded P1-distortion fallback: the full reciprocal metric must agree within 5% and every transformed axis length within 3%. All compatible determinant-positive sign variants then enter the normal chemistry-blind Bloch transform scout. The fallback, limits, source/model cells, and retained operators are recorded in `decisions/<dataset>/transform_decision.json`; genuine cell mismatches still fail closed.
 
 This no-profile-fitting pass may look slightly worse by ordinary integration statistics, especially at high resolution, because profile fitting is designed to improve conventional intensity estimates. That is expected. GROND needs intensities that are closer to raw summation counts for each observation row, because the Bloch calculation is trying to predict the rocking/partiality behavior itself. A profile-fitted `INTEGRATE.HKL` will often run, but it can double-count or distort partiality assumptions and usually gives poorer dynamical endpoint behavior.
+
+Preflight reports a visible warning when the XDS header declares profile
+fitting. It also reports possible row-count or geometry-tail alternatives, but
+automatic execution does not silently lower an explicitly requested
+`min_peak=90`/partiality floor or change the requested geometry percentile.
+Change those values only in a separately named diagnostic run.
 
 ## 3. Check The Inputs
 
@@ -127,6 +139,6 @@ If you know the solved structure and the summation `INTEGRATE.HKL` are already i
 
 An operator with determinant `-1` is not an alternative indexing setting for an absolute-configuration test. It is the exact gauge partner of coordinate inversion: `(model,T)` and `(inverted model,-T)` give the same physical prediction. The default proper-only policy therefore rejects an explicitly supplied improper candidate. `--transform-parity-policy all-diagnostic` exists only to audit legacy work and leaves the configuration status unresolved.
 
-For a named sign claim, reserve one known crystal for every distinct acquisition/import setup. Select its proper operator without using the known configuration, freeze the matched hand comparison, and only then attach the known sign as the setup calibration. All remaining crystals are validation. When the same physical crystal is imported through XDS and DIALS, the two backend calibrations are useful pipeline controls but are not independent biological or chemical observations.
+For a named sign claim, reserve one known crystal for every distinct acquisition/import setup. Select its proper operator without using the known configuration, freeze the matched hand comparison, and only then attach the known sign as the setup calibration. All remaining crystals are validation. The current final negative-thickness `auto` artifact is a conditional inversion result and is not yet accepted by the older `create-parity-calibration`/`apply-parity-calibration` replay, which supports only the legacy branch-symmetric/common-sigma format. Preserve the setup identity and external known-chemistry assignment rather than inferring a named configuration from the current residual sign. When the same physical crystal is imported through XDS and DIALS, the two backend controls are useful pipeline checks but are not independent biological or chemical observations.
 
 If endpoint statistics or maps are missing, run `GROND doctor --config grond.config.json --probe-bloch`. Full corrected-HKL endpoint polishing requires SHELXL. Native dynamical map generation uses `GROND finish --run-dir grond_out` and requires no external map executable; only the optional `--map-mode shelx2map` check requires `shelx2map`.

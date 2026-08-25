@@ -98,14 +98,16 @@ def _combined_baseline_gate(
         "endpoint_R1_all": endpoint if math.isfinite(endpoint) else None,
         "delta_R1_all": None,
         "reasons": [],
+        "warnings": [],
     }
     if not available:
         if required:
-            reason = (
-                "combined conventional-baseline no-harm gate is required but unavailable; "
-                "a validated finite baseline R1(F)all and non-empty source are required"
+            warning = (
+                "combined conventional-baseline comparison was requested but is unavailable; "
+                "a validated finite baseline R1(F)all and non-empty source are needed for the "
+                "comparison, but the corrected endpoint remains available for model handoff"
             )
-            gate.update({"status": "failed_baseline_unavailable", "passed": False, "reasons": [reason]})
+            gate.update({"status": "warning_baseline_unavailable", "passed": True, "warnings": [warning]})
         return gate
     if not math.isfinite(endpoint):
         reason = "combined endpoint R1(F)all is unavailable, so it cannot pass the conventional-baseline no-harm gate"
@@ -115,12 +117,13 @@ def _combined_baseline_gate(
     delta = endpoint - baseline
     gate["delta_R1_all"] = delta
     if delta > 1e-12:
-        reason = (
+        warning = (
             f"combined endpoint R1(F)all {_percent(endpoint)} is worse than conventional baseline "
             f"{_percent(baseline)} by {100.0 * delta:.2f} percentage points "
-            f"(source: {source})"
+            f"(source: {source}); warning only, keep the endpoint available for model inspection "
+            "and continued refinement"
         )
-        gate.update({"status": "failed_worse_than_baseline", "passed": False, "reasons": [reason]})
+        gate.update({"status": "warning_worse_than_baseline", "passed": True, "warnings": [warning]})
         return gate
     gate["status"] = "passed"
     return gate
@@ -747,6 +750,10 @@ def choose_publication_endpoints(
                 required=require_combined_baseline,
             )
             decision["combined_baseline_gate"] = baseline_gate
+            decision["warnings"] = [
+                *list(decision.get("warnings") or []),
+                *(str(warning) for warning in baseline_gate.get("warnings", []) if str(warning)),
+            ]
             if not baseline_gate["passed"]:
                 reasons = list(decision.get("rejection_reasons") or [])
                 reasons.extend(str(reason) for reason in baseline_gate.get("reasons", []))
@@ -807,10 +814,10 @@ def choose_publication_endpoints(
         "source": baseline_source,
     }
     baseline_requirement = (
-        "combined endpoints must not worsen the validated conventional combined-baseline R1(F)all; "
-        "a missing baseline fails closed"
+        "combined endpoints are compared with the validated conventional combined-baseline R1(F)all; "
+        "a missing comparison or worse value is reported as a warning but does not withhold an otherwise usable model"
         if require_combined_baseline
-        else "combined endpoints must not worsen a supplied validated conventional combined-baseline R1(F)all"
+        else "when supplied, the conventional combined-baseline R1(F)all is a warning-only comparison"
     )
     return {
         "status": verdict,
@@ -928,7 +935,7 @@ def _write_markdown(out_dir: Path, decision: Mapping) -> Path:
     lines.extend(
         [
             "",
-            "Promotion rule: finite endpoint metrics, full q correction, EXTI off, endpoint-B equal to zero, exact current RES/HKL/LST paths and SHA-256 values, a complete hash-bound final LST pathology audit, no NPD pathology unless explicitly overridden, safe HKL rescaling, and a passed observation-polish gate when a polish correction is involved. SHELXL GooF outside the preferred range and large modulation p95 are reported as warnings, not mathematical-validity or model-handoff gates. A combined endpoint must not worsen a supplied validated conventional combined-baseline R1(F)all; when that baseline is required, missing baseline evidence fails closed. Multi-dataset runs never substitute a single-dataset endpoint for a failed combined publication endpoint. Split warnings are reported but do not block promotion.",
+            "Promotion rule: finite endpoint metrics, full q correction, EXTI off, endpoint-B equal to zero, exact current RES/HKL/LST paths and SHA-256 values, a complete hash-bound final LST pathology audit, no NPD pathology unless explicitly overridden, safe HKL rescaling, and a passed observation-polish gate when a polish correction is involved. SHELXL GooF outside the preferred range, large modulation p95, a missing conventional comparison, and an endpoint R1all worse than the conventional baseline are reported as warnings, not mathematical-validity or model-handoff gates. Multi-dataset runs never substitute a single-dataset endpoint for a failed combined physical endpoint. Split warnings are reported but do not block promotion.",
             "",
             "## Endpoint Candidates",
             "",

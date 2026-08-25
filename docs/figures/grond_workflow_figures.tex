@@ -151,10 +151,10 @@ diagnostics live.
     geometry from \texttt{XPARM.XDS}};
   \node[enginebox, text width=38mm, right=of reint] (grond) {GROND automatic path\\
     preflight\\
-    two-stage alignment scout\\
-    hand + thickness\\
-    geometry + nuisance gates\\
-    Bloch prediction};
+    proper-transform scout\\
+    thickness + nuisance gates\\
+    Bloch/LS1 feedback\\
+    final elastic hand check};
   \node[outputbox, text width=42mm, right=of grond] (out) {Scientific outputs\\
     corrected HKL\\
     raw-row statistics\\
@@ -278,10 +278,11 @@ diagnostics live.
   \node[decision, right=of pre, text width=25mm] (usable) {usable\\row set?};
   \node[enginebox, text width=31mm, right=of usable] (transform) {Two-stage transform scout\\cheap all-candidate pass\\better N/Q rerank};
   \node[decision, right=of transform, text width=24mm] (align) {clear\\alignment?};
-  \node[enginebox, text width=31mm, below=12mm of transform] (fast) {Fast Bloch scout\\small basis\\coarse thickness\\both hand branches};
-  \node[enginebox, text width=31mm, right=of fast] (geom) {Geometry scout\\beam center\\rotation/drift\\support basis};
+  \node[enginebox, text width=31mm, below=12mm of transform] (fast) {Compact Bloch scout\\small basis\\coarse thickness\\input hand only};
+  \node[enginebox, text width=31mm, right=of fast] (geom) {Row-geometry audit\\frame offset\\observed centroids\\support basis};
   \node[decision, right=of geom, text width=25mm] (promote) {score\\improves?};
-  \node[updatebox, text width=35mm, right=of promote] (pin) {Pin current best\\transform\\hand\\thickness band\\geometry family};
+  \node[updatebox, text width=35mm, right=of promote] (pin) {Pin current best\\proper transform\\thickness/nuisance\\geometry family};
+  \node[enginebox, text width=35mm, below=of pin] (finalhand) {Shared model feedback\\final elastic $-t$ hand pair\\absorption off only here};
   \node[stopbox, text width=31mm, below=of usable] (stop) {Stop with\\actionable error\\and diagnostics};
   \node[riskbox, text width=31mm, below=of promote] (reject) {Reject branch\\keep simpler model};
 
@@ -295,46 +296,47 @@ diagnostics live.
     \draw[flow] (fast) -- (geom);
     \draw[flow] (geom) -- (promote);
     \draw[flow] (promote) -- node[tag, above] {yes} (pin);
+    \draw[flow] (pin) -- (finalhand);
     \draw[rejectflow] (promote) -- node[tag, right] {no} (reject);
     \draw[softflow] (reject.west) -| (fast.south);
   \end{scope}
 
-  \node[note, text width=126mm, below=10mm of reject] {The decision score combines row-level residual behavior, endpoint statistics when available, held-out checks, and penalties for complexity.};
+  \node[note, text width=126mm, below=10mm of reject] {Known chemistry never chooses the transform or hand. Hand is tested only after thickness, nuisance, geometry, and shared-coordinate feedback are fixed.};
 \end{tikzpicture}
 }
-\caption{Automatic decision tree. GROND promotes a branch only when it improves the chosen score without creating obvious weak-row, high-resolution, or held-out damage.}
+\caption{Automatic decision tree. Chemistry-blind proper-transform selection is separated from hand. The conditional hand comparison occurs at the end using the exact elastic negative-thickness identity with final rows and nuisance terms fixed.}
 \end{figure}
 
 \clearpage
 
 \begin{figure}[p]
 \centering
-\grondTitle{Stage 3: Alignment, Geometry, Thickness, and Hand}
-\grondSub{These are the first physically meaningful parameters GROND must settle before full regularization.}
+\grondTitle{Stage 3: Proper Alignment, Geometry, and Thickness}
+\grondSub{GROND fixes the row and nuisance contract before asking the final conditional hand question.}
 \begin{tikzpicture}[node distance=8mm and 10mm]
   \node[inputbox, text width=32mm] (ledger) {Observation ledger\\one measured spot per row\\detector x/y\\frame index};
   \node[enginebox, text width=33mm, right=of ledger] (align) {Alignment scout\\cheap transform scan\\top-candidate rerank\\row residuals};
-  \node[enginebox, text width=33mm, right=of align] (hand) {Hand screen\\original hand\\alternate hand\\$\Delta\chi^2$ row diagnostic};
+  \node[enginebox, text width=33mm, right=of align] (support) {Frozen row contract\\exact resolution/MINPK\\proper transform\\work/free split};
   \node[enginebox, text width=33mm, below=13mm of align] (thick) {Thickness search\\coarse band\\local regularization\\best support basis};
-  \node[enginebox, text width=33mm, right=of thick] (geo) {Geometry tweak\\beam/tilt/drift terms\\only if supported};
-  \node[outputbox, text width=40mm, right=of geo] (pinned) {Pinned physical start\\best transform\\hand\\thickness band\\geometry policy};
+  \node[enginebox, text width=33mm, right=of thick] (geo) {Geometry contract\\frame-offset audit\\optional fixed external\\orientation path};
+  \node[outputbox, text width=40mm, right=of geo] (pinned) {Pinned physical start\\proper transform\\thickness/nuisance\\geometry policy};
 
   \begin{scope}[on background layer]
     \draw[flow] (ledger) -- (align);
-    \draw[flow] (align) -- (hand);
-    \draw[flow] (hand) |- (thick);
+    \draw[flow] (align) -- (support);
+    \draw[flow] (support) |- (thick);
     \draw[flow] (thick) -- (geo);
     \draw[flow] (geo) -- (pinned);
   \end{scope}
 
   \draw[decorate, decoration={brace, amplitude=5pt}, thick, draw=grondMuted]
-    ($(align.north west)+(-1mm,5mm)$) -- ($(hand.north east)+(1mm,5mm)$)
-    node[midway, yshift=8mm, note] {orientation decisions};
+    ($(align.north west)+(-1mm,5mm)$) -- ($(support.north east)+(1mm,5mm)$)
+    node[midway, yshift=8mm, note] {chemistry-blind row-setting decisions};
   \draw[decorate, decoration={brace, amplitude=5pt}, thick, draw=grondMuted]
     ($(thick.south west)+(-1mm,-5mm)$) -- ($(geo.south east)+(1mm,-5mm)$)
     node[midway, yshift=-8mm, note] {sample and instrument decisions};
 \end{tikzpicture}
-\caption{Early physical decisions. The goal is not to test every possible setting, but to find a stable transform, hand, thickness band, and geometry family quickly enough to make the final regularization tractable.}
+\caption{Early physical decisions. The goal is to fix a stable determinant-positive transform, row support, thickness band, and geometry/nuisance family before coordinate feedback. Hand is deliberately absent from this stage.}
 \end{figure}
 
 \clearpage
@@ -350,7 +352,7 @@ diagnostics live.
   \node[enginebox, text width=34mm, below=13mm of matrix] (predict) {Row prediction\\thickness integration\\dynamic intensity\\Born reference};
   \node[updatebox, text width=34mm, left=of predict] (regularize) {Intensity regularization\\scale manifold\\nuisance factors\\optional LS update};
   \node[decision, left=of regularize, text width=24mm] (conv) {converged\\or gated?};
-  \node[outputbox, text width=35mm, below=13mm of regularize] (rows) {Native row table\\predicted I\\residuals\\basis diagnostics\\timings};
+  \node[outputbox, text width=35mm, below=13mm of regularize] (rows) {Final elastic hand pair\\then exact accepted-model rows\\predicted I + residuals\\basis diagnostics + timings};
 
   \begin{scope}[on background layer]
     \draw[flow] (start) -- (basis);
@@ -364,7 +366,7 @@ diagnostics live.
 
   \node[note, text width=118mm, below=8mm of rows] {Fast mode uses a small basis and avoids expensive non-Hermitian terms. Full auto keeps Q20 for final polish, chooses N from observed row support plus a margin, and enables richer absorption, geometry, beam, off-diagonal, and non-Hermitian terms only when the data support them.};
 \end{tikzpicture}
-\caption{Bloch/regularization core. GROND separates cheap scouting from the final high-fidelity prediction so runtime is spent on branches that have already earned promotion.}
+\caption{Bloch/regularization core. After coordinate feedback converges or stops, GROND performs one matched elastic negative-thickness hand comparison. If the hand changes, the accepted model is materialized and its rows are recomputed without another coordinate step.}
 \end{figure}
 
 \clearpage
@@ -406,7 +408,7 @@ diagnostics live.
 \begin{tikzpicture}[node distance=8mm and 9mm]
   \node[outputbox, text width=32mm] (corr) {Corrected reflection files\\work/free splits\\all-row exports\\endpoint HKL};
   \node[outputbox, text width=32mm, right=of corr] (stats) {Statistics\\raw row R factors\\merge-style R factors\\hand $\Delta\chi^2$\\timings};
-  \node[outputbox, text width=32mm, right=of stats] (maps) {Maps\\full map\\difference map\\H-omit\\no-H endpoint\\when tools exist};
+  \node[outputbox, text width=32mm, right=of stats] (maps) {Maps\\native dynamical\\corrected endpoint\\prospective never-H\\in a separate zero-H run};
   \node[outputbox, text width=32mm, below=13mm of stats] (ledger) {Run ledger\\\texttt{commands.jsonl}\\\texttt{grond\_progress.json}\\decision JSON\\resume state};
   \node[enginebox, text width=35mm, below=13mm of corr] (user) {Human review\\inspect trends\\compare endpoints\\choose next action};
   \node[enginebox, text width=35mm, below=13mm of maps] (repeat) {Repeat safely\\same output dir\\resume completed stages\\preserve provenance};

@@ -1,37 +1,7 @@
 {
   "tools": {
-    "python": "",
     "shelxl": "",
-    "shelx2map": "",
-    "shelxt": "",
-    "xds": "",
-    "xdsconv": "",
-    "phenix_refine": "",
-    "refmac5": "",
-    "servalcat": "",
-    "custom_refiner": ""
+    "shelx2map": ""
   },
-  "endpoints": {
-    "custom": {
-      "command": "",
-      "output_model": "",
-      "note": "Optional command template using {model}, {reflections}, {out_dir}, and {cycles}."
-    },
-    "phenix_refine": {
-      "command": "",
-      "output_model": "",
-      "note": "Optional macromolecular endpoint template using {model}, {mtz}, {out_dir}, {cycles}, and {free_label}."
-    },
-    "refmac5": {
-      "command": "",
-      "output_model": "",
-      "note": "Optional macromolecular endpoint template using {model}, {mtz}, {out_dir}, {cycles}, and {free_label}."
-    },
-    "servalcat": {
-      "command": "",
-      "output_model": "",
-      "note": "Optional macromolecular endpoint template using {model}, {mtz}, {out_dir}, {cycles}, and {free_label}."
-    }
-  },
-  "notes": "Use absolute paths on shared servers. Empty values mean GROND will try environment variables and PATH."
+  "notes": "SHELXL is required for the default small-molecule LS1 endpoint. shelx2map is optional; native dynamical maps need no external map program. Empty values use environment variables and PATH."
 }

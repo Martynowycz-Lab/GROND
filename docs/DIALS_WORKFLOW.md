@@ -57,6 +57,30 @@ GROND auto \
 
 During startup GROND writes a prepared XDS-like row directory under `grond_dials_auto/prepared/dials_<dataset_name>/`. That directory contains `INTEGRATE.HKL`, `DIALS_A_AT_SCAN_POINTS.txt`, `dials_bridge_summary.json`, and a short bridge README. The generated `INTEGRATE.HKL` is a compatibility contract for GROND, not a native XDS result.
 
+One bridge contains exactly one DIALS experiment. If a `.refl/.expt` pair holds
+several experiments, split it first and import each output separately:
+
+```bash
+dials.split_experiments combined.expt combined.refl
+
+GROND import-dials --refl split_0.refl --expt split_0.expt \
+  --dials-python /absolute/path/to/dials.python --dataset-name crystal_0 \
+  --out-dir bridges/crystal_0
+GROND import-dials --refl split_1.refl --expt split_1.expt \
+  --dials-python /absolute/path/to/dials.python --dataset-name crystal_1 \
+  --out-dir bridges/crystal_1
+
+GROND prep --structure model.res --baseline-hkl model.hkl \
+  --dataset crystal_0=bridges/crystal_0,dmin=0.70,min_peak=90 \
+  --dataset crystal_1=bridges/crystal_1,dmin=0.70,min_peak=90 \
+  --out prep.json
+GROND auto --config grond.config.json --prep prep.json --out-dir grond_dials_multi
+```
+
+The numeric suffix is the experiment-list order written by DIALS. Keep the
+split files and each bridge summary so that experiment UUID and row provenance
+remain auditable.
+
 You can also make the converted directory once and inspect it before running:
 
 ```bash
@@ -126,6 +150,6 @@ Here `F` and `S` are the DIALS fixed and setting rotations, and `A(alpha)` is ob
 
 After import, inspect `dials_bridge_summary.json`. A healthy conversion should have nonzero `rows_written`, a sensible number of rows with `partiality >= 0.90`, an explicit sigma policy, and `sg_validation.median_abs_sg_inv_A` close to zero for the predicted row positions. GROND refuses the conversion when the 95th percentile of `|Sg|` exceeds `0.005 A^-1`, the ordinary maximum support-Sg contract, because such rows are not trustworthy Bloch inputs. A failed conversion leaves a diagnostic summary but does not write a new `INTEGRATE.HKL`. Production DIALS imports drop rows flagged `dont_integrate` and rows with severe bad-pixel, overloaded, powder-ring, bad-shoebox, failed-background, or failed-summation flags. Use `--dials-keep-dont-integrate` or `--dials-keep-bad-flags` only for diagnostics.
 
-The DIALS bridge is newer than the XDS route and should be tested against known structures before being used as the only production path. A known structure used for sign calibration must be applied only after its proper operator and matched hand result have been frozen; it must not choose the operator and must be excluded from the validation count. Use a separate calibration record for each acquisition/import setup. If XDS and DIALS disagree strongly on the same raw frames, compare the row counts, partiality selection, DIALS flag policy, sigma policy, resolution limit, proper-transform decision, conditional hand decision, and `Sg` validation before interpreting the model-update statistics.
+The DIALS bridge is newer than the XDS route and should be tested against known structures before being used as the only production path. A known structure used for sign calibration must be applied only after its proper operator and matched hand result have been frozen; it must not choose the operator and must be excluded from the validation count. Use a separate calibration record for each acquisition/import setup. The current final-elastic `auto` hand artifact is a conditional result and is not yet accepted by the legacy parity-calibration replay, so preserve the external known-chemistry assignment rather than deriving a named configuration from residual sign alone. If XDS and DIALS disagree strongly on the same raw frames, compare the row counts, partiality selection, DIALS flag policy, sigma policy, resolution limit, proper-transform decision, conditional hand decision, and `Sg` validation before interpreting the model-update statistics.
 
 Be especially careful when comparing fitted thickness values across integration programs. GROND thickness is a nuisance parameter fitted to a row contract, not a direct microscope thickness measurement. If XDS and DIALS use different cells, rotation axes, scan-varying orientation models, row filters, or intensity completion conventions, their fitted thickness values can differ even when both final structures are chemically reasonable. Treat a cross-pipeline thickness mismatch as a prompt to audit the row contract before treating either number as absolute.

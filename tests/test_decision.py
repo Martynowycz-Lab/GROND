@@ -153,6 +153,33 @@ def test_apply_preflight_preserves_dataset_baseline_and_paths(tmp_path: Path):
     assert updated.baseline_hkl == ds.baseline_hkl
     assert updated.xds_dir == ds.xds_dir
     assert updated.hkl_transform == ds.hkl_transform
+    assert updated.min_peak == ds.min_peak
+    assert updated.geometry_percentile == ds.geometry_percentile
+
+
+def test_apply_preflight_does_not_apply_relaxed_support_suggestion(tmp_path: Path):
+    hkl = tmp_path / "INTEGRATE.HKL"
+    _write_minimal_xds(hkl)
+    lines = hkl.read_text().splitlines()
+    for index in range(1, 251):
+        fields = lines[index].split()
+        fields[9] = "75"
+        lines[index] = " ".join(fields)
+    hkl.write_text("\n".join(lines) + "\n")
+    ds = DatasetSpec(name="sparse_p90", hkl=str(hkl), min_peak=90.0, geometry_percentile=99.0)
+
+    decision = preflight_dataset(
+        ds,
+        requested_min_peak=90.0,
+        requested_geometry_percentile=99.0,
+        requested_scout_rows=500,
+    )
+    updated = apply_preflight(ds, decision)
+
+    assert decision.recommended_min_peak < 90.0
+    assert updated.min_peak == 90.0
+    assert updated.geometry_percentile == 99.0
+    assert any("suggestion only" in warning for warning in decision.warnings)
 
 
 def test_metadata_transform_prefilter_promotes_hkl_overlap(tmp_path: Path):

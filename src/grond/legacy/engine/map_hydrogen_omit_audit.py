@@ -99,6 +99,22 @@ def grid_points_near(arr: np.ndarray, cell: gemmi.UnitCell, frac, radius_A: floa
 def audit_map(name: str, path: Path, sites: list[dict], ref_cell: gemmi.UnitCell, radius_A: float):
     grid, arr = read_map(path)
     cell = grid.unit_cell
+    ref_lengths = np.asarray([ref_cell.a, ref_cell.b, ref_cell.c], dtype=float)
+    map_lengths = np.asarray([cell.a, cell.b, cell.c], dtype=float)
+    length_rel = float(np.max(np.abs(map_lengths - ref_lengths) / np.maximum(ref_lengths, 1e-12)))
+    angle_abs = float(
+        np.max(
+            np.abs(
+                np.asarray([cell.alpha, cell.beta, cell.gamma], dtype=float)
+                - np.asarray([ref_cell.alpha, ref_cell.beta, ref_cell.gamma], dtype=float)
+            )
+        )
+    )
+    if length_rel > 0.01 or angle_abs > 1.0:
+        raise ValueError(
+            f"map {path} cell is incompatible with the full-H reference "
+            f"(max length mismatch {length_rel:.4f}, max angle mismatch {angle_abs:.3f} deg)"
+        )
     mean = float(np.nanmean(arr))
     std = float(np.nanstd(arr))
     zarr = (arr - mean) / max(std, 1e-12)
@@ -142,6 +158,8 @@ def audit_map(name: str, path: Path, sites: list[dict], ref_cell: gemmi.UnitCell
         "name": name,
         "path": str(path),
         "grid_shape": list(arr.shape),
+        "reference_cell_max_length_relative_mismatch": length_rel,
+        "reference_cell_max_angle_mismatch_deg": angle_abs,
         "mean": mean,
         "std": std,
         "min": float(np.nanmin(arr)),
