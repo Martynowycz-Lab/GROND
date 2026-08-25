@@ -144,6 +144,7 @@ Start with the [quickstart](docs/QUICKSTART.md), then use the guide that matches
 - [XDS workflow](docs/XDS_WORKFLOW.md)
 - [DIALS workflow](docs/DIALS_WORKFLOW.md)
 - [PETS, Jana2020, Dyngo, and diffBloch interoperability](docs/INTEROPERABILITY.md)
+- [Experimental diffBloch endpoint polish](docs/DIFFBLOCH_ENDPOINT.md)
 - [Multi-dataset workflow](docs/MULTI_DATASET.md)
 - [Simple staged workflow](docs/MANUAL_WORKFLOW.md)
 - [Outputs](docs/OUTPUTS.md)

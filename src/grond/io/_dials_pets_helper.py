@@ -508,6 +508,25 @@ def _xds_correct_acceptance(handle, transformed_hkl, xds_ascii):
     return keep, len(corrected)
 
 
+def _xds_source_row_contract_mask(row_count, source_row_ids):
+    """Materialize an exact original-INTEGRATE-row selection mask."""
+
+    import numpy as np
+
+    selected_ids = np.asarray(source_row_ids, dtype=int)
+    if (
+        selected_ids.ndim != 1
+        or np.any(selected_ids < 0)
+        or np.any(selected_ids >= int(row_count))
+    ):
+        raise ValueError(
+            "PETS row-contract source_row_ids are outside the XDS INTEGRATE.HKL row range"
+        )
+    keep = np.zeros(int(row_count), dtype=bool)
+    keep[selected_ids] = True
+    return keep
+
+
 def _export_xds(config):
     import numpy as np
     from dials.array_family import flex
@@ -560,6 +579,13 @@ def _export_xds(config):
         & (rlp > 0.0)
         & (sigma > 0.0)
     )
+    source_row_ids = np.arange(len(hkl), dtype=int)
+    contract_ids = config.get("source_row_ids")
+    contract_selected_rows = None
+    if contract_ids is not None:
+        contract_keep = _xds_source_row_contract_mask(len(hkl), contract_ids)
+        keep &= contract_keep
+        contract_selected_rows = int(np.count_nonzero(contract_keep))
     xds_ascii = xds_dir / "XDS_ASCII.HKL"
     correct_rows = None
     if config["xds_row_selection"] == "correct":
@@ -587,7 +613,7 @@ def _export_xds(config):
     table["partiality"] = flex.double(peak[keep].astype(float).tolist())
     table["intensity.sum.value"] = flex.double(recorded_i[keep].astype(float).tolist())
     table["intensity.sum.variance"] = flex.double(recorded_var[keep].astype(float).tolist())
-    table["grond.source_row_id"] = flex.size_t(range(len(table)))
+    table["grond.source_row_id"] = flex.size_t(source_row_ids[keep].astype(int).tolist())
     table.set_flags(flex.bool(len(table), True), table.flags.integrated_sum)
     partiality_rows = int(np.count_nonzero(peak[keep] >= float(config["min_partiality"])))
 
@@ -630,6 +656,8 @@ def _export_xds(config):
         "correct_rows": correct_rows,
         "selected_rows_before_partiality": int(len(table)),
         "source_observations_at_partiality": partiality_rows,
+        "row_contract": config.get("row_contract_selection"),
+        "row_contract_selected_source_rows": contract_selected_rows,
         "reindex_matrix_raw_to_export": transform.astype(int).tolist(),
         "reindex_determinant": int(round(np.linalg.det(transform))),
         "reindex_rounding_error": transform_error,

@@ -12084,6 +12084,8 @@ def cmd_export_pets(args: argparse.Namespace) -> int:
             max_cell_angle_degrees=args.max_cell_angle_deviation,
             keep_bad_flags=bool(args.keep_bad_flags),
             allow_profile_fitted_xds=bool(args.allow_profile_fitted_xds),
+            row_contract=args.row_contract or None,
+            split_selection=args.split_selection,
             overwrite=bool(args.overwrite),
         )
     except (FileNotFoundError, OSError, RuntimeError, ValueError) as exc:
@@ -12102,6 +12104,28 @@ def cmd_export_pets(args: argparse.Namespace) -> int:
         )
     )
     return 0
+
+
+def cmd_apply_diffbloch_model(args: argparse.Namespace) -> int:
+    """Transfer a refined diffBloch CIF into an existing SHELX instruction model."""
+
+    from .diffbloch_endpoint import materialize_diffbloch_res
+
+    audit_path = args.audit_json or str(Path(args.out_res).with_suffix(".diffbloch_handoff.json"))
+    try:
+        payload = materialize_diffbloch_res(
+            args.source_res,
+            args.refined_cif,
+            args.out_res,
+            audit_json=audit_path,
+            max_cell_length_fraction=float(args.max_cell_length_deviation),
+            max_cell_angle_degrees=float(args.max_cell_angle_deviation),
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        print(json.dumps({"status": "error", "error": str(exc)}, indent=2))
+        return 2
+    print(json.dumps(payload, indent=2, allow_nan=False))
+    return 0 if payload.get("status") == "complete" or args.allow_npd else 3
 
 
 def _fill_common_run_defaults(args: argparse.Namespace) -> argparse.Namespace:
@@ -20667,8 +20691,39 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Diagnostic only: allow XDS input not explicitly produced with PROFILE_FITTING=FALSE.",
     )
+    p_pets.add_argument(
+        "--row-contract",
+        default="",
+        help=(
+            "Optional GROND native_dyn_calc.csv whose immutable row_index/split columns filter an XDS export. "
+            "Use with --split-selection work to keep GROND free rows out of an external optimizer."
+        ),
+    )
+    p_pets.add_argument(
+        "--split-selection",
+        choices=["all", "work", "free"],
+        default="all",
+        help="Rows retained from --row-contract before PETS virtual-frame ownership.",
+    )
     p_pets.add_argument("--overwrite", action="store_true")
     p_pets.set_defaults(func=cmd_export_pets)
+
+    p_diffbloch_apply = sub.add_parser(
+        "apply-diffbloch-model",
+        help="Transfer a refined diffBloch CIF into a source RES while preserving SHELX instructions.",
+    )
+    p_diffbloch_apply.add_argument("--source-res", required=True)
+    p_diffbloch_apply.add_argument("--refined-cif", required=True)
+    p_diffbloch_apply.add_argument("--out-res", required=True)
+    p_diffbloch_apply.add_argument("--audit-json", default="")
+    p_diffbloch_apply.add_argument("--max-cell-length-deviation", type=float, default=0.01)
+    p_diffbloch_apply.add_argument("--max-cell-angle-deviation", type=float, default=0.25)
+    p_diffbloch_apply.add_argument(
+        "--allow-npd",
+        action="store_true",
+        help="Write and return success for an NPD candidate. The audit remains labeled rejected_npd.",
+    )
+    p_diffbloch_apply.set_defaults(func=cmd_apply_diffbloch_model)
 
     p_scout = sub.add_parser(
         "scout",

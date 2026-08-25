@@ -8,6 +8,7 @@ INTEGRATE.HKL relation before passing it through the same DIALS PETS writer.
 
 from __future__ import annotations
 
+import csv
 import hashlib
 import json
 import math
@@ -223,7 +224,57 @@ def _source_hashes(config: dict[str, Any]) -> dict[str, str]:
     else:
         xds_dir = Path(config["xds_dir"])
         paths.extend(path for path in (xds_dir / "XDS.INP", xds_dir / "INTEGRATE.HKL", xds_dir / "XDS_ASCII.HKL") if path.is_file())
+    if config.get("row_contract"):
+        paths.append(Path(config["row_contract"]))
     return {str(path.resolve()): _sha256(path) for path in paths}
+
+
+def _row_contract_selection(path: str | Path, selection: str) -> dict[str, Any]:
+    """Read immutable source-row IDs for a PETS training/validation export."""
+
+    contract = Path(path).expanduser().resolve()
+    if not contract.is_file():
+        raise FileNotFoundError(contract)
+    if selection not in {"all", "work", "free"}:
+        raise ValueError("--split-selection must be all, work, or free")
+    with contract.open(newline="") as handle:
+        reader = csv.DictReader(handle)
+        fields = set(reader.fieldnames or [])
+        missing = sorted({"row_index", "split"} - fields)
+        if missing:
+            raise ValueError(
+                f"PETS row contract {contract} lacks required column(s): {', '.join(missing)}"
+            )
+        rows = list(reader)
+    source_ids: list[int] = []
+    split_counts = {"work": 0, "free": 0, "other": 0}
+    for row in rows:
+        split = str(row.get("split") or "").strip().lower()
+        bucket = split if split in {"work", "free"} else "other"
+        split_counts[bucket] += 1
+        keep = selection == "all" or split == selection
+        if not keep:
+            continue
+        try:
+            source_id = int(str(row["row_index"]).strip())
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"PETS row contract {contract} has an invalid row_index") from exc
+        if source_id < 0:
+            raise ValueError(f"PETS row contract {contract} has a negative row_index")
+        source_ids.append(source_id)
+    if len(source_ids) != len(set(source_ids)):
+        raise ValueError(f"PETS row contract {contract} repeats a selected row_index")
+    if not source_ids:
+        raise ValueError(f"PETS row contract {contract} selects no {selection} rows")
+    return {
+        "path": str(contract),
+        "sha256": _sha256(contract),
+        "selection": selection,
+        "input_rows": len(rows),
+        "selected_rows": len(source_ids),
+        "split_counts": split_counts,
+        "source_row_ids": sorted(source_ids),
+    }
 
 
 def _write_readme(path: Path, manifest_name: str, files: list[Path], source_kind: str) -> None:
@@ -271,6 +322,8 @@ def export_pets(
     max_cell_angle_degrees: float = 1.0,
     keep_bad_flags: bool = False,
     allow_profile_fitted_xds: bool = False,
+    row_contract: str | Path | None = None,
+    split_selection: str = "all",
     overwrite: bool = False,
 ) -> PetsExportResult:
     """Create one or more audited ``cif_pets`` interoperability files."""
@@ -289,6 +342,8 @@ def export_pets(
         raise ValueError("--frame-ownership must be overlap or nearest-excitation")
     if xds_sigma_mode not in {"reported", "raw"}:
         raise ValueError("--xds-sigma-mode must be reported or raw")
+    if row_contract is not None and has_dials:
+        raise ValueError("--row-contract filtering is currently implemented only for XDS exports")
     if float(max_cell_length_fraction) < 0.0 or float(max_cell_angle_degrees) < 0.0:
         raise ValueError("scan-varying cell deviation limits must be non-negative")
     if not str(dataset_name).strip() or not re.fullmatch(r"[A-Za-z0-9_.-]+", str(dataset_name)):
@@ -319,7 +374,14 @@ def export_pets(
         "max_cell_angle_degrees": float(max_cell_angle_degrees),
         "keep_bad_flags": bool(keep_bad_flags),
         "allow_profile_fitted_xds": bool(allow_profile_fitted_xds),
+        "row_contract": "",
+        "split_selection": str(split_selection),
     }
+    if row_contract is not None:
+        contract = _row_contract_selection(row_contract, split_selection)
+        config["row_contract"] = contract["path"]
+        config["row_contract_selection"] = contract
+        config["source_row_ids"] = contract["source_row_ids"]
     if has_dials:
         config.update(
             {
@@ -380,6 +442,12 @@ def export_pets(
             "No Friedel merging or absolute-hand selection is performed by this export.",
             "cif_pets stores one declared cell; any scan-varying DIALS cell projection is explicit in helper_result.",
             "The XDS conversion is an approximate XDS-to-DIALS geometry bridge and must retain its transform ledger.",
+            (
+                "A row-contract split filter was applied before PETS frame ownership; its source-row IDs and hash "
+                "are recorded in command_contract."
+                if config.get("row_contract")
+                else "No external row-contract split filter was applied."
+            ),
             (
                 "nearest-excitation frame ownership emits each selected source observation once; "
                 "overlap is the stock PETS/Jana candidate-frame convention."

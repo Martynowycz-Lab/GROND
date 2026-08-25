@@ -50,6 +50,15 @@ does this automatically when no baseline was supplied at setup. Final reports
 show starting SHELXL statistics only when the source-model HKL and configured
 baseline HKL are hash-identical, preventing an unrelated cohort baseline from
 appearing in a single-crystal comparison.
+XDS PETS exports can now be filtered by the immutable `row_index` and `split`
+columns of a GROND native row table. This permits a work-only diffBloch input
+whose optimizer never sees GROND free rows; the selected source IDs, split
+counts, row-contract hash, and source hashes are recorded in the export
+manifest. The new `apply-diffbloch-model` command transfers a refined CIF back
+into the exact source RES while preserving SHELX instructions and rejecting
+cell/label/element mismatches or NPD ADPs. diffBloch remains optional and
+experimental; candidates must pass a fresh GROND work/free replay before
+promotion.
 
 Experimental XDS target-transform fits now restore their corrected HKLF4
 endpoints to the ordinary XDS IOBS intensity and uncertainty convention before

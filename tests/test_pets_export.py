@@ -14,8 +14,10 @@ from grond.io._dials_pets_helper import (
     _read_xds_profile_fitting,
     _xds_correct_acceptance,
     _xds_recorded_variance,
+    _xds_source_row_contract_mask,
 )
 from grond.io.pets_export import (
+    _row_contract_selection,
     _validate_and_repair_pets,
     export_pets,
     xds_recorded_observation,
@@ -95,6 +97,29 @@ def test_nearest_excitation_owners_reject_nonfinite_values() -> None:
         _nearest_excitation_owners([(10, float("nan"), 3)])
 
 
+def test_pets_row_contract_selects_immutable_work_and_free_ids(tmp_path: Path) -> None:
+    path = tmp_path / "native_dyn_calc.csv"
+    path.write_text(
+        "row_index,h,k,l,split\n"
+        "7,1,0,0,work\n"
+        "2,0,1,0,free\n"
+        "9,0,0,1,work\n"
+    )
+    work = _row_contract_selection(path, "work")
+    free = _row_contract_selection(path, "free")
+    assert work["source_row_ids"] == [7, 9]
+    assert work["split_counts"] == {"work": 2, "free": 1, "other": 0}
+    assert free["source_row_ids"] == [2]
+    assert work["sha256"] == free["sha256"]
+
+
+def test_pets_row_contract_rejects_duplicate_selected_ids(tmp_path: Path) -> None:
+    path = tmp_path / "native_dyn_calc.csv"
+    path.write_text("row_index,split\n3,work\n3,work\n")
+    with pytest.raises(ValueError, match="repeats"):
+        _row_contract_selection(path, "work")
+
+
 def test_xds_recorded_variance_reports_or_inverts_calibration() -> None:
     sigma = np.asarray([10.0, 2.0])
     factor = np.asarray([0.5, 0.5])
@@ -170,6 +195,13 @@ def test_xds_correct_rows_bind_by_position_and_reindexed_hkl(tmp_path: Path) -> 
     )
     assert row_count == 2
     assert keep.tolist() == [True, True]
+
+
+def test_xds_source_row_contract_mask_preserves_original_row_identity() -> None:
+    keep = _xds_source_row_contract_mask(6, [4, 1])
+    assert keep.tolist() == [False, True, False, False, True, False]
+    with pytest.raises(ValueError, match="outside"):
+        _xds_source_row_contract_mask(6, [6])
 
 
 def test_export_pets_writes_manifest_and_hashes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

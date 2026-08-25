@@ -27,6 +27,7 @@ from grond.io.config import DatasetSpec, PrepConfig, write_prep
 from grond.progress import ProgressState
 
 EXPECTED_CLI_COMMANDS = {
+    "apply-diffbloch-model",
     "apply-parity-calibration",
     "auto",
     "calibrate-endpoint",
