@@ -84,6 +84,23 @@ the documented `RLP/PEAK` correction and the verified mapping from raw
 `INTEGRATE.HKL` rows to the unmerged rows accepted by CORRECT. See
 [INTEROPERABILITY.md](INTEROPERABILITY.md).
 
+`GROND import-pets` writes a PETS-owned native row bridge:
+
+```text
+pets_bridge/
+  INTEGRATE.HKL                 # PETS intensity/sigma and signed row identity
+  PETS_EXACT_GEOMETRY.npz       # exact zone A matrices and rocking semiangles
+  PETS_A_AT_ZONE_AXES.txt       # readable 3x3 matrices, one per PETS zone
+  PETS_ROW_SELECTION.json       # Klar/symmetry/Jana-support audit per source row
+  PETS_ZONE_AXIS_LEDGER.json    # PETS angles, widths, and recorded scales
+  pets2_bridge_summary.json     # source hashes and scientific contract
+```
+
+The XDS-like filename is an internal compatibility layer; it does not turn PETS
+profile or virtual-frame intensities into XDS observations. The
+`!GROND_SOURCE=PETS2` and `!PETS_EXACT_GEOMETRY_FILE` headers make the Bloch
+engine use the recorded PETS rocking path directly.
+
 For integrations from other software, use the portable row contract documented
 in [PORTABLE_INPUTS_AND_ENDPOINTS.md](PORTABLE_INPUTS_AND_ENDPOINTS.md). The row
 table can be CSV, TSV, or JSON Lines. The smallest useful CSV table looks like

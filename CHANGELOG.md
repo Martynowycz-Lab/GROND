@@ -4,6 +4,18 @@ This file records user-visible changes to the installable package. Version `0.2.
 
 ## 0.2.2 (unreleased)
 
+Native continuous-rotation PETS2 input is now available through the bounded
+`import-pets` and `pets-evaluate` commands. The importer preserves PETS-owned
+signed rows, uncertainties, UB/zone orientations, rocking widths, wavelength,
+and systematic absences that can receive dynamical intensity. The evaluator
+requires explicit convergence-tested beam, quadrature, reciprocal-support, and
+thickness settings; uses one work-fitted scale per PETS zone and no detector
+field; and writes JANA/PETS-style row statistics plus the elastic
+negative-thickness hand diagnostic. Generic XDS/DIALS auto, scout/thickness,
+unsupported nuisance, precession, nonidentity-setting, and SHELXL endpoint
+paths fail closed for this input. PETS virtual-frame rows remain a native
+row-space target, not a fabricated static HKLF4 endpoint.
+
 The release-candidate workflow audit now keeps user-declared row support
 immutable: preflight may suggest a lower PEAK/partiality floor or a stricter
 geometry percentile, but automatic execution no longer applies either change

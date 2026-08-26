@@ -57,6 +57,19 @@ def read_csv_rows(path: Path, dataset: str) -> list[dict]:
     for row in rows:
         if not str(row.get("dataset") or "").strip():
             row["dataset"] = dataset
+        # The standalone Bloch engine writes its immutable observation columns
+        # as iobs/sigma.  Auto's post-nuisance row contract renames the same
+        # quantities target_I/sigma_eff.  Accept the direct-engine spelling
+        # explicitly so PETS and other forward-only audits can use the canonical
+        # JANA/PETS report without manufacturing a second CSV dialect.
+        if not str(row.get("target_I") or "").strip() and str(
+            row.get("iobs") or ""
+        ).strip():
+            row["target_I"] = row["iobs"]
+        if not str(row.get("sigma_eff") or "").strip() and str(
+            row.get("sigma") or ""
+        ).strip():
+            row["sigma_eff"] = row["sigma"]
     return rows
 
 

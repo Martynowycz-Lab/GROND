@@ -6,6 +6,82 @@ format, and diffBloch reads the same file as its experimental-data input. The
 export does not perform a GROND refinement, merge Friedel mates, or choose an
 absolute hand.
 
+`GROND import-pets` goes in the other direction. It reads a native PETS2
+integration and preserves PETS ownership of the signed observation, uncertainty,
+zone geometry, UB matrix, rocking width, and wavelength. It does not reconstruct
+detector coordinates that PETS did not write.
+
+## Importing native PETS2 data
+
+An ordinary `sample.cif_pets` does not record the acquisition frame for each
+row. Supply its companion 13-column `sample.hkl`; GROND checks every HKL,
+intensity, uncertainty, and frame before writing the bridge.
+
+```bash
+grond import-pets \
+  --cif-pets sample.cif_pets \
+  --pets-hkl sample.hkl \
+  --space-group-number 19 \
+  --structure model.res \
+  --baseline-hkl model.hkl \
+  --dataset-name crystal_01 \
+  --out-dir crystal_01_pets_bridge
+```
+
+PETS also writes `*_dyn.cif_pets`, in which one source reflection can appear in
+several PETS-owned virtual frames. These occurrences are the correct direct
+comparison target for Jana/Dyngo and diffBloch, but they are correlated rather
+than new independent measurements. GROND refuses them unless this is
+acknowledged explicitly. A Klar--Palatinus support can be selected at import:
+
+```bash
+grond import-pets \
+  --cif-pets sample_dyn.cif_pets \
+  --allow-virtual-frames \
+  --klar-rsg 0.66 \
+  --klar-dsg 0.0 \
+  --space-group-number 19 \
+  --structure model.res \
+  --baseline-hkl model.hkl \
+  --dataset-name crystal_01_dyn \
+  --out-dir crystal_01_dyn_bridge
+```
+
+The bridge supports native Born/Bloch row statistics, thickness scans, elastic
+negative-thickness hand checks, and experimental native structure updates. Keep
+detector scales disabled because PETS does not provide detector coordinates.
+PETS virtual-frame rocking intensities are not a conventional static HKLF4
+integration. A native PETS calculation therefore does not acquire a valid
+SHELXL endpoint merely by dividing the rows by a Bloch/Born ratio. Report the
+separate conventional SHELXL refinement as the endpoint comparator unless a
+static-integration conversion has been independently validated.
+
+Use `grond pets-evaluate` for the safe fixed-model path. Beam count, angular
+quadrature, reciprocal support, and thickness grid are deliberately explicit;
+the generic XDS/DIALS scout defaults are too shallow for PETS virtual-frame
+rocking calculations and are refused. For the tyrosine example matched to its
+Jana settings, the command is:
+
+```bash
+grond pets-evaluate \
+  --prep crystal_01_dyn_bridge/grond_prep.json \
+  --out-dir crystal_01_pets_native \
+  --n-basis 420 \
+  --n-points 41 \
+  --topup-d-min 0.6134969 \
+  --max-support-sg 0.01 \
+  --thickness-grid 800,1000,1200,1400,1500,1600,1800,2000 \
+  --workers 48
+```
+
+The command always includes non-positive observations retained by PETS, fits
+one scale per populated PETS zone on work rows, keeps detector scales at zero,
+selects thickness by held-out row `wR2`, evaluates the inverse hand by elastic
+negative-thickness propagation, and writes the JANA/PETS-style row table. It
+always skips SHELXL feedback and endpoint generation. Repeat at larger N/Q and
+wider reciprocal support until the result is numerically stable before calling
+the calculation final.
+
 ## DIALS
 
 The DIALS route calls the PETS writer shipped with the selected DIALS

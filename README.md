@@ -30,6 +30,12 @@ GROND can also export either integration to the shared PETS `cif_pets`
 observation-and-geometry format used by PETS/Jana2020/Dyngo and diffBloch. See
 [PETS and diffBloch interoperability](docs/INTEROPERABILITY.md).
 
+Native PETS2 input is available through `GROND import-pets`. It preserves the
+recorded PETS zone geometry for native row-space Born/Bloch, thickness, and hand
+calculations. PETS virtual-frame intensities are not silently presented as a
+conventional SHELXL endpoint; that comparison remains a separate static
+integration unless its conversion has been validated.
+
 A solved SHELX `RES` or `INS` model with explicit electron scattering coefficients is the normal starting point. `GROND run` also accepts a CIF when it embeds the complete SHELX instruction block needed for model updates. The lower-level Bloch parser can read a coefficient-based CIF only when the file explicitly identifies those coefficients as electron factors. A solved-model HKL file is strongly recommended because it lets GROND settle indexing alignment before spending time on Bloch transform scouts.
 
 ## What a normal run does

@@ -2247,6 +2247,43 @@ class XDSData:
             if not mats:
                 raise ValueError(f"declared DIALS A scan-point file {p} contains no matrices")
             self.A_at_scan_points = np.asarray(mats, dtype=float)
+        self.pets_exact_geometry_path = None
+        self.pets_exact_a_center = None
+        self.pets_integration_semiangle_deg = None
+        pets_geometry_file = self.header.get("PETS_EXACT_GEOMETRY_FILE", "").split()
+        if pets_geometry_file:
+            p = Path(pets_geometry_file[0])
+            if not p.is_absolute():
+                p = self.path.parent / p
+            self.pets_exact_geometry_path = p.resolve()
+            with np.load(self.pets_exact_geometry_path, allow_pickle=False) as loaded:
+                required = {"a_center", "integration_semiangle_deg", "source_zone_id"}
+                missing = sorted(required.difference(loaded.files))
+                if missing:
+                    raise ValueError(
+                        f"PETS exact geometry is missing arrays: {', '.join(missing)}"
+                    )
+                centers = np.asarray(loaded["a_center"], dtype=float)
+                semiangles = np.asarray(
+                    loaded["integration_semiangle_deg"], dtype=float
+                )
+                zone_ids = np.asarray(loaded["source_zone_id"], dtype=np.int64)
+            if centers.ndim != 3 or centers.shape[1:] != (3, 3):
+                raise ValueError("PETS exact A centers must have shape (N,3,3)")
+            if semiangles.shape != (len(centers),) or zone_ids.shape != (len(centers),):
+                raise ValueError("PETS exact geometry arrays must have one row per zone")
+            if (
+                not np.all(np.isfinite(centers))
+                or not np.all(np.isfinite(semiangles))
+                or np.any(semiangles <= 0.0)
+            ):
+                raise ValueError("PETS exact geometry must be finite with positive semiangles")
+            if not np.array_equal(zone_ids, np.arange(1, len(zone_ids) + 1)):
+                raise ValueError(
+                    "PETS exact geometry source zone IDs must be consecutive from one"
+                )
+            self.pets_exact_a_center = centers
+            self.pets_integration_semiangle_deg = semiangles
         self.variance_model = tuple(float(v) for v in self.header.get("VARIANCE_MODEL", "1.0 0.0").split()[:2])
         self.apply_hkl_transform(hkl_transform)
 
@@ -2283,6 +2320,12 @@ class XDSData:
             self.A_at_scan_points = np.einsum(
                 "nij,jk->nik",
                 np.asarray(self.A_at_scan_points, dtype=float),
+                inv_t,
+            )
+        if self.pets_exact_a_center is not None:
+            self.pets_exact_a_center = np.einsum(
+                "nij,jk->nik",
+                np.asarray(self.pets_exact_a_center, dtype=float),
                 inv_t,
             )
         self.header["HKL_TRANSFORM_TO_MODEL_BASIS"] = canonical
@@ -2845,6 +2888,8 @@ class XDSBlochPort:
         return t, w / np.sum(w)
 
     def make_groups(self):
+        if getattr(self.data, "pets_exact_a_center", None) is not None:
+            return np.rint(np.asarray(self.data.zcal, dtype=float)).astype(int) - 1
         omegas = np.array([self.omega_from_z(z) for z in self.data.zcal])
         return ((omegas - np.min(omegas)) // float(self.cfg.group_width_deg)).astype(int)
 
@@ -4294,8 +4339,219 @@ class XDSBlochPort:
             float(np.sum(self.thick_w * reverse)),
         )
 
+    def pets_exact_orientation_samples(self, row_idx):
+        """Return the PETS-owned ``Rx(delta) @ A_zone`` rocking path."""
+
+        centers = getattr(self.data, "pets_exact_a_center", None)
+        semiangles = getattr(self.data, "pets_integration_semiangle_deg", None)
+        if centers is None or semiangles is None:
+            raise ValueError("PETS exact orientation samples require PETS geometry metadata")
+        ordinal = int(round(float(self.data.zcal[row_idx]))) - 1
+        if not 0 <= ordinal < len(centers):
+            raise ValueError(
+                f"PETS row {row_idx} uses zone ordinal {ordinal + 1}, outside 1..{len(centers)}"
+            )
+        center = np.asarray(centers[ordinal], dtype=float)
+        semiangle = float(semiangles[ordinal])
+        count = max(1, int(self.cfg.n_points))
+        offsets = (
+            np.asarray([0.0], dtype=float)
+            if count == 1
+            else np.linspace(-semiangle, semiangle, count)
+        )
+        matrices = np.asarray(
+            [
+                _rotation_matrix_axis_angle(np.asarray([1.0, 0.0, 0.0]), offset)
+                @ center
+                for offset in offsets
+            ],
+            dtype=float,
+        )
+        weights = np.ones(len(offsets), dtype=float)
+        accumulation = str(
+            getattr(self.cfg, "profile_accumulation", "sum") or "sum"
+        ).lower()
+        if accumulation == "mean":
+            weights /= float(np.sum(weights))
+        elif accumulation != "sum":
+            raise ValueError(f"unknown profile_accumulation={accumulation!r}")
+        return matrices, offsets, weights, semiangle, ordinal
+
+    def pets_exact_sg_for_hkls(self, hkls, orientation):
+        g = (np.asarray(orientation, dtype=float) @ np.asarray(hkls, dtype=float).T).T
+        return (
+            self.data.k**2 - np.sum((self.data.s0 + g) ** 2, axis=1)
+        ) / (2.0 * self.data.k)
+
+    def pets_exact_select_common_basis(self, target_hkl, orientations, row_idx):
+        """Select one scored beam union over the full PETS rocking wedge."""
+
+        pool_ug = self.pool_ug * self.dose_attenuation_for_inv_d2(
+            self.pool_inv_d2, row_idx
+        )
+        coupling = np.abs(pool_ug) ** 2
+        best_score = np.zeros(len(self.pool_hkl), dtype=float)
+        minimum_abs_sg = np.full(len(self.pool_hkl), np.inf, dtype=float)
+        for orientation in np.asarray(orientations, dtype=float):
+            abs_sg = np.abs(
+                self.pets_exact_sg_for_hkls(self.pool_hkl, orientation)
+            )
+            minimum_abs_sg = np.minimum(minimum_abs_sg, abs_sg)
+            best_score = np.maximum(best_score, coupling / (abs_sg + 1e-5))
+        candidates = np.flatnonzero(
+            minimum_abs_sg <= float(self.cfg.max_support_sg)
+        )
+        basis = [(0, 0, 0), tuple(int(value) for value in target_hkl)]
+        seen = set(basis)
+        eligible_candidates = {
+            tuple(int(value) for value in self.pool_hkl[index])
+            for index in candidates
+        }
+        eligible_candidate_count = int(len(candidates))
+        full_union_count = int(len(seen | eligible_candidates))
+        needed = max(0, int(self.cfg.n_basis) - len(basis))
+        if needed:
+            take = min(len(candidates), needed + 1)
+            if take < len(candidates):
+                local = np.argpartition(best_score[candidates], -take)[-take:]
+                candidates = candidates[local]
+            candidates = candidates[
+                np.lexsort((candidates, -best_score[candidates]))
+            ]
+            for index in candidates:
+                candidate = tuple(int(value) for value in self.pool_hkl[index])
+                if candidate in seen:
+                    continue
+                basis.append(candidate)
+                seen.add(candidate)
+                if len(basis) >= int(self.cfg.n_basis):
+                    break
+        return np.asarray(basis, dtype=int), {
+            "pets_basis_mode": "one_common_scored_union_over_full_recorded_wedge",
+            "pets_basis_orientation_count": int(len(orientations)),
+            "pets_basis_candidate_count": eligible_candidate_count,
+            "pets_basis_full_union_count": full_union_count,
+            "pets_basis_ranked_candidate_count": int(len(candidates)),
+            "pets_basis_cap": int(self.cfg.n_basis),
+            "pets_basis_cap_truncated": bool(len(basis) < full_union_count),
+        }
+
+    def pets_exact_row_prediction_plan(self, row_idx):
+        """Build one exact PETS direct-angle row plan without Sg root solving."""
+
+        hkl = np.asarray(self.data.hkl[row_idx], dtype=int)
+        orientations, offsets, profile_weights, semiangle, ordinal = (
+            self.pets_exact_orientation_samples(row_idx)
+        )
+        center = np.asarray(self.data.pets_exact_a_center[ordinal], dtype=float)
+        center_sg = float(
+            self.pets_exact_sg_for_hkls(np.asarray([hkl]), center)[0]
+        )
+        derivative_step = 1e-4
+        plus = _rotation_matrix_axis_angle(
+            np.asarray([1.0, 0.0, 0.0]), derivative_step
+        ) @ center
+        minus = _rotation_matrix_axis_angle(
+            np.asarray([1.0, 0.0, 0.0]), -derivative_step
+        ) @ center
+        sg_derivative = float(
+            (
+                self.pets_exact_sg_for_hkls(np.asarray([hkl]), plus)[0]
+                - self.pets_exact_sg_for_hkls(np.asarray([hkl]), minus)[0]
+            )
+            / (2.0 * derivative_step)
+        )
+        sg_window = 2.0 * abs(sg_derivative) * semiangle
+        basis, basis_meta = self.pets_exact_select_common_basis(
+            hkl, orientations, row_idx
+        )
+        if not np.array_equal(basis[0], np.asarray([0, 0, 0], dtype=int)) or not np.array_equal(
+            basis[1], hkl
+        ):
+            raise RuntimeError(
+                "PETS frozen basis must start with direct beam then exact signed target HKL"
+            )
+        dynamic_static = self.hamiltonian_static_part(
+            basis, absorb=True, row_idx=row_idx
+        )
+        born_static = (
+            self.hamiltonian_static_part(basis, absorb=False, row_idx=row_idx)
+            if self.absorption_enabled()
+            else dynamic_static
+        )
+        h10_born = born_static[1, 0]
+        dynamic_matrices = []
+        born_values = []
+        born_deltas = []
+        for orientation in orientations:
+            sg_basis = self.pets_exact_sg_for_hkls(basis, orientation)
+            dynamic_matrices.append(
+                self.hamiltonian_from_static(dynamic_static, sg_basis)
+            )
+            delta = float(np.real(sg_basis[1] - sg_basis[0]))
+            born_deltas.append(delta)
+            sinc = np.sinc(delta * self.thick)
+            born_t = (
+                (2.0 * math.pi) ** 2
+                * (abs(h10_born) ** 2)
+                * (self.thick**2)
+                * (sinc**2)
+            )
+            born_values.append(float(np.sum(self.thick_w * born_t)))
+        return {
+            "_dyn_matrices": dynamic_matrices,
+            "_profile_weights": np.asarray(profile_weights, dtype=float),
+            "_born_vals": np.asarray(born_values, dtype=float),
+            "_born_h10_abs2": float(abs(h10_born) ** 2),
+            "_born_deltas": np.asarray(born_deltas, dtype=float),
+            "_sg_resid": np.asarray([], dtype=float),
+            "basis_size": int(len(basis)),
+            "support_hkls": [
+                [int(value) for value in row] for row in basis.tolist()
+            ],
+            "center_sg_inv_A": center_sg,
+            "omega_center_deg": float("nan"),
+            "omega_bragg_deg": float("nan"),
+            "omega_bragg_minus_center_deg": float("nan"),
+            "sg_window_inv_A": sg_window,
+            "dose_delta_b_A2": float(self.row_delta_b(row_idx)),
+            "thickness_model": str(
+                getattr(self.cfg, "thickness_model", "uniform_gradient")
+            ),
+            "thickness_sigma_frac": float(
+                getattr(self.cfg, "thickness_sigma_frac", 0.0)
+            ),
+            "sg_profile_coordinate": "pets_exact_direct_angle",
+            "sg_profile_quadrature": "uniform_linspace",
+            "sg_profile_accumulation": str(
+                getattr(self.cfg, "profile_accumulation", "sum")
+            ),
+            "sg_profile_angle_half_width_deg": semiangle,
+            "sg_profile_points_total": int(len(orientations)),
+            "sg_profile_weight_sum": float(np.sum(profile_weights)),
+            "sg_dSg_domega_inv_A_per_deg": sg_derivative,
+            "sg_dSg_dframe_inv_A": sg_derivative
+            * float(self.data.oscillation_range),
+            "sg_window_raw_inv_A": sg_window,
+            "sg_window_half_frames": semiangle
+            / max(abs(float(self.data.oscillation_range)), 1e-30),
+            "sg_window_clipped": False,
+            "sg_jitter_sigma_inv_A": 0.0,
+            "sg_jitter_d_inv_A": float("nan"),
+            "sg_jitter_frame_fraction": float("nan"),
+            "sg_jitter_kernel_points": 1,
+            "sg_profile_same_branch_continuation_used": False,
+            "sg_profile_same_branch_continuation_segments": 1,
+            "pets_zone_ordinal": int(ordinal + 1),
+            "pets_rocking_offsets_deg": [float(value) for value in offsets],
+            **basis_meta,
+        }
+
     def row_prediction_plan(self, row_idx):
         """Build one row's Bloch matrices and metadata before eigensolver evaluation."""
+
+        if getattr(self.data, "pets_exact_a_center", None) is not None:
+            return self.pets_exact_row_prediction_plan(row_idx)
 
         hkl = self.data.hkl[row_idx]
         zcal = self.data.zcal[row_idx]
@@ -4476,6 +4732,12 @@ class XDSBlochPort:
                 if self.data.a_scan_points_path is not None and self.data.a_scan_points_path.exists()
                 else ""
             ),
+            "pets_exact_geometry_sha256": (
+                sha256(self.data.pets_exact_geometry_path)
+                if self.data.pets_exact_geometry_path is not None
+                and self.data.pets_exact_geometry_path.exists()
+                else ""
+            ),
         }
         if self.row_plan_cache_mode() == "exact":
             cfg_fields.update(
@@ -4549,37 +4811,110 @@ class XDSBlochPort:
         for pos, row_idx in enumerate(indices):
             row_idx = int(row_idx)
             hkl = self.data.hkl[row_idx]
-            zcal = self.data.zcal[row_idx]
-            omega_c = self.omega_from_z(zcal)
-            c_sg = float(self.sg_for_hkls(np.asarray([hkl], dtype=int), omega_c)[0])
-            if str(getattr(self.cfg, "profile_coordinate", "target_sg")) == "direct_angle":
-                omega_b = float(omega_c)
+            if getattr(self.data, "pets_exact_a_center", None) is not None:
+                orientations, _angles, profile_weights, semiangle, ordinal = (
+                    self.pets_exact_orientation_samples(row_idx)
+                )
+                center = np.asarray(
+                    self.data.pets_exact_a_center[ordinal], dtype=float
+                )
+                c_sg = float(
+                    self.pets_exact_sg_for_hkls(
+                        np.asarray([hkl], dtype=int), center
+                    )[0]
+                )
+                derivative_step = 1e-4
+                plus = _rotation_matrix_axis_angle(
+                    np.asarray([1.0, 0.0, 0.0]), derivative_step
+                ) @ center
+                minus = _rotation_matrix_axis_angle(
+                    np.asarray([1.0, 0.0, 0.0]), -derivative_step
+                ) @ center
+                derivative = float(
+                    (
+                        self.pets_exact_sg_for_hkls(
+                            np.asarray([hkl], dtype=int), plus
+                        )[0]
+                        - self.pets_exact_sg_for_hkls(
+                            np.asarray([hkl], dtype=int), minus
+                        )[0]
+                    )
+                    / (2.0 * derivative_step)
+                )
+                sg_window_i = 2.0 * abs(derivative) * semiangle
+                basis, _pets_basis_meta = self.pets_exact_select_common_basis(
+                    hkl, orientations, row_idx
+                )
+                sg_basis_rows = [
+                    np.asarray(
+                        self.pets_exact_sg_for_hkls(basis, orientation),
+                        dtype=float,
+                    )
+                    for orientation in orientations
+                ]
+                # These legacy fields are not used for exact PETS propagation,
+                # but the cache validator requires finite fixed-width arrays.
+                omega_c = 0.0
+                omega_b = 0.0
+                sg_resid_values = np.asarray([], dtype=float)
+                sg_width_meta = {
+                    "sg_dSg_domega_inv_A_per_deg": derivative,
+                    "sg_dSg_dframe_inv_A": derivative
+                    * float(self.data.oscillation_range),
+                    "sg_window_raw_inv_A": sg_window_i,
+                    "sg_window_half_frames": semiangle
+                    / max(abs(float(self.data.oscillation_range)), 1e-30),
+                    "sg_window_clipped": False,
+                }
+                jitter_meta = {
+                    "sg_jitter_sigma_inv_A": 0.0,
+                    "sg_jitter_d_inv_A": float("nan"),
+                    "sg_jitter_frame_fraction": float("nan"),
+                    "sg_jitter_kernel_points": 1,
+                    "sg_profile_points_total": int(len(orientations)),
+                    "sg_profile_weight_sum": float(np.sum(profile_weights)),
+                    "sg_profile_same_branch_continuation_used": False,
+                    "sg_profile_same_branch_continuation_segments": 1,
+                }
             else:
-                omega_b = self.solve_omega_for_sg(hkl, omega_c, 0.0)
-            sg_window_i, sg_width_meta = self.row_sg_window(row_idx, hkl, omega_c)
-            (
-                solved_omegas,
-                mosaic_tilts,
-                profile_weights,
-                sg_resid_values,
-                jitter_meta,
-                _mosaicity_meta,
-            ) = self.row_profile_orientation_points(
-                row_idx, hkl, omega_c, c_sg, sg_window_i
-            )
-            basis, _cone_basis_meta = self.select_basis_common_cone(
-                hkl, omega_c, sg_window_i, row_idx=row_idx
-            )
+                zcal = self.data.zcal[row_idx]
+                omega_c = self.omega_from_z(zcal)
+                c_sg = float(
+                    self.sg_for_hkls(np.asarray([hkl], dtype=int), omega_c)[0]
+                )
+                if (
+                    str(getattr(self.cfg, "profile_coordinate", "target_sg"))
+                    == "direct_angle"
+                ):
+                    omega_b = float(omega_c)
+                else:
+                    omega_b = self.solve_omega_for_sg(hkl, omega_c, 0.0)
+                sg_window_i, sg_width_meta = self.row_sg_window(
+                    row_idx, hkl, omega_c
+                )
+                (
+                    solved_omegas,
+                    mosaic_tilts,
+                    profile_weights,
+                    sg_resid_values,
+                    jitter_meta,
+                    _mosaicity_meta,
+                ) = self.row_profile_orientation_points(
+                    row_idx, hkl, omega_c, c_sg, sg_window_i
+                )
+                basis, _cone_basis_meta = self.select_basis_common_cone(
+                    hkl, omega_c, sg_window_i, row_idx=row_idx
+                )
+                sg_basis_rows = []
+                for omega, (along_deg, transverse_deg) in zip(
+                    solved_omegas, mosaic_tilts, strict=True
+                ):
+                    sg_basis = self.sg_for_hkls_at_orientation(
+                        basis, omega, along_deg, transverse_deg
+                    )
+                    sg_basis_rows.append(np.asarray(sg_basis, dtype=float))
             if not np.array_equal(basis[0], np.asarray([0, 0, 0], dtype=int)) or not np.array_equal(basis[1], np.asarray(hkl, dtype=int)):
                 raise RuntimeError("Frozen row-plan basis contract violated: basis must start with direct beam then exact signed target hkl.")
-            sg_basis_rows = []
-            for omega, (along_deg, transverse_deg) in zip(
-                solved_omegas, mosaic_tilts, strict=True
-            ):
-                sg_basis = self.sg_for_hkls_at_orientation(
-                    basis, omega, along_deg, transverse_deg
-                )
-                sg_basis_rows.append(np.asarray(sg_basis, dtype=float))
 
             diffs = basis[None, :, :] - basis[:, None, :] if convention == "j_minus_i" else basis[:, None, :] - basis[None, :, :]
             row_diff_idx = []

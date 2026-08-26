@@ -856,6 +856,11 @@ def sigma_eff(data: XDSData, target, base_sigma, nui: Nuisance):
 
 
 def group_indices(data: XDSData, group_width_deg: float, frame_offset: float):
+    if getattr(data, "pets_exact_a_center", None) is not None:
+        # PETS owns this virtual-frame/zone partition. Its orientations are not
+        # a uniform XDS scan and can have varying angular steps, so re-binning
+        # by an arbitrary omega width can silently combine unrelated zones.
+        return np.rint(np.asarray(data.zcal, dtype=float)).astype(int) - 1
     omegas = np.asarray([data.omega_from_z(float(z) + float(frame_offset)) for z in data.zcal], dtype=float)
     return ((omegas - float(np.min(omegas))) // float(group_width_deg)).astype(int)
 
@@ -1348,7 +1353,21 @@ def prediction_cache_validation_errors(pred: dict, payload: dict, indices) -> li
     return errors
 
 
-def predict_with_cache(data, model, res_hash, hkl_path, res_path, cfg, indices, cache_dir: Path, workers: int, chunksize: int, model_tag: str = "original", cache_compression: str = "compressed"):
+def predict_with_cache(
+    data,
+    model,
+    res_hash,
+    hkl_path,
+    res_path,
+    cfg,
+    indices,
+    cache_dir: Path,
+    workers: int,
+    chunksize: int,
+    model_tag: str = "original",
+    cache_compression: str = "compressed",
+    ug_cache_dir: Path | None = None,
+):
     cache_dir.mkdir(parents=True, exist_ok=True)
     key, payload = prediction_cache_key(data, hkl_path, res_path, cfg, indices, model_tag=model_tag)
     path = cache_dir / f"native_pred_{key}.npz"
@@ -1364,8 +1383,14 @@ def predict_with_cache(data, model, res_hash, hkl_path, res_path, cfg, indices, 
             print(f"Ignoring stale prediction cache {path}: {'; '.join(errors)}", flush=True)
         except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
             print(f"Ignoring unreadable prediction cache {path}: {type(exc).__name__}: {exc}", flush=True)
-    ug_cache_dir = runtime_cache_dir("native_row_regularize", "ug")
-    port = XDSBlochPort(data, model, cfg, cache_dir=ug_cache_dir, res_hash=res_hash)
+    resolved_ug_cache_dir = (
+        Path(ug_cache_dir)
+        if ug_cache_dir is not None
+        else runtime_cache_dir("native_row_regularize", "ug")
+    )
+    port = XDSBlochPort(
+        data, model, cfg, cache_dir=resolved_ug_cache_dir, res_hash=res_hash
+    )
     pred = port.predict_rows(indices, workers=workers, chunksize=chunksize)
     save = cacheable_prediction_arrays(pred)
     validation_view = {**save, "prediction_cache_meta": payload}
@@ -3441,6 +3466,11 @@ def main():
     ap.add_argument("--workers", type=int, default=1)
     ap.add_argument("--chunksize", type=int, default=8)
     ap.add_argument("--prediction-cache-dir", default=str(runtime_cache_dir("native_row_regularize", "predictions")))
+    ap.add_argument(
+        "--ug-cache-dir",
+        default=str(runtime_cache_dir("native_row_regularize", "ug")),
+        help="Directory for model-dependent U_g cubes; use a run-local path on restricted systems.",
+    )
     ap.add_argument("--cache-compression", choices=["compressed", "none"], default="compressed", help="Use none for faster local SSD caches; compressed saves disk on slow/limited storage.")
     ap.add_argument("--compute-backend", choices=["scipy", "scipy_bethe", "scipy_expm", "scipy_expm_multiply", "jax", "jax_auto", "jax_cpu", "jax_mps", "jax_cuda", "jax_padded", "jax_auto_padded", "jax_cpu_padded", "jax_mps_padded", "jax_cuda_padded", "jax_cpu_real_expm", "jax_mps_real_expm", "jax_mps_real_expm_padded"], default="scipy", help="Prediction backend. SciPy eigensolver is the production reference; scipy_bethe uses an opt-in promoted Bethe/Schur strong-beam reduction; SciPy expm/expm_multiply, real-embedded JAX expm, and JAX eigensolver backends are experimental agreement/speed probes. *_padded JAX backends pad matrix dimensions into small buckets to reduce compilation churn.")
     ap.add_argument(
@@ -3487,6 +3517,43 @@ def main():
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
     data = XDSData(Path(args.hkl), hkl_transform=args.hkl_transform)
+    if getattr(data, "pets_exact_a_center", None) is not None:
+        if not bool(args.skip_endpoint_refinement):
+            raise ValueError(
+                "native PETS virtual-frame rows do not define a conventional SHELXL "
+                "HKLF4 endpoint; add --skip-endpoint-refinement and report the separate "
+                "static integration as the endpoint comparator"
+            )
+        if any(value > 1 for value in parse_int_grid(args.detector_scale_bins)):
+            raise ValueError(
+                "PETS cif_pets input has no detector coordinates; detector scale bins must be 0"
+            )
+        if any(
+            abs(value) > 1e-12 for value in parse_float_grid(args.frame_offset_grid)
+        ):
+            raise ValueError(
+                "PETS exact geometry owns the zone orientations; frame-offset grids are not applicable"
+            )
+        if str(args.profile_quadrature) != "uniform":
+            raise ValueError(
+                "PETS exact rocking wedges currently implement uniform direct-angle sampling only"
+            )
+        if str(args.mosaicity_mode) != "none" or abs(float(args.mosaicity_sigma_deg)) > 0.0:
+            raise ValueError(
+                "PETS exact-row mosaicity controls are not implemented and cannot be silently ignored"
+            )
+        if any(
+            str(value).strip().lower() != "none"
+            for value in str(args.sg_jitter_mode_grid).split(",")
+            if str(value).strip()
+        ):
+            raise ValueError(
+                "PETS exact-row Sg-jitter controls are not implemented and cannot be silently ignored"
+            )
+        if str(args.geometry_path).strip():
+            raise ValueError(
+                "PETS exact geometry cannot be combined with an XDS/DIALS geometry-path correction"
+            )
     target, base_sig = target_arrays(data, args.target_mode)
     row_contract_summary = {}
     if str(args.row_contract).strip():
@@ -3704,6 +3771,7 @@ def main():
                                                                 args.chunksize,
                                                                 model_tag=model_tag,
                                                                 cache_compression=args.cache_compression,
+                                                                ug_cache_dir=Path(args.ug_cache_dir),
                                                             )
                                                         except InfeasibleSgJitterProfileError as exc:
                                                             rejection = sg_jitter_candidate_rejection(cfg, exc)

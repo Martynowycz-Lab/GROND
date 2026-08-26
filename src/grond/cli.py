@@ -12460,6 +12460,301 @@ def cmd_import_dials(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_import_pets(args: argparse.Namespace) -> int:
+    """Import a native PETS2 observation/geometry contract into GROND rows."""
+
+    from .io.pets_import import import_pets_to_grond
+
+    try:
+        bridge = import_pets_to_grond(
+            args.cif_pets,
+            args.out_dir,
+            pets_hkl=args.pets_hkl or None,
+            allow_virtual_frames=bool(args.allow_virtual_frames),
+            klar_rsg=args.klar_rsg,
+            klar_dsg=float(args.klar_dsg),
+            exclude_systematic_absences=bool(args.exclude_systematic_absences),
+            jana_reflistout=args.jana_reflistout or None,
+            dataset_name=args.dataset_name,
+            space_group_number=int(args.space_group_number),
+            hkl_transform=args.hkl_transform,
+            structure=args.structure or None,
+            baseline_hkl=args.baseline_hkl or None,
+            prep_out=args.prep_out or None,
+        )
+    except (FileNotFoundError, OSError, RuntimeError, ValueError) as exc:
+        print(json.dumps({"status": "error", "error": str(exc)}, indent=2))
+        return 2
+    payload = {
+        "status": "complete",
+        "out_dir": str(bridge.out_dir),
+        "hkl": str(bridge.hkl),
+        "scan_points": str(bridge.scan_points),
+        "summary": str(bridge.summary),
+        "scope": (
+            "native PETS row-space calculation; a conventional SHELXL endpoint "
+            "requires a separately validated static-integration contract"
+        ),
+    }
+    if bridge.prep:
+        payload["prep"] = str(bridge.prep)
+    print(json.dumps(payload, indent=2))
+    return 0
+
+
+def cmd_pets_evaluate(args: argparse.Namespace) -> int:
+    """Run a bounded native PETS2 forward/thickness/hand calculation."""
+
+    prep = load_prep(Path(args.prep).expanduser().resolve())
+    bridge = (prep.metadata or {}).get("pets2_bridge")
+    if not isinstance(bridge, Mapping):
+        raise SystemExit("--prep must be written by GROND import-pets")
+    if len(prep.datasets) != 1:
+        raise SystemExit("PETS native evaluation currently requires exactly one dataset")
+    dataset = prep.datasets[0]
+    structure = str(
+        Path(args.structure).expanduser().resolve()
+        if str(args.structure).strip()
+        else Path(prep.structure).expanduser().resolve()
+    )
+    if not Path(structure).is_file():
+        raise SystemExit(f"PETS evaluation structure does not exist: {structure}")
+    transform = parse_hkl_transform_info(dataset.hkl_transform)
+    if transform.canonical != "identity":
+        raise SystemExit(
+            "PETS native evaluation currently requires identity indexing; nonidentity "
+            "setting conjugation is not yet implemented, and coordinate hand is evaluated "
+            "separately by negative-thickness propagation"
+        )
+    if int(args.n_basis) < 2 or int(args.n_points) < 1:
+        raise SystemExit("--n-basis must be >=2 and --n-points must be >=1")
+    if float(args.topup_d_min) <= 0.0 or float(args.max_support_sg) <= 0.0:
+        raise SystemExit("--topup-d-min and --max-support-sg must be positive")
+    if not str(args.thickness_grid).strip():
+        raise SystemExit("--thickness-grid must name at least one positive thickness in Angstrom")
+
+    out = Path(args.out_dir).expanduser().resolve()
+    logs = out / "logs"
+    native = out / "native"
+    jana = out / "jana_rows"
+    python = choose_python(args.python)
+    workers = auto_worker_count(int(args.workers), 0.85)
+    chunksize = auto_chunksize(int(args.chunksize), workers)
+    configure_progress(
+        logs,
+        resume=bool(args.resume),
+        total=3 if bool(args.paired_inverse_hand) else 2,
+        begin_invocation=True,
+    )
+    baseline_hkl = str(prep.baseline_hkl or dataset.baseline_hkl or dataset.hkl)
+    command = [
+        python,
+        str(engine_script("native_row_regularize.py")),
+        "--hkl",
+        str(dataset.hkl),
+        "--res",
+        structure,
+        "--baseline-hkl",
+        baseline_hkl,
+        "--hkl-transform",
+        str(dataset.hkl_transform),
+        "--out-dir",
+        str(native),
+        "--n-basis",
+        str(int(args.n_basis)),
+        "--n-points",
+        str(int(args.n_points)),
+        "--min-d-spacing",
+        f"{float(dataset.min_d_spacing):.12g}",
+        "--min-peak",
+        "0",
+        "--geometry-percentile",
+        "100",
+        "--target-mode",
+        "iobs",
+        "--include-nonpositive",
+        "--thickness-grid",
+        str(args.thickness_grid),
+        "--thickness-model-grid",
+        "single",
+        "--thickness-grad-grid",
+        "0",
+        "--thickness-sigma-frac-grid",
+        "0",
+        "--frame-offset-grid",
+        "0",
+        "--absorption-mode-grid",
+        "none",
+        "--sg-jitter-mode-grid",
+        "none",
+        "--mosaicity-mode",
+        "none",
+        "--group-width-grid",
+        "1",
+        "--detector-scale-bins",
+        "0",
+        "--sigma-a-grid",
+        "0",
+        "--sigma-b-corr-grid",
+        "0",
+        "--sigma-c-peak-grid",
+        "0",
+        "--wght-a-grid",
+        "0",
+        "--wght-b-grid",
+        "0",
+        "--thickness-points",
+        "1",
+        "--topup-d-min",
+        f"{float(args.topup_d_min):.12g}",
+        "--max-support-sg",
+        f"{float(args.max_support_sg):.12g}",
+        "--free-fraction",
+        f"{float(args.free_fraction):.12g}",
+        "--split-seed",
+        str(int(args.split_seed)),
+        "--scale-fit-split",
+        "work",
+        "--selection-metric",
+        "free_wR2",
+        "--lambda-grid",
+        "1.0",
+        "--profile-quadrature",
+        "uniform",
+        "--profile-accumulation",
+        "sum",
+        "--compute-backend",
+        "scipy",
+        "--row-plan-cache",
+        "off",
+        "--prediction-cache-dir",
+        str(out / "cache"),
+        "--ug-cache-dir",
+        str(out / "cache" / "ug"),
+        "--workers",
+        str(workers),
+        "--chunksize",
+        str(chunksize),
+        "--skip-endpoint-refinement",
+    ]
+    if bool(args.paired_inverse_hand):
+        command.append("--paired-inverse-hand")
+    run_logged(command, logs, "pets_native_evaluate", dry_run=bool(args.dry_run))
+
+    hand_diagnostic = native / "absolute_structure_diagnostic.json"
+    hand_command: list[str] = []
+    if bool(args.paired_inverse_hand):
+        hand_command = [
+            python,
+            str(engine_script("absolute_structure_diagnostic.py")),
+            "--best",
+            str(native / "native_dyn_calc.csv"),
+            "--other",
+            str(native / "native_inverse_hand_dyn_calc.csv"),
+            "--out",
+            str(hand_diagnostic),
+        ]
+        run_logged(
+            hand_command,
+            logs,
+            "pets_absolute_structure_diagnostic",
+            dry_run=bool(args.dry_run),
+        )
+
+    report_command = [
+        python,
+        str(engine_script("row_mr_report.py")),
+        "--row-table",
+        f"{dataset.name}={native / 'native_dyn_calc.csv'}",
+        "--res",
+        structure,
+        "--out-dir",
+        str(jana),
+        "--title",
+        f"PETS2 native row statistics: {dataset.name}",
+        "--instability-u",
+        f"{float(args.instability_u):.12g}",
+        "--no-pdf",
+    ]
+    run_logged(
+        report_command,
+        logs,
+        "pets_jana_row_report",
+        dry_run=bool(args.dry_run),
+    )
+    if bool(args.dry_run):
+        print(
+            json.dumps(
+                {
+                    "status": "dry_run",
+                    "native_command": command,
+                    "hand_command": hand_command or None,
+                    "row_report_command": report_command,
+                },
+                indent=2,
+            )
+        )
+        return 0
+    native_summary_path = native / "summary.json"
+    native_rows_path = native / "native_dyn_calc.csv"
+    jana_path = jana / "JANA_ROW_STATISTICS.json"
+    native_summary = read_json(native_summary_path)
+    jana_summary = read_json(jana_path)
+    hand_summary = read_json(hand_diagnostic) if bool(args.paired_inverse_hand) else {}
+    best_native = native_summary.get("best_native")
+    best_native = best_native if isinstance(best_native, Mapping) else {}
+    nuisance = best_native.get("nuisance")
+    nuisance = nuisance if isinstance(nuisance, Mapping) else {}
+    row_mr = jana_summary.get("row_mr")
+    row_mr = row_mr if isinstance(row_mr, Mapping) else {}
+    payload = {
+        "schema": "grond.pets2-native-evaluation.v1",
+        "status": "complete",
+        "prep": str(Path(args.prep).expanduser().resolve()),
+        "structure": structure,
+        "structure_sha256": sha256_file(Path(structure)),
+        "native_summary": str(native_summary_path.resolve()),
+        "native_summary_sha256": sha256_file(native_summary_path),
+        "native_rows": str(native_rows_path.resolve()),
+        "native_rows_sha256": sha256_file(native_rows_path),
+        "hand_diagnostic": (
+            str(hand_diagnostic.resolve()) if bool(args.paired_inverse_hand) else None
+        ),
+        "hand_diagnostic_sha256": (
+            sha256_file(hand_diagnostic) if bool(args.paired_inverse_hand) else None
+        ),
+        "jana_row_statistics": str(jana_path.resolve()),
+        "jana_row_statistics_sha256": sha256_file(jana_path),
+        "selected_thickness_A": safe_float(nuisance.get("thickness_A")),
+        "selected_thickness_nm": safe_float(nuisance.get("thickness_A")) / 10.0,
+        "frame_scale_count": int(best_native.get("frame_scale_count") or 0),
+        "detector_scale_count": int(best_native.get("detector_scale_count") or 0),
+        "applied_frame_groups": len(best_native.get("dyn_scales") or {}),
+        "applied_detector_groups": len(best_native.get("dyn_detector_scales") or {}),
+        "row_statistics": {
+            "born": row_mr.get("born"),
+            "bloch": row_mr.get("dynamic"),
+        },
+        "hand_statistics": {
+            "all": hand_summary.get("all"),
+            "work": hand_summary.get("work"),
+            "free": hand_summary.get("free"),
+        }
+        if hand_summary
+        else None,
+        "scientific_scope": (
+            "native PETS row-space Born/Bloch, thickness, and elastic hand evaluation; "
+            "no corrected SHELXL endpoint"
+        ),
+        "hkl_transform": transform.to_dict(),
+    }
+    (out / "PETS_NATIVE_EVALUATION.json").write_text(
+        json.dumps(payload, indent=2) + "\n"
+    )
+    print(json.dumps(payload, indent=2))
+    return 0
+
+
 def cmd_export_pets(args: argparse.Namespace) -> int:
     """Export DIALS or XDS observations to PETS/Jana/diffBloch ``cif_pets``."""
 
@@ -12554,6 +12849,11 @@ def cmd_scout(args: argparse.Namespace) -> int:
     logs = root / "logs"
     python = choose_python(args.python)
     prep = prep_from_args(args)
+    if isinstance((prep.metadata or {}).get("pets2_bridge"), Mapping):
+        raise SystemExit(
+            "Generic scout/thickness handoffs are not convergence-safe for native PETS2. "
+            "Use GROND pets-evaluate with explicit converged N, Q, support, and thickness grid."
+        )
     args.workers = auto_worker_count(args.workers, args.max_core_fraction)
     args.chunksize = auto_chunksize(args.chunksize, args.workers)
     write_prep(root / "source_prep.json", prep)
@@ -13018,6 +13318,14 @@ def cmd_run(args: argparse.Namespace) -> int:
     logs = Path(args.out_dir) / "logs"
     python = choose_python(args.python)
     prep = prep_from_args(args)
+    if isinstance((prep.metadata or {}).get("pets2_bridge"), Mapping):
+        raise SystemExit(
+            "Native PETS2 prep files are currently row-space only. GROND run/auto "
+            "would invoke a conventional SHELXL feedback/endpoint path, but PETS "
+            "virtual-frame rocking intensities are not a static HKLF4 target. Use "
+            "the audited native PETS row/thickness/hand commands documented in "
+            "docs/INTEROPERABILITY.md; do not bypass this guard with a fabricated endpoint."
+        )
     try:
         requested_h_omit = str(getattr(args, "h_omit", "off") or "off")
         args.h_omit = _validated_h_omit_mode(requested_h_omit, len(prep.datasets))
@@ -20098,6 +20406,12 @@ def cmd_thickness_scout(args: argparse.Namespace) -> int:
     logs = out_dir / "logs"
     python = choose_python(args.python)
     prep = prep_from_args(args)
+    if isinstance((prep.metadata or {}).get("pets2_bridge"), Mapping):
+        raise SystemExit(
+            "Generic thickness scouting is not convergence-safe for native PETS2. "
+            "Use grond pets-evaluate with explicit converged N, Q, reciprocal support, "
+            "and thickness grid."
+        )
     args.workers = auto_worker_count(args.workers, args.max_core_fraction)
     args.chunksize = auto_chunksize(args.chunksize, args.workers)
     original_structure = prep.structure
@@ -21272,6 +21586,127 @@ def build_parser() -> argparse.ArgumentParser:
     p_dials.add_argument("--dataset-name", default="dials")
     p_dials.add_argument("--prep-out", default="", help="Optional prep JSON output path. Defaults to OUT/grond_prep.json when --structure is supplied.")
     p_dials.set_defaults(func=cmd_import_dials)
+
+    p_import_pets = sub.add_parser(
+        "import-pets",
+        help="Import a native PETS2 cif_pets observation table and exact rocking geometry.",
+        description=(
+            "Import PETS2 intensities, uncertainties, signed indices, UB/zone geometry, and "
+            "rocking widths without inventing detector coordinates. Ordinary cif_pets input "
+            "requires its companion 13-column .hkl file so the acquisition frame remains "
+            "known. PETS-owned *_dyn.cif_pets virtual-frame occurrences require the explicit "
+            "--allow-virtual-frames acknowledgement. The bridge supports native row metrics, "
+            "thickness, hand, and experimental native structure updates; it does not claim "
+            "that PETS virtual-frame intensities are a conventional SHELXL HKLF4 endpoint."
+        ),
+    )
+    p_import_pets.add_argument("--cif-pets", required=True)
+    p_import_pets.add_argument(
+        "--pets-hkl",
+        default="",
+        help="Companion 13-column PETS .hkl file; inferred beside ordinary cif_pets input.",
+    )
+    p_import_pets.add_argument(
+        "--allow-virtual-frames",
+        action="store_true",
+        help=(
+            "Accept correlated PETS-owned occurrences from *_dyn.cif_pets. Repeated signed "
+            "HKLs remain distinct zone observations and must not be described as independent "
+            "source integrations."
+        ),
+    )
+    p_import_pets.add_argument(
+        "--klar-rsg",
+        type=float,
+        default=None,
+        help="Optional Klar/Palatinus |Sg|/Sgmax row threshold, for example 0.66.",
+    )
+    p_import_pets.add_argument(
+        "--klar-dsg",
+        type=float,
+        default=0.0,
+        help="Optional Klar/Palatinus Sgmax-|Sg| margin in inverse Angstrom.",
+    )
+    p_import_pets.add_argument(
+        "--exclude-systematic-absences",
+        action="store_true",
+        help=(
+            "Drop systematic absences for a static-comparison support. Leave them present for "
+            "a full dynamical calculation because multiple scattering can populate them."
+        ),
+    )
+    p_import_pets.add_argument(
+        "--jana-reflistout",
+        default="",
+        help="Optional Jana eldyn_reflistout used only to audit category overlap.",
+    )
+    p_import_pets.add_argument("--out-dir", required=True)
+    p_import_pets.add_argument("--dataset-name", default="pets2")
+    p_import_pets.add_argument("--space-group-number", type=int, required=True)
+    p_import_pets.add_argument(
+        "--hkl-transform",
+        default="identity",
+        help=(
+            "Reserved for a future setting bridge; the current native PETS importer "
+            "requires identity and keeps hand in the separate negative-thickness calculation."
+        ),
+    )
+    p_import_pets.add_argument(
+        "--structure", default="", help="Optional RES/CIF used to write a prep JSON."
+    )
+    p_import_pets.add_argument(
+        "--baseline-hkl",
+        default="",
+        help="Optional conventional solved-model HKL recorded as a separate comparator.",
+    )
+    p_import_pets.add_argument(
+        "--prep-out",
+        default="",
+        help="Prep JSON path; defaults to OUT/grond_prep.json when --structure is supplied.",
+    )
+    p_import_pets.set_defaults(func=cmd_import_pets)
+
+    p_pets_evaluate = sub.add_parser(
+        "pets-evaluate",
+        help="Evaluate native PETS2 rows without invoking a fabricated SHELXL endpoint.",
+        description=(
+            "Run the exact PETS rocking geometry through matched Born/Bloch row calculations, "
+            "a declared thickness grid, optional elastic negative-thickness hand comparison, "
+            "and JANA/PETS-style row reporting. N, Q, reciprocal support, and thickness are "
+            "explicit because they must be convergence-tested for each structure."
+        ),
+    )
+    p_pets_evaluate.add_argument("--prep", required=True)
+    p_pets_evaluate.add_argument(
+        "--structure",
+        default="",
+        help="Optional audited model override, for example a validation-selected native update.",
+    )
+    p_pets_evaluate.add_argument("--out-dir", required=True)
+    p_pets_evaluate.add_argument("--n-basis", type=int, required=True)
+    p_pets_evaluate.add_argument("--n-points", type=int, required=True)
+    p_pets_evaluate.add_argument("--topup-d-min", type=float, required=True)
+    p_pets_evaluate.add_argument("--max-support-sg", type=float, default=0.01)
+    p_pets_evaluate.add_argument(
+        "--thickness-grid",
+        required=True,
+        help="Comma-separated thicknesses in Angstrom, for example 800,1200,1500,1800.",
+    )
+    p_pets_evaluate.add_argument(
+        "--paired-inverse-hand",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use the exact elastic negative-thickness identity for the inverse-hand control.",
+    )
+    p_pets_evaluate.add_argument("--free-fraction", type=float, default=0.10)
+    p_pets_evaluate.add_argument("--split-seed", type=int, default=42)
+    p_pets_evaluate.add_argument("--instability-u", type=float, default=0.01)
+    p_pets_evaluate.add_argument("--workers", type=int, default=0)
+    p_pets_evaluate.add_argument("--chunksize", type=int, default=1)
+    p_pets_evaluate.add_argument("--python", default="")
+    p_pets_evaluate.add_argument("--resume", action="store_true")
+    p_pets_evaluate.add_argument("--dry-run", action="store_true")
+    p_pets_evaluate.set_defaults(func=cmd_pets_evaluate)
 
     p_pets = sub.add_parser(
         "export-pets",

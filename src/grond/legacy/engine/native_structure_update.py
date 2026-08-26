@@ -941,6 +941,12 @@ def main():
     ap.add_argument("--thickness-grad-frac", type=float, default=0.8)
     ap.add_argument("--thickness-points", type=int, default=5)
     ap.add_argument("--topup-d-min", type=float, default=0.8, help="Resolution limit for Bloch support top-up beams.")
+    ap.add_argument(
+        "--max-support-sg",
+        type=float,
+        default=0.005,
+        help="Maximum absolute excitation error for candidate support beams.",
+    )
     ap.add_argument("--group-width-deg", type=float, default=1.0)
     ap.add_argument("--frame-offset", type=float, default=0.0)
     ap.add_argument("--row-resolution-b", type=float, default=0.0, help="Raw-row dynamical resolution-envelope B from nuisance regularization.")
@@ -1044,6 +1050,7 @@ def main():
         thickness_grad_frac=args.thickness_grad_frac,
         thickness_points=args.thickness_points,
         topup_d_min=min(float(args.topup_d_min), float(args.min_d_spacing)) if args.min_d_spacing > 0 else float(args.topup_d_min),
+        max_support_sg=args.max_support_sg,
         group_width_deg=args.group_width_deg,
         frame_offset=args.frame_offset,
         free_fraction=args.free_fraction,
@@ -1078,6 +1085,17 @@ def main():
     )
     objective_cfg = copy.deepcopy(cfg)
     objective_cfg.group_width_deg = args.objective_group_width_deg
+    pets_objective_cache_only = bool(
+        getattr(data, "pets_exact_a_center", None) is not None
+        and str(args.row_plan_cache).lower() == "readwrite"
+    )
+    if pets_objective_cache_only:
+        # A full N~400/Q~40 PETS cache stores O(rows*N^2) coupling indices and
+        # can consume many gigabytes. The finite-difference objective is the
+        # repeated hot path and uses only its stratified row subset, so cache
+        # that geometry while leaving one-off full validation passes uncached.
+        cfg.row_plan_cache = "off"
+        objective_cfg.row_plan_cache = "readwrite"
     trace = []
     block_results = []
     restraints = []
@@ -1202,6 +1220,7 @@ def main():
                     "scale_count": int(scale_count),
                     "objective_scale_mode": args.objective_scale_mode,
                     "objective_group_width_deg": float(args.objective_group_width_deg),
+                    "pets_objective_cache_only": pets_objective_cache_only,
                 }
             )
             print(
@@ -1394,6 +1413,7 @@ def main():
             "scale_mode": str(args.objective_scale_mode),
             "scale_mode_note": "frozen_block refreshes scales once per model-update block, then keeps them fixed for every coordinate/ADP finite-difference evaluation.",
             "scale_fit_split": str(args.scale_fit_split),
+            "pets_objective_cache_only": pets_objective_cache_only,
         },
         "restraints": {
             "mode": args.restraints,
