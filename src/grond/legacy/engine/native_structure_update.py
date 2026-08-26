@@ -110,6 +110,36 @@ class EarlyStopOptimization(Exception):
         self.eval_no = int(eval_no)
 
 
+NATIVE_UPDATE_TRACE_FIELDS = (
+    "block",
+    "mode",
+    "eval",
+    "rms_residual",
+    "data_rms",
+    "prior_rms",
+    "geometry_rms",
+    "adp_similarity_rms",
+    "max_abs_shift",
+    "scale_count",
+    "objective_scale_mode",
+    "objective_group_width_deg",
+    "pets_objective_cache_only",
+)
+
+
+def write_native_update_trace(path: Path, trace: list[dict]) -> None:
+    """Write the update trace without silently dropping provenance fields."""
+
+    known = set(NATIVE_UPDATE_TRACE_FIELDS)
+    unknown = sorted({key for row in trace for key in row} - known)
+    if unknown:
+        raise ValueError(f"native update trace schema is missing fields: {', '.join(unknown)}")
+    with path.open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=NATIVE_UPDATE_TRACE_FIELDS)
+        writer.writeheader()
+        writer.writerows(trace)
+
+
 def early_stop_min_evals(args, params: list[dict]) -> int:
     """Return the minimum residual calls before a plateau gate is allowed to fire."""
 
@@ -1364,26 +1394,7 @@ def main():
     write_model_delta_csv(out / "model_delta.csv", base_model, accepted_model)
     # Backward-compatible name for quick inspection scripts.
     write_model_delta_csv(out / "coordinate_shifts.csv", base_model, accepted_model)
-    with (out / "trace.csv").open("w", newline="") as f:
-        w = csv.DictWriter(
-            f,
-            fieldnames=[
-                "block",
-                "mode",
-                "eval",
-                "rms_residual",
-                "data_rms",
-                "prior_rms",
-                "geometry_rms",
-                "adp_similarity_rms",
-                "max_abs_shift",
-                "scale_count",
-                "objective_scale_mode",
-                "objective_group_width_deg",
-            ],
-        )
-        w.writeheader()
-        w.writerows(trace)
+    write_native_update_trace(out / "trace.csv", trace)
 
     # Export a corrected-HKL endpoint only from the validation-accepted model.
     # If the coordinate step overfits, this intentionally falls back to the

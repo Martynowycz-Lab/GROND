@@ -4,10 +4,12 @@ import numpy as np
 import pytest
 
 from grond.legacy.engine.native_structure_update import (
+    NATIVE_UPDATE_TRACE_FIELDS,
     absolute_finite_difference_jacobian,
     atom_distance_A,
     frac_delta_min_image,
     parameter_absolute_steps,
+    write_native_update_trace,
 )
 
 
@@ -131,3 +133,23 @@ def test_absolute_finite_difference_jacobian_stays_within_bounds():
     np.testing.assert_allclose(calls[1] - x, [-1e-4, 0.0], atol=1e-15)
     np.testing.assert_allclose(calls[2] - x, [0.0, 1e-4], atol=1e-15)
     np.testing.assert_allclose(jacobian, [[1.9998, 3.0]], atol=1e-12)
+
+
+def test_native_update_trace_preserves_pets_cache_provenance(tmp_path):
+    row = {field: 0 for field in NATIVE_UPDATE_TRACE_FIELDS}
+    row["pets_objective_cache_only"] = True
+    path = tmp_path / "trace.csv"
+
+    write_native_update_trace(path, [row])
+
+    header, values = path.read_text().splitlines()
+    assert header.split(",")[-1] == "pets_objective_cache_only"
+    assert values.split(",")[-1] == "True"
+
+
+def test_native_update_trace_rejects_unregistered_fields(tmp_path):
+    row = {field: 0 for field in NATIVE_UPDATE_TRACE_FIELDS}
+    row["new_provenance"] = "must not be silently dropped"
+
+    with pytest.raises(ValueError, match="new_provenance"):
+        write_native_update_trace(tmp_path / "trace.csv", [row])
