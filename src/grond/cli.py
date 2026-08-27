@@ -17088,7 +17088,11 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
             f"| free-row I residual Z | n `{free_z.get('n', 'n/a')}`; RMSZ `{_quick_number(free_z.get('rms_z'), 3)}`; meanZ `{_quick_number(free_z.get('mean_z'), 3)}`; median absZ `{_quick_number(free_z.get('median_abs_z'), 3)}` |",
             f"| all-row I residual Z | n `{all_z.get('n', 'n/a')}`; RMSZ `{_quick_number(all_z.get('rms_z'), 3)}`; meanZ `{_quick_number(all_z.get('mean_z'), 3)}`; median absZ `{_quick_number(all_z.get('median_abs_z'), 3)}` |",
             "",
-            *_quick_multi_hand_evidence_lines(multi_hand_diagnostic),
+            *(
+                _quick_multi_hand_evidence_lines(multi_hand_diagnostic)
+                if result.get("combined")
+                else []
+            ),
             "## Input Model Row Statistics",
             "",
             "These are the first adaptive-screen row-space statistics for the supplied start model after GROND has selected the row contract used by the run. They are the practical input-model comparator, not final endpoint statistics.",
@@ -17794,7 +17798,11 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
         f"| effective thickness model | `{_quick_thickness_text(nuisance, metadata, dataset_nuisance_contracts)}`; Sg window `{metadata.get('sg_window', 'n/a')}` |",
         f"| publication endpoint source | `{console['publication_endpoint'].get('source') or 'none'}` / `{console['publication_endpoint'].get('source_kind') or 'no_physical_endpoint'}` |",
         "",
-        *_quick_multi_hand_evidence_lines(multi_hand_diagnostic, compact=True),
+        *(
+            _quick_multi_hand_evidence_lines(multi_hand_diagnostic, compact=True)
+            if result.get("combined")
+            else []
+        ),
         "## Canonical Statistics",
         "",
         f"The authoritative human-readable separation is in `{table1['markdown']}` and the machine-readable form is `{table1['json']}`. SHELXL endpoint factors and JANA/PETS-style row factors are never combined into generic R columns.",

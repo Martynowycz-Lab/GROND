@@ -1152,6 +1152,8 @@ def test_finish_prefers_endpoint_chooser_physical_endpoint(tmp_path: Path, capsy
     assert "endpoint_chooser" in final_text
     assert "observation_polish" in final_text
     assert "endpoint_chooser | observation_polish" in quick_text
+    assert "warning_missing_diagnostic" not in final_text
+    assert "warning_missing_diagnostic" not in quick_text
 
 
 def test_finish_does_not_promote_calibration_when_chooser_rejects_all(tmp_path: Path, capsys):
