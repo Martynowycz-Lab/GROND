@@ -917,9 +917,39 @@ def test_final_multi_hand_selection_uses_one_elastic_pair_and_switches_without_n
                 json.dumps(
                     {
                         "status": "ok",
-                        "all": {"n": 4, "paired_row_t_delta_chi2": -4.0},
-                        "work": {"n": 2, "paired_row_t_delta_chi2": -3.0},
-                        "free": {"n": 2, "paired_row_t_delta_chi2": -2.0},
+                        "all": {
+                            "n": 4,
+                            "paired_row_t_delta_chi2": -4.0,
+                            "klar_palatinus_adjusted_hand_z": {
+                                "status": "ok",
+                                "n": 100,
+                                "k_effective_selected_wins_plus_half_ties": 0.0,
+                                "w": 0.0,
+                                "z": -10.0,
+                            },
+                        },
+                        "work": {
+                            "n": 2,
+                            "paired_row_t_delta_chi2": -3.0,
+                            "klar_palatinus_adjusted_hand_z": {
+                                "status": "ok",
+                                "n": 80,
+                                "k_effective_selected_wins_plus_half_ties": 0.0,
+                                "w": 0.0,
+                                "z": -80.0 / (80.0**0.5),
+                            },
+                        },
+                        "free": {
+                            "n": 2,
+                            "paired_row_t_delta_chi2": -2.0,
+                            "klar_palatinus_adjusted_hand_z": {
+                                "status": "ok",
+                                "n": 20,
+                                "k_effective_selected_wins_plus_half_ties": 7.0,
+                                "w": 0.0,
+                                "z": -6.0 / (20.0**0.5),
+                            },
+                        },
                     }
                 )
                 + "\n"
@@ -1064,14 +1094,14 @@ def test_multi_post_feedback_hand_diagnostic_pins_final_contract_and_warns_witho
                     "n": 4,
                     "delta_chi2_other_minus_best": sign * 25.0,
                     "paired_row_t_delta_chi2": sign * 5.0,
-                    "klar_palatinus_adjusted_hand_z": {"z": -sign * 999.0},
+                    "klar_palatinus_adjusted_hand_z": {"status": "ok", "z": -sign * 999.0},
                 },
                 "work": {"n": 2, "delta_chi2_other_minus_best": sign * 16.0, "paired_row_t_delta_chi2": sign * 4.0},
                 "free": {
                     "n": 2,
                     "delta_chi2_other_minus_best": sign * 9.0,
                     "paired_row_t_delta_chi2": sign * 3.0,
-                    "klar_palatinus_adjusted_hand_z": {"z": -sign * 999.0},
+                    "klar_palatinus_adjusted_hand_z": {"status": "ok", "z": -sign * 999.0},
                 },
             }
             out.parent.mkdir(parents=True, exist_ok=True)
@@ -1119,9 +1149,10 @@ def test_multi_post_feedback_hand_diagnostic_pins_final_contract_and_warns_witho
     assert payload["selected_hand_after_diagnostic"] == "original"
     assert payload["hand_switched"] is False
     assert payload["merged_z"] is None
-    assert payload["datasets"]["a"]["status"] == "consistent_no_material_opposite_support"
-    assert payload["datasets"]["b"]["status"] == "warning_material_opposite_support"
-    assert payload["datasets"]["b"]["materially_favors_opposite"] is True
+    assert payload["datasets"]["a"]["status"] == "warning_material_opposite_support"
+    assert payload["datasets"]["b"]["status"] == "consistent_no_material_opposite_support"
+    assert payload["datasets"]["a"]["materially_favors_opposite"] is True
+    assert payload["datasets"]["b"]["materially_favors_opposite"] is False
     assert payload["datasets"]["b"]["paired_t_style_z_positive_favors_selected"]["free"] == pytest.approx(-3.0)
     assert payload["datasets"]["b"]["paired_t_style_positive_favors_selected"]["free"] == {
         "t": pytest.approx(-3.0),
@@ -1166,7 +1197,7 @@ def test_multi_post_feedback_hand_diagnostic_pins_final_contract_and_warns_witho
     full_lines = "\n".join(cli._quick_multi_hand_evidence_lines(payload))
     compact_lines = "\n".join(cli._quick_multi_hand_evidence_lines(payload, compact=True))
     assert "no pooled statistic" in full_lines.lower()
-    assert "a | consistent_no_material_opposite_support | 4/2/2 | 5.000/4.000/3.000" in compact_lines
+    assert "a | warning_material_opposite_support | 4/2/2 | n/a/n/a/n/a | 5.000/4.000/3.000" in compact_lines
 
 
 def test_multi_post_feedback_hand_diagnostic_fails_closed_when_final_rows_are_missing(

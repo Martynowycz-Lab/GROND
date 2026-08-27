@@ -1250,6 +1250,9 @@ def test_terminal_finish_summary_is_human_readable():
         "final_hand_t_style_free_n": 10,
         "final_hand_t_style_free_df": 9,
         "final_hand_t_style_scope": "single_dataset",
+        "final_hand_zkp_all": 10.0,
+        "final_hand_zkp_free": 1.5,
+        "final_hand_warnings": ["held-out ZKP 1.5 supports the selected hand only weakly (< 3.5)"],
         "selected_transform": "identity",
         "input_shelxl": {
             "R1gt": 0.1382,
@@ -1304,7 +1307,9 @@ def test_terminal_finish_summary_is_human_readable():
     assert "Timing: cumulative completed-stage runtime 13m42s." in text
     assert "concurrent stages overlap" in text
     assert "not workflow wall time" in text
-    assert "Hand: alternate (paired t-style all/free = t 1.505 (n 40, df 39) / t 0.876 (n 10, df 9)" in text
+    assert "Hand: alternate (adjusted ZKP all/free = 10.000 / 1.500; positive favors the selected hand" in text
+    assert "paired t-style all/free = t 1.505 (n 40, df 39) / t 0.876 (n 10, df 9)" in text
+    assert "Hand warning: held-out ZKP 1.5 supports the selected hand only weakly" in text
     assert "not a calibrated normal Z score" in text
     assert "normal-equivalent confidence" not in text
     assert "Starting SHELXL reference" in text
@@ -2435,18 +2440,18 @@ def test_zero_pathology_summary_cannot_erase_recorded_npd_or_split_warnings(tmp_
 
 
 def test_post_feedback_hand_diagnostic_gate_requires_signed_support():
-    args = argparse.Namespace(hand_min_z_all=2.0, hand_min_z_free=0.5, hand_min_free_rows=10)
+    args = argparse.Namespace(hand_flip_zkp_all=3.5)
     ok, reasons = cli.hand_diagnostic_supports_other(
         {
             "all": {
                 "n": 100,
                 "paired_row_t_delta_chi2": -2.4,
-                "klar_palatinus_adjusted_hand_z": {"z": 999.0},
+                "klar_palatinus_adjusted_hand_z": {"status": "ok", "z": -10.0},
             },
             "free": {
                 "n": 10,
-                "paired_row_t_delta_chi2": -0.8,
-                "klar_palatinus_adjusted_hand_z": {"z": 999.0},
+                "paired_row_t_delta_chi2": 0.8,
+                "klar_palatinus_adjusted_hand_z": {"status": "ok", "z": 1.5},
             },
         },
         args,
@@ -2458,29 +2463,37 @@ def test_post_feedback_hand_diagnostic_gate_requires_signed_support():
         {
             "all": {
                 "n": 100,
-                "paired_row_t_delta_chi2": -0.1,
-                "klar_palatinus_adjusted_hand_z": {"z": -999.0},
+                "paired_row_t_delta_chi2": -10.0,
+                "klar_palatinus_adjusted_hand_z": {"status": "ok", "z": -3.49},
             },
             "free": {
                 "n": 10,
-                "paired_row_t_delta_chi2": 0.2,
-                "klar_palatinus_adjusted_hand_z": {"z": -999.0},
+                "paired_row_t_delta_chi2": -10.0,
+                "klar_palatinus_adjusted_hand_z": {"status": "ok", "z": -9.0},
             },
         },
         args,
     )
     assert weak is False
-    assert "all-row paired t-style statistic" in weak_reasons[0]
+    assert "all-row Klar-Palatinus adjusted hand Z" in weak_reasons[0]
 
-    too_few, too_few_reasons = cli.hand_diagnostic_supports_other(
+    missing, missing_reasons = cli.hand_diagnostic_supports_other(
         {
             "all": {"n": 100, "paired_row_t_delta_chi2": -4.0},
             "free": {"n": 9, "paired_row_t_delta_chi2": -2.0},
         },
         args,
     )
-    assert too_few is False
-    assert any("below the minimum 10" in reason for reason in too_few_reasons)
+    assert missing is False
+    assert any("unavailable" in reason for reason in missing_reasons)
+
+    warnings = cli._hand_evidence_warnings(
+        all_z=-10.0,
+        free_z=-1.5,
+        switched=True,
+        threshold=3.5,
+    )
+    assert any("supports the selected hand only weakly" in warning for warning in warnings)
 
 
 def test_utility_commands_parse():

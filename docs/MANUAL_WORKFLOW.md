@@ -105,9 +105,10 @@ grond manual hand --workflow manual_run/manual_workflow.json
 This evaluates the thickness-stage model with the exact elastic
 negative-thickness identity, writes per-dataset diagnostics plus
 `combined_hand_evidence.json`, and pauses. Known chemistry is never used. The
-automatic recommendation requires sign-consistent all/free residual evidence,
-an adjusted hand-Z threshold, and enough free rows; weak evidence defaults to an
-ambiguous report rather than an automatic inversion. Record the deliberate
+recommendation uses the combined all-row Klar--Palatinus adjusted Z with a
+default threshold of 3.5. Held-out Z and row count remain visible and generate
+warnings when weak or conflicting, but do not veto a decisive all-row
+recommendation. Weak all-row evidence defaults to an ambiguous report. Record the deliberate
 coordinate choice with one short command:
 
 ```bash

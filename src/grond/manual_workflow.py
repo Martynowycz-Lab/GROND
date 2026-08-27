@@ -709,8 +709,8 @@ def manual_thickness(args) -> int:
 def _hand_evidence(
     diagnostics: Mapping[str, Mapping[str, object]],
     *,
-    min_z_all: float = 2.0,
-    min_z_free: float = 0.5,
+    min_z_all: float = 3.5,
+    min_z_free: float = 3.5,
     min_free_rows: int = 10,
 ) -> dict[str, object]:
     all_delta = 0.0
@@ -760,29 +760,37 @@ def _hand_evidence(
         )
         for support in ("all", "free")
     }
-    decisive_support = bool(
-        free_n >= int(min_free_rows)
-        and math.isfinite(combined_z["all"])
-        and math.isfinite(combined_z["free"])
-    )
+    decisive_support = math.isfinite(combined_z["all"])
     if (
         decisive_support
         and combined_z["all"] >= float(min_z_all)
-        and combined_z["free"] >= float(min_z_free)
-        and all_delta > 0.0
-        and free_delta >= 0.0
     ):
         recommendation = "input"
     elif (
         decisive_support
         and combined_z["all"] <= -float(min_z_all)
-        and combined_z["free"] <= -float(min_z_free)
-        and all_delta < 0.0
-        and free_delta <= 0.0
     ):
         recommendation = "inverse"
     else:
         recommendation = "ambiguous"
+    selected_sign = -1.0 if recommendation == "inverse" else 1.0
+    oriented_free_z = selected_sign * combined_z["free"]
+    warnings: list[str] = []
+    if not math.isfinite(combined_z["free"]):
+        warnings.append("Held-out Klar-Palatinus adjusted hand Z is unavailable.")
+    elif oriented_free_z < 0.0:
+        warnings.append(
+            f"Held-out ZKP {oriented_free_z:.3g} conflicts with the all-row recommended hand."
+        )
+    elif oriented_free_z < float(min_z_free):
+        warnings.append(
+            f"Held-out ZKP {oriented_free_z:.3g} supports the recommended hand only weakly "
+            f"(< {float(min_z_free):.3g})."
+        )
+    if free_n < int(min_free_rows):
+        warnings.append(
+            f"Held-out hand evidence contains {free_n} rows, below the reporting target {int(min_free_rows)}."
+        )
     return {
         "definition": "positive delta chi2 means the input coordinate hand has lower residual; no known chemistry is used",
         "datasets": rows,
@@ -796,6 +804,11 @@ def _hand_evidence(
         "minimum_free_rows": int(min_free_rows),
         "decisive_support": decisive_support,
         "recommendation": recommendation,
+        "warnings": warnings,
+        "decision_rule": (
+            "recommend inversion when combined all-row adjusted ZKP <= -threshold; held-out evidence "
+            "is reported and may warn but does not veto the recommendation"
+        ),
     }
 
 
@@ -943,8 +956,9 @@ def manual_hand(args) -> int:
             "headline": hand_headline,
         },
         command={"datasets": commands},
-        warnings=(
-            ["Hand evidence is mixed across all/free rows; inspect both datasets before choosing."]
+        warnings=list(evidence.get("warnings") or [])
+        + (
+            ["All-row hand evidence is below the decision threshold; inspect both hands before choosing."]
             if evidence["recommendation"] == "ambiguous"
             else []
         ),

@@ -15,7 +15,7 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
 from pathlib import Path
@@ -7116,43 +7116,118 @@ def choose_shared_hand_by_scout(
     return shared_selected, shared, alternate_runs
 
 
-def hand_diagnostic_supports_other(stats: Mapping[str, object], args: argparse.Namespace) -> tuple[bool, list[str]]:
-    """Return whether row-level paired t-style diagnostics support ``other``.
+def _adjusted_hand_z_block(stats: Mapping[str, object], split: str) -> dict[str, object]:
+    """Return the declared Klar--Palatinus adjusted-Z block for one split."""
 
-    ``absolute_structure_diagnostic.py`` defines positive paired-row t statistics as
-    support for the current best/final row table.  A post-feedback promotion
-    switches to the opposite-hand row table, so the required sign is negative.
-    This statistic is not a calibrated normal Z score.
+    support = stats.get(split) if isinstance(stats, Mapping) else {}
+    support = support if isinstance(support, Mapping) else {}
+    adjusted = support.get("klar_palatinus_adjusted_hand_z")
+    return dict(adjusted) if isinstance(adjusted, Mapping) else {}
+
+
+def _combine_adjusted_hand_z(
+    diagnostics: Iterable[Mapping[str, object]],
+    split: str,
+) -> dict[str, object]:
+    """Combine independent-dataset adjusted hand counts with a declared rule.
+
+    Each physical dataset contributes its signed reflection-count numerator and
+    adjusted variance.  The result is positive when the currently evaluated
+    coordinate hand is favored and negative when its inverse is favored.
     """
 
-    min_all = float(getattr(args, "hand_min_z_all", 2.0))
-    min_free = float(getattr(args, "hand_min_z_free", 0.5))
-    min_free_rows = max(0, int(getattr(args, "hand_min_free_rows", 10) or 0))
+    numerator = 0.0
+    variance = 0.0
+    rows = 0
+    datasets = 0
+    excluded: list[str] = []
+    for index, diagnostic in enumerate(diagnostics):
+        adjusted = _adjusted_hand_z_block(diagnostic, split)
+        n = int(adjusted.get("n", 0) or 0)
+        k_effective = safe_float(
+            adjusted.get("k_effective_selected_wins_plus_half_ties"),
+            float("nan"),
+        )
+        w = safe_float(adjusted.get("w"), float("nan"))
+        if (
+            str(adjusted.get("status") or "") != "ok"
+            or n <= 0
+            or not math.isfinite(k_effective)
+            or not math.isfinite(w)
+            or n - w <= 0.0
+        ):
+            excluded.append(str(index))
+            continue
+        numerator += 2.0 * k_effective - n
+        variance += n - w
+        rows += n
+        datasets += 1
+    z = numerator / math.sqrt(variance) if datasets and variance > 0.0 else float("nan")
+    return {
+        "status": "ok" if math.isfinite(z) else "unavailable",
+        "z": z,
+        "n": rows,
+        "datasets": datasets,
+        "signed_numerator": numerator,
+        "adjusted_variance": variance,
+        "excluded_dataset_indices": excluded,
+        "positive_favors_current_coordinates": True,
+        "combination_rule": "sum(2*k_effective-n)/sqrt(sum(n-w)) across physical datasets",
+    }
+
+
+def hand_diagnostic_supports_other(stats: Mapping[str, object], args: argparse.Namespace) -> tuple[bool, list[str]]:
+    """Use the all-row adjusted ZKP to decide whether to invert the model.
+
+    The held-out split is deliberately diagnostic: a small or conflicting free
+    Z emits a warning but does not veto a decisive all-row statistic.
+    """
+
+    threshold = float(getattr(args, "hand_flip_zkp_all", 3.5))
+    all_adjusted = _adjusted_hand_z_block(stats, "all")
+    all_z = safe_float(all_adjusted.get("z"), float("nan"))
     reasons: list[str] = []
-    all_block = stats.get("all") if isinstance(stats, Mapping) else {}
-    free_block = stats.get("free") if isinstance(stats, Mapping) else {}
-    all_t = safe_float((all_block or {}).get("paired_row_t_delta_chi2") if isinstance(all_block, Mapping) else float("nan"))
-    free_t = safe_float((free_block or {}).get("paired_row_t_delta_chi2") if isinstance(free_block, Mapping) else float("nan"))
-    try:
-        free_n = int((free_block or {}).get("n", 0) if isinstance(free_block, Mapping) else 0)
-    except (TypeError, ValueError, OverflowError):
-        free_n = 0
-    if not math.isfinite(all_t) or all_t > -min_all:
+    if str(all_adjusted.get("status") or "") != "ok" or not math.isfinite(all_z):
+        reasons.append("all-row Klar-Palatinus adjusted hand Z is unavailable")
+    elif all_z > -threshold:
         reasons.append(
-            f"all-row paired t-style statistic {all_t:.4g} does not support switching to other "
-            f"at threshold {min_all:.4g}"
-        )
-    if min_free > 0.0 and (not math.isfinite(free_t) or free_t > -min_free):
-        reasons.append(
-            f"free-row paired t-style statistic {free_t:.4g} does not support switching to other "
-            f"at threshold {min_free:.4g}"
-        )
-    if free_n < min_free_rows:
-        reasons.append(
-            f"free-row paired t-style statistic has n={free_n}, below the minimum {min_free_rows} "
-            "required for material opposite-hand support"
+            f"all-row Klar-Palatinus adjusted hand Z {all_z:.4g} does not favor inversion "
+            f"at the {-threshold:.4g} decision boundary"
         )
     return not reasons, reasons
+
+
+def _hand_evidence_warnings(
+    *,
+    all_z: float,
+    free_z: float,
+    switched: bool,
+    threshold: float,
+) -> list[str]:
+    """Warn when final-hand support is weak, conflicting, or not held out."""
+
+    sign = -1.0 if switched else 1.0
+    oriented_all = sign * all_z if math.isfinite(all_z) else float("nan")
+    oriented_free = sign * free_z if math.isfinite(free_z) else float("nan")
+    warnings: list[str] = []
+    if not math.isfinite(oriented_all):
+        warnings.append("all-row Klar-Palatinus adjusted hand Z is unavailable")
+    elif oriented_all < threshold:
+        warnings.append(
+            f"final-hand all-row ZKP is {oriented_all:.3g}, below the decisive threshold {threshold:.3g}"
+        )
+    if not math.isfinite(oriented_free):
+        warnings.append("held-out Klar-Palatinus adjusted hand Z is unavailable")
+    elif oriented_free < 0.0:
+        warnings.append(
+            f"held-out ZKP {oriented_free:.3g} conflicts with the all-row selected hand"
+        )
+    elif oriented_free < threshold:
+        warnings.append(
+            f"held-out ZKP {oriented_free:.3g} supports the selected hand only weakly "
+            f"(< {threshold:.3g})"
+        )
+    return warnings
 
 
 def elastic_hand_nuisance(nuisance: Mapping[str, object]) -> tuple[dict[str, object], dict[str, object]]:
@@ -8174,6 +8249,10 @@ def run_multi_final_elastic_hand_selection(
         records[ds.name] = record
 
     complete = [record for record in records.values() if record.get("status") == "complete"]
+    complete_diagnostics = [
+        try_read_json(Path(str(record.get("diagnostic") or "")))
+        for record in complete
+    ]
     pooled = _pooled_hand_pair_statistics(
         [
             (
@@ -8189,18 +8268,18 @@ def run_multi_final_elastic_hand_selection(
     total_free_rows = int((pooled.get("free") or {}).get("n", 0) or 0)
     total_score_delta = sum(safe_float(record.get("score_delta_selected_minus_inverse"), 0.0) for record in complete)
     incomplete = len(complete) != len(prep.datasets)
+    adjusted_z_before = {
+        split: _combine_adjusted_hand_z(complete_diagnostics, split)
+        for split in ("all", "work", "free")
+    }
+    aggregate_all_zkp = safe_float(adjusted_z_before["all"].get("z"), float("nan"))
+    aggregate_free_zkp = safe_float(adjusted_z_before["free"].get("z"), float("nan"))
+    hand_flip_threshold = float(getattr(args, "hand_flip_zkp_all", 3.5))
     switch = bool(
         complete
         and not incomplete
-        and math.isfinite(aggregate_all_t)
-        and aggregate_all_t <= -float(getattr(args, "hand_min_z_all", 2.0))
-        and (
-            float(getattr(args, "hand_min_z_free", 0.5)) <= 0.0
-            or math.isfinite(aggregate_free_t)
-            and aggregate_free_t <= -float(getattr(args, "hand_min_z_free", 0.5))
-        )
-        and total_free_rows >= int(getattr(args, "hand_min_free_rows", 10))
-        and total_score_delta > float(getattr(args, "hand_accept_delta", 0.0))
+        and math.isfinite(aggregate_all_zkp)
+        and aggregate_all_zkp <= -hand_flip_threshold
         and is_shelx_model(final_model)
     )
     selected_model_after = final_model
@@ -8208,6 +8287,27 @@ def run_multi_final_elastic_hand_selection(
     if switch:
         selected_model_after = str(make_alternate_hand_model(python, final_model, root, logs, False))
         selected_hand_after = "alternate" if selected_hand == "original" else "original"
+    orientation = -1.0 if switch else 1.0
+    adjusted_z_final = {
+        split: {
+            **block,
+            "z": (
+                orientation * safe_float(block.get("z"), float("nan"))
+                if math.isfinite(safe_float(block.get("z"), float("nan")))
+                else float("nan")
+            ),
+            "positive_favors_final_selected_hand": True,
+        }
+        for split, block in adjusted_z_before.items()
+    }
+    hand_warnings = _hand_evidence_warnings(
+        all_z=aggregate_all_zkp,
+        free_z=aggregate_free_zkp,
+        switched=switch,
+        threshold=hand_flip_threshold,
+    )
+    if incomplete:
+        hand_warnings.append("one or more datasets lacked a complete exact hand-pair contract; no automatic inversion was made")
     result = {
         **base,
         "status": "switched" if switch else "kept" if not incomplete else "incomplete_kept",
@@ -8220,13 +8320,18 @@ def run_multi_final_elastic_hand_selection(
             "score_delta_selected_minus_inverse": total_score_delta,
             "negative_favors_inverse": True,
             "splits": pooled,
+            "adjusted_z_before_selection": adjusted_z_before,
+            "adjusted_z_final_hand_favored": adjusted_z_final,
         },
         "hand_switched": switch,
         "selected_hand_after": selected_hand_after,
         "selected_model_after": selected_model_after,
+        "hand_flip_zkp_all_threshold": hand_flip_threshold,
+        "warnings": hand_warnings,
         "decision_rule": (
-            "switch only after every dataset has a complete exact row pair, aggregate all/free evidence and the "
-            "aggregate composite score favor the inverse beyond the declared thresholds"
+            "switch once when every dataset has a complete exact row pair and the combined all-row "
+            "Klar-Palatinus adjusted Z favors the inverse by at least the declared threshold; held-out "
+            "evidence is reported and may warn but does not veto the all-row decision"
         ),
     }
     write_json(artifact, result)
@@ -8612,8 +8717,6 @@ def run_multi_post_feedback_hand_diagnostic(
             opposite_gate_ok, opposite_gate_reasons = hand_diagnostic_supports_other(stats, args)
             materially_opposite = bool(
                 not incomplete_reasons
-                and math.isfinite(score_delta)
-                and score_delta > float(getattr(args, "hand_accept_delta", 0.0))
                 and opposite_gate_ok
             )
             opposite_config = (
@@ -9280,6 +9383,16 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
             else {},
         )
         post_feedback_delta = final_score.get("score", float("inf")) - other_score.get("score", float("inf"))
+        hand_stats = try_read_json(stats_path) or {}
+        raw_all_zkp = safe_float(
+            _adjusted_hand_z_block(hand_stats, "all").get("z"),
+            float("nan"),
+        )
+        raw_free_zkp = safe_float(
+            _adjusted_hand_z_block(hand_stats, "free").get("z"),
+            float("nan"),
+        )
+        hand_flip_threshold = float(getattr(args, "hand_flip_zkp_all", 3.5))
         post_feedback_hand_promotion = {
             "status": "not_promoted",
             "method": "nakane_negative_thickness_elastic_pair_v1",
@@ -9296,14 +9409,22 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
             "shared_eigendecomposition": True,
             "nuisance_refit": False,
             "jitter_refit": False,
+            "adjusted_z_before_selection": {
+                "all": raw_all_zkp,
+                "free": raw_free_zkp,
+                "positive_favors_active_hand": True,
+            },
+            "hand_flip_zkp_all_threshold": hand_flip_threshold,
         }
         diagnostic_gate_ok, diagnostic_gate_reasons = hand_diagnostic_supports_other(
-            try_read_json(stats_path) or {},
+            hand_stats,
             args,
         )
-        post_feedback_hand_promotion["diagnostic_quality_gate_status"] = "passed" if diagnostic_gate_ok else "rejected_switch"
+        post_feedback_hand_promotion["diagnostic_quality_gate_status"] = (
+            "switch_supported" if diagnostic_gate_ok else "keep_current"
+        )
         post_feedback_hand_promotion["diagnostic_quality_gate_reasons"] = diagnostic_gate_reasons
-        if post_feedback_delta > float(args.hand_accept_delta) and diagnostic_gate_ok and is_shelx_model(final_model):
+        if diagnostic_gate_ok and is_shelx_model(final_model):
             promoted_model = make_alternate_hand_model(python, final_model, root, logs, args.dry_run)
             promoted = root / "runs" / ds.name / "adaptive_promoted_hand_final"
             run_logged(
@@ -9341,6 +9462,17 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
             final = promoted
             final_model = str(best_endpoint_model(promoted) or promoted_model)
             active_hand = post_feedback_hand_promotion["opposite_hand"]
+            post_feedback_hand_promotion["adjusted_z_final_hand_favored"] = {
+                "all": -raw_all_zkp if math.isfinite(raw_all_zkp) else float("nan"),
+                "free": -raw_free_zkp if math.isfinite(raw_free_zkp) else float("nan"),
+                "positive_favors_final_selected_hand": True,
+            }
+            post_feedback_hand_promotion["warnings"] = _hand_evidence_warnings(
+                all_z=raw_all_zkp,
+                free_z=raw_free_zkp,
+                switched=True,
+                threshold=hand_flip_threshold,
+            )
             absolute_structure_decision = {
                 **absolute_structure_decision,
                 "status": "complete",
@@ -9348,9 +9480,18 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
                 "post_feedback_selected_hand": active_hand,
                 "post_feedback_promotion": post_feedback_hand_promotion,
             }
-        elif post_feedback_delta > float(args.hand_accept_delta) and not diagnostic_gate_ok:
-            post_feedback_hand_promotion["status"] = "rejected_by_diagnostic_quality_gate"
         else:
+            post_feedback_hand_promotion["adjusted_z_final_hand_favored"] = {
+                "all": raw_all_zkp,
+                "free": raw_free_zkp,
+                "positive_favors_final_selected_hand": True,
+            }
+            post_feedback_hand_promotion["warnings"] = _hand_evidence_warnings(
+                all_z=raw_all_zkp,
+                free_z=raw_free_zkp,
+                switched=False,
+                threshold=hand_flip_threshold,
+            )
             absolute_structure_decision = {
                 **absolute_structure_decision,
                 "status": "complete",
@@ -14841,11 +14982,16 @@ def _quick_hand_block_t_style(block: Mapping[str, object], *, final_is_other: bo
     raw_t = _quick_float(block.get("paired_row_t_delta_chi2"))
     oriented_delta = sign * raw_delta if math.isfinite(raw_delta) else float("nan")
     oriented_t = sign * raw_t if math.isfinite(raw_t) else float("nan")
+    adjusted = block.get("klar_palatinus_adjusted_hand_z")
+    adjusted = adjusted if isinstance(adjusted, Mapping) else {}
+    raw_zkp = _quick_float(adjusted.get("z"))
+    oriented_zkp = sign * raw_zkp if math.isfinite(raw_zkp) else float("nan")
     return {
         "n": n,
         "df": df,
         "delta_chi2_rejected_minus_final": oriented_delta,
         "paired_t_style_positive_favors_final": oriented_t,
+        "adjusted_zkp_positive_favors_final": oriented_zkp,
         "paired_t_style_definition": (
             "paired Student-t-style contrast of per-row delta_chi2; positive favors the final selected hand; "
             "not a calibrated normal Z score"
@@ -14926,6 +15072,28 @@ def _quick_final_elastic_hand_aggregate(payload: Mapping[str, object]) -> dict[s
     return oriented
 
 
+def _quick_final_elastic_hand_zkp(payload: Mapping[str, object]) -> dict[str, dict[str, object]]:
+    """Return combined adjusted ZKP values already oriented to the final hand."""
+
+    if str(payload.get("method") or "") != "nakane_negative_thickness_elastic_pair_v1":
+        return {}
+    aggregate = payload.get("aggregate") if isinstance(payload.get("aggregate"), Mapping) else {}
+    adjusted = (
+        aggregate.get("adjusted_z_final_hand_favored")
+        if isinstance(aggregate.get("adjusted_z_final_hand_favored"), Mapping)
+        else {}
+    )
+    result: dict[str, dict[str, object]] = {}
+    for split in ("all", "work", "free"):
+        block = adjusted.get(split) if isinstance(adjusted.get(split), Mapping) else {}
+        result[split] = {
+            "z": _quick_float(block.get("z")) if block else None,
+            "n": _quick_int(block.get("n")) if block else None,
+            "datasets": _quick_int(block.get("datasets")) if block else None,
+        }
+    return result
+
+
 def _quick_multi_hand_console_rows(payload: Mapping[str, object]) -> dict[str, dict[str, object]]:
     """Return compact per-dataset hand evidence for console/report consumers."""
 
@@ -14969,6 +15137,17 @@ def _quick_multi_hand_console_rows(payload: Mapping[str, object]) -> dict[str, d
                 }
                 for split, block in diagnostic_blocks.items()
             }
+            adjusted = {
+                split: (
+                    diagnostic_blocks[split].get("klar_palatinus_adjusted_hand_z")
+                    if isinstance(
+                        diagnostic_blocks[split].get("klar_palatinus_adjusted_hand_z"),
+                        Mapping,
+                    )
+                    else {}
+                )
+                for split in ("all", "work", "free")
+            }
             selected_minus_inverse = _quick_float(record.get("score_delta_selected_minus_inverse"))
             final_margin = sign * (-selected_minus_inverse) if math.isfinite(selected_minus_inverse) else None
             margins = {}
@@ -14988,6 +15167,21 @@ def _quick_multi_hand_console_rows(payload: Mapping[str, object]) -> dict[str, d
             "t_all": (paired.get("all") or {}).get("t") if isinstance(paired.get("all"), Mapping) else paired_compatibility.get("all"),
             "t_work": (paired.get("work") or {}).get("t") if isinstance(paired.get("work"), Mapping) else paired_compatibility.get("work"),
             "t_free": (paired.get("free") or {}).get("t") if isinstance(paired.get("free"), Mapping) else paired_compatibility.get("free"),
+            "zkp_all": (
+                sign * _quick_float((adjusted.get("all") or {}).get("z"))
+                if final_elastic and math.isfinite(_quick_float((adjusted.get("all") or {}).get("z")))
+                else None
+            ),
+            "zkp_work": (
+                sign * _quick_float((adjusted.get("work") or {}).get("z"))
+                if final_elastic and math.isfinite(_quick_float((adjusted.get("work") or {}).get("z")))
+                else None
+            ),
+            "zkp_free": (
+                sign * _quick_float((adjusted.get("free") or {}).get("z"))
+                if final_elastic and math.isfinite(_quick_float((adjusted.get("free") or {}).get("z")))
+                else None
+            ),
             "df_all": (paired.get("all") or {}).get("df") if isinstance(paired.get("all"), Mapping) else None,
             "df_work": (paired.get("work") or {}).get("df") if isinstance(paired.get("work"), Mapping) else None,
             "df_free": (paired.get("free") or {}).get("df") if isinstance(paired.get("free"), Mapping) else None,
@@ -15023,6 +15217,7 @@ def _quick_multi_hand_evidence_lines(
 
     rows = _quick_multi_hand_console_rows(payload)
     pooled = _quick_final_elastic_hand_aggregate(payload)
+    pooled_zkp = _quick_final_elastic_hand_zkp(payload)
     final_elastic = bool(pooled)
     lines = [
         "## Final Hand Evidence",
@@ -15030,9 +15225,9 @@ def _quick_multi_hand_evidence_lines(
         (
             "The final elastic negative-thickness comparison uses each crystal's exact frozen rows, nuisance, scales, "
             "N/Q, jitter, and proper transform, with absorption disabled only for the Hermitian hand identity. "
-            "The pooled all/work/free contrast below is the predeclared shared-model selection statistic; each "
-            "crystal remains visible separately. Positive displayed t-style values favor the final retained hand. "
-            "These are paired row contrasts with n and df=n-1, not calibrated normal Z scores."
+            "The combined all-row Klar--Palatinus adjusted Z is the hand-selection statistic; held-out Z is a "
+            "warning diagnostic and each crystal remains visible separately. Displayed ZKP and t-style values are "
+            "oriented so positive favors the final retained hand; the t-style values are not normal Z scores."
             if final_elastic
             else
             "Each row below compares one crystal's frozen final row table with an opposite-hand recomputation at "
@@ -15046,6 +15241,15 @@ def _quick_multi_hand_evidence_lines(
         lines.extend(
             [
                 f"Selection status: `{payload.get('status', 'missing')}`; hand switched: `{bool(payload.get('hand_switched', False))}`.",
+                "",
+                "| pooled adjusted ZKP | ZKP favoring final hand | n | datasets |",
+                "|---|---:|---:|---:|",
+                *[
+                    f"| {split} | {_quick_number((pooled_zkp.get(split) or {}).get('z'), 3)} | "
+                    f"{(pooled_zkp.get(split) or {}).get('n', 'n/a')} | "
+                    f"{(pooled_zkp.get(split) or {}).get('datasets', 'n/a')} |"
+                    for split in ("all", "work", "free")
+                ],
                 "",
                 "| pooled exact rows | paired t-style | n | df |",
                 "|---|---:|---:|---:|",
@@ -15071,14 +15275,16 @@ def _quick_multi_hand_evidence_lines(
             [
                 f"Consistency gate: `{payload.get('status', 'missing')}`.",
                 "",
-                "| dataset | status | rows all/work/free | paired t-style all/work/free | df all/work/free |",
-                "|---|---|---:|---:|---:|",
+                "| dataset | status | rows all/work/free | ZKP all/work/free | paired t-style all/work/free | df all/work/free |",
+                "|---|---|---:|---:|---:|---:|",
             ]
         )
         for name, row in rows.items():
             lines.append(
                 f"| {name} | {row.get('status', 'missing')} | "
                 f"{row.get('rows_all', 0)}/{row.get('rows_work', 0)}/{row.get('rows_free', 0)} | "
+                f"{_quick_number(row.get('zkp_all'), 3)}/{_quick_number(row.get('zkp_work'), 3)}/"
+                f"{_quick_number(row.get('zkp_free'), 3)} | "
                 f"{_quick_number(row.get('t_all'), 3)}/{_quick_number(row.get('t_work'), 3)}/"
                 f"{_quick_number(row.get('t_free'), 3)} | "
                 f"{row.get('df_all', 'n/a')}/{row.get('df_work', 'n/a')}/{row.get('df_free', 'n/a')} |"
@@ -15088,8 +15294,8 @@ def _quick_multi_hand_evidence_lines(
             [
                 f"Consistency gate: `{payload.get('status', 'missing')}`; artifact `{payload.get('artifact', '')}`.",
                 "",
-                "| dataset | status | rows all/work/free | paired t-style all/work/free | df all/work/free | chi2 margin all/work/free | composite score margin | selected/opposite row tables |",
-                "|---|---|---:|---:|---:|---:|---:|---|",
+                "| dataset | status | rows all/work/free | ZKP all/work/free | paired t-style all/work/free | df all/work/free | chi2 margin all/work/free | composite score margin | selected/opposite row tables |",
+                "|---|---|---:|---:|---:|---:|---:|---:|---|",
             ]
         )
         for name, row in rows.items():
@@ -15100,6 +15306,7 @@ def _quick_multi_hand_evidence_lines(
                         name,
                         str(row.get("status", "missing")),
                         f"{row.get('rows_all', 0)}/{row.get('rows_work', 0)}/{row.get('rows_free', 0)}",
+                        f"{_quick_number(row.get('zkp_all'), 3)}/{_quick_number(row.get('zkp_work'), 3)}/{_quick_number(row.get('zkp_free'), 3)}",
                         f"{_quick_number(row.get('t_all'), 3)}/{_quick_number(row.get('t_work'), 3)}/{_quick_number(row.get('t_free'), 3)}",
                         f"{row.get('df_all', 'n/a')}/{row.get('df_work', 'n/a')}/{row.get('df_free', 'n/a')}",
                         f"{_quick_number(row.get('chi2_margin_all'), 3)}/{_quick_number(row.get('chi2_margin_work'), 3)}/{_quick_number(row.get('chi2_margin_free'), 3)}",
@@ -16094,6 +16301,8 @@ def _format_terminal_finish_summary(payload: Mapping[str, object]) -> str:
     t_free_n = payload.get("final_hand_t_style_free_n")
     t_all_df = payload.get("final_hand_t_style_all_df")
     t_free_df = payload.get("final_hand_t_style_free_df")
+    zkp_all = payload.get("final_hand_zkp_all")
+    zkp_free = payload.get("final_hand_zkp_free")
     per_dataset_hand = (
         payload.get("final_hand_per_dataset")
         if isinstance(payload.get("final_hand_per_dataset"), Mapping)
@@ -16246,7 +16455,8 @@ def _format_terminal_finish_summary(payload: Mapping[str, object]) -> str:
     hand_scope = str(payload.get("final_hand_t_style_scope") or payload.get("final_hand_z_scope") or "")
     if hand_scope == "per_dataset":
         evidence = "; ".join(
-            f"{name}=t {_quick_number((row or {}).get('t_all'), 3)}/{_quick_number((row or {}).get('t_free'), 3)} "
+            f"{name}=ZKP {_quick_number((row or {}).get('zkp_all'), 3)}/{_quick_number((row or {}).get('zkp_free'), 3)}; "
+            f"t {_quick_number((row or {}).get('t_all'), 3)}/{_quick_number((row or {}).get('t_free'), 3)} "
             f"(df {(row or {}).get('df_all', 'n/a')}/{(row or {}).get('df_free', 'n/a')})"
             for name, row in per_dataset_hand.items()
             if isinstance(row, Mapping)
@@ -16258,11 +16468,16 @@ def _format_terminal_finish_summary(payload: Mapping[str, object]) -> str:
         )
     else:
         hand_line = (
-            f"  Hand: {final_hand} (paired t-style all/free = "
+            f"  Hand: {final_hand} (adjusted ZKP all/free = "
+            f"{_quick_number(zkp_all, 3)} / {_quick_number(zkp_free, 3)}; "
+            "positive favors the selected hand; paired t-style all/free = "
             f"{_quick_flat_hand_t_style_text(t_all, t_all_n, t_all_df)} / "
             f"{_quick_flat_hand_t_style_text(t_free, t_free_n, t_free_df)}; "
-            "positive favors the selected hand; not a calibrated normal Z score)"
+            "t-style is not a calibrated normal Z score)"
         )
+    hand_warnings = [str(item) for item in payload.get("final_hand_warnings", [])]
+    if hand_warnings:
+        hand_line += "\n  Hand warning: " + "; ".join(hand_warnings)
     if jana_dynamic or jana_born:
         row_stat_lines = [
             "Final JANA/PETS-style row statistics (computed by GROND)",
@@ -16534,6 +16749,7 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
         }
     multi_hand_rows = _quick_multi_hand_console_rows(multi_hand_diagnostic)
     multi_hand_pooled = _quick_final_elastic_hand_aggregate(multi_hand_diagnostic)
+    multi_hand_zkp = _quick_final_elastic_hand_zkp(multi_hand_diagnostic)
     if multi_hand_diagnostic:
         hand_summary["promotion_status"] = multi_hand_diagnostic.get("status", "missing")
     z_summary = _quick_residual_z_summary([path for _name, path in frozen_row_tables])
@@ -16673,6 +16889,28 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
         if per_dataset_jana_json_path.is_file()
         else "not available for this historical run"
     )
+    if result.get("combined") and multi_hand_zkp:
+        hand_zkp_report_line = (
+            "| final-hand adjusted ZKP, all/work/free | "
+            f"`{_quick_number((multi_hand_zkp.get('all') or {}).get('z'), 3)}` / "
+            f"`{_quick_number((multi_hand_zkp.get('work') or {}).get('z'), 3)}` / "
+            f"`{_quick_number((multi_hand_zkp.get('free') or {}).get('z'), 3)}`; "
+            "combined across physical datasets and oriented positive for the final selected hand; "
+            "the all-row value controls the 3.5 inversion decision |"
+        )
+    elif result.get("combined"):
+        hand_zkp_report_line = (
+            "| final-hand adjusted ZKP, all/work/free | `not available for this historical run` |"
+        )
+    else:
+        hand_zkp_report_line = (
+            "| final-hand adjusted ZKP, all/work/free | "
+            f"`{_quick_number(hand_all.get('adjusted_zkp_positive_favors_final'), 3)}` / "
+            f"`{_quick_number(hand_work.get('adjusted_zkp_positive_favors_final'), 3)}` / "
+            f"`{_quick_number(hand_free.get('adjusted_zkp_positive_favors_final'), 3)}`; "
+            "oriented positive for the final selected hand; the all-row value controls the 3.5 inversion decision |"
+        )
+
     if result.get("combined") and multi_hand_pooled:
         hand_t_report_line = (
             "| final hand paired t-style, all/work/free | "
@@ -16845,6 +17083,7 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
             f"| initial hand scout | `{hand_summary.get('initial_hand', 'n/a')}`; delta original-minus-alternate `{_quick_number(hand_summary.get('initial_score_delta_original_minus_alternate'), 4)}` |",
             f"| final hand | `{hand_summary.get('final_hand', 'n/a')}`; post-feedback status `{hand_summary.get('promotion_status', 'n/a')}` |",
             hand_t_report_line,
+            hand_zkp_report_line,
             hand_delta_report_line,
             f"| free-row I residual Z | n `{free_z.get('n', 'n/a')}`; RMSZ `{_quick_number(free_z.get('rms_z'), 3)}`; meanZ `{_quick_number(free_z.get('mean_z'), 3)}`; median absZ `{_quick_number(free_z.get('median_abs_z'), 3)}` |",
             f"| all-row I residual Z | n `{all_z.get('n', 'n/a')}`; RMSZ `{_quick_number(all_z.get('rms_z'), 3)}`; meanZ `{_quick_number(all_z.get('mean_z'), 3)}`; median absZ `{_quick_number(all_z.get('median_abs_z'), 3)}` |",
@@ -17335,6 +17574,35 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
             if result.get("combined") and multi_hand_pooled
             else "per_dataset" if result.get("combined") else "single_dataset"
         ),
+        "final_hand_zkp_all": (
+            _quick_fraction((multi_hand_zkp.get("all") or {}).get("z"))
+            if result.get("combined") and multi_hand_zkp
+            else None
+            if result.get("combined")
+            else _quick_fraction(hand_all.get("adjusted_zkp_positive_favors_final"))
+        ),
+        "final_hand_zkp_free": (
+            _quick_fraction((multi_hand_zkp.get("free") or {}).get("z"))
+            if result.get("combined") and multi_hand_zkp
+            else None
+            if result.get("combined")
+            else _quick_fraction(hand_free.get("adjusted_zkp_positive_favors_final"))
+        ),
+        "final_hand_zkp_scope": (
+            "combined_independent_datasets"
+            if result.get("combined") and multi_hand_zkp
+            else "per_dataset" if result.get("combined") else "single_dataset"
+        ),
+        "final_hand_warnings": (
+            list(multi_hand_diagnostic.get("warnings") or [])
+            if result.get("combined")
+            else list(promotion_decision.get("warnings") or [])
+        ),
+        "final_hand_zkp_threshold": (
+            multi_hand_diagnostic.get("hand_flip_zkp_all_threshold", 3.5)
+            if result.get("combined")
+            else promotion_decision.get("hand_flip_zkp_all_threshold", 3.5)
+        ),
         "final_hand_z_all": (
             None
             if result.get("combined")
@@ -17498,6 +17766,15 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
             "positive favors the selected hand; not a calibrated normal Z score |"
         )
 
+    final_hand_zkp_line = (
+        "| final-hand adjusted ZKP, all/free | "
+        f"`{_quick_number(console.get('final_hand_zkp_all'), 3)}` / "
+        f"`{_quick_number(console.get('final_hand_zkp_free'), 3)}`; "
+        f"oriented positive for the final selected hand; all-row threshold "
+        f"`{_quick_number(console.get('final_hand_zkp_threshold'), 3)}`; "
+        "held-out evidence warns but does not veto |"
+    )
+
     final_lines = [
         "# GROND Final Summary",
         "",
@@ -17508,6 +17785,7 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
         "| item | value |",
         "|---|---|",
         f"| final hand | `{console['final_hand']}` |",
+        final_hand_zkp_line,
         final_hand_t_line,
         f"| selected HKL transform | `{console['selected_transform']}` |",
         f"| transform parity / determinant | `{console.get('selected_transform_parity', 'n/a')}` / `{console.get('selected_transform_determinant', 'per-dataset')}` |",
@@ -20309,6 +20587,9 @@ def _target_ablation_summary_row(variant: str, run_dir: Path, log_path: Path, re
         "hand_t_style_all": console.get("final_hand_t_style_all", console.get("final_hand_z_all")),
         "hand_t_style_all_n": console.get("final_hand_t_style_all_n"),
         "hand_t_style_all_df": console.get("final_hand_t_style_all_df"),
+        "hand_zkp_all": console.get("final_hand_zkp_all"),
+        "hand_zkp_free": console.get("final_hand_zkp_free"),
+        "hand_warnings": console.get("final_hand_warnings", []),
         "hand_t_style_free": console.get("final_hand_t_style_free", console.get("final_hand_z_free")),
         "hand_t_style_free_n": console.get("final_hand_t_style_free_n"),
         "hand_t_style_free_df": console.get("final_hand_t_style_free_df"),
@@ -20886,9 +21167,19 @@ def add_common_run_args(ap: argparse.ArgumentParser, *, expose_lambda_controls: 
             "residual-preference diagnostics."
         ),
     )
-    ap.add_argument("--hand-min-z-all", type=float, default=2.0, help="Legacy option name for the minimum paired all-row t-style hand statistic required before post-feedback hand promotion; this is not a calibrated normal Z score.")
-    ap.add_argument("--hand-min-z-free", type=float, default=0.5, help="Legacy option name for the minimum paired free-row t-style hand statistic required before post-feedback hand promotion. Set to 0 to disable the free-row sign gate; the minimum free-row count still applies.")
-    ap.add_argument("--hand-min-free-rows", type=int, default=10, help="Minimum paired held-out rows required before a post-feedback diagnostic may materially favor the opposite hand.")
+    ap.add_argument(
+        "--hand-flip-zkp-all",
+        type=float,
+        default=3.5,
+        help=(
+            "Invert the final acentric model once when the all-row Klar-Palatinus adjusted Z "
+            "favors the inverse by at least this magnitude (default 3.5). The held-out Z is "
+            "reported and may warn, but does not veto a decisive all-row result."
+        ),
+    )
+    ap.add_argument("--hand-min-z-all", type=float, default=2.0, help=argparse.SUPPRESS)
+    ap.add_argument("--hand-min-z-free", type=float, default=0.5, help=argparse.SUPPRESS)
+    ap.add_argument("--hand-min-free-rows", type=int, default=10, help=argparse.SUPPRESS)
     ap.add_argument("--stop-on-bad-preflight", action="store_true", default=False)
     ap.add_argument("--stop-on-bad-fit", action="store_true", default=False)
     ap.add_argument("--stop-if-wR2-above", type=float, default=0.75, help="Bad-data stop threshold for native all-row dynamic wR2 when --stop-on-bad-fit is enabled.")
@@ -21390,8 +21681,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="report computes evidence; input/inverse records the coordinate choice; skip keeps input coordinates without a hand claim.",
     )
     p_manual_hand.add_argument("--skip", action="store_true", help="Alias for --choice skip.")
-    p_manual_hand.add_argument("--min-adjusted-z-all", type=float, default=2.0)
-    p_manual_hand.add_argument("--min-adjusted-z-free", type=float, default=0.5)
+    p_manual_hand.add_argument(
+        "--min-adjusted-z-all",
+        type=float,
+        default=3.5,
+        help="All-row adjusted ZKP magnitude required for the input/inverse recommendation.",
+    )
+    p_manual_hand.add_argument(
+        "--min-adjusted-z-free",
+        type=float,
+        default=3.5,
+        help="Held-out adjusted ZKP reporting threshold; weak evidence warns but does not veto the recommendation.",
+    )
     p_manual_hand.add_argument("--min-free-rows", type=int, default=10)
     p_manual_hand.set_defaults(func=cmd_manual)
 
