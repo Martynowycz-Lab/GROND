@@ -29,6 +29,27 @@ def test_compact_scale_count_reports_materialized_selected_output():
     assert scale_param_count(payloads, compact=True) == 187
 
 
+def test_jana_row_statistics_use_source_sigma_not_fitted_sigma_eff():
+    model = {"symmetry_ops": [{"rot": [[1, 0, 0], [0, 1, 0], [0, 0, 1]]}]}
+    rows = [
+        {
+            "h": "1",
+            "k": "0",
+            "l": "0",
+            "target_I": "10",
+            "source_sigma": "1",
+            "sigma_eff": "100",
+            "dyn_scaled": "9",
+            "born_scaled": "8",
+        }
+    ]
+
+    summary = compute_row_mr_summary(rows, model)
+
+    assert summary["dynamic"]["Nobs"] == 1
+    assert summary["definition"]["sigma_source"].startswith("immutable experimental source_sigma")
+
+
 def test_row_mr_mr_merges_model_symmetry_equivalents():
     model = {
         "symmetry_ops": [

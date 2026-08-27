@@ -24,14 +24,14 @@ def select_multi_scale_contract(
     compact: Mapping[str, object],
     *,
     min_scale_reduction: float = 0.10,
-    require_bic_improvement: bool = True,
-    max_row_wr2_cost: float = 0.01,
+    require_bic_improvement: bool = False,
+    max_row_rall_cost: float = 0.01,
     max_endpoint_r1_cost: float = 0.005,
     max_endpoint_wr2_cost: float = 0.01,
     goof_min: float = 0.85,
     goof_max: float = 1.15,
     max_input_row_loss_fraction: float = 0.001,
-    min_bloch_wr2_gain: float = 0.002,
+    min_bloch_rall_gain: float = 0.002,
     min_hkl_safe_factor: float = 0.25,
     max_modulation_p95: float = 20.0,
     require_endpoint_health: bool = True,
@@ -40,7 +40,8 @@ def select_multi_scale_contract(
 
     The function is deliberately pure: callers retain both endpoint artifacts,
     while this decision records whether parsimony was earned without excessive
-    held-out, conventional-endpoint, coverage, or ADP-pathology cost.
+    held-out/work JANA-style row Rall cost or loss of the Born-to-Bloch Rall
+    advantage. Endpoint factors are reports; coverage and pathology remain gates.
     """
 
     reasons: list[str] = []
@@ -53,11 +54,11 @@ def select_multi_scale_contract(
         compact_bic = _finite(compact, "aggregate_bic")
         full_input_rows = _integer(full, "input_endpoint_rows")
         compact_input_rows = _integer(compact, "input_endpoint_rows")
-        full_rows = full["row_wr2"]
-        compact_rows = compact["row_wr2"]
+        full_rows = full["row_rall"]
+        compact_rows = compact["row_rall"]
         full_endpoint = full["endpoint"]
         compact_endpoint = compact["endpoint"]
-        compact_bloch_gain = compact["bloch_gain_wr2"]
+        compact_bloch_gain = compact["bloch_gain_rall"]
         if not all(
             isinstance(value, Mapping)
             for value in (full_rows, compact_rows, full_endpoint, compact_endpoint, compact_bloch_gain)
@@ -105,7 +106,7 @@ def select_multi_scale_contract(
             "scale_reduction_fraction": scale_reduction,
             "aggregate_bic_delta": compact_bic - full_bic,
             "input_endpoint_row_loss_fraction": input_row_loss,
-            "row_wr2_cost": {
+            "row_rall_cost": {
                 split: compact_row_values[split] - full_row_values[split]
                 for split in ("all", "work", "free")
             },
@@ -114,7 +115,7 @@ def select_multi_scale_contract(
                 "R1_gt": compact_r1_gt - full_r1_gt,
                 "wR2_all": compact_wr2 - full_wr2,
             },
-            "compact_bloch_wr2_gain": compact_bloch_gains,
+            "compact_bloch_rall_gain": compact_bloch_gains,
             "compact_hkl_safe_factor": compact_hkl_safe_factor,
             "compact_modulation_p95": compact_modulation_p95,
         }
@@ -128,20 +129,20 @@ def select_multi_scale_contract(
     if scale_reduction + epsilon < float(min_scale_reduction):
         reasons.append("scale_reduction_below_minimum")
     if require_bic_improvement and compact_bic >= full_bic:
-        reasons.append("aggregate_bic_not_improved")
+        warnings.append("aggregate_bic_not_improved_diagnostic_only")
     if input_row_loss > float(max_input_row_loss_fraction) + epsilon:
         reasons.append("input_endpoint_row_loss_exceeded")
     for split in ("all", "work", "free"):
-        if compact_row_values[split] - full_row_values[split] > float(max_row_wr2_cost) + epsilon:
-            reasons.append(f"row_wr2_{split}_cost_exceeded")
-        if compact_bloch_gains[split] + epsilon < float(min_bloch_wr2_gain):
-            reasons.append(f"pooled_bloch_gain_{split}_below_minimum")
+        if compact_row_values[split] - full_row_values[split] > float(max_row_rall_cost) + epsilon:
+            reasons.append(f"row_rall_{split}_cost_exceeded")
+        if compact_bloch_gains[split] + epsilon < float(min_bloch_rall_gain):
+            reasons.append(f"pooled_bloch_rall_gain_{split}_below_minimum")
     if compact_r1_all - full_r1_all > float(max_endpoint_r1_cost) + epsilon:
-        reasons.append("endpoint_r1_all_cost_exceeded")
+        warnings.append("endpoint_r1_all_cost_exceeded_diagnostic_only")
     if compact_r1_gt - full_r1_gt > float(max_endpoint_r1_cost) + epsilon:
-        reasons.append("endpoint_r1_gt_cost_exceeded")
+        warnings.append("endpoint_r1_gt_cost_exceeded_diagnostic_only")
     if compact_wr2 - full_wr2 > float(max_endpoint_wr2_cost) + epsilon:
-        reasons.append("endpoint_wr2_all_cost_exceeded")
+        warnings.append("endpoint_wr2_all_cost_exceeded_diagnostic_only")
     if not math.isfinite(compact_goof):
         warnings.append("endpoint_goof_unavailable")
     elif compact_goof < float(goof_min) - epsilon or compact_goof > float(goof_max) + epsilon:

@@ -13,9 +13,9 @@ def _contract(
     scale_params: int,
     aggregate_bic: float,
     input_endpoint_rows: int = 100_000,
-    row_all_wr2: float = 0.180,
-    row_work_wr2: float = 0.175,
-    row_free_wr2: float = 0.205,
+    row_all_rall: float = 0.180,
+    row_work_rall: float = 0.175,
+    row_free_rall: float = 0.205,
     endpoint_r1_all: float = 0.084,
     endpoint_r1_gt: float = 0.059,
     endpoint_wr2_all: float = 0.124,
@@ -29,12 +29,12 @@ def _contract(
         "scale_params": scale_params,
         "aggregate_bic": aggregate_bic,
         "input_endpoint_rows": input_endpoint_rows,
-        "row_wr2": {
-            "all": row_all_wr2,
-            "work": row_work_wr2,
-            "free": row_free_wr2,
+        "row_rall": {
+            "all": row_all_rall,
+            "work": row_work_rall,
+            "free": row_free_rall,
         },
-        "bloch_gain_wr2": {"all": 0.08, "work": 0.07, "free": 0.09},
+        "bloch_gain_rall": {"all": 0.08, "work": 0.07, "free": 0.09},
         "endpoint": {
             "R1_all": endpoint_r1_all,
             "R1_gt": endpoint_r1_gt,
@@ -60,9 +60,9 @@ def _passing_pair() -> tuple[dict[str, object], dict[str, object]]:
         scale_params=850,
         aggregate_bic=11_500.0,
         input_endpoint_rows=99_950,
-        row_all_wr2=0.185,
-        row_work_wr2=0.181,
-        row_free_wr2=0.212,
+        row_all_rall=0.185,
+        row_work_rall=0.181,
+        row_free_rall=0.212,
         endpoint_r1_all=0.087,
         endpoint_r1_gt=0.061,
         endpoint_wr2_all=0.130,
@@ -97,7 +97,7 @@ def test_all_numeric_gates_are_inclusive_at_the_documented_boundaries() -> None:
         scale_params=900,
         aggregate_bic=11_999.0,
         input_endpoint_rows=99_900,
-        row_wr2={"all": 0.190, "work": 0.185, "free": 0.215},
+        row_rall={"all": 0.190, "work": 0.185, "free": 0.215},
         endpoint={
             "R1_all": 0.089,
             "R1_gt": 0.064,
@@ -129,7 +129,6 @@ def test_all_numeric_gates_are_inclusive_at_the_documented_boundaries() -> None:
     ("mutation", "expected_reason"),
     [
         ({"scale_params": 901}, "scale_reduction_below_minimum"),
-        ({"aggregate_bic": 12_000.0}, "aggregate_bic_not_improved"),
         ({"input_endpoint_rows": 99_899}, "input_endpoint_row_loss_exceeded"),
     ],
 )
@@ -146,19 +145,33 @@ def test_contract_level_gates_fail_closed(
     assert expected_reason in result["reasons"]
 
 
+def test_bic_is_diagnostic_only_for_scale_topology() -> None:
+    full, compact = _passing_pair()
+    compact["aggregate_bic"] = full["aggregate_bic"] + 500.0
+
+    result = select_multi_scale_contract(
+        full,
+        compact,
+        require_bic_improvement=True,
+    )
+
+    assert result["accepted"] is True
+    assert "aggregate_bic_not_improved_diagnostic_only" in result["warnings"]
+
+
 @pytest.mark.parametrize(
     ("split", "value", "expected_reason"),
     [
-        ("all", 0.190_001, "row_wr2_all_cost_exceeded"),
-        ("work", 0.185_001, "row_wr2_work_cost_exceeded"),
-        ("free", 0.215_001, "row_wr2_free_cost_exceeded"),
+        ("all", 0.190_001, "row_rall_all_cost_exceeded"),
+        ("work", 0.185_001, "row_rall_work_cost_exceeded"),
+        ("free", 0.215_001, "row_rall_free_cost_exceeded"),
     ],
 )
 def test_each_row_split_is_independently_protected(
     split: str, value: float, expected_reason: str
 ) -> None:
     full, compact = _passing_pair()
-    compact["row_wr2"][split] = value
+    compact["row_rall"][split] = value
 
     result = _select(full, compact)
 
@@ -175,7 +188,7 @@ def test_each_row_split_is_independently_protected(
         ("wR2_all", 0.134_001, "endpoint_wr2_all_cost_exceeded"),
     ],
 )
-def test_each_endpoint_residual_is_independently_protected(
+def test_each_endpoint_residual_is_diagnostic_only(
     metric: str, value: float, expected_reason: str
 ) -> None:
     full, compact = _passing_pair()
@@ -183,9 +196,9 @@ def test_each_endpoint_residual_is_independently_protected(
 
     result = _select(full, compact)
 
-    assert result["accepted"] is False
-    assert result["selected_contract"] == "full"
-    assert expected_reason in result["reasons"]
+    assert result["accepted"] is True
+    assert result["selected_contract"] == "compact"
+    assert f"{expected_reason}_diagnostic_only" in result["warnings"]
 
 
 @pytest.mark.parametrize("goof", [0.849_999, 1.150_001, float("nan")])
@@ -267,12 +280,12 @@ def test_compact_endpoint_modulation_is_warning_only() -> None:
 @pytest.mark.parametrize("split", ["all", "work", "free"])
 def test_pooled_bloch_gain_is_required_on_every_split(split: str) -> None:
     full, compact = _passing_pair()
-    compact["bloch_gain_wr2"][split] = 0.0019
+    compact["bloch_gain_rall"][split] = 0.0019
 
     result = _select(full, compact)
 
     assert result["accepted"] is False
-    assert f"pooled_bloch_gain_{split}_below_minimum" in result["reasons"]
+    assert f"pooled_bloch_rall_gain_{split}_below_minimum" in result["reasons"]
 
 
 @pytest.mark.parametrize(
@@ -280,7 +293,7 @@ def test_pooled_bloch_gain_is_required_on_every_split(split: str) -> None:
     [
         ((), "scale_params"),
         ((), "aggregate_bic"),
-        (("row_wr2",), "free"),
+        (("row_rall",), "free"),
         (("endpoint",), "R1_all"),
         (("endpoint",), "GooF"),
         (("endpoint",), "n_reflections"),

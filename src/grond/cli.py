@@ -3624,8 +3624,8 @@ def validate_scale_contract_run_map(
     full_runs: Mapping[str, Path],
     candidate_runs: Mapping[str, Path],
     *,
-    min_bloch_wr2_gain: float = 0.0,
-    max_dataset_row_wr2_cost: float = 0.015,
+    min_bloch_rall_gain: float = 0.0,
+    max_dataset_row_rall_cost: float = 0.015,
     max_preexisting_bloch_gain_loss: float = 0.01,
 ) -> dict:
     """Prove that compact tables changed only fitted scale predictions."""
@@ -3686,38 +3686,38 @@ def validate_scale_contract_run_map(
             return {"ok": False, "reason": "incomplete_full_split_metrics", "dataset": name}
         bloch_gains: dict[str, float] = {}
         full_bloch_gains: dict[str, float] = {}
-        row_wr2_costs: dict[str, float] = {}
+        row_rall_costs: dict[str, float] = {}
         for split in ("all", "work", "free"):
-            dyn_wr2 = safe_float((metrics[split].get("dyn") or {}).get("wR2_all"), float("nan"))
-            born_wr2 = safe_float((metrics[split].get("born") or {}).get("wR2_all"), float("nan"))
-            full_dyn_wr2 = safe_float((full_metrics[split].get("dyn") or {}).get("wR2_all"), float("nan"))
-            full_born_wr2 = safe_float((full_metrics[split].get("born") or {}).get("wR2_all"), float("nan"))
-            gain = born_wr2 - dyn_wr2
-            full_gain = full_born_wr2 - full_dyn_wr2
-            row_cost = dyn_wr2 - full_dyn_wr2
+            dyn_rall = safe_float((metrics[split].get("dyn") or {}).get("R1_all"), float("nan"))
+            born_rall = safe_float((metrics[split].get("born") or {}).get("R1_all"), float("nan"))
+            full_dyn_rall = safe_float((full_metrics[split].get("dyn") or {}).get("R1_all"), float("nan"))
+            full_born_rall = safe_float((full_metrics[split].get("born") or {}).get("R1_all"), float("nan"))
+            gain = born_rall - dyn_rall
+            full_gain = full_born_rall - full_dyn_rall
+            row_cost = dyn_rall - full_dyn_rall
             if not all(math.isfinite(value) for value in (gain, full_gain, row_cost)):
                 return {"ok": False, "reason": "nonfinite_split_metrics", "dataset": name, "split": split}
-            if row_cost > float(max_dataset_row_wr2_cost):
+            if row_cost > float(max_dataset_row_rall_cost):
                 return {
                     "ok": False,
-                    "reason": "dataset_row_wr2_cost_exceeded",
+                    "reason": "dataset_row_rall_cost_exceeded",
                     "dataset": name,
                     "split": split,
                     "cost": row_cost,
-                    "maximum": float(max_dataset_row_wr2_cost),
+                    "maximum": float(max_dataset_row_rall_cost),
                 }
-            if full_gain >= float(min_bloch_wr2_gain) and gain < float(min_bloch_wr2_gain):
+            if full_gain >= float(min_bloch_rall_gain) and gain < float(min_bloch_rall_gain):
                 return {
                     "ok": False,
-                    "reason": "bloch_wr2_gain_below_minimum",
+                    "reason": "bloch_rall_gain_below_minimum",
                     "dataset": name,
                     "split": split,
                     "full_gain": full_gain,
                     "gain": gain,
-                    "minimum": float(min_bloch_wr2_gain),
+                    "minimum": float(min_bloch_rall_gain),
                 }
             if (
-                full_gain < float(min_bloch_wr2_gain)
+                full_gain < float(min_bloch_rall_gain)
                 and gain < full_gain - float(max_preexisting_bloch_gain_loss)
             ):
                 return {
@@ -3732,7 +3732,7 @@ def validate_scale_contract_run_map(
                 }
             bloch_gains[split] = gain
             full_bloch_gains[split] = full_gain
-            row_wr2_costs[split] = row_cost
+            row_rall_costs[split] = row_cost
         try:
             scale_count = int(best_native["scale_count"])
         except (KeyError, TypeError, ValueError, OverflowError):
@@ -3743,9 +3743,9 @@ def validate_scale_contract_run_map(
             "rows": len(full_rows),
             "immutable_columns": immutable,
             "scale_count": scale_count,
-            "bloch_wr2_gain": bloch_gains,
-            "full_bloch_wr2_gain": full_bloch_gains,
-            "row_wr2_cost": row_wr2_costs,
+            "bloch_rall_gain": bloch_gains,
+            "full_bloch_rall_gain": full_bloch_gains,
+            "row_rall_cost": row_rall_costs,
         }
     return {"ok": True, "datasets": datasets}
 
@@ -3806,13 +3806,13 @@ def combined_scale_contract_candidate(label: str, combined_dir: Path, *, scale_p
         "scale_params": int(scale_params),
         "aggregate_bic": float(aggregate_bic),
         "input_endpoint_rows": endpoint.get("input_unmerged_rows"),
-        "row_wr2": {
-            split: ((native.get("dyn") or {}).get(split) or {}).get("wR2_all")
+        "row_rall": {
+            split: ((native.get("dyn") or {}).get(split) or {}).get("R1_all")
             for split in ("all", "work", "free")
         },
-        "bloch_gain_wr2": {
-            split: safe_float(((native.get("born") or {}).get(split) or {}).get("wR2_all"))
-            - safe_float(((native.get("dyn") or {}).get(split) or {}).get("wR2_all"))
+        "bloch_gain_rall": {
+            split: safe_float(((native.get("born") or {}).get(split) or {}).get("R1_all"))
+            - safe_float(((native.get("dyn") or {}).get(split) or {}).get("R1_all"))
             for split in ("all", "work", "free")
         },
         "endpoint": {
@@ -3848,13 +3848,13 @@ def write_multi_scale_contract_report(out_dir: Path, decision: Mapping[str, obje
     lines = [
         "# GROND Multi-Dataset Scale-Contract Selection",
         "",
-        "Full and compact candidates reuse identical frozen Bloch predictions. Compact promotion is fail-closed for matched physics, aggregate fitted-variance BIC, bounded all/work/free row costs, bounded endpoint costs, unchanged merged coverage, and new ADP pathology. Non-ideal GooF is reported as a warning and never withholds an otherwise usable model.",
+        "Full and compact candidates reuse identical frozen Bloch predictions. Compact scale topology is selected from bounded all/work/free row Rall costs and preserved Born-to-Bloch Rall gain. SHELXL endpoint factors and BIC are diagnostics only; coverage, NPD/split pathology, and artifact health remain safety gates.",
         "",
         f"Status: `{decision.get('status', 'unknown')}`. Reason: `{decision.get('reason', 'completed candidate gate')}`. Wall time: `{safe_float(decision.get('wall_seconds')):.3f} s`.",
         "",
         f"Selected contract: `{decision.get('selected_contract', 'full')}`.",
         "",
-        "| contract | scales | aggregate BIC | row wR2 all/work/free | endpoint R1all/R1gt/wR2 | GooF | NPD/split | accepted | reasons |",
+        "| contract | scales | aggregate BIC report | row Rall all/work/free | endpoint R1all/R1gt/wR2 report | GooF | NPD/split | accepted | reasons |",
         "|---|---:|---:|---:|---:|---:|---:|---:|---|---|",
     ]
     evaluations = decision.get("evaluations") if isinstance(decision.get("evaluations"), list) else []
@@ -3864,7 +3864,7 @@ def write_multi_scale_contract_report(out_dir: Path, decision: Mapping[str, obje
         if not isinstance(candidate, Mapping):
             continue
         row = accepted_by_label.get(str(label), {})
-        wr = candidate.get("row_wr2") or {}
+        wr = candidate.get("row_rall") or {}
         ep = candidate.get("endpoint") or {}
         lines.append(
             f"| `{label}` | {candidate.get('scale_params', '')} | {safe_float(candidate.get('aggregate_bic')):.2f} | "
@@ -3998,7 +3998,7 @@ def run_multi_scale_contract_selection(
     thresholds = {
         "minimum_scale_reduction": float(getattr(args, "multi_scale_min_reduction", 0.10)),
         "require_bic_improvement": bool(getattr(args, "multi_scale_require_bic_improvement", True)),
-        "maximum_row_wr2_cost": float(getattr(args, "multi_scale_max_row_wr2_cost", 0.01)),
+        "maximum_row_rall_cost": float(getattr(args, "multi_scale_max_row_rall_cost", 0.01)),
         "maximum_endpoint_r1_cost": float(getattr(args, "multi_scale_max_endpoint_r1_cost", 0.005)),
         "maximum_endpoint_wr2_cost": float(getattr(args, "multi_scale_max_endpoint_wr2_cost", 0.01)),
         "goof_min": float(getattr(args, "multi_scale_goof_min", 0.85)),
@@ -4006,9 +4006,9 @@ def run_multi_scale_contract_selection(
         "maximum_input_row_loss_fraction": float(
             getattr(args, "multi_scale_max_input_row_loss_fraction", 0.001)
         ),
-        "minimum_bloch_wr2_gain": float(getattr(args, "multi_scale_min_bloch_wr2_gain", 0.002)),
-        "maximum_dataset_row_wr2_cost": float(
-            getattr(args, "multi_scale_max_dataset_row_wr2_cost", 0.015)
+        "minimum_bloch_rall_gain": float(getattr(args, "multi_scale_min_bloch_rall_gain", 0.002)),
+        "maximum_dataset_row_rall_cost": float(
+            getattr(args, "multi_scale_max_dataset_row_rall_cost", 0.015)
         ),
         "maximum_preexisting_bloch_gain_loss": float(
             getattr(args, "multi_scale_max_preexisting_bloch_gain_loss", 0.01)
@@ -4064,7 +4064,7 @@ def run_multi_scale_contract_selection(
         ("compact_min_strict", "selected_strict_run", "selected"),
     )
     preflight: dict[str, dict[str, object]] = {}
-    min_bloch_gain = float(thresholds["minimum_bloch_wr2_gain"])
+    min_bloch_gain = float(thresholds["minimum_bloch_rall_gain"])
     for label, run_key, selection_key in specifications:
         try:
             candidate_runs, reason = _multi_scale_candidate_runs(
@@ -4077,8 +4077,8 @@ def run_multi_scale_contract_selection(
             validation = validate_scale_contract_run_map(
                 selection_full_runs,
                 candidate_runs,
-                min_bloch_wr2_gain=min_bloch_gain,
-                max_dataset_row_wr2_cost=float(thresholds["maximum_dataset_row_wr2_cost"]),
+                min_bloch_rall_gain=min_bloch_gain,
+                max_dataset_row_rall_cost=float(thresholds["maximum_dataset_row_rall_cost"]),
                 max_preexisting_bloch_gain_loss=float(
                     thresholds["maximum_preexisting_bloch_gain_loss"]
                 ),
@@ -4225,7 +4225,7 @@ def run_multi_scale_contract_selection(
                 require_bic_improvement=bool(
                     getattr(args, "multi_scale_require_bic_improvement", True)
                 ),
-                max_row_wr2_cost=float(getattr(args, "multi_scale_max_row_wr2_cost", 0.01)),
+                max_row_rall_cost=float(getattr(args, "multi_scale_max_row_rall_cost", 0.01)),
                 max_endpoint_r1_cost=float(
                     getattr(args, "multi_scale_max_endpoint_r1_cost", 0.005)
                 ),
@@ -4237,7 +4237,7 @@ def run_multi_scale_contract_selection(
                 max_input_row_loss_fraction=float(
                     getattr(args, "multi_scale_max_input_row_loss_fraction", 0.001)
                 ),
-                min_bloch_wr2_gain=min_bloch_gain,
+                min_bloch_rall_gain=min_bloch_gain,
                 min_hkl_safe_factor=float(
                     getattr(args, "publication_endpoint_min_hkl_safe_factor", 0.25)
                 ),
@@ -4268,7 +4268,8 @@ def run_multi_scale_contract_selection(
             accepted_labels,
             key=lambda label: (
                 int(candidates[label]["scale_params"]),
-                safe_float((candidates[label].get("endpoint") or {}).get("wR2_all"), float("inf")),
+                safe_float((candidates[label].get("row_rall") or {}).get("free"), float("inf")),
+                safe_float((candidates[label].get("row_rall") or {}).get("work"), float("inf")),
             ),
         )
         selected_input, selected_publication = selected_payloads[selected_label]
@@ -4292,7 +4293,7 @@ def run_multi_scale_contract_selection(
         candidates=candidates,
         evaluations=evaluations,
         preflight=preflight,
-        selection_policy="smallest accepted scale count, then endpoint wR2all",
+        selection_policy="smallest accepted scale count, then held-out/work row Rall",
         selected_input_runs={name: str(path) for name, path in selected_input.items()},
         selected_publication_runs={name: str(path) for name, path in selected_publication.items()},
         publication_scale_polish_summaries=publication_scale_polish_summaries,
@@ -5597,6 +5598,12 @@ def run_endpoint_calibration(prep: PrepConfig, result: dict, args: argparse.Name
         f"{getattr(args, 'endpoint_calibration_max_r1_cost', 0.010):g}",
         "--publication-free-wr2-tolerance",
         f"{getattr(args, 'endpoint_calibration_free_wr2_tolerance', 0.040):g}",
+        "--publication-free-rall-tolerance",
+        f"{getattr(args, 'endpoint_calibration_free_rall_tolerance', 0.010):g}",
+        "--publication-work-rall-tolerance",
+        f"{getattr(args, 'endpoint_calibration_work_rall_tolerance', 0.010):g}",
+        "--publication-free-wrall-tolerance",
+        f"{getattr(args, 'endpoint_calibration_free_wrall_tolerance', 0.050):g}",
         "--publication-max-modulation-p95",
         f"{getattr(args, 'publication_endpoint_max_modulation_p95', 20.0):g}",
         "--publication-prefer-wght-mode",
@@ -5709,11 +5716,15 @@ def run_scale_window_polish(python: str, run_dir: Path, out_dir: Path, logs: Pat
         "--detector-max-field-log-rms",
         str(getattr(args, "detector_scale_max_field_log_rms", 0.10)),
         "--scale-objective",
-        getattr(args, "scale_polish_objective", "native"),
+        getattr(args, "scale_polish_objective", "row_mr"),
         "--tolerance",
         str(getattr(args, "scale_polish_tolerance", 0.01)),
         "--selection-metrics",
-        getattr(args, "scale_polish_selection_metrics", "Rall,wRall,native_R1_all,native_wR2_all"),
+        getattr(
+            args,
+            "scale_polish_selection_metrics",
+            "free_Rall,work_Rall",
+        ),
         "--frame-models",
         getattr(args, "scale_polish_frame_models", "adaptive,fixed"),
         "--adaptive-frame-counts",
@@ -7145,7 +7156,10 @@ def _combine_adjusted_hand_z(
         adjusted = _adjusted_hand_z_block(diagnostic, split)
         n = int(adjusted.get("n", 0) or 0)
         k_effective = safe_float(
-            adjusted.get("k_effective_selected_wins_plus_half_ties"),
+            adjusted.get(
+                "k_selected_lower_abs_intensity_residual",
+                adjusted.get("k_effective_selected_wins_plus_half_ties"),
+            ),
             float("nan"),
         )
         w = safe_float(adjusted.get("w"), float("nan"))
@@ -13700,14 +13714,14 @@ def cmd_run(args: argparse.Namespace) -> int:
         "multi_scale_contract_selection": {
             "mode": args.multi_scale_contract_selection,
             "minimum_scale_reduction": args.multi_scale_min_reduction,
-            "require_bic_improvement": args.multi_scale_require_bic_improvement,
-            "maximum_row_wr2_cost": args.multi_scale_max_row_wr2_cost,
+            "require_bic_improvement_diagnostic_only": args.multi_scale_require_bic_improvement,
+            "maximum_row_rall_cost": args.multi_scale_max_row_rall_cost,
             "maximum_endpoint_r1_cost": args.multi_scale_max_endpoint_r1_cost,
             "maximum_endpoint_wr2_cost": args.multi_scale_max_endpoint_wr2_cost,
             "goof_range": [args.multi_scale_goof_min, args.multi_scale_goof_max],
             "maximum_input_row_loss_fraction": args.multi_scale_max_input_row_loss_fraction,
-            "minimum_bloch_wr2_gain": args.multi_scale_min_bloch_wr2_gain,
-            "maximum_dataset_row_wr2_cost": args.multi_scale_max_dataset_row_wr2_cost,
+            "minimum_bloch_rall_gain": args.multi_scale_min_bloch_rall_gain,
+            "maximum_dataset_row_rall_cost": args.multi_scale_max_dataset_row_rall_cost,
             "maximum_preexisting_bloch_gain_loss": args.multi_scale_max_preexisting_bloch_gain_loss,
         },
         "resolution_limit": {
@@ -17461,8 +17475,8 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
             "",
             f"Selection policy: `{selection_policy}`; information criterion: `{information_criterion}`.",
             "",
-            "| branch | spec | WGHT | scales | R1(F)all | wR2(F^2)all | GooF | row-free wR(I)all | sigma scale |",
-            "|---|---|---|---:|---:|---:|---:|---:|---:|",
+            "| branch | spec | WGHT | scales | free row Rall | free row wRall | work row Rall | R1(F)all report | wR2(F^2)all report | GooF |",
+            "|---|---|---|---:|---:|---:|---:|---:|---:|---:|",
         ]
     )
     branch_rows = [
@@ -17483,17 +17497,18 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
                     str(row.get("spec", "n/a")),
                     str(row.get("wght_mode", "n/a")),
                     str(row.get("scale_params", "n/a")),
+                    _quick_percent(row.get("row_free_Rall")),
+                    _quick_percent(row.get("row_free_wRall")),
+                    _quick_percent(row.get("row_work_Rall")),
                     _quick_percent(row.get("shelxl_R1all")),
                     _quick_percent(row.get("shelxl_wR2all")),
                     _quick_number(row.get("shelxl_GooF"), 3),
-                    _quick_percent(row.get("native_free_wR2_all")),
-                    _quick_number(row.get("sigma_scale"), 3),
                 ]
             )
             + " |"
         )
     if not wrote_branch:
-        lines.append("| n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a |")
+        lines.append("| n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a |")
 
     lines.extend(
         [
@@ -17907,6 +17922,11 @@ def _publication_endpoint_from_result(result: Mapping[str, object]) -> Mapping[s
         checked["baseline_no_harm_gate"] = gate
         return checked
 
+    calibration_endpoint = _endpoint_calibration_publication_endpoint(result)
+    if calibration_endpoint:
+        checked_calibration = no_harm_checked(calibration_endpoint)
+        if checked_calibration:
+            return checked_calibration
     chooser_endpoint = _chooser_publication_endpoint(result)
     if chooser_endpoint:
         return no_harm_checked(chooser_endpoint)
@@ -17914,7 +17934,7 @@ def _publication_endpoint_from_result(result: Mapping[str, object]) -> Mapping[s
     chooser_status = str(chooser.get("status", "") if isinstance(chooser, Mapping) else "")
     if chooser and chooser_status not in {"", "disabled", "dry_run", "no_endpoint_runs"}:
         return {}
-    return no_harm_checked(_endpoint_calibration_publication_endpoint(result))
+    return {}
 
 
 def _shelx2map_executable(args: argparse.Namespace) -> str:
@@ -20089,6 +20109,12 @@ def cmd_scale_replay(args: argparse.Namespace) -> int:
         str(args.publication_max_r1_cost),
         "--publication-free-wr2-tolerance",
         str(args.publication_free_wr2_tolerance),
+        "--publication-free-rall-tolerance",
+        str(args.publication_free_rall_tolerance),
+        "--publication-work-rall-tolerance",
+        str(args.publication_work_rall_tolerance),
+        "--publication-free-wrall-tolerance",
+        str(args.publication_free_wrall_tolerance),
         "--publication-max-modulation-p95",
         str(args.publication_max_modulation_p95),
         "--publication-prefer-wght-mode",
@@ -21339,11 +21365,14 @@ def add_common_run_args(ap: argparse.ArgumentParser, *, expose_lambda_controls: 
     ap.add_argument("--endpoint-calibration-goof-max", type=float, default=1.15, help="Upper preferred GooF warning threshold; never a model-handoff gate.")
     ap.add_argument("--endpoint-calibration-max-r1-cost", type=float, default=0.010)
     ap.add_argument("--endpoint-calibration-free-wr2-tolerance", type=float, default=0.040)
+    ap.add_argument("--endpoint-calibration-free-rall-tolerance", type=float, default=0.010)
+    ap.add_argument("--endpoint-calibration-work-rall-tolerance", type=float, default=0.010)
+    ap.add_argument("--endpoint-calibration-free-wrall-tolerance", type=float, default=0.050)
     ap.add_argument(
         "--endpoint-calibration-selection-policy",
         choices=["bic", "gated-smallest"],
         default="gated-smallest",
-        help="Final scale-contract selector. Default promotes the smallest frozen-row-validated contract that also passes endpoint sanity gates; BIC remains available as a diagnostic policy.",
+        help="Final scale-contract selector. Scale topology is chosen from held-out/work JANA-style row factors; endpoint factors are reporting only.",
     )
     ap.add_argument(
         "--endpoint-calibration-information-criterion",
@@ -21365,9 +21394,21 @@ def add_common_run_args(ap: argparse.ArgumentParser, *, expose_lambda_controls: 
     ap.add_argument("--scale-polish-frame-models", default="adaptive,fixed", help="Frame-scale compression models tested by the scale-polish gate.")
     ap.add_argument("--scale-polish-adaptive-counts", default="auto", help="Adaptive neighboring-frame segment counts for scale polish; percentages such as 50%% are accepted.")
     ap.add_argument("--scale-polish-detector-bins", default="0,2,4,8", help="Detector flat-field grids tested on frozen predictions. Automatic promotion uses the smallest detector field that earns the validation gates; 8x8 remains diagnostic without independent calibration.")
-    ap.add_argument("--scale-polish-objective", choices=["row_mr", "native", "sigma"], default="native")
+    ap.add_argument(
+        "--scale-polish-objective",
+        choices=["row_mr", "native", "sigma"],
+        default="row_mr",
+        help="Fit compact frame scales on work rows with the JANA-style row weight by default.",
+    )
     ap.add_argument("--scale-polish-tolerance", type=float, default=0.01)
-    ap.add_argument("--scale-polish-selection-metrics", default="Rall,wRall,native_R1_all,native_wR2_all")
+    ap.add_argument(
+        "--scale-polish-selection-metrics",
+        default="free_Rall,work_Rall",
+        help=(
+            "Metrics protected when selecting compact scales. Default: held-out and work JANA-style "
+            "Rall; wRall is a secondary report/tie-break and endpoint/native wR2 are excluded."
+        ),
+    )
     ap.add_argument("--scale-polish-scan-offsets", action=argparse.BooleanOptionalAction, default=False, help="Test all block-boundary offsets in the scale-polish gate.")
     ap.add_argument(
         "--multi-scale-contract-selection",
@@ -21379,15 +21420,15 @@ def add_common_run_args(ap: argparse.ArgumentParser, *, expose_lambda_controls: 
         ),
     )
     ap.add_argument("--multi-scale-min-reduction", type=float, default=0.10, help="Minimum total scale-parameter reduction required for compact promotion.")
-    ap.add_argument("--multi-scale-require-bic-improvement", action=argparse.BooleanOptionalAction, default=True, help="Require aggregate fitted-variance BIC to improve before compact promotion.")
-    ap.add_argument("--multi-scale-max-row-wr2-cost", type=float, default=0.01, help="Maximum absolute compact wR2 cost on each of all, work, and free rows.")
+    ap.add_argument("--multi-scale-require-bic-improvement", action=argparse.BooleanOptionalAction, default=False, help="Deprecated diagnostic toggle; BIC is reported but does not select scale topology.")
+    ap.add_argument("--multi-scale-max-row-rall-cost", "--multi-scale-max-row-wr2-cost", dest="multi_scale_max_row_rall_cost", type=float, default=0.01, help="Maximum absolute compact JANA-style row Rall cost on each of all, work, and free rows.")
     ap.add_argument("--multi-scale-max-endpoint-r1-cost", type=float, default=0.005, help="Maximum absolute compact R1all and R1gt endpoint cost.")
     ap.add_argument("--multi-scale-max-endpoint-wr2-cost", type=float, default=0.01, help="Maximum absolute compact endpoint wR2all cost.")
     ap.add_argument("--multi-scale-goof-min", type=float, default=0.85)
     ap.add_argument("--multi-scale-goof-max", type=float, default=1.15)
     ap.add_argument("--multi-scale-max-input-row-loss-fraction", type=float, default=0.001, help="Maximum corrected-row loss allowed when materializing compact scales.")
-    ap.add_argument("--multi-scale-min-bloch-wr2-gain", type=float, default=0.002, help="Minimum pooled Bloch wR2 gain and minimum retained per-dataset gain where the full-scale control already passes.")
-    ap.add_argument("--multi-scale-max-dataset-row-wr2-cost", type=float, default=0.015, help="Maximum compact-versus-full wR2 cost on any individual dataset/split.")
+    ap.add_argument("--multi-scale-min-bloch-rall-gain", "--multi-scale-min-bloch-wr2-gain", dest="multi_scale_min_bloch_rall_gain", type=float, default=0.002, help="Minimum pooled Born-minus-Bloch row Rall gain and retained per-dataset gain.")
+    ap.add_argument("--multi-scale-max-dataset-row-rall-cost", "--multi-scale-max-dataset-row-wr2-cost", dest="multi_scale_max_dataset_row_rall_cost", type=float, default=0.015, help="Maximum compact-versus-full row Rall cost on any individual dataset/split.")
     ap.add_argument("--multi-scale-max-preexisting-bloch-gain-loss", type=float, default=0.01, help="Maximum additional Born-minus-Bloch loss allowed where the full-scale control already lacks a split-level Bloch win.")
     ap.add_argument(
         "--endpoint-min-d-spacing",
@@ -22444,9 +22485,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_scale.add_argument("--window-scan-deg", type=float, default=0.0, help="Also scan every integer group stride up to this physical window size.")
     p_scale.add_argument("--scan-offsets", action="store_true", help="Test all block-boundary offsets for each finite group stride.")
     p_scale.add_argument("--detector-bins", default="exact")
-    p_scale.add_argument("--scale-objective", choices=["row_mr", "native", "sigma"], default="native")
+    p_scale.add_argument("--scale-objective", choices=["row_mr", "native", "sigma"], default="row_mr")
     p_scale.add_argument("--tolerance", type=float, default=0.01)
-    p_scale.add_argument("--selection-metrics", default="Rall,wRall,native_R1_all,native_wR2_all")
+    p_scale.add_argument("--selection-metrics", default="free_Rall,work_Rall")
     p_scale.add_argument("--native-wght-a", type=float, default=None)
     p_scale.add_argument("--native-wght-b", type=float, default=None)
     p_scale.set_defaults(func=cmd_scale_polish)
@@ -22480,6 +22521,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_scale_replay.add_argument("--publication-goof-max", type=float, default=1.15)
     p_scale_replay.add_argument("--publication-max-r1-cost", type=float, default=0.010)
     p_scale_replay.add_argument("--publication-free-wr2-tolerance", type=float, default=0.040)
+    p_scale_replay.add_argument("--publication-free-rall-tolerance", type=float, default=0.010)
+    p_scale_replay.add_argument("--publication-work-rall-tolerance", type=float, default=0.010)
+    p_scale_replay.add_argument("--publication-free-wrall-tolerance", type=float, default=0.050)
     p_scale_replay.add_argument("--publication-max-modulation-p95", type=float, default=20.0, help="Warning level only; modulation p95 never blocks endpoint selection.")
     p_scale_replay.add_argument("--publication-prefer-wght-mode", default="freeze-zero")
     p_scale_replay.add_argument("--publication-allow-npd", action=argparse.BooleanOptionalAction, default=False, help="Explicit diagnostic override allowing NPD pathology in the selected compact-scale endpoint. Default requires NPD == 0; this strict scale-contract promotion also requires zero split warnings, even though the general endpoint chooser reports splits without withholding model handoff.")
@@ -22487,7 +22531,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--publication-selection-policy",
         choices=["bic", "gated-smallest"],
         default="gated-smallest",
-        help="Endpoint scale-contract selector. Default promotes the smallest contract passing endpoint, held-out-row, and detector-field gates; BIC remains diagnostic.",
+        help="Scale topology selector. Held-out/work JANA-style row factors are authoritative; endpoint factors are reporting only.",
     )
     p_scale_replay.add_argument(
         "--publication-information-criterion",
@@ -22541,6 +22585,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_cal_endpoint.add_argument("--publication-goof-max", type=float, default=1.15, help="Upper preferred GooF warning threshold; never a model-handoff gate.")
     p_cal_endpoint.add_argument("--publication-max-r1-cost", type=float, default=0.010)
     p_cal_endpoint.add_argument("--publication-free-wr2-tolerance", type=float, default=0.040)
+    p_cal_endpoint.add_argument("--publication-free-rall-tolerance", type=float, default=0.010)
+    p_cal_endpoint.add_argument("--publication-work-rall-tolerance", type=float, default=0.010)
+    p_cal_endpoint.add_argument("--publication-free-wrall-tolerance", type=float, default=0.050)
     p_cal_endpoint.add_argument("--publication-max-modulation-p95", type=float, default=20.0, help="Warning level only; modulation p95 never blocks endpoint selection.")
     p_cal_endpoint.add_argument("--publication-prefer-wght-mode", default="freeze-zero")
     p_cal_endpoint.add_argument("--publication-allow-npd", action=argparse.BooleanOptionalAction, default=False, help="Explicit diagnostic override allowing NPD pathology in the selected calibrated endpoint. Default requires NPD == 0; strict compact scale/calibration promotion can require zero split warnings, while the general endpoint chooser reports splits without withholding model handoff.")
@@ -22548,7 +22595,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--publication-selection-policy",
         choices=["bic", "gated-smallest"],
         default="gated-smallest",
-        help="Endpoint scale-contract selector. Default promotes the smallest contract passing endpoint, held-out-row, and detector-field gates; BIC remains diagnostic.",
+        help="Scale topology selector. Held-out/work JANA-style row factors are authoritative; endpoint factors are reporting only.",
     )
     p_cal_endpoint.add_argument(
         "--publication-information-criterion",

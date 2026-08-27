@@ -47,12 +47,12 @@ def _percent(value: object) -> str:
 
 
 def _metric_key(candidate: Mapping) -> tuple[float, float, float, str]:
-    """Sort endpoint candidates by weighted all-row endpoint quality."""
+    """Sort endpoint diagnostics without letting SHELXL wR2 dominate."""
 
     return (
-        _float(candidate.get("wR2_all"), float("inf")),
         _float(candidate.get("R1_all"), float("inf")),
         _float(candidate.get("R1_gt"), float("inf")),
+        _float(candidate.get("wR2_all"), float("inf")),
         str(candidate.get("id", "")),
     )
 

@@ -740,7 +740,12 @@ def _hand_evidence(
             adjusted = block.get("klar_palatinus_adjusted_hand_z")
             adjusted = adjusted if isinstance(adjusted, Mapping) else {}
             n = int(adjusted.get("n", 0) or 0)
-            k_effective = float(adjusted.get("k_effective_selected_wins_plus_half_ties", float("nan")))
+            k_effective = float(
+                adjusted.get(
+                    "k_selected_lower_abs_intensity_residual",
+                    adjusted.get("k_effective_selected_wins_plus_half_ties", float("nan")),
+                )
+            )
             w = float(adjusted.get("w", float("nan")))
             if (
                 str(adjusted.get("status") or "") == "ok"
@@ -1355,7 +1360,12 @@ def _selected_hand_summary(workflow: Mapping[str, object]) -> dict[str, object]:
                 kp = kp if isinstance(kp, Mapping) else {}
                 z_input = _finite_float(kp.get("z"))
                 n = int(kp.get("n", 0) or 0)
-                k_effective = _finite_float(kp.get("k_effective_selected_wins_plus_half_ties"))
+                k_effective = _finite_float(
+                    kp.get(
+                        "k_selected_lower_abs_intensity_residual",
+                        kp.get("k_effective_selected_wins_plus_half_ties"),
+                    )
+                )
                 w = _finite_float(kp.get("w"))
                 z_selected = orientation * z_input if z_input is not None else None
                 row[support] = {

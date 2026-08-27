@@ -37,6 +37,16 @@ def safe_float(value, default=float("nan")) -> float:
         return float(default)
 
 
+def row_source_sigma(row: dict) -> float:
+    """Return the immutable source sigma with historical row-table fallbacks."""
+
+    for name in ("source_sigma", "xds_sigma", "sigma", "sigma_eff"):
+        value = safe_float(row.get(name))
+        if math.isfinite(value) and value > 0.0:
+            return value
+    return float("nan")
+
+
 def standard_json_data(value):
     """Return recursively JSON-safe data, mapping non-finite numbers to null."""
 
@@ -66,10 +76,11 @@ def read_csv_rows(path: Path, dataset: str) -> list[dict]:
             row.get("iobs") or ""
         ).strip():
             row["target_I"] = row["iobs"]
-        if not str(row.get("sigma_eff") or "").strip() and str(
-            row.get("sigma") or ""
-        ).strip():
-            row["sigma_eff"] = row["sigma"]
+        if not str(row.get("source_sigma") or "").strip():
+            for sigma_name in ("xds_sigma", "sigma", "sigma_eff"):
+                if str(row.get(sigma_name) or "").strip():
+                    row["source_sigma"] = row[sigma_name]
+                    break
     return rows
 
 
@@ -144,10 +155,19 @@ def canonical_hkl(h: int, k: int, l: int, symmetry_ops: list[dict]) -> tuple[int
     return min(reciprocal_equivalent_keys(h, k, l, symmetry_ops))
 
 
+def jana_adjusted_observations(obs: np.ndarray, sigma: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Apply the weak/negative-observation convention reported by Klar et al."""
+
+    weak = obs < 0.01 * sigma
+    adjusted = np.where(weak, 0.0, obs)
+    return adjusted, weak
+
+
 def row_sqrt_weights(obs: np.ndarray, sigma: np.ndarray, instability_u: float = 0.01) -> np.ndarray:
-    obs_pos = np.maximum(obs, 0.0)
-    sqrt_obs = np.sqrt(obs_pos)
-    sigma_sqrt = sigma / np.maximum(2.0 * sqrt_obs, 1e-6)
+    obs_adjusted, weak = jana_adjusted_observations(obs, sigma)
+    sqrt_obs = np.sqrt(np.maximum(obs_adjusted, 0.0))
+    sigma_sqrt = sigma / np.maximum(2.0 * sqrt_obs, 1e-30)
+    sigma_sqrt[weak] = 5.0 * np.sqrt(sigma[weak])
     denom = np.sqrt(sigma_sqrt * sigma_sqrt + (float(instability_u) * sqrt_obs) ** 2)
     return 1.0 / np.maximum(denom, 1e-30)
 
@@ -170,18 +190,20 @@ def row_mr_r_factors(obs, sigma, calc, instability_u: float = 0.01, observed_sig
             "wRall": float("nan"),
         }
 
+    obs_original = obs.copy()
+    obs, _weak = jana_adjusted_observations(obs, sigma)
     obs_pos = np.maximum(obs, 0.0)
     calc_pos = np.maximum(calc, 0.0)
     fobs = np.sqrt(obs_pos)
     fcalc = np.sqrt(calc_pos)
-    observed = obs > float(observed_sigma_cut) * sigma
+    observed = obs_original > float(observed_sigma_cut) * sigma
 
     def r_factor(use):
         if not np.any(use):
             return float("nan")
         return float(np.sum(np.abs(fobs[use] - fcalc[use])) / max(np.sum(fobs[use]), 1e-30))
 
-    weights = row_sqrt_weights(obs, sigma, instability_u=instability_u)
+    weights = row_sqrt_weights(obs_original, sigma, instability_u=instability_u)
     residual = obs - calc
 
     def wr_factor(use):
@@ -240,7 +262,7 @@ def compute_model_metrics(rows: list[dict], model: dict, calc_column: str, insta
         dtype=float,
     )
     obs = np.asarray([safe_float(r.get("target_I")) for r in rows], dtype=float)
-    sigma = np.asarray([safe_float(r.get("sigma_eff")) for r in rows], dtype=float)
+    sigma = np.asarray([row_source_sigma(r) for r in rows], dtype=float)
     calc = np.asarray([safe_float(r.get(calc_column)) for r in rows], dtype=float)
     base = row_mr_r_factors(obs, sigma, calc, instability_u=instability_u)
     finite_row = np.isfinite(obs) & np.isfinite(sigma) & np.isfinite(calc) & (sigma > 0)
@@ -250,9 +272,10 @@ def compute_model_metrics(rows: list[dict], model: dict, calc_column: str, insta
         axis=1,
     )
     merge_support = finite_row & valid_hkl
+    obs_for_merge, _weak = jana_adjusted_observations(obs[merge_support], sigma[merge_support])
     merged = merged_arrays(
         rounded_hkl[merge_support].astype(int),
-        obs[merge_support],
+        obs_for_merge,
         sigma[merge_support],
         calc[merge_support],
         model.get("symmetry_ops", []),
@@ -282,7 +305,7 @@ def compute_row_mr_summary(rows: list[dict], model: dict, instability_u: float =
     """Calculate Born and Bloch factors on one explicitly matched row support."""
 
     obs = np.asarray([safe_float(row.get("target_I")) for row in rows], dtype=float)
-    sigma = np.asarray([safe_float(row.get("sigma_eff")) for row in rows], dtype=float)
+    sigma = np.asarray([row_source_sigma(row) for row in rows], dtype=float)
     dynamic_calc = np.asarray([safe_float(row.get("dyn_scaled")) for row in rows], dtype=float)
     born_calc = np.asarray([safe_float(row.get("born_scaled")) for row in rows], dtype=float)
     matched_support = (
@@ -307,22 +330,23 @@ def compute_row_mr_summary(rows: list[dict], model: dict, instability_u: float =
         "definition": {
             "style": "JANA/PETS-style dynamical-refinement row and merged-row residual factors (GROND implementation)",
             "provenance": "computed by GROND from its final signed row table; not emitted by JANA or PETS",
-            "matched_support": "Born and Bloch factors use the identical intersection of rows with finite Iobs, positive finite sigma_eff, finite born_scaled, and finite dyn_scaled",
+            "matched_support": "Born and Bloch factors use the identical intersection of rows with finite Iobs, positive finite immutable source sigma(Iobs), finite born_scaled, and finite dyn_scaled",
             "matched_support_counts": "Ninput is the supplied row count; Nmatched/Nall is the common finite Born/Bloch support; Nexcluded is Ninput-Nmatched",
             "unmerged_metrics": "Nobs, Nall, Robs, Rall, wRobs, and wRall use individual observations from the matched row support",
             "merged_metrics": "MNobs, MNall, MRobs, MRall, MwRobs, and MwRall use post-refinement model-symmetry groups; Nmerge_excluded counts matched rows with missing, non-finite, or non-integral HKL indices",
             "observed_cutoff": "Iobs > 3 sigma(Iobs), used for Robs, wRobs, MRobs, and MwRobs",
             "all_reflection_metrics": "Rall, wRall, MRall, and MwRall use all finite observations after row or merged-row grouping.",
             "observed_weighted_metrics": "wRobs and MwRobs are optional extensions that apply the same weighted residual formula to the Iobs > 3 sigma(Iobs) subsets; the conventional core reporting family is Robs, Rall, wRall, MRobs, MRall, and MwRall.",
-            "R_formula": "sum(abs(sqrt(max(Iobs,0)) - sqrt(max(Icalc,0)))) / sum(sqrt(max(Iobs,0)))",
+            "R_formula": "sum(abs(sqrt(Iobs,JANA) - sqrt(max(Icalc,0)))) / sum(sqrt(Iobs,JANA))",
             "wR_formula": "sqrt(sum((w * abs(Iobs-Icalc))^2) / sum((w * Iobs)^2))",
-            "nonpositive_intensity_policy": "R factors map nonpositive intensities to zero amplitude; weighted factors retain signed Iobs and Icalc residuals",
-            "weight_formula": "w = (sigma(sqrt(Iobs))^2 + (u*sqrt(max(Iobs,0)))^2)^(-1/2)",
-            "sigma_sqrt_formula": "sigma(sqrt(Iobs)) = sigma_eff / max(2*sqrt(max(Iobs,0)), 1e-6)",
+            "nonpositive_intensity_policy": "following Klar et al. SI, rows with Iobs < 0.01 sigma(Iobs) use Iobs=0 and sigma(sqrt(Iobs))=5 sqrt(sigma(Iobs))",
+            "weight_formula": "w = (sigma(sqrt(Iobs,JANA))^2 + (u*sqrt(Iobs,JANA))^2)^(-1/2), with u=0.01 by default",
+            "sigma_contract": "source_sigma is the immutable imported experimental sigma(Iobs); xds_sigma is accepted as its historical column name and sigma_eff only as a legacy fallback during CSV normalization",
+            "sigma_sqrt_formula": "sigma(sqrt(Iobs)) = source_sigma/(2 sqrt(Iobs)) for ordinary positive rows; weak rows use 5 sqrt(source_sigma)",
             "instability_u": float(instability_u),
             "merge": "arithmetic means over model-symmetry-related rows; sigma_M = sqrt(sum sigma_i^2) / n",
-            "sigma_source": "sigma_eff from the supplied GROND row table; raw_row_weight is not separately folded into these JANA/PETS-style factors",
-            "dataset_policy_note": "Any sigma transformation already present in sigma_eff is honored. A separate dataset-policy raw_row_weight affects fitting/inclusion but is not multiplied into the reported JANA/PETS-style R/MR formula.",
+            "sigma_source": "immutable experimental source_sigma from the supplied GROND row table; raw_row_weight and fitted sigma_eff are not folded into these JANA/PETS-style factors",
+            "dataset_policy_note": "Dataset-policy raw_row_weight and fitted sigma_eff may affect training or inclusion, but neither is multiplied into the reported JANA/PETS-style R/MR formula.",
             "friedel_policy": "Friedel opposites remain separate in acentric groups unless they are related by an explicit model-symmetry rotation.",
             "compatibility_alias": "row_mr.kinematic is a deprecated byte-for-byte alias of row_mr.born; it is not a conventional merged-refinement result.",
             "endpoint_exclusion": "SHELXL R1(F), wR2(F^2), GooF, and endpoint reflection counts are intentionally not part of this row-statistics block.",

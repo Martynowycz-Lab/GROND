@@ -21,12 +21,12 @@ from typing import Any
 
 KEY_COLUMNS = ("row_index", "h", "k", "l")
 REQUIRED_COLUMNS = KEY_COLUMNS
-BASE_PREDICTION_COLUMNS = ("target_I", "sigma_eff")
+BASE_PREDICTION_COLUMNS = ("target_I",)
+SOURCE_SIGMA_COLUMNS = ("source_sigma", "xds_sigma", "sigma_eff")
 SUPPORTED_PREDICTION_COLUMNS = ("dyn_scaled", "born_scaled")
 ADJUSTED_HAND_METHOD = "klar_palatinus_adjusted_reflection_count_hand_z"
-ADJUSTED_HAND_METHOD_VERSION = "2"
-ADJUSTED_HAND_TIE_POLICY = "neutral_half_credit_v1"
-ADJUSTED_HAND_LEGACY_TIE_POLICY = "strict_lower_residual_v0"
+ADJUSTED_HAND_METHOD_VERSION = "3"
+ADJUSTED_HAND_TIE_POLICY = "strict_lower_residual_klar_2023"
 KLAR_PALATINUS_REFERENCE = {
     "citation": (
         "Klar, P. B. et al. Accurate structure models and absolute configuration determination using "
@@ -44,7 +44,6 @@ def adjusted_hand_method_metadata(prediction_column: str) -> dict[str, str]:
         "method": ADJUSTED_HAND_METHOD,
         "method_version": ADJUSTED_HAND_METHOD_VERSION,
         "tie_policy": ADJUSTED_HAND_TIE_POLICY,
-        "legacy_tie_policy": ADJUSTED_HAND_LEGACY_TIE_POLICY,
         "prediction_column": prediction_column,
     }
 
@@ -129,10 +128,31 @@ def adjusted_hand_missing_columns(
     """Return columns missing for the adjusted hand-Z diagnostic."""
 
     required = (*BASE_PREDICTION_COLUMNS, prediction_column)
-    return {
+    missing = {
         "selected": [name for name in required if name not in set(best_fields)],
         "other": [name for name in required if name not in set(other_fields)],
     }
+    if not any(name in set(best_fields) and name in set(other_fields) for name in SOURCE_SIGMA_COLUMNS):
+        label = "one common source sigma column: " + "|".join(SOURCE_SIGMA_COLUMNS)
+        missing["selected"].append(label)
+        missing["other"].append(label)
+    return missing
+
+
+def adjusted_hand_sigma_column(rows: list[tuple[dict[str, str], dict[str, str]]]) -> str:
+    """Select one immutable observation-sigma column shared by both hands."""
+
+    if not rows:
+        return ""
+    selected, other = rows[0]
+    return next(
+        (
+            name
+            for name in SOURCE_SIGMA_COLUMNS
+            if name in selected and name in other
+        ),
+        "",
+    )
 
 
 def klar_palatinus_adjusted_hand_z(
@@ -143,7 +163,7 @@ def klar_palatinus_adjusted_hand_z(
     """Compute the adjusted reflection-count hand Z on matched native rows.
 
     The selected (``best``) and other-hand tables must carry identical observed
-    intensities and effective sigmas.  Branch-specific values from the selected
+    intensities and immutable source sigmas. Branch-specific values from the selected
     prediction column are then compared on exactly the joined signed
     observations.  Rows with invalid numbers, non-positive sigmas, or
     inconsistent observation metadata are excluded explicitly rather than
@@ -153,7 +173,11 @@ def klar_palatinus_adjusted_hand_z(
     base: dict[str, Any] = {
         **adjusted_hand_method_metadata(prediction_column),
         "n_joined_candidates": int(len(rows)),
-        "required_columns": [*BASE_PREDICTION_COLUMNS, prediction_column],
+        "required_columns": [
+            *BASE_PREDICTION_COLUMNS,
+            prediction_column,
+            "one common source sigma: " + "|".join(SOURCE_SIGMA_COLUMNS),
+        ],
     }
     if missing["selected"] or missing["other"]:
         return {
@@ -163,6 +187,7 @@ def klar_palatinus_adjusted_hand_z(
             "n": 0,
         }
 
+    sigma_column = adjusted_hand_sigma_column(rows)
     valid: list[tuple[float, float, float, float]] = []
     invalid_numeric = 0
     nonpositive_sigma = 0
@@ -175,8 +200,8 @@ def klar_palatinus_adjusted_hand_z(
         target_other = finite_float(other.get("target_I"))
         calc_selected = finite_float(selected.get(prediction_column))
         calc_other = finite_float(other.get(prediction_column))
-        sigma_selected = finite_float(selected.get("sigma_eff"))
-        sigma_other = finite_float(other.get("sigma_eff"))
+        sigma_selected = finite_float(selected.get(sigma_column))
+        sigma_other = finite_float(other.get(sigma_column))
         values = (target_selected, target_other, calc_selected, calc_other, sigma_selected, sigma_other)
         if not all(math.isfinite(value) for value in values):
             invalid_numeric += 1
@@ -204,7 +229,7 @@ def klar_palatinus_adjusted_hand_z(
         "invalid_numeric": int(invalid_numeric),
         "nonpositive_sigma": int(nonpositive_sigma),
         "target_I_mismatch_between_hands": int(observation_mismatch),
-        "sigma_eff_mismatch_between_hands": int(sigma_mismatch),
+        "source_sigma_mismatch_between_hands": int(sigma_mismatch),
         "dataset_label_mismatch_between_hands": int(dataset_mismatch),
     }
     if len(datasets) > 1:
@@ -245,11 +270,12 @@ def klar_palatinus_adjusted_hand_z(
         w += 1.0 - normal_cdf(separation)
 
     denominator_variance = float(n - w)
-    k_effective = float(k + 0.5 * tied)
-    z = float((2.0 * k_effective - n) / math.sqrt(denominator_variance))
-    z_legacy_strict = float((2 * k - n) / math.sqrt(denominator_variance))
+    k_effective = float(k)
+    z = float((2 * k - n) / math.sqrt(denominator_variance))
+    k_neutral = float(k + 0.5 * tied)
+    z_neutral_ties = float((2.0 * k_neutral - n) / math.sqrt(denominator_variance))
     probability = normal_cdf(z)
-    probability_legacy_strict = normal_cdf(z_legacy_strict)
+    probability_neutral_ties = normal_cdf(z_neutral_ties)
     return {
         **base,
         "status": "ok",
@@ -257,15 +283,21 @@ def klar_palatinus_adjusted_hand_z(
         "k_selected_lower_abs_intensity_residual": int(k),
         "n_tied_abs_intensity_residual": int(tied),
         "k_effective_selected_wins_plus_half_ties": k_effective,
+        "k_neutral_half_tie_diagnostic": k_neutral,
         "w": float(w),
         "n_minus_w": denominator_variance,
         "z": z,
         "probability_phi_z": probability,
         "probability_one_sided_other_hand": float(normal_cdf(-z)),
-        "z_legacy_strict": z_legacy_strict,
-        "probability_phi_z_legacy_strict": probability_legacy_strict,
-        "probability_one_sided_other_hand_legacy_strict": float(
-            normal_cdf(-z_legacy_strict)
+        "z_neutral_half_tie_diagnostic": z_neutral_ties,
+        "probability_phi_z_neutral_half_tie_diagnostic": probability_neutral_ties,
+        "probability_one_sided_other_hand_neutral_half_tie_diagnostic": float(
+            normal_cdf(-z_neutral_ties)
+        ),
+        "sigma_column": sigma_column,
+        "sigma_contract": (
+            "experimental source sigma(Iobs), preferring source_sigma then xds_sigma; "
+            "sigma_eff is accepted only for historical row tables lacking an immutable source column"
         ),
         "dataset_labels": sorted(datasets),
         "dataset_scope": "single_labeled_dataset" if datasets else "unlabeled_table",
@@ -467,19 +499,18 @@ def main() -> None:
                     "number of joined valid rows where |target_I-prediction_selected| is strictly smaller "
                     "than |target_I-prediction_other| for prediction_column"
                 ),
-                "k_effective": "k + 0.5 times the number of exact residual ties",
-                "w": "sum(1-Phi(|prediction_selected-prediction_other|/(2*sigma_eff)))",
-                "z": "(2*k_effective-N)/sqrt(N-w)",
-                "z_legacy_strict": "(2*k-N)/sqrt(N-w)",
+                "k_effective": "strict k from Klar et al.; exact ties do not increment k",
+                "w": "sum(1-Phi(|prediction_selected-prediction_other|/(2*source_sigma(Iobs))))",
+                "z": "(2*k-N)/sqrt(N-w)",
                 "probability": "Phi(z), reported as probability_phi_z; this is distinct from paired_row_t_delta_chi2",
                 "ties": (
-                    "an exact equal absolute intensity residual receives half credit in the version-2 primary statistic, "
-                    "restoring hand-swap antisymmetry; z_legacy_strict preserves the earlier literal strict-lower-residual result"
+                    "the primary statistic follows Klar et al.'s strict inequality; a separate neutral-half-tie "
+                    "diagnostic is retained only to expose the otherwise negligible exact-tie edge case"
                 ),
                 "tie_policy": ADJUSTED_HAND_TIE_POLICY,
-                "legacy_tie_policy": ADJUSTED_HAND_LEGACY_TIE_POLICY,
                 "sigma_contract": (
-                    "target_I and positive sigma_eff must match between hand tables; invalid or mismatched rows are excluded and counted"
+                    "target_I and positive immutable source sigma(Iobs) must match between hand tables; source_sigma "
+                    "is preferred, xds_sigma is its historical alias, and sigma_eff is a legacy fallback only"
                 ),
                 "multi_dataset_policy": (
                     "multiple dataset labels are not silently row-pooled; compute per-dataset Z values before any explicitly declared combination"

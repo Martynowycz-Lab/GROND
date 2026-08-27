@@ -1752,7 +1752,8 @@ def test_auto_parser_hides_lambda_controls(capsys):
     assert args.scale_polish_frame_models == "adaptive,fixed"
     assert args.scale_polish_adaptive_counts == "auto"
     assert args.scale_polish_detector_bins == "0,2,4,8"
-    assert args.scale_polish_selection_metrics == "Rall,wRall,native_R1_all,native_wR2_all"
+    assert args.scale_polish_objective == "row_mr"
+    assert args.scale_polish_selection_metrics == "free_Rall,work_Rall"
     assert args.scale_polish_scan_offsets is False
     assert args.resolution_limit_gate is True
     assert args.resolution_shells == 10

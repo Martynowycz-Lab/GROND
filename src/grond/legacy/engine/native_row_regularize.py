@@ -2899,7 +2899,7 @@ def write_row_table(path: Path, data: XDSData, target, best_eval, masks):
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="") as f:
         fields = [
-            "row_index", "h", "k", "l", "d_A", "target_I", "sigma_eff", "xds_sigma", "peak", "corr", "rlp",
+            "row_index", "h", "k", "l", "d_A", "target_I", "source_sigma", "sigma_eff", "xds_sigma", "peak", "corr", "rlp",
             "group", "detector_bin", "basis_size", "basis_support_hash64", "center_sg_inv_A", "omega_bragg_deg", "omega_bragg_minus_center_deg",
             "sg_window_inv_A", "sg_window_raw_inv_A", "sg_window_half_frames", "sg_window_clipped",
             "sg_dSg_domega_inv_A_per_deg", "sg_dSg_dframe_inv_A", "sg_jitter_sigma_inv_A",
@@ -2925,6 +2925,7 @@ def write_row_table(path: Path, data: XDSData, target, best_eval, masks):
                 "h": int(data.hkl[i, 0]), "k": int(data.hkl[i, 1]), "l": int(data.hkl[i, 2]),
                 "d_A": float(dvals[i]),
                 "target_I": float(target[i]),
+                "source_sigma": float(data.sigma[i]),
                 "sigma_eff": float(arrays["sigma_eff"][i]),
                 "xds_sigma": float(data.sigma[i]),
                 "peak": float(data.peak[i]),

@@ -86,7 +86,18 @@ def parse_csv_ints(text: str) -> list[int]:
 
 def parse_csv_metrics(text: str) -> tuple[str, ...]:
     metrics = tuple(part.strip() for part in str(text).split(",") if part.strip())
-    allowed = {"Robs", "Rall", "wRall", "native_R1_gt", "native_R1_all", "native_wR2_all"}
+    allowed = {
+        "Robs",
+        "Rall",
+        "wRall",
+        "work_Rall",
+        "work_wRall",
+        "free_Rall",
+        "free_wRall",
+        "native_R1_gt",
+        "native_R1_all",
+        "native_wR2_all",
+    }
     bad = sorted(set(metrics) - allowed)
     if bad:
         raise ValueError(f"Unknown selection metrics: {bad}; allowed={sorted(allowed)}")
@@ -197,10 +208,29 @@ def split_masks(rows: list[dict[str, str]]) -> dict[str, np.ndarray]:
     return masks
 
 
+def source_sigma_array(rows: list[dict[str, str]]) -> np.ndarray:
+    """Return immutable imported sigma(Iobs), with historical fallbacks."""
+
+    for name in ("source_sigma", "xds_sigma", "sigma", "sigma_eff"):
+        if name in rows[0]:
+            values = col(rows, name)
+            if np.any(np.isfinite(values) & (values > 0)):
+                return values
+    return np.full(len(rows), np.nan, dtype=float)
+
+
+def jana_adjusted_observations(obs: np.ndarray, sigma: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Apply the weak/negative-observation convention reported by Klar et al."""
+
+    weak = obs < 0.01 * sigma
+    return np.where(weak, 0.0, obs), weak
+
+
 def row_sqrt_weights(obs: np.ndarray, sigma: np.ndarray, instability_u: float) -> np.ndarray:
-    obs_pos = np.maximum(obs, 0.0)
-    sqrt_obs = np.sqrt(obs_pos)
-    sigma_sqrt = sigma / np.maximum(2.0 * sqrt_obs, 1e-6)
+    obs_adjusted, weak = jana_adjusted_observations(obs, sigma)
+    sqrt_obs = np.sqrt(np.maximum(obs_adjusted, 0.0))
+    sigma_sqrt = sigma / np.maximum(2.0 * sqrt_obs, 1e-30)
+    sigma_sqrt[weak] = 5.0 * np.sqrt(sigma[weak])
     denom = np.sqrt(sigma_sqrt * sigma_sqrt + (float(instability_u) * sqrt_obs) ** 2)
     # The GROND row/MR wR expression squares w*(Iobs-Icalc), so the least-squares
     # normal equations use w**2 as the intensity residual weight.
@@ -433,18 +463,20 @@ def row_mr_metrics(obs: np.ndarray, sig: np.ndarray, pred: np.ndarray, mask: np.
     pred_m = pred[m]
     if len(obs_m) == 0:
         return {"Nall": 0, "Nobs": 0, "Robs": float("nan"), "Rall": float("nan"), "wRall": float("nan")}
+    obs_original = obs_m.copy()
+    obs_m, _weak = jana_adjusted_observations(obs_m, sig_m)
     obs_pos = np.maximum(obs_m, 0.0)
     pred_pos = np.maximum(pred_m, 0.0)
     fobs = np.sqrt(obs_pos)
     fcalc = np.sqrt(pred_pos)
-    observed = obs_m > float(observed_sigma_cut) * sig_m
+    observed = obs_original > float(observed_sigma_cut) * sig_m
 
     def r_factor(local_mask: np.ndarray) -> float:
         if not np.any(local_mask):
             return float("nan")
         return float(np.sum(np.abs(fobs[local_mask] - fcalc[local_mask])) / max(np.sum(fobs[local_mask]), 1e-30))
 
-    w = np.sqrt(row_sqrt_weights(obs_m, sig_m, instability_u))
+    w = np.sqrt(row_sqrt_weights(obs_original, sig_m, instability_u))
     wr = float(np.sqrt(np.sum((w * np.abs(obs_m - pred_m)) ** 2) / max(np.sum((w * obs_m) ** 2), 1e-30)))
     return {
         "Nall": int(len(obs_m)),
@@ -699,36 +731,30 @@ def detector_scale_policy_diagnostics(
         ref_born, _, _ = fit(raw_born, work, False)
         candidate_dyn, _, _ = fit(raw_dyn, work, True)
         candidate_born, _, _ = fit(raw_born, work, True)
-        ref_dyn_wr2 = safe_float(
-            native_metrics(obs, sig, ref_dyn, free, native_wght_a, native_wght_b)[
-                "wR2_all"
-            ]
-        )
-        ref_born_wr2 = safe_float(
-            native_metrics(obs, sig, ref_born, free, native_wght_a, native_wght_b)[
-                "wR2_all"
-            ]
-        )
-        dyn_wr2 = safe_float(
-            native_metrics(obs, sig, candidate_dyn, free, native_wght_a, native_wght_b)[
-                "wR2_all"
-            ]
-        )
-        born_wr2 = safe_float(
-            native_metrics(obs, sig, candidate_born, free, native_wght_a, native_wght_b)[
-                "wR2_all"
-            ]
-        )
+        ref_dyn_metrics = row_mr_metrics(obs, sig, ref_dyn, free, instability_u, 3.0)
+        ref_born_metrics = row_mr_metrics(obs, sig, ref_born, free, instability_u, 3.0)
+        dyn_metrics = row_mr_metrics(obs, sig, candidate_dyn, free, instability_u, 3.0)
+        born_metrics = row_mr_metrics(obs, sig, candidate_born, free, instability_u, 3.0)
+        ref_dyn_rall = safe_float(ref_dyn_metrics.get("Rall"))
+        ref_born_rall = safe_float(ref_born_metrics.get("Rall"))
+        dyn_rall = safe_float(dyn_metrics.get("Rall"))
+        born_rall = safe_float(born_metrics.get("Rall"))
         split_rows.append(
             {
                 "split": split_label,
-                "reference_dyn_wR2": ref_dyn_wr2,
-                "candidate_dyn_wR2": dyn_wr2,
-                "detector_improvement": ref_dyn_wr2 - dyn_wr2,
-                "reference_bloch_gain": ref_born_wr2 - ref_dyn_wr2,
-                "candidate_bloch_gain": born_wr2 - dyn_wr2,
-                "bloch_gain_change": (born_wr2 - dyn_wr2)
-                - (ref_born_wr2 - ref_dyn_wr2),
+                "reference_dyn_Rall": ref_dyn_rall,
+                "candidate_dyn_Rall": dyn_rall,
+                "detector_improvement_Rall": ref_dyn_rall - dyn_rall,
+                "reference_bloch_gain_Rall": ref_born_rall - ref_dyn_rall,
+                "candidate_bloch_gain_Rall": born_rall - dyn_rall,
+                "bloch_gain_change_Rall": (born_rall - dyn_rall)
+                - (ref_born_rall - ref_dyn_rall),
+                "reference_dyn_wRall": ref_dyn_metrics.get("wRall"),
+                "candidate_dyn_wRall": dyn_metrics.get("wRall"),
+                "reference_bloch_gain_wRall": safe_float(ref_born_metrics.get("wRall"))
+                - safe_float(ref_dyn_metrics.get("wRall")),
+                "candidate_bloch_gain_wRall": safe_float(born_metrics.get("wRall"))
+                - safe_float(dyn_metrics.get("wRall")),
             }
         )
 
@@ -753,7 +779,7 @@ def detector_scale_policy_diagnostics(
         min_rows=detector_min_rows,
     )
     improved_count = sum(
-        safe_float(row["detector_improvement"], -float("inf"))
+        safe_float(row["detector_improvement_Rall"], -float("inf"))
         >= float(min_holdout_improvement)
         for row in split_rows
     )
@@ -763,7 +789,7 @@ def detector_scale_policy_diagnostics(
     elif improved_count < int(required_improved_splits):
         reasons.append("detector_field_did_not_improve_multiple_holdouts")
     if any(
-        safe_float(row["bloch_gain_change"], -float("inf"))
+        safe_float(row["bloch_gain_change_Rall"], -float("inf"))
         < -float(max_bloch_gain_loss)
         for row in split_rows
     ):
@@ -790,6 +816,9 @@ def detector_scale_policy_diagnostics(
         "holdout_splits": split_rows,
         "improved_split_count": int(improved_count),
         "required_improved_split_count": int(required_improved_splits),
+        "selection_metric": "held-out JANA-style unmerged row Rall",
+        "secondary_report_metric": "held-out JANA-style unmerged row wRall",
+        "bloch_advantage_metric": "Born Rall - Bloch Rall",
         "support": support,
         "data_half_agreement": half_agreement,
         "born_bloch_field_agreement": shared_agreement,
@@ -948,6 +977,13 @@ def metric_delta(candidate: dict, baseline: dict) -> dict:
     out = {}
     for key in ("Robs", "Rall", "wRall"):
         out[key] = safe_float(candidate.get(key)) - safe_float(baseline.get(key))
+    for split in ("work", "free"):
+        candidate_split = candidate.get(f"row_{split}") or {}
+        baseline_split = baseline.get(f"row_{split}") or {}
+        for key in ("Rall", "wRall"):
+            out[f"{split}_{key}"] = safe_float(candidate_split.get(key)) - safe_float(
+                baseline_split.get(key)
+            )
     out["native_R1_gt"] = safe_float(candidate.get("native", {}).get("R1_gt")) - safe_float(baseline.get("native", {}).get("R1_gt"))
     out["native_R1_all"] = safe_float(candidate.get("native", {}).get("R1_all")) - safe_float(baseline.get("native", {}).get("R1_all"))
     out["native_wR2_all"] = safe_float(candidate.get("native", {}).get("wR2_all")) - safe_float(baseline.get("native", {}).get("wR2_all"))
@@ -981,9 +1017,17 @@ def candidate_row(candidate: dict) -> dict[str, object]:
         "Robs": candidate["Robs"],
         "Rall": candidate["Rall"],
         "wRall": candidate["wRall"],
+        "work_Rall": (candidate.get("row_work") or {}).get("Rall"),
+        "work_wRall": (candidate.get("row_work") or {}).get("wRall"),
+        "free_Rall": (candidate.get("row_free") or {}).get("Rall"),
+        "free_wRall": (candidate.get("row_free") or {}).get("wRall"),
         "dRobs": delta["Robs"],
         "dRall": delta["Rall"],
         "dwRall": delta["wRall"],
+        "dwork_Rall": delta.get("work_Rall"),
+        "dwork_wRall": delta.get("work_wRall"),
+        "dfree_Rall": delta.get("free_Rall"),
+        "dfree_wRall": delta.get("free_wRall"),
         "native_R1_gt": native["R1_gt"],
         "native_R1_all": native["R1_all"],
         "native_wR2_all": native["wR2_all"],
@@ -1151,9 +1195,16 @@ def main() -> None:
     ap.add_argument("--detector-min-field-correlation", type=float, default=0.50)
     ap.add_argument("--detector-max-field-log-rms", type=float, default=0.10)
     ap.add_argument("--detector-independent-calibration", action="store_true", help="Allow an 8x8 detector field to be promotable because an independent detector calibration supports it.")
-    ap.add_argument("--scale-objective", choices=["row_mr", "native", "sigma"], default="native")
+    ap.add_argument("--scale-objective", choices=["row_mr", "native", "sigma"], default="row_mr")
     ap.add_argument("--tolerance", type=float, default=0.01)
-    ap.add_argument("--selection-metrics", default="Rall,wRall,native_R1_all,native_wR2_all")
+    ap.add_argument(
+        "--selection-metrics",
+        default="free_Rall,work_Rall",
+        help=(
+            "Row-factor gates used to earn scale compression. The default protects held-out and work "
+            "JANA-style Rall; wRall is a secondary tie-break/report, and SHELXL/native wR2 do not select topology."
+        ),
+    )
     ap.add_argument("--instability-u", type=float, default=0.01)
     ap.add_argument("--observed-sigma-cut", type=float, default=3.0)
     ap.add_argument("--native-wght-a", type=float, default=float("nan"))
@@ -1172,7 +1223,7 @@ def main() -> None:
             raise ValueError(f"Required column {required!r} is not present in {row_table}")
 
     obs = col(rows, "target_I")
-    sig = col(rows, "sigma_eff")
+    sig = source_sigma_array(rows)
     raw_dyn = col(rows, args.raw_dyn_column)
     raw_born = col(rows, args.raw_born_column)
     base_dyn = col(rows, args.baseline_dyn_column)
@@ -1192,6 +1243,8 @@ def main() -> None:
     base_scale_count, base_total_params, physical_params = load_baseline_counts(source_summary, len(rows))
 
     baseline_row_mr = row_mr_metrics(obs, sig, base_dyn, masks["all"], args.instability_u, args.observed_sigma_cut)
+    baseline_row_work = row_mr_metrics(obs, sig, base_dyn, masks["work"], args.instability_u, args.observed_sigma_cut)
+    baseline_row_free = row_mr_metrics(obs, sig, base_dyn, masks["free"], args.instability_u, args.observed_sigma_cut)
     baseline_native = native_metrics(obs, sig, base_dyn, masks["all"], native_wght_a, native_wght_b, n_params=base_total_params)
     group_width_deg = infer_group_width_deg(source_summary)
     source_detector_bins = int(
@@ -1218,9 +1271,22 @@ def main() -> None:
         "detector_scale_params": source_detector_params,
         "total_params": base_total_params,
         **baseline_row_mr,
+        "row_work": baseline_row_work,
+        "row_free": baseline_row_free,
         "native": baseline_native,
         "information": information_criteria(baseline_native, base_total_params),
-        "delta_vs_baseline": {"Robs": 0.0, "Rall": 0.0, "wRall": 0.0, "native_R1_gt": 0.0, "native_R1_all": 0.0, "native_wR2_all": 0.0},
+        "delta_vs_baseline": {
+            "Robs": 0.0,
+            "Rall": 0.0,
+            "wRall": 0.0,
+            "work_Rall": 0.0,
+            "work_wRall": 0.0,
+            "free_Rall": 0.0,
+            "free_wRall": 0.0,
+            "native_R1_gt": 0.0,
+            "native_R1_all": 0.0,
+            "native_wR2_all": 0.0,
+        },
         "within_strict": True,
         "within_r_only": True,
         "detector_policy": {
@@ -1277,6 +1343,8 @@ def main() -> None:
             scale_params, n_group_scales, n_detector_scales = count_scale_params(groups, det_bins, fit_good, det_label)
             total_params = int(scale_params + physical_params)
             metrics = row_mr_metrics(obs, sig, dyn_scaled, masks["all"], args.instability_u, args.observed_sigma_cut)
+            row_work = row_mr_metrics(obs, sig, dyn_scaled, masks["work"], args.instability_u, args.observed_sigma_cut)
+            row_free = row_mr_metrics(obs, sig, dyn_scaled, masks["free"], args.instability_u, args.observed_sigma_cut)
             native = native_metrics(obs, sig, dyn_scaled, masks["all"], native_wght_a, native_wght_b, n_params=total_params)
             candidate = {
                 "name": f"{name_prefix}_det_{det_label}",
@@ -1297,6 +1365,8 @@ def main() -> None:
                 "frame_scales": frame_scales,
                 "detector_scales": det_scales,
                 **metrics,
+                "row_work": row_work,
+                "row_free": row_free,
                 "native": native,
                 "information": information_criteria(native, total_params),
                 "arrays": {"dyn": dyn_scaled},
@@ -1328,7 +1398,11 @@ def main() -> None:
             )
             candidate["delta_vs_baseline"] = metric_delta(candidate, baseline)
             candidate["within_strict"] = within_tolerance(candidate["delta_vs_baseline"], selection_metrics, args.tolerance)
-            candidate["within_r_only"] = within_tolerance(candidate["delta_vs_baseline"], ("Robs", "Rall"), args.tolerance)
+            candidate["within_r_only"] = within_tolerance(
+                candidate["delta_vs_baseline"],
+                ("free_Rall", "work_Rall"),
+                args.tolerance,
+            )
             candidates.append(candidate)
 
     if "adaptive" in frame_models:
@@ -1379,10 +1453,16 @@ def main() -> None:
     ]
     strict_added_detector = [c for c in strict if int(c.get("detector_bins", 0)) > 1]
     strict_no_detector = [c for c in strict if int(c.get("detector_bins", 0)) <= 1]
-    promotion_pool = strict_added_detector or strict_no_detector
+    promotion_pool = strict_no_detector or strict_added_detector
     selected = min(
         promotion_pool,
-        key=lambda c: (c["scale_params"], c["total_params"], c["wRall"], c["Rall"]),
+        key=lambda c: (
+            c["scale_params"],
+            c["total_params"],
+            safe_float((c.get("row_free") or {}).get("Rall"), float("inf")),
+            safe_float((c.get("row_free") or {}).get("wRall"), float("inf")),
+            safe_float((c.get("row_work") or {}).get("Rall"), float("inf")),
+        ),
     ) if promotion_pool else None
     selected_information = min(
         strict,
@@ -1390,10 +1470,18 @@ def main() -> None:
             safe_float(c.get("information", {}).get("bic_fitted_variance"), float("inf")),
             safe_float(c.get("information", {}).get("bic_known_sigma"), float("inf")),
             c["scale_params"],
-            c["wRall"],
+            safe_float((c.get("row_free") or {}).get("Rall"), float("inf")),
         ),
     ) if strict else None
-    selected_r_only = min(r_only, key=lambda c: (c["scale_params"], c["total_params"], c["Rall"], c["wRall"])) if r_only else None
+    selected_r_only = min(
+        r_only,
+        key=lambda c: (
+            c["scale_params"],
+            c["total_params"],
+            safe_float((c.get("row_free") or {}).get("Rall"), float("inf")),
+            safe_float((c.get("row_work") or {}).get("Rall"), float("inf")),
+        ),
+    ) if r_only else None
     selected_widest = max(strict, key=lambda c: (safe_float(c.get("window_deg"), -1.0), c["group_stride"], -c["scale_params"], -c["wRall"])) if strict else None
     selected_widest_r_only = max(r_only, key=lambda c: (safe_float(c.get("window_deg"), -1.0), c["group_stride"], -c["scale_params"], -c["wRall"])) if r_only else None
     policy_eligible = [
@@ -1404,11 +1492,22 @@ def main() -> None:
     selected_for_output = selected or selected_information or selected_r_only or min(
         policy_eligible or non_baseline,
         key=lambda c: (
-            max(0.0, c["delta_vs_baseline"]["Rall"]),
+            max(0.0, safe_float(c["delta_vs_baseline"].get("free_Rall"), float("inf"))),
+            max(0.0, safe_float(c["delta_vs_baseline"].get("work_Rall"), float("inf"))),
             c["scale_params"],
         ),
     )
-    candidate_rows = [candidate_row(c) for c in sorted(candidates, key=lambda c: (c["scale_params"], c["wRall"], c["Rall"]))]
+    candidate_rows = [
+        candidate_row(c)
+        for c in sorted(
+            candidates,
+            key=lambda c: (
+                c["scale_params"],
+                safe_float((c.get("row_free") or {}).get("Rall"), float("inf")),
+                safe_float((c.get("row_free") or {}).get("wRall"), float("inf")),
+            ),
+        )
+    ]
     candidate_csv = out / "scale_compression_candidates.csv"
     write_rows(candidate_csv, candidate_rows, list(candidate_rows[0].keys()))
 

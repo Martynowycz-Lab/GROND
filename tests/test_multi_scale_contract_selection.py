@@ -41,8 +41,11 @@ def _write_run(path: Path, *, scale_count: int, weak_free_bloch: bool = False) -
         writer.writerows(rows)
     metrics = {
         split: {
-            "dyn": {"wR2_all": 0.20},
-            "born": {"wR2_all": 0.201 if weak_free_bloch and split == "free" else 0.30},
+            "dyn": {"R1_all": 0.20, "wR2_all": 0.20},
+            "born": {
+                "R1_all": 0.201 if weak_free_bloch and split == "free" else 0.30,
+                "wR2_all": 0.201 if weak_free_bloch and split == "free" else 0.30,
+            },
         }
         for split in ("all", "work", "free")
     }
@@ -59,8 +62,8 @@ def _candidate(label: str, *, scales: int, bic: float) -> dict[str, object]:
         "scale_params": scales,
         "aggregate_bic": bic,
         "input_endpoint_rows": 1000,
-        "row_wr2": {"all": 0.20 + row_cost, "work": 0.19 + row_cost, "free": 0.23 + row_cost},
-        "bloch_gain_wr2": {"all": 0.08, "work": 0.07, "free": 0.09},
+        "row_rall": {"all": 0.20 + row_cost, "work": 0.19 + row_cost, "free": 0.23 + row_cost},
+        "bloch_gain_rall": {"all": 0.08, "work": 0.07, "free": 0.09},
         "endpoint": {
             "R1_all": 0.08 + endpoint_cost,
             "R1_gt": 0.06 + endpoint_cost,
@@ -122,10 +125,10 @@ def _selection_args() -> SimpleNamespace:
     return SimpleNamespace(
         dry_run=False,
         multi_scale_contract_selection="auto",
-        multi_scale_min_bloch_wr2_gain=0.002,
+        multi_scale_min_bloch_rall_gain=0.002,
         multi_scale_min_reduction=0.10,
         multi_scale_require_bic_improvement=True,
-        multi_scale_max_row_wr2_cost=0.01,
+        multi_scale_max_row_rall_cost=0.01,
         multi_scale_max_endpoint_r1_cost=0.005,
         multi_scale_max_endpoint_wr2_cost=0.01,
         multi_scale_goof_min=0.85,
@@ -149,12 +152,12 @@ def test_validate_scale_contract_run_map_allows_only_scale_predictions(tmp_path:
     result = cli.validate_scale_contract_run_map(
         {"a": full},
         {"a": compact},
-        min_bloch_wr2_gain=0.002,
+        min_bloch_rall_gain=0.002,
     )
 
     assert result["ok"] is True
     assert result["datasets"]["a"]["scale_count"] == 70
-    assert result["datasets"]["a"]["bloch_wr2_gain"]["free"] == pytest.approx(0.10)
+    assert result["datasets"]["a"]["bloch_rall_gain"]["free"] == pytest.approx(0.10)
 
 
 def test_validate_scale_contract_run_map_rejects_weak_held_out_bloch_gain(tmp_path: Path) -> None:
@@ -166,11 +169,11 @@ def test_validate_scale_contract_run_map_rejects_weak_held_out_bloch_gain(tmp_pa
     result = cli.validate_scale_contract_run_map(
         {"a": full},
         {"a": compact},
-        min_bloch_wr2_gain=0.002,
+        min_bloch_rall_gain=0.002,
     )
 
     assert result["ok"] is False
-    assert result["reason"] == "bloch_wr2_gain_below_minimum"
+    assert result["reason"] == "bloch_rall_gain_below_minimum"
     assert result["split"] == "free"
 
 
@@ -194,13 +197,13 @@ def test_preexisting_bloch_loss_is_preserved_without_requiring_a_false_win(
     for path, born_wr2 in ((full, 0.190), (compact, compact_born_wr2)):
         summary_path = path / "summary.json"
         summary = json.loads(summary_path.read_text())
-        summary["best_native"]["metrics"]["free"]["born"]["wR2_all"] = born_wr2
+        summary["best_native"]["metrics"]["free"]["born"]["R1_all"] = born_wr2
         summary_path.write_text(json.dumps(summary) + "\n")
 
     result = cli.validate_scale_contract_run_map(
         {"a": full},
         {"a": compact},
-        min_bloch_wr2_gain=0.002,
+        min_bloch_rall_gain=0.002,
         max_preexisting_bloch_gain_loss=0.01,
     )
 
@@ -258,10 +261,10 @@ def test_multi_selection_promotes_the_smallest_passing_materialized_contract(
     args = SimpleNamespace(
         dry_run=False,
         multi_scale_contract_selection="auto",
-        multi_scale_min_bloch_wr2_gain=0.002,
+        multi_scale_min_bloch_rall_gain=0.002,
         multi_scale_min_reduction=0.10,
         multi_scale_require_bic_improvement=True,
-        multi_scale_max_row_wr2_cost=0.01,
+        multi_scale_max_row_rall_cost=0.01,
         multi_scale_max_endpoint_r1_cost=0.005,
         multi_scale_max_endpoint_wr2_cost=0.01,
         multi_scale_goof_min=0.85,

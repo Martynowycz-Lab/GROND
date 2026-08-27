@@ -62,6 +62,7 @@ try:
         read_json,
         read_rows,
         row_mr_metrics,
+        source_sigma_array,
         split_masks,
         write_rows,
     )
@@ -108,6 +109,7 @@ except ImportError:  # pragma: no cover - direct script execution
         read_json,
         read_rows,
         row_mr_metrics,
+        source_sigma_array,
         split_masks,
         write_rows,
     )
@@ -310,7 +312,7 @@ def endpoint_from_row_table(
     k = col(rows, "k").astype(int)
     l = col(rows, "l").astype(int)
     target = col(rows, "target_I")
-    sig = col(rows, "sigma_eff")
+    sig = source_sigma_array(rows)
     dyn_scaled = col(rows, "dyn_scaled")
     born_raw = col(rows, "born_raw")
     valid = np.isfinite(target) & np.isfinite(sig) & np.isfinite(dyn_scaled) & np.isfinite(born_raw) & (sig > 0) & (dyn_scaled > 0) & (born_raw > 0)
@@ -456,8 +458,8 @@ def build_replay_rows(
             groups = coarsen_groups(groups0, int(spec["stride"]), 0)
         det_target = int(spec.get("detector_bins", detector_base))
         if det_target <= 1:
-            dyn_scaled, frame_scales = fit_group_scales(obs, sig, raw_dyn, groups, fit_mask, "native", native_wght_a, native_wght_b, instability_u)
-            born_scaled, _ = fit_group_scales(obs, sig, raw_born, groups, fit_mask, "native", native_wght_a, native_wght_b, instability_u)
+            dyn_scaled, frame_scales = fit_group_scales(obs, sig, raw_dyn, groups, fit_mask, "row_mr", native_wght_a, native_wght_b, instability_u)
+            born_scaled, _ = fit_group_scales(obs, sig, raw_born, groups, fit_mask, "row_mr", native_wght_a, native_wght_b, instability_u)
             det_bins = np.zeros(len(rows), dtype=int)
             detector_scales = {}
         else:
@@ -469,11 +471,11 @@ def build_replay_rows(
                 "detector_min_rows": detector_min_rows,
             }
             dyn_scaled, frame_scales, detector_scales = fit_group_detector_scales(
-                obs, sig, raw_dyn, groups, det_bins, fit_mask, "native",
+                obs, sig, raw_dyn, groups, det_bins, fit_mask, "row_mr",
                 native_wght_a, native_wght_b, instability_u, **fit_kwargs,
             )
             born_scaled, _, _ = fit_group_detector_scales(
-                obs, sig, raw_born, groups, det_bins, fit_mask, "native",
+                obs, sig, raw_born, groups, det_bins, fit_mask, "row_mr",
                 native_wght_a, native_wght_b, instability_u, **fit_kwargs,
             )
         scale_params, group_scale_params, detector_scale_params = count_scale_params(groups, det_bins, fit_good, int(spec.get("detector_bins", detector_base)))
@@ -488,7 +490,7 @@ def build_replay_rows(
             detector_base=detector_base,
             detector_target=det_target,
             fit_mask=fit_mask,
-            objective="native",
+            objective="row_mr",
             native_wght_a=native_wght_a,
             native_wght_b=native_wght_b,
             instability_u=instability_u,
@@ -532,7 +534,7 @@ def build_replay_rows(
         "name": spec["name"],
         "frame_model": str(spec["kind"]),
         "mode": "replay",
-        "objective": "native",
+        "objective": "row_mr",
         "group_stride": int(spec.get("stride", 0) or 0),
         "group_offset": 0,
         "adaptive_segments": spec.get("actual_segments", spec.get("segments", "")),
@@ -599,13 +601,15 @@ def choose_publication_endpoint(
     allow_npd: bool = False,
     max_modulation_p95: float = 20.0,
     detector_independent_calibration: bool = False,
+    free_rall_tolerance: float = 0.01,
+    work_rall_tolerance: float = 0.01,
+    free_wrall_tolerance: float = 0.05,
 ) -> dict[str, object]:
     """Choose a publication endpoint from replayed scale contracts.
 
-    The low-R and held-out row branches are kept as diagnostics.  By default,
-    the publication branch applies the endpoint, held-out-row, and detector
-    validation gates, then promotes the smallest passing scale contract.  An
-    information-criterion selector remains available as a diagnostic policy.
+    Scale topology is selected only from work/free JANA-style row factors.
+    SHELXL endpoint factors remain reporting diagnostics and cannot make a
+    flexible scale field win. Endpoint health still rejects NPD/split branches.
     """
 
     finite = [
@@ -635,31 +639,40 @@ def choose_publication_endpoint(
     best_free = min(
         reference_rows,
         key=lambda r: (
-            _finite_float(r.get("native_free_wR2_all"), float("inf")),
-            _finite_float(r.get("native_wR2_all"), float("inf")),
+            _finite_float(r.get("row_free_Rall"), float("inf")),
+            _finite_float(r.get("row_free_wRall"), float("inf")),
+            _finite_float(r.get("row_work_Rall"), float("inf")),
             int(r.get("scale_params", 10**9)),
         ),
     )
-    low_r_r1 = _finite_float(low_r.get("shelxl_R1all"), float("inf"))
-    best_free_wr2 = _finite_float(best_free.get("native_free_wR2_all"), float("inf"))
+    best_free_rall = min(
+        _finite_float(row.get("row_free_Rall"), float("inf"))
+        for row in reference_rows
+    )
+    best_work_rall = min(
+        _finite_float(row.get("row_work_Rall"), float("inf"))
+        for row in reference_rows
+    )
+    best_free_wrall = min(
+        _finite_float(row.get("row_free_wRall"), float("inf"))
+        for row in reference_rows
+    )
     prefer = str(prefer_wght_mode)
     policy = str(selection_policy or "gated-smallest").strip().lower()
     ic_name = str(information_criterion or "bic_fitted_variance").strip()
-    if policy not in {"bic", "information", "gated-smallest", "legacy"}:
-        policy = "bic"
-    if policy == "information":
-        policy = "bic"
-    if policy == "legacy":
-        policy = "gated-smallest"
+    if policy not in {"gated-smallest", "row-gated-smallest", "legacy"}:
+        policy = "row-gated-smallest"
+    if policy in {"legacy", "gated-smallest"}:
+        policy = "row-gated-smallest"
     passing: list[dict[str, object]] = []
     rejections: list[dict[str, object]] = []
     for row in finite:
         reasons = []
         warnings = []
         goof = _finite_float(row.get("shelxl_GooF"), float("inf"))
-        r1 = _finite_float(row.get("shelxl_R1all"), float("inf"))
-        free_wr2 = _finite_float(row.get("native_free_wR2_all"), float("inf"))
-        ic_value = _finite_float(row.get(ic_name), float("inf"))
+        free_rall = _finite_float(row.get("row_free_Rall"), float("inf"))
+        work_rall = _finite_float(row.get("row_work_Rall"), float("inf"))
+        free_wrall = _finite_float(row.get("row_free_wRall"), float("inf"))
         modulation_p95 = _finite_float(row.get("mod_p95", row.get("modulation_p95")))
         try:
             npd_count = int(row.get("shelxl_npd_count", 0) or 0)
@@ -701,15 +714,23 @@ def choose_publication_endpoint(
                 f"endpoint modulation p95 {modulation_p95:.4g} exceeds warning level {float(max_modulation_p95):.4g}"
             )
         row["modulation_warnings"] = warnings
-        if policy == "bic" and not math.isfinite(ic_value):
-            reasons.append(f"missing finite information criterion {ic_name!r}")
-        if policy == "gated-smallest":
-            if r1 > low_r_r1 + float(max_r1_cost):
-                reasons.append(f"R1all cost {100.0 * (r1 - low_r_r1):.2f}% exceeds {100.0 * max_r1_cost:.2f}%")
-            if free_wr2 > best_free_wr2 + float(free_wr2_tolerance):
+        if not all(math.isfinite(value) for value in (free_rall, work_rall, free_wrall)):
+            reasons.append("missing finite work/free JANA-style row factors")
+        else:
+            if free_rall > best_free_rall + float(free_rall_tolerance):
                 reasons.append(
-                    f"held-out row wR2 cost {100.0 * (free_wr2 - best_free_wr2):.2f}% exceeds "
-                    f"{100.0 * free_wr2_tolerance:.2f}%"
+                    f"held-out row Rall cost {100.0 * (free_rall - best_free_rall):.2f}% exceeds "
+                    f"{100.0 * free_rall_tolerance:.2f}%"
+                )
+            if work_rall > best_work_rall + float(work_rall_tolerance):
+                reasons.append(
+                    f"work-row Rall cost {100.0 * (work_rall - best_work_rall):.2f}% exceeds "
+                    f"{100.0 * work_rall_tolerance:.2f}%"
+                )
+            if free_wrall > best_free_wrall + float(free_wrall_tolerance):
+                reasons.append(
+                    f"held-out row wRall cost {100.0 * (free_wrall - best_free_wrall):.2f}% exceeds "
+                    f"{100.0 * free_wrall_tolerance:.2f}%"
                 )
         if reasons:
             rejections.append(
@@ -719,7 +740,9 @@ def choose_publication_endpoint(
                     "reasons": reasons,
                     "shelxl_R1all": row.get("shelxl_R1all"),
                     "shelxl_GooF": row.get("shelxl_GooF"),
-                    "native_free_wR2_all": row.get("native_free_wR2_all"),
+                    "row_free_Rall": row.get("row_free_Rall"),
+                    "row_free_wRall": row.get("row_free_wRall"),
+                    "row_work_Rall": row.get("row_work_Rall"),
                     "scale_params": row.get("scale_params"),
                     "shelxl_npd_count": row.get("shelxl_npd_count"),
                     "shelxl_split_count": row.get("shelxl_split_count"),
@@ -733,25 +756,15 @@ def choose_publication_endpoint(
             passing.append(row)
 
     if passing:
-        if policy == "bic":
-            selected = min(
-                passing,
-                key=lambda r: (
-                    _finite_float(r.get(ic_name), float("inf")),
-                    int(r.get("scale_params", 10**9)),
-                    _finite_float(r.get("native_free_wR2_all"), float("inf")),
-                    _finite_float(r.get("shelxl_R1all"), float("inf")),
-                ),
-            )
-        else:
-            selected = min(
-                passing,
-                key=lambda r: (
-                    int(r.get("scale_params", 10**9)),
-                    _finite_float(r.get("native_free_wR2_all"), float("inf")),
-                    _finite_float(r.get("shelxl_R1all"), float("inf")),
-                ),
-            )
+        selected = min(
+            passing,
+            key=lambda r: (
+                int(r.get("scale_params", 10**9)),
+                _finite_float(r.get("row_free_Rall"), float("inf")),
+                _finite_float(r.get("row_free_wRall"), float("inf")),
+                _finite_float(r.get("row_work_Rall"), float("inf")),
+            ),
+        )
         status = "passed"
     else:
         selected = min(
@@ -759,22 +772,23 @@ def choose_publication_endpoint(
             key=lambda r: (
                 max(float(goof_min) - _finite_float(r.get("shelxl_GooF"), 0.0), 0.0)
                 + max(_finite_float(r.get("shelxl_GooF"), float("inf")) - float(goof_max), 0.0),
-                _finite_float(r.get(ic_name), float("inf")) if policy == "bic" else 0.0,
-                max(_finite_float(r.get("shelxl_R1all"), float("inf")) - low_r_r1 - float(max_r1_cost), 0.0),
+                max(_finite_float(r.get("row_free_Rall"), float("inf")) - best_free_rall, 0.0),
+                max(_finite_float(r.get("row_work_Rall"), float("inf")) - best_work_rall, 0.0),
                 int(r.get("scale_params", 10**9)),
             ),
         )
         status = "no_candidate_passed_all_gates"
 
     best_ic = None
-    if policy == "bic":
-        finite_ic = [_finite_float(r.get(ic_name), float("inf")) for r in passing]
-        finite_ic = [v for v in finite_ic if math.isfinite(v)]
-        best_ic = min(finite_ic) if finite_ic else None
     selected_ic = _finite_float(selected.get(ic_name), float("nan")) if selected else float("nan")
     selected_delta_ic = selected_ic - float(best_ic) if best_ic is not None and math.isfinite(selected_ic) else float("nan")
-    r1_cost = _finite_float(selected.get("shelxl_R1all"), float("nan")) - low_r_r1 if selected else float("nan")
-    free_wr2_cost = _finite_float(selected.get("native_free_wR2_all"), float("nan")) - best_free_wr2 if selected else float("nan")
+    r1_cost = float("nan")
+    free_wr2_cost = float("nan")
+    selected_free_rall_cost = (
+        _finite_float(selected.get("row_free_Rall"), float("nan")) - best_free_rall
+        if selected
+        else float("nan")
+    )
     return {
         "status": status,
         "publication_endpoint": selected,
@@ -787,11 +801,15 @@ def choose_publication_endpoint(
         "selected_delta_information_criterion": selected_delta_ic,
         "selected_r1_cost_vs_low_r": r1_cost,
         "selected_free_wr2_cost_vs_best_free": free_wr2_cost,
+        "selected_free_rall_cost_vs_best_free": selected_free_rall_cost,
         "gates": {
             "goof_min": float(goof_min),
             "goof_max": float(goof_max),
-            "max_r1_cost": float(max_r1_cost),
-            "free_wr2_tolerance": float(free_wr2_tolerance),
+            "free_rall_tolerance": float(free_rall_tolerance),
+            "work_rall_tolerance": float(work_rall_tolerance),
+            "free_wrall_tolerance": float(free_wrall_tolerance),
+            "deprecated_endpoint_max_r1_cost_not_used_for_scale_selection": float(max_r1_cost),
+            "deprecated_native_free_wr2_tolerance_not_used_for_scale_selection": float(free_wr2_tolerance),
             "preferred_wght_mode": prefer,
             "selection_policy": policy,
             "information_criterion": ic_name,
@@ -825,8 +843,9 @@ def write_publication_report(path: Path, selection: dict[str, object], rows_out:
         "",
         "This report separates the low-R diagnostic corrected-HKL export from the prospectively selected publication export. "
         "The publication branch uses fixed row corrections, a declared scale contract, endpoint sigma calibration, "
-        "and a fixed `WGHT 0 0` branch unless requested otherwise. The default selector applies endpoint, held-out-row, "
-        "and detector-field validation gates, then chooses the smallest passing scale contract. Endpoint modulation p95 "
+        "and a fixed `WGHT 0 0` branch unless requested otherwise. Scale topology is selected from work/free "
+        "JANA-style row Rall and wRall, then endpoint pathology and detector-field gates are applied. SHELXL R1/wR2 "
+        "are reported but never select the scale field. Endpoint modulation p95 "
         "is reported as a warning diagnostic and never blocks selection.",
         "",
         f"Runtime: `{elapsed_s:.2f}` seconds.",
@@ -841,18 +860,16 @@ def write_publication_report(path: Path, selection: dict[str, object], rows_out:
         lines += [
             f"Spec: `{selected.get('spec')}`; weight mode: `{selected.get('wght_mode')}`.",
             f"Scale parameters: `{selected.get('scale_params')}`; total row-model parameters: `{selected.get('total_params')}`.",
-            f"Selection IC: `{_finite_float(selected.get(str(selection.get('information_criterion') or 'bic_fitted_variance'))):.3f}`; "
-            f"delta from best passing IC `{_finite_float(selection.get('selected_delta_information_criterion')):.3f}`.",
+            f"Held-out row Rall/wRall: `{_percent_or_blank(selected.get('row_free_Rall'))}` / "
+            f"`{_percent_or_blank(selected.get('row_free_wRall'))}`; work Rall/wRall "
+            f"`{_percent_or_blank(selected.get('row_work_Rall'))}` / "
+            f"`{_percent_or_blank(selected.get('row_work_wRall'))}`.",
             f"SHELXL: R1(F)gt `{_percent_or_blank(selected.get('shelxl_R1gt'))}`, "
             f"R1(F)all `{_percent_or_blank(selected.get('shelxl_R1all'))}`, "
             f"wR2(F^2)all `{_percent_or_blank(selected.get('shelxl_wR2all'))}`, "
             f"GooF `{_finite_float(selected.get('shelxl_GooF')):.3f}`.",
-            f"Row-space all: R(I)all `{_percent_or_blank(selected.get('native_R1_all'))}`, "
-            f"wR(I)all `{_percent_or_blank(selected.get('native_wR2_all'))}`, "
-            f"S_GROND `{_finite_float(selected.get('native_GooF')):.3f}`.",
-            f"Row-space held-out: R(I)all `{_percent_or_blank(selected.get('native_free_R1_all'))}`, "
-            f"wR(I)all `{_percent_or_blank(selected.get('native_free_wR2_all'))}`, "
-            f"S_GROND_free `{_finite_float(selected.get('native_free_GooF')):.3f}`.",
+            f"Row-space all: Rall `{_percent_or_blank(selected.get('row_Rall'))}`, "
+            f"wRall `{_percent_or_blank(selected.get('row_wRall'))}`.",
             f"Endpoint sigma scale: `{_finite_float(selected.get('sigma_scale')):.4g}`; "
             f"held-out RMS(z) after calibration `{_finite_float(selected.get('heldout_rms_z_after')):.3f}`.",
             f"Endpoint pathology: NPD `{selected.get('shelxl_npd_count', 'n/a')}`"
@@ -889,34 +906,33 @@ def write_publication_report(path: Path, selection: dict[str, object], rows_out:
             "## Best Held-Out Row Endpoint",
             "",
             f"Spec: `{best_free.get('spec')}`; weight mode: `{best_free.get('wght_mode')}`; "
-            f"held-out row wR(I)all `{_percent_or_blank(best_free.get('native_free_wR2_all'))}`.",
+            f"held-out row Rall/wRall `{_percent_or_blank(best_free.get('row_free_Rall'))}` / "
+            f"`{_percent_or_blank(best_free.get('row_free_wRall'))}`.",
             "",
         ]
 
     lines += [
         "## Candidate Table",
         "",
-        "| spec | WGHT mode | scale params | selection IC | R1(F)all | wR2(F^2)all | GooF | modulation p95 | NPD | split | row free wR(I)all | sigma scale | endpoint |",
+        "| spec | WGHT mode | scales | free Rall | free wRall | work Rall | work wRall | R1(F)all report | wR2(F^2)all report | GooF | NPD | split | endpoint |",
         "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
-    ic_name = str(selection.get("information_criterion") or "bic_fitted_variance")
     for row in sorted(
         rows_out,
         key=lambda r: (
             str(r.get("wght_mode")) != str((selection.get("gates") or {}).get("preferred_wght_mode", "freeze-zero")),
-            _finite_float(r.get(ic_name), float("inf")),
+            _finite_float(r.get("row_free_Rall"), float("inf")),
             int(r.get("scale_params", 10**9)),
         ),
     ):
         lines.append(
             f"| `{row.get('spec')}` | `{row.get('wght_mode')}` | {row.get('scale_params')} | "
-            f"{_finite_float(row.get(ic_name)):.3f} | "
+            f"{_percent_or_blank(row.get('row_free_Rall'))} | {_percent_or_blank(row.get('row_free_wRall'))} | "
+            f"{_percent_or_blank(row.get('row_work_Rall'))} | {_percent_or_blank(row.get('row_work_wRall'))} | "
             f"{_percent_or_blank(row.get('shelxl_R1all'))} | {_percent_or_blank(row.get('shelxl_wR2all'))} | "
             f"{_finite_float(row.get('shelxl_GooF')):.3f} | "
-            f"{_finite_float(row.get('mod_p95')):.4g} | "
             f"{row.get('shelxl_npd_count', '')} | {row.get('shelxl_split_count', '')} | "
-            f"{_percent_or_blank(row.get('native_free_wR2_all'))} | "
-            f"{_finite_float(row.get('sigma_scale')):.4g} | `{row.get('endpoint_dir')}` |"
+            f"`{row.get('endpoint_dir')}` |"
         )
 
     if selection.get("rejections"):
@@ -963,6 +979,9 @@ def main() -> None:
     ap.add_argument("--publication-goof-max", type=float, default=1.15)
     ap.add_argument("--publication-max-r1-cost", type=float, default=0.010)
     ap.add_argument("--publication-free-wr2-tolerance", type=float, default=0.040)
+    ap.add_argument("--publication-free-rall-tolerance", type=float, default=0.010)
+    ap.add_argument("--publication-work-rall-tolerance", type=float, default=0.010)
+    ap.add_argument("--publication-free-wrall-tolerance", type=float, default=0.050)
     ap.add_argument("--publication-max-modulation-p95", type=float, default=20.0)
     ap.add_argument("--publication-prefer-wght-mode", default="freeze-zero")
     ap.add_argument("--publication-allow-npd", action=argparse.BooleanOptionalAction, default=False, help="Explicit diagnostic override allowing NPD pathology in the selected endpoint. Default requires NPD == 0; split warnings always block publication selection.")
@@ -970,7 +989,7 @@ def main() -> None:
         "--publication-selection-policy",
         choices=["bic", "gated-smallest"],
         default="gated-smallest",
-        help="Endpoint scale-count selector. The default promotes the smallest contract passing endpoint, held-out-row, and detector-field gates; BIC remains diagnostic.",
+        help="Scale topology selector. All accepted values now use held-out/work JANA-style row factors; legacy bic is retained only as a CLI alias.",
     )
     ap.add_argument(
         "--publication-information-criterion",
@@ -1127,6 +1146,10 @@ def main() -> None:
                 "row_Robs": meta["candidate"]["Robs"],
                 "row_Rall": meta["candidate"]["Rall"],
                 "row_wRall": meta["candidate"]["wRall"],
+                "row_work_Rall": meta["candidate"]["row_work"]["Rall"],
+                "row_work_wRall": meta["candidate"]["row_work"]["wRall"],
+                "row_free_Rall": meta["candidate"]["row_free"]["Rall"],
+                "row_free_wRall": meta["candidate"]["row_free"]["wRall"],
                 "native_R1_gt": meta["candidate"]["native"]["R1_gt"],
                 "native_R1_all": meta["candidate"]["native"]["R1_all"],
                 "native_wR2_all": meta["candidate"]["native"]["wR2_all"],
@@ -1199,6 +1222,9 @@ def main() -> None:
             detector_independent_calibration=bool(
                 args.detector_independent_calibration
             ),
+            free_rall_tolerance=float(args.publication_free_rall_tolerance),
+            work_rall_tolerance=float(args.publication_work_rall_tolerance),
+            free_wrall_tolerance=float(args.publication_free_wrall_tolerance),
         )
     )
     summary_out = {

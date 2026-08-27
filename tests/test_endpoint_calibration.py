@@ -1,6 +1,14 @@
 from grond.legacy.engine.scale_contract_replay import choose_publication_endpoint
 
 
+def _row_metrics(free_rall: float, work_rall: float, free_wrall: float) -> dict[str, float]:
+    return {
+        "row_free_Rall": free_rall,
+        "row_work_Rall": work_rall,
+        "row_free_wRall": free_wrall,
+    }
+
+
 def test_publication_endpoint_prefers_boring_goof_over_low_r_diagnostic():
     rows = [
         {
@@ -12,6 +20,7 @@ def test_publication_endpoint_prefers_boring_goof_over_low_r_diagnostic():
             "native_free_wR2_all": 0.14,
             "bic_fitted_variance": 100.0,
             "endpoint_dir": "baseline",
+            **_row_metrics(0.100, 0.100, 0.120),
         },
         {
             "spec": "adaptive_120_det_8",
@@ -22,6 +31,7 @@ def test_publication_endpoint_prefers_boring_goof_over_low_r_diagnostic():
             "native_free_wR2_all": 0.15,
             "bic_fitted_variance": 200.0,
             "endpoint_dir": "adaptive_120",
+            **_row_metrics(0.105, 0.105, 0.125),
         },
         {
             "spec": "window_5deg_det_4",
@@ -32,6 +42,7 @@ def test_publication_endpoint_prefers_boring_goof_over_low_r_diagnostic():
             "native_free_wR2_all": 0.20,
             "bic_fitted_variance": 500.0,
             "endpoint_dir": "too_coarse",
+            **_row_metrics(0.140, 0.140, 0.180),
         },
     ]
     for row in rows:
@@ -51,7 +62,7 @@ def test_publication_endpoint_prefers_boring_goof_over_low_r_diagnostic():
     assert selected["publication_endpoint"]["spec"] == "adaptive_120_det_8"
 
 
-def test_publication_endpoint_bic_policy_uses_bic_after_sanity_gates():
+def test_publication_endpoint_legacy_bic_alias_uses_row_gated_smallest():
     rows = [
         {
             "spec": "few_scales",
@@ -62,6 +73,7 @@ def test_publication_endpoint_bic_policy_uses_bic_after_sanity_gates():
             "native_free_wR2_all": 0.22,
             "bic_fitted_variance": 2000.0,
             "endpoint_dir": "few",
+            **_row_metrics(0.180, 0.180, 0.190),
         },
         {
             "spec": "bic_best",
@@ -72,6 +84,7 @@ def test_publication_endpoint_bic_policy_uses_bic_after_sanity_gates():
             "native_free_wR2_all": 0.18,
             "bic_fitted_variance": 1500.0,
             "endpoint_dir": "bic_best",
+            **_row_metrics(0.175, 0.175, 0.185),
         },
         {
             "spec": "low_r_bad_goof",
@@ -82,6 +95,7 @@ def test_publication_endpoint_bic_policy_uses_bic_after_sanity_gates():
             "native_free_wR2_all": 0.15,
             "bic_fitted_variance": 1000.0,
             "endpoint_dir": "low_r",
+            **_row_metrics(0.170, 0.170, 0.180),
         },
     ]
     for row in rows:
@@ -98,13 +112,8 @@ def test_publication_endpoint_bic_policy_uses_bic_after_sanity_gates():
     )
 
     assert selected["status"] == "passed"
-    assert selected["selection_policy"] == "bic"
-    assert selected["publication_endpoint"]["spec"] == "low_r_bad_goof"
-    assert selected["selected_information_criterion"] == 1000.0
-    assert any(
-        "GooF" in warning
-        for warning in selected["publication_endpoint"]["modulation_warnings"]
-    )
+    assert selected["selection_policy"] == "row-gated-smallest"
+    assert selected["publication_endpoint"]["spec"] == "few_scales"
 
 
 def test_publication_endpoint_legacy_policy_keeps_smallest_passing_scale_count():
@@ -118,6 +127,7 @@ def test_publication_endpoint_legacy_policy_keeps_smallest_passing_scale_count()
             "native_free_wR2_all": 0.151,
             "bic_fitted_variance": 2000.0,
             "endpoint_dir": "few",
+            **_row_metrics(0.151, 0.151, 0.161),
         },
         {
             "spec": "bic_best",
@@ -128,6 +138,7 @@ def test_publication_endpoint_legacy_policy_keeps_smallest_passing_scale_count()
             "native_free_wR2_all": 0.150,
             "bic_fitted_variance": 1500.0,
             "endpoint_dir": "bic_best",
+            **_row_metrics(0.150, 0.150, 0.160),
         },
     ]
     for row in rows:
@@ -144,7 +155,7 @@ def test_publication_endpoint_legacy_policy_keeps_smallest_passing_scale_count()
     )
 
     assert selected["status"] == "passed"
-    assert selected["selection_policy"] == "gated-smallest"
+    assert selected["selection_policy"] == "row-gated-smallest"
     assert selected["publication_endpoint"]["spec"] == "few_scales"
 
 
@@ -158,6 +169,7 @@ def test_publication_endpoint_modulation_is_warning_only():
             "shelxl_GooF": 1.0,
             "native_free_wR2_all": 0.15,
             "bic_fitted_variance": 100.0,
+            **_row_metrics(0.15, 0.15, 0.16),
         },
         {
             "spec": "excessive",
@@ -168,6 +180,7 @@ def test_publication_endpoint_modulation_is_warning_only():
             "native_free_wR2_all": 0.15,
             "bic_fitted_variance": 100.0,
             "mod_p95": 20.1,
+            **_row_metrics(0.15, 0.15, 0.16),
         },
     ]
 
