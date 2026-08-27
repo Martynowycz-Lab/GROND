@@ -857,6 +857,31 @@ def sigma_eff(data: XDSData, target, base_sigma, nui: Nuisance):
 
 def group_indices(data: XDSData, group_width_deg: float, frame_offset: float):
     if getattr(data, "pets_exact_a_center", None) is not None:
+        static_endpoint = (
+            str(data.header.get("PETS_STATIC_HKLF4_VALIDATED", ""))
+            .strip()
+            .upper()
+            == "TRUE"
+        )
+        if static_endpoint:
+            matrices = np.asarray(data.pets_exact_a_center, dtype=float)
+            cumulative = np.zeros(len(matrices), dtype=float)
+            for index in range(1, len(matrices)):
+                relative = matrices[index] @ np.linalg.inv(matrices[index - 1])
+                cosine = float(
+                    np.clip((np.trace(relative) - 1.0) / 2.0, -1.0, 1.0)
+                )
+                cumulative[index] = cumulative[index - 1] + math.degrees(
+                    math.acos(cosine)
+                )
+            ordinals = np.rint(np.asarray(data.zcal, dtype=float)).astype(int) - 1
+            if np.any(ordinals < 0) or np.any(ordinals >= len(cumulative)):
+                raise ValueError("PETS static endpoint row uses an invalid acquisition-frame ordinal")
+            width = float(group_width_deg)
+            if not math.isfinite(width) or width <= 0.0:
+                raise ValueError("PETS static endpoint scale-group width must be positive")
+            row_angles = cumulative[ordinals]
+            return np.floor((row_angles - float(np.min(row_angles))) / width).astype(int)
         # PETS owns this virtual-frame/zone partition. Its orientations are not
         # a uniform XDS scan and can have varying angular steps, so re-binning
         # by an arbitrary omega width can silently combine unrelated zones.
@@ -3518,11 +3543,17 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     data = XDSData(Path(args.hkl), hkl_transform=args.hkl_transform)
     if getattr(data, "pets_exact_a_center", None) is not None:
-        if not bool(args.skip_endpoint_refinement):
+        static_endpoint_validated = (
+            str(data.header.get("PETS_STATIC_HKLF4_VALIDATED", ""))
+            .strip()
+            .upper()
+            == "TRUE"
+        )
+        if not bool(args.skip_endpoint_refinement) and not static_endpoint_validated:
             raise ValueError(
-                "native PETS virtual-frame rows do not define a conventional SHELXL "
-                "HKLF4 endpoint; add --skip-endpoint-refinement and report the separate "
-                "static integration as the endpoint comparator"
+                "native PETS rows do not have a validated row-preserving static SHELXL "
+                "HKLF4 contract; add --skip-endpoint-refinement or re-import the ordinary "
+                "cif_pets with PETS' matching static HKLF4 as --baseline-hkl"
             )
         if any(value > 1 for value in parse_int_grid(args.detector_scale_bins)):
             raise ValueError(

@@ -427,8 +427,12 @@ def native_command(
         str(float(args.bethe_denom_eps)),
         "--matrix-convention",
         str(nui.get("matrix_convention", summary_value(source_summary, "matrix_convention", "j_minus_i"))),
-        "--positive-only",
     ]
+    cmd.append(
+        "--positive-only"
+        if bool(summary_value(source_summary, "positive_only", True))
+        else "--include-nonpositive"
+    )
     if baseline_hkl:
         cmd.extend(["--baseline-hkl", str(baseline_hkl)])
     if args.max_rows > 0:

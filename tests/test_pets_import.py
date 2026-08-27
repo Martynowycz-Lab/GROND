@@ -8,12 +8,15 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from grond.cli import build_parser
+from grond.cli import _configure_static_pets_auto, build_parser
+from grond.io.config import load_prep
 from grond.io.pets_import import import_pets_to_grond, read_pets_contract
 from grond.legacy.engine import native_row_regularize
 from grond.legacy.engine.bloch_engine import Config, XDSBlochPort, XDSData, parse_model
 from grond.legacy.engine.native_row_regularize import group_indices
 from grond.legacy.engine.native_row_regularize import main as native_regularize_main
+from grond.legacy.engine.shelx_hkl import write_fixed_width_hkl
+from grond.legacy.engine.support_basis_scan import scan_basis_sizes
 
 
 def _pets_text(*, repeat: bool = False, bad_zone: bool = False) -> str:
@@ -146,6 +149,132 @@ def test_native_pets_rows_write_one_grond_row_per_observation(tmp_path: Path) ->
     ).tolist() == [0, 1]
 
 
+def test_ordinary_pets_static_hkl_enables_compact_angular_scale_groups(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "test.cif_pets"
+    source.write_text(_pets_text())
+    source.with_suffix(".hkl").write_text(
+        "1 0 0 10 1 1 0 0 0 -1 0 0 -1\n"
+        "0 1 0 20 2 2 0 0 0 -1 0 0 -1\n"
+    )
+    baseline = tmp_path / "test_shelx.hkl"
+    write_fixed_width_hkl(
+        baseline,
+        [(1, 0, 0, 10.0, 1.0), (0, 1, 0, 20.0, 2.0)],
+    )
+
+    output = import_pets_to_grond(
+        source,
+        tmp_path / "bridge",
+        space_group_number=19,
+        baseline_hkl=baseline,
+    )
+    summary = json.loads(output.summary.read_text())
+    assert summary["static_endpoint_contract"]["status"] == "validated"
+    assert summary["static_endpoint_contract"]["rows"] == 2
+    assert "!PETS_STATIC_HKLF4_VALIDATED= TRUE" in output.hkl.read_text()
+
+    loaded = XDSData(output.hkl, hkl_transform="identity")
+    assert group_indices(
+        loaded, group_width_deg=999.0, frame_offset=0.0
+    ).tolist() == [0, 0]
+    assert group_indices(
+        loaded, group_width_deg=45.0, frame_offset=0.0
+    ).tolist() == [0, 2]
+
+
+def test_pets_static_hkl_mismatch_fails_closed(tmp_path: Path) -> None:
+    source = tmp_path / "test.cif_pets"
+    source.write_text(_pets_text())
+    source.with_suffix(".hkl").write_text(
+        "1 0 0 10 1 1 0 0 0 -1 0 0 -1\n"
+        "0 1 0 20 2 2 0 0 0 -1 0 0 -1\n"
+    )
+    baseline = tmp_path / "wrong.hkl"
+    write_fixed_width_hkl(
+        baseline,
+        [(1, 0, 0, 10.0, 1.0), (0, 1, 0, 21.0, 2.0)],
+    )
+
+    with pytest.raises(ValueError, match="observation differs"):
+        import_pets_to_grond(
+            source,
+            tmp_path / "bridge",
+            space_group_number=19,
+            baseline_hkl=baseline,
+        )
+
+
+def test_pets_static_hkl_accepts_pets_eof_without_terminator(tmp_path: Path) -> None:
+    source = tmp_path / "test.cif_pets"
+    source.write_text(_pets_text())
+    source.with_suffix(".hkl").write_text(
+        "1 0 0 10 1 1 0 0 0 -1 0 0 -1\n"
+        "0 1 0 20 2 2 0 0 0 -1 0 0 -1\n"
+    )
+    baseline = tmp_path / "pets_shelx.hkl"
+    baseline.write_text(
+        f"{1:4d}{0:4d}{0:4d}{10.0:8.2f}{1.0:8.2f}\n"
+        f"{0:4d}{1:4d}{0:4d}{20.0:8.2f}{2.0:8.2f}\n"
+    )
+
+    output = import_pets_to_grond(
+        source,
+        tmp_path / "bridge",
+        space_group_number=19,
+        baseline_hkl=baseline,
+    )
+    summary = json.loads(output.summary.read_text())
+    assert summary["static_endpoint_contract"]["status"] == "validated"
+
+
+def test_static_pets_auto_profile_is_source_safe_and_leaves_nq_automatic(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "test.cif_pets"
+    source.write_text(_pets_text())
+    source.with_suffix(".hkl").write_text(
+        "1 0 0 10 1 1 0 0 0 -1 0 0 -1\n"
+        "0 1 0 20 2 2 0 0 0 -1 0 0 -1\n"
+    )
+    structure = tmp_path / "model.res"
+    structure.write_text(
+        "TITL test\nCELL 0.025 5 6 7 90 90 90\nLATT -1\n"
+        "SFAC C 1 0 1 0 1 0 1 0\nFVAR 1\n"
+        "C1 1 0.1 0.2 0.3 11.0 0.05\nHKLF 4\nEND\n"
+    )
+    baseline = tmp_path / "model.hkl"
+    write_fixed_width_hkl(
+        baseline,
+        [(1, 0, 0, 10.0, 1.0), (0, 1, 0, 20.0, 2.0)],
+    )
+    bridge = import_pets_to_grond(
+        source,
+        tmp_path / "bridge",
+        space_group_number=1,
+        structure=structure,
+        baseline_hkl=baseline,
+    )
+    out = tmp_path / "auto"
+    args = build_parser().parse_args(
+        ["auto", "--prep", str(bridge.prep), "--out-dir", str(out), "--dry-run"]
+    )
+
+    payload = _configure_static_pets_auto(load_prep(bridge.prep), args)
+
+    assert payload["status"] == "validated"
+    assert args.pets_static_auto is True
+    assert args.n_basis == 0
+    assert args.n_points == 20
+    assert args.screen_n_basis == 24
+    assert args.screen_n_points == 10
+    assert args.trust_hkl_transform is True
+    assert args.detector_scale_bins == "0"
+    assert args.group_width_grid == "999,10,5,3,2,1"
+    assert (out / "PETS_STATIC_AUTO_CONTRACT.json").is_file()
+
+
 def test_pets_prep_keeps_exact_edge_and_nonpositive_rows(tmp_path: Path) -> None:
     source = tmp_path / "test.cif_pets"
     source.write_text(_pets_text().replace("1 0 0 10 1 1", "1 0 0 -10 1 1"))
@@ -182,7 +311,7 @@ def test_pets_prep_keeps_exact_edge_and_nonpositive_rows(tmp_path: Path) -> None
             str(tmp_path / "unsafe_auto"),
         ]
     )
-    with pytest.raises(SystemExit, match="row-space only"):
+    with pytest.raises(SystemExit, match="row-for-row validated"):
         run_args.func(run_args)
     auto_args = build_parser().parse_args(
         [
@@ -194,7 +323,7 @@ def test_pets_prep_keeps_exact_edge_and_nonpositive_rows(tmp_path: Path) -> None
             "--dry-run",
         ]
     )
-    with pytest.raises(SystemExit, match="row-space only"):
+    with pytest.raises(SystemExit, match="row-for-row validated"):
         auto_args.func(auto_args)
     pets_args = build_parser().parse_args(
         [
@@ -252,7 +381,7 @@ def test_pets_native_regularizer_refuses_static_endpoint_and_detector_grid(
         "/usr/bin/true",
     ]
     monkeypatch.setattr(sys, "argv", common)
-    with pytest.raises(ValueError, match="do not define a conventional SHELXL"):
+    with pytest.raises(ValueError, match="validated row-preserving static SHELXL"):
         native_regularize_main()
 
     monkeypatch.setattr(
@@ -422,6 +551,44 @@ def test_pets_row_plan_cache_matches_direct_and_updates_current_model_ug(
         res_hash="model1",
     ).predict_rows(workers=1)
     assert not np.allclose(moved["dyn"], cached["dyn"], rtol=1e-8, atol=1e-15)
+
+
+def test_pets_support_scan_uses_full_recorded_wedge(tmp_path: Path) -> None:
+    source = tmp_path / "test.cif_pets"
+    source.write_text(_pets_text())
+    source.with_suffix(".hkl").write_text(
+        "1 0 0 10 1 1 0 0 0 -1 0 0 -1\n"
+        "0 1 0 20 2 2 0 0 0 -1 0 0 -1\n"
+    )
+    bridge = import_pets_to_grond(source, tmp_path / "bridge", space_group_number=1)
+    structure = tmp_path / "model.res"
+    structure.write_text(
+        "TITL test\nCELL 0.025 5 6 7 90 90 90\nLATT -1\n"
+        "SFAC C 1 0 1 0 1 0 1 0\nFVAR 1\n"
+        "C1 1 0.1 0.2 0.3 11.0 0.05\nHKLF 4\nEND\n"
+    )
+    data = XDSData(bridge.hkl, hkl_transform="identity")
+    config = Config(
+        n_basis=8,
+        n_points=3,
+        topup_d_min=0.5,
+        max_support_sg=1.0,
+    )
+    port = XDSBlochPort(
+        data,
+        parse_model(structure),
+        config,
+        cache_dir=tmp_path / "cache",
+        res_hash="model",
+    )
+    orientations, *_rest = port.pets_exact_orientation_samples(0)
+    expected, _metadata = port.pets_exact_select_common_basis(
+        data.hkl[0], orientations, 0
+    )
+
+    observed = scan_basis_sizes(port, np.asarray([0]), workers=1, chunksize=1)
+
+    assert observed.tolist() == [len(expected)]
 
 
 def test_sg19_dynamical_absence_is_retained_and_flagged_by_default(

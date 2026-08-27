@@ -91,6 +91,63 @@ def test_feedback_native_command_forwards_explicit_non_path_shelxl(tmp_path: Pat
     assert command[command.index("--shelxl") + 1] == str(explicit_shelxl)
 
 
+def test_feedback_native_command_preserves_nonpositive_row_contract(tmp_path: Path):
+    args = argparse.Namespace(
+        python="python",
+        hkl=str(tmp_path / "rows.hkl"),
+        baseline_hkl="",
+        hkl_transform="identity",
+        min_d_spacing=0.7,
+        topup_d_min=0.7,
+        min_peak=0.0,
+        geometry_percentile=100.0,
+        lambda_grid="1.0",
+        shelxl="shelxl",
+        shelxl_iterations=1,
+        endpoint_ls_cycles=1,
+        endpoint_wght_mode="freeze-zero",
+        post_bloch_sigma_policy="uniform_z_rms",
+        post_bloch_sigma_holdout_fraction=0.2,
+        post_bloch_sigma_min_scale=0.25,
+        post_bloch_sigma_max_scale=4.0,
+        rescale="median-iobs",
+        workers=1,
+        chunksize=1,
+        cache_compression="none",
+        compute_backend="scipy",
+        row_plan_cache="off",
+        jax_batch_size=0,
+        jax_matrix_bucket_size=0,
+        bethe_strong_count=48,
+        bethe_variant="schur_target",
+        bethe_promote_denom=0.005,
+        bethe_denom_eps=1e-5,
+        max_rows=0,
+    )
+    source_summary = {
+        "config": {"positive_only": False},
+        "best_native": {
+            "nuisance": {
+                "thickness_A": 1200.0,
+                "thickness_model": "single",
+                "thickness_grad_frac": 0.0,
+            }
+        },
+    }
+
+    command = fb.native_command(
+        args,
+        source_summary,
+        tmp_path / "model.res",
+        tmp_path / "cycle_01",
+        n_basis=24,
+        n_points=10,
+    )
+
+    assert "--include-nonpositive" in command
+    assert "--positive-only" not in command
+
+
 def test_native_worker_uses_explicit_non_path_shelxl(tmp_path: Path, monkeypatch):
     work = tmp_path / "work"
     work.mkdir()

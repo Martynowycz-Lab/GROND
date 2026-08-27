@@ -50,11 +50,29 @@ grond import-pets \
 The bridge supports native Born/Bloch row statistics, thickness scans, elastic
 negative-thickness hand checks, and experimental native structure updates. Keep
 detector scales disabled because PETS does not provide detector coordinates.
+For an ordinary import, `--baseline-hkl` may name PETS' own SHELX export. GROND
+requires its ordered HKL, intensity, and sigma columns to match the ordinary
+`cif_pets` and companion `.hkl` exactly. A successful audit is stored in the
+bridge and permits the normal automatic correction-and-endpoint workflow:
+
+```bash
+grond auto \
+  --prep crystal_01_pets_bridge/grond_prep.json \
+  --out-dir crystal_01_grond_auto
+```
+
+AUTO skips transform scouting only because the importer has already verified
+the proper identity setting and model symmetry. It selects the screen and final
+beam bases, quadrature, thickness distribution, compact angular frame scales,
+hand, and q/LS1 feedback itself. Detector fields remain disabled because PETS
+does not export detector coordinates. Every feedback cycle preserves signed
+nonpositive observations when they were present in the imported integration.
+
 PETS virtual-frame rocking intensities are not a conventional static HKLF4
-integration. A native PETS calculation therefore does not acquire a valid
-SHELXL endpoint merely by dividing the rows by a Bloch/Born ratio. Report the
-separate conventional SHELXL refinement as the endpoint comparator unless a
-static-integration conversion has been independently validated.
+integration. A `*_dyn.cif_pets` calculation therefore does not acquire a valid
+SHELXL endpoint merely by dividing those correlated occurrences by a
+Bloch/Born ratio. Report the separate conventional SHELXL refinement as the
+endpoint comparator for that native-row route.
 
 Use `grond pets-evaluate` for the safe fixed-model path. Beam count, angular
 quadrature, reciprocal support, and thickness grid are deliberately explicit;

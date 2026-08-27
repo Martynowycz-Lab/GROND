@@ -1891,9 +1891,12 @@ def compact_base_nuisance(args: argparse.Namespace) -> dict:
             "dose_b_mode": "none",
             "row_resolution_b": "0.0",
         }
+    pets_static = bool(getattr(args, "pets_static_auto", False))
     return {
         "thickness_A": args.thickness_grid,
-        "thickness_model": "uniform_gradient",
+        "thickness_model": (
+            args.thickness_model_grid if pets_static else "uniform_gradient"
+        ),
         "thickness_grad_frac": args.thickness_grad_grid,
         "thickness_sigma_frac": "0.0",
         "frame_offset": args.frame_offset_grid,
@@ -9010,6 +9013,11 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
     if not args.fast:
         thickness_run = root / "runs" / ds.name / "adaptive_thickness_polish"
         thickness_baseline = discrete_thickness_baseline_nuisance(args, active_nui)
+        thickness_candidates = thickness_polish_nuisance(
+            thickness_baseline, screen_frame_offsets
+        )
+        if bool(getattr(args, "pets_static_auto", False)):
+            thickness_candidates["frame_offset"] = "0"
         run_logged(
             native_stage_cmd(
                 python,
@@ -9021,7 +9029,7 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
                 n_basis=args.screen_n_basis,
                 n_points=args.screen_n_points,
                 stage="adaptive_thickness_polish",
-                pinned=thickness_polish_nuisance(thickness_baseline, screen_frame_offsets),
+                pinned=thickness_candidates,
                 promotion_baseline=thickness_baseline,
                 scale_fit_split_override="work",
                 selection_metric_override="work_wR2",
@@ -12485,6 +12493,12 @@ def cmd_import_pets(args: argparse.Namespace) -> int:
     except (FileNotFoundError, OSError, RuntimeError, ValueError) as exc:
         print(json.dumps({"status": "error", "error": str(exc)}, indent=2))
         return 2
+    summary_payload = read_json(bridge.summary)
+    static_endpoint = summary_payload.get("static_endpoint_contract")
+    static_endpoint_ready = bool(
+        isinstance(static_endpoint, Mapping)
+        and static_endpoint.get("status") == "validated"
+    )
     payload = {
         "status": "complete",
         "out_dir": str(bridge.out_dir),
@@ -12492,8 +12506,9 @@ def cmd_import_pets(args: argparse.Namespace) -> int:
         "scan_points": str(bridge.scan_points),
         "summary": str(bridge.summary),
         "scope": (
-            "native PETS row-space calculation; a conventional SHELXL endpoint "
-            "requires a separately validated static-integration contract"
+            "ordinary PETS row-space plus validated q/LS1 AUTO endpoint"
+            if static_endpoint_ready
+            else "native PETS row-space calculation only; no validated static LS1 endpoint"
         ),
     }
     if bridge.prep:
@@ -13308,6 +13323,101 @@ def _validated_h_omit_mode(value: object, dataset_count: int) -> str:
     return "on" if mode in {"on", "only", "both"} else "off"
 
 
+def _configure_static_pets_auto(
+    prep: PrepConfig,
+    args: argparse.Namespace,
+) -> dict[str, object] | None:
+    """Apply source-safe AUTO defaults for a row-matched ordinary PETS import."""
+
+    bridge = (prep.metadata or {}).get("pets2_bridge")
+    if not isinstance(bridge, Mapping):
+        return None
+    if len(prep.datasets) != 1:
+        raise SystemExit("PETS2 AUTO currently supports exactly one ordinary integration")
+    if bool(bridge.get("virtual_frames")):
+        raise SystemExit(
+            "PETS *_dyn.cif_pets virtual-frame occurrences are correlated row-space data, "
+            "not a static LS1 endpoint. Import the ordinary cif_pets plus its companion "
+            ".hkl and PETS-exported SHELX HKLF4 instead."
+        )
+    static_contract = bridge.get("static_endpoint_contract")
+    if not isinstance(static_contract, Mapping) or static_contract.get("status") != "validated":
+        raise SystemExit(
+            "PETS2 AUTO requires a row-for-row validated PETS static HKLF4. Re-import "
+            "the ordinary cif_pets with its 13-column .hkl, starting model, and the "
+            "matching PETS-exported SHELX HKL as --baseline-hkl."
+        )
+    baseline = Path(prep.baseline_hkl).expanduser().resolve()
+    if not baseline.is_file():
+        raise SystemExit(f"validated PETS static HKLF4 is not readable: {baseline}")
+    expected_hash = str(static_contract.get("sha256") or "")
+    actual_hash = sha256_file(baseline)
+    if not expected_hash or actual_hash != expected_hash:
+        raise SystemExit(
+            "PETS static HKLF4 hash changed after import; refusing q/LS1 AUTO "
+            f"(expected {expected_hash or 'missing'}, observed {actual_hash})"
+        )
+    dataset = prep.datasets[0]
+    transform = parse_hkl_transform_info(dataset.hkl_transform or "identity")
+    if transform.canonical != "identity" or not transform.proper:
+        raise SystemExit(
+            "PETS2 AUTO currently requires the importer-validated proper identity setting"
+        )
+
+    changes: dict[str, dict[str, object]] = {}
+
+    def force(name: str, value: object) -> None:
+        old = getattr(args, name)
+        setattr(args, name, value)
+        if old != value:
+            changes[name] = {"old": old, "new": value}
+
+    force("trust_hkl_transform", True)
+    force("frame_offset_grid", "0")
+    force("group_width_grid", "999,10,5,3,2,1")
+    force("detector_scale_bins", "0")
+    force("scale_polish", "off")
+    force("scale_polish_detector_bins", "0")
+    force("row_resolution_b_grid", "0.0")
+    force("sigma_c_peak_grid", "0.0")
+    force("sg_jitter_mode_grid", "none")
+    force("sg_jitter_sigma0_grid", "0.0")
+    force("sg_jitter_sigma_d_inv_grid", "0.0")
+    force("sg_jitter_sigma_frame_grid", "0.0")
+    force("thickness_model_grid", "single,uniform_gradient")
+    force("thickness_grad_grid", "0.0,0.4,1.0")
+    force("profile_quadrature", "uniform")
+    force("profile_accumulation", "sum")
+    force("sg_window_scout", "off")
+    force("observation_polish", "off")
+    force("forensic_depth", "quick")
+    force(
+        "endpoint_calibration_specs",
+        "baseline,window:1.0:det0,window:3.0:det0,window:5.0:det0",
+    )
+    args.pets_static_auto = True
+    payload = {
+        "schema": "grond.pets2-static-auto-contract.v1",
+        "status": "validated",
+        "source": bridge.get("source"),
+        "rows": bridge.get("rows"),
+        "virtual_frames": False,
+        "static_hkl": str(baseline),
+        "static_hkl_sha256": actual_hash,
+        "transform": transform.to_dict(),
+        "automatic_overrides": changes,
+        "selection": (
+            "AUTO chooses screen/final beam bases, quadrature count, thickness, compact "
+            "angular frame scales, hand, and q/LS1 feedback; detector scales remain disabled "
+            "because cif_pets has no detector coordinates"
+        ),
+    }
+    contract_path = Path(args.out_dir) / "PETS_STATIC_AUTO_CONTRACT.json"
+    contract_path.parent.mkdir(parents=True, exist_ok=True)
+    contract_path.write_text(json.dumps(payload, indent=2) + "\n")
+    return payload
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     """CLI entrypoint for the configurable `GROND run` workflow."""
 
@@ -13318,14 +13428,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     logs = Path(args.out_dir) / "logs"
     python = choose_python(args.python)
     prep = prep_from_args(args)
-    if isinstance((prep.metadata or {}).get("pets2_bridge"), Mapping):
-        raise SystemExit(
-            "Native PETS2 prep files are currently row-space only. GROND run/auto "
-            "would invoke a conventional SHELXL feedback/endpoint path, but PETS "
-            "virtual-frame rocking intensities are not a static HKLF4 target. Use "
-            "the audited native PETS row/thickness/hand commands documented in "
-            "docs/INTEROPERABILITY.md; do not bypass this guard with a fabricated endpoint."
-        )
+    _configure_static_pets_auto(prep, args)
     try:
         requested_h_omit = str(getattr(args, "h_omit", "off") or "off")
         args.h_omit = _validated_h_omit_mode(requested_h_omit, len(prep.datasets))
@@ -21595,9 +21698,10 @@ def build_parser() -> argparse.ArgumentParser:
             "rocking widths without inventing detector coordinates. Ordinary cif_pets input "
             "requires its companion 13-column .hkl file so the acquisition frame remains "
             "known. PETS-owned *_dyn.cif_pets virtual-frame occurrences require the explicit "
-            "--allow-virtual-frames acknowledgement. The bridge supports native row metrics, "
-            "thickness, hand, and experimental native structure updates; it does not claim "
-            "that PETS virtual-frame intensities are a conventional SHELXL HKLF4 endpoint."
+            "--allow-virtual-frames acknowledgement. An ordinary import becomes eligible "
+            "for full q/LS1 AUTO only when --baseline-hkl is PETS' row-matched static SHELX "
+            "export. PETS virtual-frame occurrences remain native row-space data and are "
+            "never claimed as a conventional SHELXL HKLF4 endpoint."
         ),
     )
     p_import_pets.add_argument("--cif-pets", required=True)

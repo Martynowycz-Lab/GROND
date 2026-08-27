@@ -265,6 +265,93 @@ def _read_pets_hkl_sidecar(path: Path) -> np.ndarray:
     return result
 
 
+def _read_static_shelx_hkl(path: Path) -> list[tuple[int, int, int, float, float]]:
+    """Read the row-preserving HKLF4 file exported by PETS itself."""
+
+    rows: list[tuple[int, int, int, float, float]] = []
+    terminated = False
+    with path.open(errors="replace") as stream:
+        for line_number, line in enumerate(stream, start=1):
+            if not line.strip():
+                continue
+            body = line.rstrip("\r\n")
+            if len(body) < 28:
+                raise ValueError(
+                    f"PETS static HKLF4 row {line_number} is shorter than 28 columns"
+                )
+            try:
+                h, k, ell = int(body[:4]), int(body[4:8]), int(body[8:12])
+                intensity, sigma = float(body[12:20]), float(body[20:28])
+            except ValueError as exc:
+                raise ValueError(
+                    f"PETS static HKLF4 row {line_number} is not fixed-width h,k,l,I,sigma"
+                ) from exc
+            if (h, k, ell) == (0, 0, 0):
+                terminated = True
+                continue
+            if terminated:
+                raise ValueError(
+                    f"PETS static HKLF4 contains a reflection after its terminator on row {line_number}"
+                )
+            if not math.isfinite(intensity) or not math.isfinite(sigma) or sigma <= 0.0:
+                raise ValueError(
+                    f"PETS static HKLF4 row {line_number} has invalid intensity or sigma"
+                )
+            rows.append((h, k, ell, intensity, sigma))
+    # PETS' own SHELX export commonly ends at EOF without a 0,0,0 record.
+    # SHELXL accepts that producer convention; GROND's corrected writer will
+    # still materialize an explicit terminator in every generated endpoint.
+    return rows
+
+
+def _validate_static_endpoint_hkl(
+    path: Path,
+    observations: list[tuple],
+) -> dict[str, Any]:
+    """Prove that PETS' HKLF4 endpoint is the same ordered observation table."""
+
+    endpoint = Path(path).expanduser().resolve()
+    if not endpoint.is_file():
+        raise FileNotFoundError(f"PETS static HKLF4 does not exist: {endpoint}")
+    rows = _read_static_shelx_hkl(endpoint)
+    if len(rows) != len(observations):
+        raise ValueError(
+            "PETS static HKLF4 and cif_pets observation counts differ "
+            f"({len(rows)} versus {len(observations)})"
+        )
+    max_intensity_delta = 0.0
+    max_sigma_delta = 0.0
+    for index, (endpoint_row, observation) in enumerate(
+        zip(rows, observations, strict=True), start=1
+    ):
+        source_hkl = tuple(int(value) for value in observation[:3])
+        if endpoint_row[:3] != source_hkl:
+            raise ValueError(
+                f"PETS static HKLF4 HKL differs from cif_pets at row {index}: "
+                f"{endpoint_row[:3]} versus {source_hkl}"
+            )
+        intensity_delta = abs(float(endpoint_row[3]) - float(observation[3]))
+        sigma_delta = abs(float(endpoint_row[4]) - float(observation[4]))
+        max_intensity_delta = max(max_intensity_delta, intensity_delta)
+        max_sigma_delta = max(max_sigma_delta, sigma_delta)
+        if intensity_delta > 0.011 or sigma_delta > 0.011:
+            raise ValueError(
+                f"PETS static HKLF4 observation differs from cif_pets at row {index}"
+            )
+    return {
+        "status": "validated",
+        "path": str(endpoint),
+        "sha256": _sha256(endpoint),
+        "rows": len(rows),
+        "mapping": "ordered one-to-one cif_pets observation to PETS-exported HKLF4 row",
+        "hkl_match": True,
+        "intensity_sigma_match": True,
+        "rounding_tolerance": 0.011,
+        "max_abs_intensity_delta": max_intensity_delta,
+        "max_abs_sigma_delta": max_sigma_delta,
+    }
+
+
 def _read_jana_reflistout(path: Path) -> dict[tuple[int, int, int, int], int]:
     categories: dict[tuple[int, int, int, int], int] = {}
     with path.open() as stream:
@@ -614,6 +701,25 @@ def import_pets_to_grond(
     destination = Path(out_dir).expanduser().resolve()
     destination.mkdir(parents=True, exist_ok=True)
     all_observations = list(contract["observations"])
+    static_endpoint_contract: dict[str, Any] = {
+        "status": "unavailable",
+        "reason": "no baseline HKLF4 supplied",
+    }
+    if baseline_hkl is not None:
+        if bool(contract["virtual_frames"]):
+            static_endpoint_contract = {
+                "status": "unavailable",
+                "reason": "PETS virtual-frame occurrences are not a static HKLF4 observation table",
+            }
+        elif klar_rsg is not None or bool(exclude_systematic_absences):
+            static_endpoint_contract = {
+                "status": "unavailable",
+                "reason": "row filtering changed the ordinary PETS observation support",
+            }
+        else:
+            static_endpoint_contract = _validate_static_endpoint_hkl(
+                Path(baseline_hkl), all_observations
+            )
     operations = gemmi.SpaceGroup(int(space_group_number)).operations()
     k_magnitude = 1.0 / float(contract["wavelength"])
     s0 = np.asarray([0.0, 0.0, -k_magnitude])
@@ -752,6 +858,17 @@ def import_pets_to_grond(
         stream.write(
             f"!PETS_VIRTUAL_FRAMES= {'TRUE' if contract['virtual_frames'] else 'FALSE'}\n"
         )
+        stream.write(
+            "!PETS_STATIC_HKLF4_VALIDATED= "
+            f"{'TRUE' if static_endpoint_contract.get('status') == 'validated' else 'FALSE'}\n"
+        )
+        if static_endpoint_contract.get("status") == "validated":
+            stream.write(
+                f"!PETS_STATIC_HKLF4= {static_endpoint_contract['path']}\n"
+            )
+            stream.write(
+                f"!PETS_STATIC_HKLF4_SHA256= {static_endpoint_contract['sha256']}\n"
+            )
         stream.write("!PETS_INTENSITY_SOURCE= _refln_intensity_meas\n")
         stream.write("!PETS_SIGMA_SOURCE= _refln_intensity_sigma\n")
         stream.write("!PETS_PARTIALITY= unavailable; PEAK=100 is an inclusion sentinel only\n")
@@ -884,6 +1001,7 @@ def import_pets_to_grond(
             "virtual_frames": contract["virtual_frames"],
             "detector_coordinates": "not provided; detector scale fields must remain disabled",
         },
+        "static_endpoint_contract": static_endpoint_contract,
         "recommended_run_contract": {
             "hkl_transform": "identity; nonidentity PETS/model setting conjugation is not yet implemented",
             "min_peak": 0.0,
@@ -891,7 +1009,11 @@ def import_pets_to_grond(
             "profile_geometry": "PETS_EXACT_GEOMETRY.npz direct-angle rocking path",
             "profile_accumulation": "sum",
             "beam_and_quadrature": "must be converged for the structure and PETS settings",
-            "shelxl_endpoint": "not available from PETS virtual-frame rows without an independently validated static-integration conversion",
+            "shelxl_endpoint": (
+                "validated row-preserving PETS HKLF4; q correction and SHELXL feedback are available"
+                if static_endpoint_contract.get("status") == "validated"
+                else "not available without a row-preserving PETS static HKLF4 contract"
+            ),
         },
     }
     summary_path = destination / "pets2_bridge_summary.json"
