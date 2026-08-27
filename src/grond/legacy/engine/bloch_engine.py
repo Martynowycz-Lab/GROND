@@ -1651,6 +1651,7 @@ class Config:
     mosaicity_support_points: int = 5
     mosaicity_support_width_sigma: float = 4.0
     geometry_path_file: str = ""
+    profile_basis_mode: str = "center"
     profile_coordinate: str = "target_sg"
     profile_angle_max_half_width_deg: float = 2.0
     profile_quadrature: str = "uniform"
@@ -1800,6 +1801,10 @@ class Config:
             "profile_coordinate": (
                 self.profile_coordinate,
                 {"target_sg", "direct_angle"},
+            ),
+            "profile_basis_mode": (
+                self.profile_basis_mode,
+                {"center", "common_profile"},
             ),
             "profile_quadrature": (
                 self.profile_quadrature,
@@ -4057,6 +4062,133 @@ class XDSBlochPort:
                 break
         return np.asarray(basis, dtype=int), meta
 
+    def select_basis_for_profile(
+        self,
+        target_hkl,
+        omega_center,
+        sg_window_i,
+        solved_omegas,
+        mosaic_tilts,
+        row_idx=None,
+    ):
+        """Select one frozen basis over the declared rocking-profile support.
+
+        ``center`` preserves the historical row-center selection. The
+        high-fidelity ``common_profile`` mode evaluates a fixed support grid
+        spanning the complete solved rocking interval and retains every beam
+        that enters the Sg support at any support orientation. The support
+        grid size is independent of propagation quadrature Q.
+
+        A two-axis Gaussian cone already owns a wider, candidate-invariant
+        support construction and continues to use that implementation.
+        """
+
+        if str(getattr(self.cfg, "mosaicity_mode", "none")).lower() == "gaussian_cone":
+            return self.select_basis_common_cone(
+                target_hkl,
+                omega_center,
+                sg_window_i,
+                row_idx=row_idx,
+            )
+        mode = str(
+            getattr(self.cfg, "profile_basis_mode", "center") or "center"
+        ).lower()
+        if mode == "center":
+            return self.select_basis(
+                target_hkl,
+                omega_center,
+                row_idx=row_idx,
+            ), {
+                "profile_basis_mode": "center",
+                "profile_basis_orientation_count": 1,
+            }
+        if mode != "common_profile":
+            raise ValueError(f"unknown profile_basis_mode={mode!r}")
+
+        omegas = np.asarray(solved_omegas, dtype=float).reshape(-1)
+        tilts = np.asarray(mosaic_tilts, dtype=float).reshape(-1, 2)
+        if len(omegas) == 0 or len(omegas) != len(tilts):
+            raise ValueError(
+                "common-profile basis requires matching nonempty rocking angles and tilts"
+            )
+        support_count = max(
+            2,
+            int(getattr(self.cfg, "mosaicity_support_points", 5)),
+        )
+        if float(np.max(omegas) - np.min(omegas)) <= 1e-12:
+            support_omegas = np.asarray([float(omegas[0])], dtype=float)
+        else:
+            support_omegas = np.linspace(
+                float(np.min(omegas)),
+                float(np.max(omegas)),
+                support_count,
+            )
+        support_tilts = np.zeros((len(support_omegas), 2), dtype=float)
+        if row_idx is None:
+            pool_ug = self.pool_ug
+        else:
+            pool_ug = self.pool_ug * self.dose_attenuation_for_inv_d2(
+                self.pool_inv_d2,
+                row_idx,
+            )
+        coupling = np.abs(pool_ug) ** 2
+        best_score = np.zeros(len(self.pool_hkl), dtype=float)
+        minimum_abs_sg = np.full(len(self.pool_hkl), np.inf, dtype=float)
+        for omega, (along_deg, transverse_deg) in zip(
+            support_omegas,
+            support_tilts,
+            strict=True,
+        ):
+            sg_pool = self.sg_for_hkls_at_orientation(
+                self.pool_hkl,
+                float(omega),
+                float(along_deg),
+                float(transverse_deg),
+            )
+            abs_sg = np.abs(sg_pool)
+            minimum_abs_sg = np.minimum(minimum_abs_sg, abs_sg)
+            best_score = np.maximum(
+                best_score,
+                coupling / (abs_sg + 1e-5),
+            )
+        candidates = np.flatnonzero(
+            minimum_abs_sg <= float(self.cfg.max_support_sg)
+        )
+        basis = [(0, 0, 0), tuple(int(value) for value in target_hkl)]
+        seen = set(basis)
+        eligible = {
+            tuple(int(value) for value in self.pool_hkl[index])
+            for index in candidates
+        }
+        full_union_count = int(len(seen | eligible))
+        needed = max(0, int(self.cfg.n_basis) - len(basis))
+        if needed:
+            take = min(len(candidates), needed + 1)
+            if take < len(candidates):
+                local = np.argpartition(best_score[candidates], -take)[-take:]
+                candidates = candidates[local]
+            candidates = candidates[
+                np.lexsort((candidates, -best_score[candidates]))
+            ]
+            for index in candidates:
+                candidate = tuple(int(value) for value in self.pool_hkl[index])
+                if candidate in seen:
+                    continue
+                basis.append(candidate)
+                seen.add(candidate)
+                if len(basis) >= int(self.cfg.n_basis):
+                    break
+        return np.asarray(basis, dtype=int), {
+            "profile_basis_mode": "common_profile",
+            "profile_basis_orientation_count": int(len(support_omegas)),
+            "profile_basis_omega_min_deg": float(np.min(support_omegas)),
+            "profile_basis_omega_max_deg": float(np.max(support_omegas)),
+            "profile_basis_candidate_count": int(len(eligible)),
+            "profile_basis_full_union_count": full_union_count,
+            "profile_basis_cap": int(self.cfg.n_basis),
+            "profile_basis_cap_truncated": bool(len(basis) < full_union_count),
+        }
+
     def absorption_enabled(self):
         mode = str(getattr(self.cfg, "absorption_mode", "none") or "none").lower()
         return mode != "none" and (
@@ -4572,8 +4704,13 @@ class XDSBlochPort:
         ) = self.row_profile_orientation_points(
             row_idx, hkl, omega_center, center_sg, sg_window_i
         )
-        basis, cone_basis_meta = self.select_basis_common_cone(
-            hkl, omega_center, sg_window_i, row_idx=row_idx
+        basis, cone_basis_meta = self.select_basis_for_profile(
+            hkl,
+            omega_center,
+            sg_window_i,
+            solved_omegas,
+            mosaic_tilts,
+            row_idx=row_idx,
         )
         if not np.array_equal(basis[0], np.asarray([0, 0, 0], dtype=int)) or not np.array_equal(basis[1], np.asarray(hkl, dtype=int)):
             raise RuntimeError("Frozen kernel basis contract violated: basis must start with direct beam then exact signed target hkl.")
@@ -4707,6 +4844,7 @@ class XDSBlochPort:
                 self.cfg.mosaicity_support_width_sigma
             ),
             "profile_coordinate": str(self.cfg.profile_coordinate),
+            "profile_basis_mode": str(self.cfg.profile_basis_mode),
             "profile_angle_max_half_width_deg": float(
                 self.cfg.profile_angle_max_half_width_deg
             ),
@@ -4902,8 +5040,13 @@ class XDSBlochPort:
                 ) = self.row_profile_orientation_points(
                     row_idx, hkl, omega_c, c_sg, sg_window_i
                 )
-                basis, _cone_basis_meta = self.select_basis_common_cone(
-                    hkl, omega_c, sg_window_i, row_idx=row_idx
+                basis, _cone_basis_meta = self.select_basis_for_profile(
+                    hkl,
+                    omega_c,
+                    sg_window_i,
+                    solved_omegas,
+                    mosaic_tilts,
+                    row_idx=row_idx,
                 )
                 sg_basis_rows = []
                 for omega, (along_deg, transverse_deg) in zip(
@@ -6339,6 +6482,7 @@ def main():
     ap.add_argument("--mosaicity-support-points", type=int, default=5, help="Points per scan/cone axis used only to construct the common enclosing beam basis.")
     ap.add_argument("--mosaicity-support-width-sigma", type=float, default=4.0, help="Half-width of the common basis cone in support-sigma units.")
     ap.add_argument("--geometry-path", default="", help="Optional geometry-only Chebyshev slew/two-axis tilt JSON produced independently of intensities.")
+    ap.add_argument("--profile-basis-mode", choices=["center", "common_profile"], default="center", help="Use the row-center beam basis or a fixed beam union over the complete rocking-profile support.")
     ap.add_argument("--profile-coordinate", choices=["target_sg", "direct_angle"], default="target_sg", help="Integrate through solved target-Sg points or directly in recorded scan angle.")
     ap.add_argument("--profile-angle-max-half-width-deg", type=float, default=2.0, help="Hard half-width bound for direct-angle integration.")
     ap.add_argument("--profile-quadrature", choices=["uniform", "trapezoid", "gauss_legendre"], default="uniform", help="Rocking-profile Sg quadrature rule.")
@@ -6427,6 +6571,7 @@ def main():
         mosaicity_support_points=args.mosaicity_support_points,
         mosaicity_support_width_sigma=args.mosaicity_support_width_sigma,
         geometry_path_file=args.geometry_path,
+        profile_basis_mode=args.profile_basis_mode,
         profile_coordinate=args.profile_coordinate,
         profile_angle_max_half_width_deg=args.profile_angle_max_half_width_deg,
         profile_quadrature=args.profile_quadrature,

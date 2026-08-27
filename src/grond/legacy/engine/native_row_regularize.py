@@ -3376,6 +3376,7 @@ def main():
     ap.add_argument("--mosaicity-support-points", type=int, default=5, help="Points per scan/cone axis used only for common-basis construction.")
     ap.add_argument("--mosaicity-support-width-sigma", type=float, default=4.0, help="Half-width of the common basis cone in support-sigma units.")
     ap.add_argument("--geometry-path", default="", help="Fixed geometry-only slew/two-axis tilt contract fitted without intensities.")
+    ap.add_argument("--profile-basis-mode", choices=["center", "common_profile"], default="center", help="Use the historical center-orientation basis or one fixed beam union over the complete rocking-profile support.")
     ap.add_argument("--profile-coordinate", choices=["target_sg", "direct_angle"], default="target_sg", help="Integrate through solved target-Sg points or directly in recorded scan angle.")
     ap.add_argument("--profile-angle-max-half-width-deg", type=float, default=2.0, help="Hard half-width bound for direct-angle integration.")
     ap.add_argument("--profile-quadrature", choices=["uniform", "trapezoid", "gauss_legendre"], default="uniform", help="Rocking-profile Sg quadrature rule.")
@@ -3748,6 +3749,7 @@ def main():
                                                             mosaicity_support_points=args.mosaicity_support_points,
                                                             mosaicity_support_width_sigma=args.mosaicity_support_width_sigma,
                                                             geometry_path_file=args.geometry_path,
+                                                            profile_basis_mode=args.profile_basis_mode,
                                                             profile_coordinate=args.profile_coordinate,
                                                             profile_angle_max_half_width_deg=args.profile_angle_max_half_width_deg,
                                                             profile_quadrature=args.profile_quadrature,

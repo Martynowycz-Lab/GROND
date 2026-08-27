@@ -68,6 +68,17 @@ Born-to-Bloch advantage, and passes the ordinary endpoint pathology gates.
 Crystals that fail these tests remain at zero width. This control is still an
 advanced native-row option and is not enabled by `grond auto`.
 
+The same fixed-basis test is available without adding mosaicity. Pass
+`--profile-basis-mode common_profile` to the lower-level Bloch or native-row
+command to select one beam union over the complete solved rocking interval for
+each row. The union support uses `--mosaicity-support-points` orientations, is
+independent of the propagation quadrature count, and is capped by `--n-basis`.
+This is a high-fidelity convergence control rather than an automatic default:
+increase `--n-basis` until the basis is no longer truncated, then verify that
+work and held-out row residuals are stable. It changes only beam support. It
+does not introduce a mosaic width, alter the observations, or fit another
+nuisance parameter.
+
 For XDS centroids, a small geometry-only path can be generated independently of
 the structure and intensities:
 

@@ -57,6 +57,51 @@ def write_rows(path: Path, rows: list[dict[str, object]], fieldnames: list[str])
         writer.writerows(rows)
 
 
+def materialize_candidate_rows(
+    rows: list[dict[str, str]],
+    arrays: dict[str, np.ndarray],
+    *,
+    candidate_name: str,
+    baseline_dyn_column: str,
+    baseline_born_column: str,
+) -> tuple[list[dict[str, object]], list[str]]:
+    """Return a replayable compact row table with its exact nuisance topology."""
+
+    expected = len(rows)
+    for name in ("dyn", "born", "groups", "detector_bins"):
+        values = np.asarray(arrays[name])
+        if len(values) != expected:
+            raise ValueError(
+                f"candidate array {name!r} has {len(values)} rows; expected {expected}"
+            )
+    updated_rows: list[dict[str, object]] = []
+    for i, row in enumerate(rows):
+        new = dict(row)
+        new["dyn_full_scaled"] = row.get(baseline_dyn_column, "")
+        new["born_full_scaled"] = row.get(baseline_born_column, "")
+        new["dyn_scaled"] = (
+            f"{arrays['dyn'][i]:.17g}" if np.isfinite(arrays["dyn"][i]) else "nan"
+        )
+        new["born_scaled"] = (
+            f"{arrays['born'][i]:.17g}" if np.isfinite(arrays["born"][i]) else "nan"
+        )
+        new["scale_replay_group"] = int(arrays["groups"][i])
+        new["scale_replay_detector_bin"] = int(arrays["detector_bins"][i])
+        new["scale_compression_model"] = candidate_name
+        updated_rows.append(new)
+    fieldnames = list(rows[0].keys())
+    for extra in (
+        "dyn_full_scaled",
+        "born_full_scaled",
+        "scale_replay_group",
+        "scale_replay_detector_bin",
+        "scale_compression_model",
+    ):
+        if extra not in fieldnames:
+            fieldnames.append(extra)
+    return updated_rows, fieldnames
+
+
 def col(rows: list[dict[str, str]], name: str, default=float("nan")) -> np.ndarray:
     return np.asarray([safe_float(r.get(name, default), default) for r in rows], dtype=float)
 
@@ -1527,6 +1572,7 @@ def main() -> None:
             )
         detector_target = int(candidate["detector_bins"])
         if detector_target <= 1:
+            candidate_detector = np.zeros(len(rows), dtype=int)
             born, _ = fit_group_scales(
                 obs, sig, raw_born, candidate_groups, fit_mask, args.scale_objective,
                 native_wght_a, native_wght_b, args.instability_u,
@@ -1541,24 +1587,23 @@ def main() -> None:
                 detector_smoothness=args.detector_smoothness,
                 detector_min_rows=args.detector_min_rows,
             )
-        return {"dyn": candidate["arrays"]["dyn"], "born": born}
+        return {
+            "dyn": candidate["arrays"]["dyn"],
+            "born": born,
+            "groups": np.asarray(candidate_groups, dtype=int),
+            "detector_bins": np.asarray(candidate_detector, dtype=int),
+        }
 
     def materialize_candidate_run(run_dir: Path, candidate: dict) -> None:
         arrays = arrays_for_candidate(candidate)
         run_dir.mkdir(parents=True, exist_ok=True)
-        updated_rows: list[dict[str, object]] = []
-        for i, row in enumerate(rows):
-            new = dict(row)
-            new["dyn_full_scaled"] = row.get(args.baseline_dyn_column, "")
-            new["born_full_scaled"] = row.get(args.baseline_born_column, "")
-            new["dyn_scaled"] = f"{arrays['dyn'][i]:.17g}" if np.isfinite(arrays["dyn"][i]) else "nan"
-            new["born_scaled"] = f"{arrays['born'][i]:.17g}" if np.isfinite(arrays["born"][i]) else "nan"
-            new["scale_compression_model"] = candidate["name"]
-            updated_rows.append(new)
-        fieldnames = list(rows[0].keys())
-        for extra in ("dyn_full_scaled", "born_full_scaled", "scale_compression_model"):
-            if extra not in fieldnames:
-                fieldnames.append(extra)
+        updated_rows, fieldnames = materialize_candidate_rows(
+            rows,
+            arrays,
+            candidate_name=candidate["name"],
+            baseline_dyn_column=args.baseline_dyn_column,
+            baseline_born_column=args.baseline_born_column,
+        )
         write_rows(run_dir / "native_dyn_calc.csv", updated_rows, fieldnames)
 
         compact_summary = copy.deepcopy(source_summary)

@@ -4,6 +4,7 @@ import pytest
 from grond.legacy.engine.scale_compression_polish import (
     fit_group_detector_scales,
     fit_group_scales,
+    materialize_candidate_rows,
 )
 
 
@@ -78,3 +79,33 @@ def test_compact_scale_fit_fails_closed_without_two_fit_rows():
             0.0,
             0.01,
         )
+
+
+def test_materialized_compact_rows_preserve_exact_replay_topology():
+    rows = [
+        {"row_index": "0", "dyn_scaled": "9", "born_scaled": "8"},
+        {"row_index": "1", "dyn_scaled": "7", "born_scaled": "6"},
+    ]
+    arrays = {
+        "dyn": np.asarray([10.0, 20.0]),
+        "born": np.asarray([11.0, 21.0]),
+        "groups": np.asarray([3, 4]),
+        "detector_bins": np.asarray([0, 2]),
+    }
+
+    materialized, fieldnames = materialize_candidate_rows(
+        rows,
+        arrays,
+        candidate_name="adaptive_2_det_4",
+        baseline_dyn_column="dyn_scaled",
+        baseline_born_column="born_scaled",
+    )
+
+    assert [row["scale_replay_group"] for row in materialized] == [3, 4]
+    assert [row["scale_replay_detector_bin"] for row in materialized] == [0, 2]
+    assert {row["scale_compression_model"] for row in materialized} == {
+        "adaptive_2_det_4"
+    }
+    assert [row["dyn_full_scaled"] for row in materialized] == ["9", "7"]
+    assert "scale_replay_group" in fieldnames
+    assert "scale_replay_detector_bin" in fieldnames

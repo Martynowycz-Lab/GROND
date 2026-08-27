@@ -882,6 +882,56 @@ def test_common_cone_basis_is_independent_of_candidate_sigma():
     assert zero_meta["mosaicity_basis_mode"] == "common_maximum_cone"
 
 
+def test_common_profile_basis_includes_edge_beam_and_is_q_independent():
+    port = object.__new__(XDSBlochPort)
+    port.cfg = Config(
+        n_basis=4,
+        profile_basis_mode="common_profile",
+        mosaicity_support_points=3,
+        max_support_sg=0.005,
+    )
+    port.pool_hkl = np.asarray(
+        [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+        dtype=int,
+    )
+    port.pool_ug = np.asarray([1.0, 0.8, 0.2], dtype=complex)
+
+    def sg_at_orientation(hkls, omega, _along, _transverse):
+        hkls = np.asarray(hkls, dtype=int)
+        out = np.full(len(hkls), 0.1, dtype=float)
+        out[np.all(hkls == np.asarray([1, 0, 0]), axis=1)] = 0.0
+        out[np.all(hkls == np.asarray([0, 1, 0]), axis=1)] = (
+            0.02 * (1.0 - float(omega))
+        )
+        return out
+
+    port.sg_for_hkls_at_orientation = sg_at_orientation
+    port.sg_for_hkls = lambda hkls, omega: sg_at_orientation(hkls, omega, 0.0, 0.0)
+    target = np.asarray([1, 0, 0])
+    tilts20 = np.zeros((20, 2), dtype=float)
+    tilts41 = np.zeros((41, 2), dtype=float)
+    basis20, meta20 = port.select_basis_for_profile(
+        target,
+        0.0,
+        0.004,
+        np.linspace(-1.0, 1.0, 20),
+        tilts20,
+    )
+    basis41, meta41 = port.select_basis_for_profile(
+        target,
+        0.0,
+        0.004,
+        np.linspace(-1.0, 1.0, 41),
+        tilts41,
+    )
+
+    assert np.array_equal(basis20, basis41)
+    assert [0, 1, 0] in basis20.tolist()
+    assert meta20["profile_basis_mode"] == "common_profile"
+    assert meta20["profile_basis_orientation_count"] == 3
+    assert meta20 == meta41
+
+
 def test_direct_angular_mosaicity_does_not_request_extra_sg_roots():
     port = object.__new__(XDSBlochPort)
     port.cfg = Config(
