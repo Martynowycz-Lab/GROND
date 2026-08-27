@@ -1626,6 +1626,9 @@ def fcalc_res_grid(model, h, k, l):
     return total
 
 
+DEFAULT_MAX_SUPPORT_SG = 0.01
+
+
 @dataclass
 class Config:
     n_basis: int = 20
@@ -1657,7 +1660,7 @@ class Config:
     profile_quadrature: str = "uniform"
     profile_accumulation: str = "sum"
     topup_d_min: float = 0.8
-    max_support_sg: float = 0.005
+    max_support_sg: float = DEFAULT_MAX_SUPPORT_SG
     thickness_A: float = 1240.0
     thickness_model: str = "uniform_gradient"
     thickness_grad_frac: float = 0.25
@@ -6488,7 +6491,12 @@ def main():
     ap.add_argument("--profile-quadrature", choices=["uniform", "trapezoid", "gauss_legendre"], default="uniform", help="Rocking-profile Sg quadrature rule.")
     ap.add_argument("--profile-accumulation", choices=["sum", "mean"], default="sum", help="Accumulate rocking-profile samples as summed detector sub-exposures or legacy normalized means.")
     ap.add_argument("--topup-d-min", type=float, default=0.8)
-    ap.add_argument("--max-support-sg", type=float, default=0.005)
+    ap.add_argument(
+        "--max-support-sg",
+        type=float,
+        default=DEFAULT_MAX_SUPPORT_SG,
+        help="Maximum absolute excitation error for beam-basis support (default 0.01 A^-1).",
+    )
     ap.add_argument("--thickness", type=float, default=1240.0)
     ap.add_argument("--thickness-model", choices=["single", "uniform_gradient", "gaussian", "gaussian_gradient"], default="uniform_gradient")
     ap.add_argument("--thickness-grad-frac", type=float, default=0.25)

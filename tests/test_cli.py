@@ -1695,6 +1695,8 @@ def test_auto_parser_hides_lambda_controls(capsys):
     assert args.selection_metric == "work_wR2"
     assert args.continuous_thickness_metric == "work_wR2"
     assert args.n_points == 20
+    assert args.max_support_sg == pytest.approx(0.01)
+    assert args.max_support_sg == pytest.approx(cli.DEFAULT_MAX_SUPPORT_SG)
     assert args.screen_n_basis == 24
     assert args.hand_n_basis == 24
     hand_args = parser.parse_args(

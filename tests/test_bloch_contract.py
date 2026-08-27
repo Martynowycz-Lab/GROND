@@ -932,6 +932,13 @@ def test_common_profile_basis_includes_edge_beam_and_is_q_independent():
     assert meta20 == meta41
 
 
+def test_production_defaults_use_q20_and_wider_support_sg():
+    cfg = Config()
+
+    assert cfg.n_points == 20
+    assert cfg.max_support_sg == pytest.approx(0.01)
+
+
 def test_direct_angular_mosaicity_does_not_request_extra_sg_roots():
     port = object.__new__(XDSBlochPort)
     port.cfg = Config(

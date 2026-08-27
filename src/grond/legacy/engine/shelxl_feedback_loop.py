@@ -27,9 +27,9 @@ import time
 from pathlib import Path
 
 try:
-    from .native_row_regularize import shelx_res_health
+    from .native_row_regularize import DEFAULT_MAX_SUPPORT_SG, shelx_res_health
 except ImportError:  # Direct script execution from the legacy engine directory.
-    from native_row_regularize import shelx_res_health
+    from native_row_regularize import DEFAULT_MAX_SUPPORT_SG, shelx_res_health
 
 
 def read_json(path: Path) -> dict:
@@ -360,7 +360,10 @@ def native_command(
         "--topup-d-min",
         grid_value(args.topup_d_min if args.topup_d_min > 0 else summary_value(source_summary, "topup_d_min", 0.8), "0.8"),
         "--max-support-sg",
-        grid_value(summary_value(source_summary, "max_support_sg", 0.005), "0.005"),
+        grid_value(
+            summary_value(source_summary, "max_support_sg", DEFAULT_MAX_SUPPORT_SG),
+            f"{DEFAULT_MAX_SUPPORT_SG:g}",
+        ),
         "--free-fraction",
         grid_value(summary_value(source_summary, "free_fraction", 0.10), "0.10"),
         "--split-seed",

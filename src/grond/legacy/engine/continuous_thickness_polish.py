@@ -32,10 +32,10 @@ from scipy.optimize import minimize, minimize_scalar
 
 if __package__:
     from . import native_row_regularize as nrf
-    from .bloch_engine import Config, XDSBlochPort, XDSData, parse_model, sha256, split_masks
+    from .bloch_engine import DEFAULT_MAX_SUPPORT_SG, Config, XDSBlochPort, XDSData, parse_model, sha256, split_masks
 else:  # pragma: no cover - direct script execution
     import native_row_regularize as nrf
-    from bloch_engine import Config, XDSBlochPort, XDSData, parse_model, sha256, split_masks
+    from bloch_engine import DEFAULT_MAX_SUPPORT_SG, Config, XDSBlochPort, XDSData, parse_model, sha256, split_masks
 
 
 DEFAULT_HKL = Path("INTEGRATE.HKL")
@@ -694,7 +694,7 @@ def main() -> int:
     ap.add_argument("--profile-quadrature", choices=["uniform", "trapezoid", "gauss_legendre"], default="uniform")
     ap.add_argument("--profile-accumulation", choices=["sum", "mean"], default="sum")
     ap.add_argument("--topup-d-min", type=float, default=0.8)
-    ap.add_argument("--max-support-sg", type=float, default=0.005)
+    ap.add_argument("--max-support-sg", type=float, default=DEFAULT_MAX_SUPPORT_SG)
     ap.add_argument("--min-d-spacing", type=float, default=0.7)
     ap.add_argument("--min-peak", type=float, default=90.0)
     ap.add_argument("--geometry-percentile", type=float, default=100.0)

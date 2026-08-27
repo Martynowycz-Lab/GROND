@@ -50,6 +50,7 @@ except ImportError:  # Direct script execution from the legacy engine directory.
 
 try:  # Package import.
     from .bloch_engine import (
+        DEFAULT_MAX_SUPPORT_SG,
         Config,
         InfeasibleSgJitterProfileError,
         XDSBlochPort,
@@ -71,6 +72,7 @@ try:  # Package import.
     from .shelx_hkl import safe_fixed_width_factor, write_fixed_width_hkl
 except ImportError:  # Direct script execution from this directory.
     from bloch_engine import (
+        DEFAULT_MAX_SUPPORT_SG,
         Config,
         InfeasibleSgJitterProfileError,
         XDSBlochPort,
@@ -3439,7 +3441,12 @@ def main():
     ap.add_argument("--wght-b-grid", default="", help="Native SHELX-style weight b grid. Empty uses the WGHT value parsed from the RES.")
     ap.add_argument("--thickness-points", type=int, default=5)
     ap.add_argument("--topup-d-min", type=float, default=0.8)
-    ap.add_argument("--max-support-sg", type=float, default=0.005)
+    ap.add_argument(
+        "--max-support-sg",
+        type=float,
+        default=DEFAULT_MAX_SUPPORT_SG,
+        help="Maximum absolute excitation error for beam-basis support (default 0.01 A^-1).",
+    )
     ap.add_argument("--free-fraction", type=float, default=0.10)
     ap.add_argument("--split-seed", type=int, default=42)
     ap.add_argument("--scale-fit-split", choices=["work", "all"], default="work", help="Rows used to fit nuisance group scales. Use 'all' to reproduce final all-data model-update statistics; use 'work' for validation.")

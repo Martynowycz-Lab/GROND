@@ -11,6 +11,11 @@ from __future__ import annotations
 from collections import Counter
 from typing import Any
 
+try:
+    from .bloch_engine import DEFAULT_MAX_SUPPORT_SG
+except ImportError:  # pragma: no cover - direct script execution
+    from bloch_engine import DEFAULT_MAX_SUPPORT_SG
+
 DYNROW_SCHEMA_VERSION = "row_contract_signed_dynrow_v1.0"
 FROZEN_ENGINE_CONTRACT_VERSION = "audited_signed_row_simple_cycles_v1.0"
 
@@ -47,7 +52,7 @@ FROZEN_ENGINE_CONTRACT: dict[str, Any] = {
         "mode": "direct_target_topup",
         "first_beams": ["direct_000", "exact_signed_target_hkl"],
         "topup_d_min_A": 0.8,
-        "max_support_sg_inv_A": 0.005,
+        "max_support_sg_inv_A": DEFAULT_MAX_SUPPORT_SG,
         "score": "abs(U_g)^2 / (abs(Sg) + 1e-5)",
     },
     "thickness": {

@@ -79,6 +79,11 @@ work and held-out row residuals are stable. It changes only beam support. It
 does not introduce a mosaic width, alter the observations, or fit another
 nuisance parameter.
 
+New AUTO and expert calculations use `max_support_sg=0.01 A^-1` and Q20 for
+their final row calculation unless explicitly overridden. The wider support
+retains more coupled beams than the historical `0.005 A^-1` default. Existing
+summaries remain pinned to the support value recorded when they were created.
+
 For XDS centroids, a small geometry-only path can be generated independently of
 the structure and intensities:
 

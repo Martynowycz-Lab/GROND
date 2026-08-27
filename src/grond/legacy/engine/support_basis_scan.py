@@ -16,10 +16,26 @@ for _name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "VEC
 import numpy as np
 
 if __package__:
-    from .bloch_engine import Config, XDSBlochPort, XDSData, alternate_hand_model, parse_model, sha256
+    from .bloch_engine import (
+        DEFAULT_MAX_SUPPORT_SG,
+        Config,
+        XDSBlochPort,
+        XDSData,
+        alternate_hand_model,
+        parse_model,
+        sha256,
+    )
     from .native_row_regularize import TARGET_MODES, row_selection, target_arrays
 else:  # pragma: no cover - direct script execution
-    from bloch_engine import Config, XDSBlochPort, XDSData, alternate_hand_model, parse_model, sha256
+    from bloch_engine import (
+        DEFAULT_MAX_SUPPORT_SG,
+        Config,
+        XDSBlochPort,
+        XDSData,
+        alternate_hand_model,
+        parse_model,
+        sha256,
+    )
     from native_row_regularize import TARGET_MODES, row_selection, target_arrays
 
 
@@ -110,7 +126,7 @@ def main() -> int:
     ap.add_argument("--min-final", type=int, default=20)
     ap.add_argument("--max-final", type=int, default=500)
     ap.add_argument("--topup-d-min", type=float, default=0.8)
-    ap.add_argument("--max-support-sg", type=float, default=0.005)
+    ap.add_argument("--max-support-sg", type=float, default=DEFAULT_MAX_SUPPORT_SG)
     ap.add_argument("--min-d-spacing", type=float, default=0.70)
     ap.add_argument("--min-peak", type=float, default=90.0)
     ap.add_argument("--geometry-percentile", type=float, default=99.0)

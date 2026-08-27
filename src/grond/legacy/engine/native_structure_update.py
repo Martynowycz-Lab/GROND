@@ -33,6 +33,7 @@ from scipy.optimize import least_squares
 
 if __package__:
     from .bloch_engine import (
+        DEFAULT_MAX_SUPPORT_SG,
         Config,
         XDSBlochPort,
         XDSData,
@@ -66,6 +67,7 @@ if __package__:
     )
 else:  # pragma: no cover - direct script execution
     from bloch_engine import (
+        DEFAULT_MAX_SUPPORT_SG,
         Config,
         XDSBlochPort,
         XDSData,
@@ -974,7 +976,7 @@ def main():
     ap.add_argument(
         "--max-support-sg",
         type=float,
-        default=0.005,
+        default=DEFAULT_MAX_SUPPORT_SG,
         help="Maximum absolute excitation error for candidate support beams.",
     )
     ap.add_argument("--group-width-deg", type=float, default=1.0)

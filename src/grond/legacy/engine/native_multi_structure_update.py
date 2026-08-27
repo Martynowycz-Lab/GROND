@@ -36,7 +36,7 @@ from scipy.optimize import least_squares
 
 if __package__:
     from ...io.config import DATASET_NAME_RE
-    from .bloch_engine import Config, XDSData, parse_model, sha256, split_masks
+    from .bloch_engine import DEFAULT_MAX_SUPPORT_SG, Config, XDSData, parse_model, sha256, split_masks
     from .native_row_regularize import (
         TARGET_MODES,
         Nuisance,
@@ -73,7 +73,7 @@ else:  # pragma: no cover - direct script execution
         from grond.io.config import DATASET_NAME_RE
     except ImportError:
         DATASET_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
-    from bloch_engine import Config, XDSData, parse_model, sha256, split_masks
+    from bloch_engine import DEFAULT_MAX_SUPPORT_SG, Config, XDSData, parse_model, sha256, split_masks
     from native_row_regularize import (
         TARGET_MODES,
         Nuisance,
@@ -635,7 +635,7 @@ def main():
     ap.add_argument("--sg-window-scale", type=float, default=1.0)
     ap.add_argument("--sg-window-frame-floor", type=float, default=0.50)
     ap.add_argument("--topup-d-min", type=float, default=0.8)
-    ap.add_argument("--max-support-sg", type=float, default=0.005)
+    ap.add_argument("--max-support-sg", type=float, default=DEFAULT_MAX_SUPPORT_SG)
     ap.add_argument("--min-d-spacing", type=float, default=0.70)
     ap.add_argument("--min-peak", type=float, default=90.0)
     ap.add_argument("--geometry-percentile", type=float, default=100.0, help="Keep this broad geometry percentile after PEAK/d-spacing filters.")

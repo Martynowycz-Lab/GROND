@@ -108,6 +108,7 @@ _TRANSFORM_SCOUT_SEMAPHORE: threading.BoundedSemaphore | None = None
 _TRANSFORM_SCOUT_SEMAPHORE_LIMIT = 0
 FULL_Q_LAMBDA = "1.0"
 DEFAULT_ELECTRON_WAVELENGTH_A = 0.025079
+DEFAULT_MAX_SUPPORT_SG = 0.01
 XDS_TARGET_MODES = ("iobs", "iobs_over_rlp", "iobs_times_peak", "recorded_proxy")
 XDS_TARGET_MODE_LABELS = {
     "iobs": "IOBS",
@@ -19656,7 +19657,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     required_features = {
         "shelxl_feedback_res_guard": (
             "def shelx_res_health" in native_regularize_text
-            and "from .native_row_regularize import shelx_res_health" in feedback_text
+            and "native_row_regularize import" in feedback_text
+            and "shelx_res_health" in feedback_text
             and "summary-selected endpoint model hash" in feedback_text
         ),
         "usable_feedback_model_selection": "shelxl_feedback_current_model" in cli_text and "shelx_model_is_usable" in cli_text,
@@ -21294,7 +21296,12 @@ def add_common_run_args(ap: argparse.ArgumentParser, *, expose_lambda_controls: 
     ap.add_argument("--sg-window-scout-min-wR2-gain", type=float, default=0.002, help="Minimum all-row wR2 gain required before a non-baseline Sg width can be promoted.")
     ap.add_argument("--sg-window-scout-free-wR2-tolerance", type=float, default=0.003, help="Maximum held-out wR2 penalty allowed when promoting a non-baseline Sg width.")
     ap.add_argument("--topup-d-min", type=float, default=0.8, help="Nominal Bloch support top-up dmin. Auto never uses a shallower support limit than the selected data dmin.")
-    ap.add_argument("--max-support-sg", type=float, default=0.005)
+    ap.add_argument(
+        "--max-support-sg",
+        type=float,
+        default=DEFAULT_MAX_SUPPORT_SG,
+        help="Maximum absolute excitation error for beam-basis support (default 0.01 A^-1).",
+    )
     ap.add_argument("--profile-quadrature", choices=["uniform", "trapezoid", "gauss_legendre"], default="uniform", help="Rocking-profile Sg quadrature rule used inside Bloch row predictions.")
     ap.add_argument("--profile-accumulation", choices=["sum", "mean"], default="sum", help="Accumulate rocking-profile samples as summed detector sub-exposures; mean is the legacy normalized diagnostic.")
     ap.add_argument("--free-fraction", type=float, default=0.10)
@@ -22140,7 +22147,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_pets_evaluate.add_argument("--n-basis", type=int, required=True)
     p_pets_evaluate.add_argument("--n-points", type=int, required=True)
     p_pets_evaluate.add_argument("--topup-d-min", type=float, required=True)
-    p_pets_evaluate.add_argument("--max-support-sg", type=float, default=0.01)
+    p_pets_evaluate.add_argument(
+        "--max-support-sg", type=float, default=DEFAULT_MAX_SUPPORT_SG
+    )
     p_pets_evaluate.add_argument(
         "--thickness-grid",
         required=True,

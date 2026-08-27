@@ -43,6 +43,7 @@ import numpy as np
 
 if __package__:
     from .bloch_engine import (
+        DEFAULT_MAX_SUPPORT_SG,
         Config,
         XDSBlochPort,
         XDSData,
@@ -62,6 +63,7 @@ if __package__:
     )
 else:  # pragma: no cover - direct script execution
     from bloch_engine import (
+        DEFAULT_MAX_SUPPORT_SG,
         Config,
         XDSBlochPort,
         XDSData,
@@ -2054,7 +2056,11 @@ def main():
     ap.add_argument("--bloch-profile-n-basis", type=int, default=20)
     ap.add_argument("--bloch-profile-sg-window", type=float, default=0.004)
     ap.add_argument("--bloch-profile-topup-d-min", type=float, default=0.8)
-    ap.add_argument("--bloch-profile-max-support-sg", type=float, default=0.005)
+    ap.add_argument(
+        "--bloch-profile-max-support-sg",
+        type=float,
+        default=DEFAULT_MAX_SUPPORT_SG,
+    )
     ap.add_argument("--bloch-profile-thickness", type=float, default=1200.0)
     ap.add_argument(
         "--bloch-profile-thickness-model",
