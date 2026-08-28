@@ -6543,6 +6543,40 @@ def evaluate_predictions(data, cfg, pred, fit_scales_on="work", model=None):
     return out
 
 
+def read_row_index_file(path: str | Path) -> list[int]:
+    """Read zero-based row indices from text or CSV, including one-column CSV."""
+
+    with open(path, newline="") as handle:
+        sample = handle.read(4096)
+        handle.seek(0)
+        if "," in sample:
+            reader = csv.DictReader(handle)
+            field = (
+                "row_index"
+                if reader.fieldnames and "row_index" in reader.fieldnames
+                else (reader.fieldnames[0] if reader.fieldnames else None)
+            )
+            if field is None:
+                raise ValueError(f"No columns found in {path}")
+            values = [int(row[field]) for row in reader]
+        else:
+            values = []
+            for line_number, line in enumerate(handle, start=1):
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                token = line.split()[0]
+                if token.lower() in {"row_index", "index"}:
+                    continue
+                try:
+                    values.append(int(token))
+                except ValueError as exc:
+                    raise ValueError(
+                        f"invalid row index {token!r} at {path}:{line_number}"
+                    ) from exc
+    return sorted(set(values))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--hkl", default=str(DEFAULT_HKL))
@@ -6709,23 +6743,7 @@ def main():
     data_all = XDSData(Path(args.hkl), hkl_transform=args.hkl_transform)
 
     if args.row_index_file:
-        row_indices = []
-        with open(args.row_index_file, newline="") as f:
-            sample = f.read(4096)
-            f.seek(0)
-            if "," in sample:
-                reader = csv.DictReader(f)
-                field = "row_index" if reader.fieldnames and "row_index" in reader.fieldnames else (reader.fieldnames[0] if reader.fieldnames else None)
-                if field is None:
-                    raise ValueError(f"No columns found in {args.row_index_file}")
-                for row in reader:
-                    row_indices.append(int(row[field]))
-            else:
-                for line in f:
-                    line = line.strip()
-                    if not line or line.startswith("#"):
-                        continue
-                    row_indices.append(int(line.split()[0]))
+        row_indices = read_row_index_file(args.row_index_file)
         indices = np.asarray(sorted(set(row_indices)), dtype=int)
         indices = indices[(indices >= 0) & (indices < len(data_all.iobs))]
     else:

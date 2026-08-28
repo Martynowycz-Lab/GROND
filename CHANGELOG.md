@@ -10,6 +10,9 @@ rocking-profile diagnostics no longer need to solve the same roots again; old
 schema-5 caches rebuild automatically. Uniform scalar absorption is propagated
 as exact analytic damping around the Hermitian elastic eigensystem, avoiding a
 general complex eigensolve while preserving intensities to numerical precision.
+The direct-engine `--row-index-file` reader now also accepts a conventional
+single-column CSV headed `row_index`, in addition to plain text and
+multi-column CSV inputs.
 
 Native continuous-rotation PETS2 input is now available through the bounded
 `import-pets` and `pets-evaluate` commands. The importer preserves PETS-owned

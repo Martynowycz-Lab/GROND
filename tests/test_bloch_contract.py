@@ -21,6 +21,7 @@ from grond.legacy.engine.bloch_engine import (
     load_geometry_path_contract,
     parse_model,
     promoted_bethe_effective_hamiltonian,
+    read_row_index_file,
     relativistic_gamma_from_wavelength,
     rotation_matrix,
     row_plan_cache_validation_errors,
@@ -30,6 +31,19 @@ from grond.legacy.engine.build_dynrows_xds import gvec_for_hkl, sg_for_hkl
 from grond.legacy.engine.native_row_regularize import Nuisance, evaluate_trial
 
 ELECTRON_SFAC_C = "SFAC C 1 1 1 1 1 1 1 1 0"
+
+
+def test_row_index_file_accepts_text_and_single_or_multicolumn_csv(tmp_path):
+    text_path = tmp_path / "rows.txt"
+    text_path.write_text("# row_index\n9\n3\n9\n")
+    single_csv = tmp_path / "rows_single.csv"
+    single_csv.write_text("row_index\n8\n2\n")
+    multi_csv = tmp_path / "rows_multi.csv"
+    multi_csv.write_text("row_index,note\n7,a\n1,b\n")
+
+    assert read_row_index_file(text_path) == [3, 9]
+    assert read_row_index_file(single_csv) == [2, 8]
+    assert read_row_index_file(multi_csv) == [1, 7]
 
 
 def test_raw_row_geometry_uses_full_s_r_f_a_chain():
