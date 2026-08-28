@@ -34,6 +34,15 @@ Structure-update blocks have a plateau stop. Leave it enabled for routine work; 
 
 Dense SciPy `eig` and `eigh` are the reference implementation and the default. They are the first choice for an unfamiliar dataset and the comparison standard for every accelerated backend.
 
+When the absorptive potential is exactly a uniform imaginary scalar,
+`H = H_elastic + i mu I`, GROND now diagonalizes the Hermitian elastic matrix
+and applies the analytic intensity damping `exp(-4 pi mu t)`. This is
+algebraically identical to the general complex eigensolver and does not apply
+to beam-dependent or off-diagonal absorption. On the matched 512-row
+DIALS-369 control, cached prediction changed from 16.0 s to 3.24 s and agreed
+with the general non-Hermitian result at approximately `1e-13` relative
+precision.
+
 `--compute-backend scipy_bethe` is the opt-in strong/weak-beam Schur path. The
 signed target reflection is always retained in the strong block; weak beams
 renormalize that block through a Schur/Bethe correction. It can save
@@ -78,6 +87,12 @@ stages resolve it to `exact` only when at least 16 thickness or absorption
 predictions share one geometry key. Smaller searches stay uncached because the
 cold row-plan builder is serial and can cost more than it saves. The decision,
 reuse estimate, and threshold are recorded in the row summary.
+
+Row-plan cache schema 6 also stores the solved profile orientation and
+two-axis tilt at every quadrature point. These values were already calculated
+while building the cache; retaining them adds little space and prevents later
+rocking-profile or shared-orientation diagnostics from solving the same roots
+again. Older schema-5 caches are rejected and rebuilt rather than guessed.
 
 On a 256-row 370 development contract at N=128/Q=20, a first exact-cache run
 took 11.13 s and the repeated calculation took 5.98 s. The uncached reference,

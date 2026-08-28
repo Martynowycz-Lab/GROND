@@ -90,7 +90,7 @@ COMPUTE_BACKENDS = [
     "jax_mps_real_expm_padded",
 ]
 COMPUTE_BACKEND_HELP = ", ".join(COMPUTE_BACKENDS)
-ROW_PLAN_CACHE_SCHEMA = 5
+ROW_PLAN_CACHE_SCHEMA = 6
 UG_CACHE_SCHEMA = 3
 ELECTRON_COMPTON_WAVELENGTH_A = 0.024263102
 DEFAULT_MAX_DENSE_UG_GIB = 2.0
@@ -570,6 +570,8 @@ def row_plan_cache_validation_errors(cache: dict, indices, expected_key: str, ex
         "basis_flat",
         "profile_offsets",
         "profile_weights_flat",
+        "profile_omega_flat",
+        "profile_tilts_flat",
         "sg_offsets",
         "sg_basis_flat",
         "diff_offsets",
@@ -657,6 +659,24 @@ def row_plan_cache_validation_errors(cache: dict, indices, expected_key: str, ex
                 and any(float(np.sum(weights[offsets[i] : offsets[i + 1]])) <= 0.0 for i in range(len(indices)))
             ):
                 errors.append("profile weights contain an all-zero row profile")
+    if "profile_omega_flat" in cache:
+        values = np.asarray(cache["profile_omega_flat"], dtype=float)
+        if values.ndim != 1 or not np.all(np.isfinite(values)):
+            errors.append("profile omega values must be a finite vector")
+        elif "profile_offsets" in cache:
+            offsets = np.asarray(cache["profile_offsets"], dtype=np.int64)
+            if offsets[-1] != len(values):
+                errors.append("profile offsets do not span profile_omega_flat")
+    if "profile_tilts_flat" in cache:
+        values = np.asarray(cache["profile_tilts_flat"], dtype=float)
+        if values.ndim != 2 or values.shape[1:] != (2,) or not np.all(
+            np.isfinite(values)
+        ):
+            errors.append("profile tilts must be a finite N by 2 array")
+        elif "profile_offsets" in cache:
+            offsets = np.asarray(cache["profile_offsets"], dtype=np.int64)
+            if offsets[-1] != len(values):
+                errors.append("profile offsets do not span profile_tilts_flat")
     if "sg_offsets" in cache:
         offsets = np.asarray(cache["sg_offsets"], dtype=np.int64)
         if (
@@ -4324,6 +4344,29 @@ class XDSBlochPort:
         return np.asarray(vals, dtype=np.complex128), np.asarray(coupling, dtype=np.complex128)
 
     @staticmethod
+    def _uniform_scalar_absorption_decomposition(H):
+        """Return ``(Hermitian H0, mu)`` when ``H = H0 + i*mu*I`` exactly.
+
+        A uniform imaginary potential commutes with the elastic Hamiltonian.
+        Its wave-amplitude effect is the scalar ``exp(-2*pi*mu*t)`` and its
+        intensity effect is ``exp(-4*pi*mu*t)``.  Recognizing this case avoids
+        a general complex eigensolve without approximating the physics.
+        """
+
+        matrix = np.asarray(H, dtype=np.complex128)
+        if matrix.ndim != 2 or matrix.shape[0] != matrix.shape[1]:
+            return None
+        diagonal_imaginary = np.imag(np.diag(matrix))
+        if not np.all(np.isfinite(diagonal_imaginary)):
+            return None
+        mu = float(np.mean(diagonal_imaginary))
+        elastic = matrix.copy()
+        elastic[np.diag_indices(len(elastic))] -= 1j * mu
+        if not np.allclose(elastic, elastic.conj().T, atol=1e-12, rtol=0.0):
+            return None
+        return elastic, mu
+
+    @staticmethod
     def _nonhermitian_target_intensities(H, thicknesses):
         """Propagate a non-Hermitian matrix, falling back for defective eigensystems."""
 
@@ -4350,7 +4393,19 @@ class XDSBlochPort:
             backend = "scipy"
         if backend in {"scipy", "numpy_scipy_cpu"}:
             if self.absorption_enabled():
-                return float(self._nonhermitian_target_intensities(H, [thickness])[0])
+                uniform = self._uniform_scalar_absorption_decomposition(H)
+                if uniform is None:
+                    return float(
+                        self._nonhermitian_target_intensities(H, [thickness])[0]
+                    )
+                elastic, mu = uniform
+                vals, vecs = eigh(elastic)
+                coupling = vecs[1, :] * np.conj(vecs[0, :])
+                phase = np.exp(2j * np.pi * vals * thickness)
+                return float(
+                    abs(np.sum(coupling * phase)) ** 2
+                    * math.exp(-4.0 * math.pi * mu * float(thickness))
+                )
             else:
                 vals, vecs = eigh(H)
                 coupling = vecs[1, :] * np.conj(vecs[0, :])
@@ -4408,7 +4463,20 @@ class XDSBlochPort:
             backend = "scipy"
         if backend in {"scipy", "numpy_scipy_cpu"}:
             if self.absorption_enabled():
-                per_t = self._nonhermitian_target_intensities(H, self.thick)
+                uniform = self._uniform_scalar_absorption_decomposition(H)
+                if uniform is None:
+                    per_t = self._nonhermitian_target_intensities(H, self.thick)
+                    return float(np.sum(self.thick_w * per_t))
+                elastic, mu = uniform
+                vals, vecs = eigh(elastic)
+                coupling = vecs[1, :] * np.conj(vecs[0, :])
+                phase = np.exp(
+                    (2j * np.pi) * vals[:, None] * self.thick[None, :]
+                )
+                per_t = np.abs(
+                    np.sum(coupling[:, None] * phase, axis=0)
+                ) ** 2
+                per_t *= np.exp(-4.0 * np.pi * mu * self.thick)
                 return float(np.sum(self.thick_w * per_t))
             else:
                 vals, vecs = eigh(H)
@@ -4920,6 +4988,8 @@ class XDSBlochPort:
         basis_flat = []
         profile_offsets = [0]
         profile_weights_flat = []
+        profile_omega_flat = []
+        profile_tilts_flat = []
         sg_offsets = [0]
         sg_basis_flat = []
         diff_offsets = [0]
@@ -4953,9 +5023,11 @@ class XDSBlochPort:
             row_idx = int(row_idx)
             hkl = self.data.hkl[row_idx]
             if getattr(self.data, "pets_exact_a_center", None) is not None:
-                orientations, _angles, profile_weights, semiangle, ordinal = (
+                orientations, profile_angles, profile_weights, semiangle, ordinal = (
                     self.pets_exact_orientation_samples(row_idx)
                 )
+                profile_omegas = np.asarray(profile_angles, dtype=float)
+                profile_tilts = np.zeros((len(profile_omegas), 2), dtype=float)
                 center = np.asarray(
                     self.data.pets_exact_a_center[ordinal], dtype=float
                 )
@@ -5043,6 +5115,8 @@ class XDSBlochPort:
                 ) = self.row_profile_orientation_points(
                     row_idx, hkl, omega_c, c_sg, sg_window_i
                 )
+                profile_omegas = np.asarray(solved_omegas, dtype=float)
+                profile_tilts = np.asarray(mosaic_tilts, dtype=float).reshape(-1, 2)
                 basis, _cone_basis_meta = self.select_basis_for_profile(
                     hkl,
                     omega_c,
@@ -5075,7 +5149,17 @@ class XDSBlochPort:
 
             basis_flat.extend(tuple(int(v) for v in b) for b in basis)
             basis_offsets.append(len(basis_flat))
+            if not (
+                len(profile_weights) == len(profile_omegas) == len(profile_tilts)
+            ):
+                raise RuntimeError(
+                    "profile weights, orientations, and tilts must have identical lengths"
+                )
             profile_weights_flat.extend(float(v) for v in profile_weights)
+            profile_omega_flat.extend(float(value) for value in profile_omegas)
+            profile_tilts_flat.extend(
+                (float(row[0]), float(row[1])) for row in profile_tilts
+            )
             profile_offsets.append(len(profile_weights_flat))
             sg_basis_arr = np.asarray(sg_basis_rows, dtype=float)
             sg_basis_flat.extend(float(v) for v in sg_basis_arr.reshape(-1))
@@ -5126,6 +5210,10 @@ class XDSBlochPort:
             "basis_flat": np.asarray(basis_flat, dtype=np.int32).reshape(-1, 3),
             "profile_offsets": np.asarray(profile_offsets, dtype=np.int64),
             "profile_weights_flat": np.asarray(profile_weights_flat, dtype=float),
+            "profile_omega_flat": np.asarray(profile_omega_flat, dtype=float),
+            "profile_tilts_flat": np.asarray(profile_tilts_flat, dtype=float).reshape(
+                -1, 2
+            ),
             "sg_offsets": np.asarray(sg_offsets, dtype=np.int64),
             "sg_basis_flat": np.asarray(sg_basis_flat, dtype=float),
             "diff_offsets": np.asarray(diff_offsets, dtype=np.int64),

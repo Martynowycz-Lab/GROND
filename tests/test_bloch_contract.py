@@ -546,6 +546,41 @@ def test_defective_nonhermitian_propagation_matches_direct_exponential():
     assert got == pytest.approx(expected, rel=1e-12)
 
 
+def test_uniform_scalar_absorption_shortcut_matches_general_propagation():
+    port = object.__new__(XDSBlochPort)
+    port.cfg = SimpleNamespace(compute_backend="scipy")
+    port.absorption_enabled = lambda: True
+    port.thick = np.asarray([0.7, 1.3, 2.1], dtype=float)
+    port.thick_w = np.asarray([0.2, 0.5, 0.3], dtype=float)
+    elastic = np.asarray(
+        [
+            [0.03, 0.02 + 0.01j, -0.01j],
+            [0.02 - 0.01j, -0.04, 0.015],
+            [0.01j, 0.015, 0.08],
+        ],
+        dtype=np.complex128,
+    )
+    mu = 0.007
+    hamiltonian = elastic + 1j * mu * np.eye(3)
+
+    single = port.propagate_direct_to_target(hamiltonian, 1.4)
+    expected_single = XDSBlochPort._nonhermitian_target_intensities(
+        hamiltonian, [1.4]
+    )[0]
+    averaged = port.propagate_direct_to_target_thickness_average(hamiltonian)
+    expected_average = np.sum(
+        port.thick_w
+        * XDSBlochPort._nonhermitian_target_intensities(hamiltonian, port.thick)
+    )
+
+    assert single == pytest.approx(expected_single, rel=1e-12, abs=1e-15)
+    assert averaged == pytest.approx(expected_average, rel=1e-12, abs=1e-15)
+    decomposed = XDSBlochPort._uniform_scalar_absorption_decomposition(hamiltonian)
+    assert decomposed is not None
+    np.testing.assert_allclose(decomposed[0], elastic, atol=1e-15, rtol=0.0)
+    assert decomposed[1] == pytest.approx(mu, abs=1e-15)
+
+
 def test_row_plan_cache_validation_rejects_stale_metadata():
     indices = np.asarray([3, 7, 11], dtype=np.int64)
     meta = {
@@ -566,6 +601,8 @@ def test_row_plan_cache_validation_rejects_stale_metadata():
         "basis_flat": np.zeros((6, 3), dtype=np.int32),
         "profile_offsets": np.asarray([0, 1, 2, 3], dtype=np.int64),
         "profile_weights_flat": np.ones(3, dtype=float),
+        "profile_omega_flat": np.asarray([-0.1, 0.0, 0.1], dtype=float),
+        "profile_tilts_flat": np.zeros((3, 2), dtype=float),
         "sg_offsets": np.asarray([0, 2, 4, 6], dtype=np.int64),
         "sg_basis_flat": np.zeros(6, dtype=float),
         "diff_offsets": np.asarray([0, 4, 8, 12], dtype=np.int64),
@@ -675,6 +712,20 @@ def test_row_plan_cache_validation_rejects_stale_metadata():
     errors = row_plan_cache_validation_errors(zero_weight_cache, indices, "expected", meta)
     assert "profile weights contain an all-zero row profile" in errors
     assert "profile weight sums do not match cached row metadata" in errors
+
+    wrong_profile_omega = dict(valid_cache)
+    wrong_profile_omega["profile_omega_flat"] = np.asarray([0.0, np.nan, 0.0])
+    errors = row_plan_cache_validation_errors(
+        wrong_profile_omega, indices, "expected", meta
+    )
+    assert "profile omega values must be a finite vector" in errors
+
+    wrong_profile_tilts = dict(valid_cache)
+    wrong_profile_tilts["profile_tilts_flat"] = np.zeros((2, 2), dtype=float)
+    errors = row_plan_cache_validation_errors(
+        wrong_profile_tilts, indices, "expected", meta
+    )
+    assert "profile offsets do not span profile_tilts_flat" in errors
 
     wrong_sg_shape = dict(valid_cache)
     wrong_sg_shape["sg_offsets"] = np.asarray([0, 1, 3, 6], dtype=np.int64)

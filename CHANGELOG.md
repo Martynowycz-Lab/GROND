@@ -4,6 +4,13 @@ This file records user-visible changes to the installable package. Version `0.2.
 
 ## 0.2.2 (unreleased)
 
+Row-plan cache schema 6 now retains the exact solved profile orientations and
+two-axis tilts that were already computed during cache construction. Repeated
+rocking-profile diagnostics no longer need to solve the same roots again; old
+schema-5 caches rebuild automatically. Uniform scalar absorption is propagated
+as exact analytic damping around the Hermitian elastic eigensystem, avoiding a
+general complex eigensolve while preserving intensities to numerical precision.
+
 Native continuous-rotation PETS2 input is now available through the bounded
 `import-pets` and `pets-evaluate` commands. The importer preserves PETS-owned
 signed rows, uncertainties, UB/zone orientations, rocking widths, wavelength,
