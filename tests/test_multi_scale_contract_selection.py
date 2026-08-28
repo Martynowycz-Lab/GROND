@@ -160,6 +160,30 @@ def test_validate_scale_contract_run_map_allows_only_scale_predictions(tmp_path:
     assert result["datasets"]["a"]["bloch_rall_gain"]["free"] == pytest.approx(0.10)
 
 
+def test_validate_scale_contract_run_map_allows_scale_replay_assignments(tmp_path: Path) -> None:
+    full = tmp_path / "full"
+    compact = tmp_path / "compact"
+    _write_run(full, scale_count=100)
+    _write_run(compact, scale_count=70)
+    rows = list(csv.DictReader((compact / "native_dyn_calc.csv").open()))
+    for index, row in enumerate(rows):
+        row["scale_replay_group"] = str(index)
+        row["scale_replay_detector_bin"] = "0"
+    with (compact / "native_dyn_calc.csv").open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+
+    result = cli.validate_scale_contract_run_map(
+        {"a": full},
+        {"a": compact},
+        min_bloch_rall_gain=0.002,
+    )
+
+    assert result["ok"] is True
+    assert result["datasets"]["a"]["scale_count"] == 70
+
+
 def test_validate_scale_contract_run_map_rejects_weak_held_out_bloch_gain(tmp_path: Path) -> None:
     full = tmp_path / "full"
     compact = tmp_path / "compact"

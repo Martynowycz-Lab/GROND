@@ -3618,6 +3618,8 @@ _SCALE_CONTRACT_MUTABLE_COLUMNS = {
     "born_replay_source_scaled",
     "scale_compression_model",
     "scale_replay_model",
+    "scale_replay_group",
+    "scale_replay_detector_bin",
 }
 
 
