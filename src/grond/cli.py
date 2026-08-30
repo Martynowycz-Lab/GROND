@@ -18692,8 +18692,14 @@ def prepare_push_endpoint_model(args: argparse.Namespace, out_dir: Path) -> tupl
         rec = min(heavy, key=lambda item: distance2(xyz, item["xyz"]))  # type: ignore[arg-type]
         return float(rec["ueq"]), str(rec["label"])
 
-    remove_restraints = args.model_prep in {"no-restraints", "free-h-anis-no-restraints"}
+    remove_restraints = args.model_prep in {
+        "no-restraints",
+        "free-h-isotropic-no-restraints",
+        "free-h-anis-no-restraints",
+    }
+    free_h_isotropic = args.model_prep == "free-h-isotropic-no-restraints"
     free_h_anis = args.model_prep == "free-h-anis-no-restraints"
+    free_h = free_h_isotropic or free_h_anis
     adp_stabilized = args.model_prep == "adp-stabilized"
     npd_diagnostics = _quick_lst_diagnostics(source.with_suffix(".lst"))
     if not npd_diagnostics.get("exists"):
@@ -18757,7 +18763,7 @@ def prepare_push_endpoint_model(args: argparse.Namespace, out_dir: Path) -> tupl
             removed_restraints.append(line)
             i += 1
             continue
-        if free_h_anis and key == "AFIX":
+        if free_h and key == "AFIX":
             removed_afix += 1
             i += 1
             continue
@@ -18768,8 +18774,9 @@ def prepare_push_endpoint_model(args: argparse.Namespace, out_dir: Path) -> tupl
         if key == "END":
             if adp_stabilized and not inserted_adp_stabilizers:
                 add_adp_stabilizers()
-            if free_h_anis:
-                new_lines.append(f"REM GROND endpoint-push free anisotropic H count: {len(converted_h)}")
+            if free_h:
+                mode = "anisotropic" if free_h_anis else "isotropic"
+                new_lines.append(f"REM GROND endpoint-push free {mode} H count: {len(converted_h)}")
             new_lines.append("END")
             i += 1
             continue
@@ -18789,7 +18796,7 @@ def prepare_push_endpoint_model(args: argparse.Namespace, out_dir: Path) -> tupl
             adp_isotropic.append({"label": label, "old_u": old_u, "fallback_u": max(0.006, min(0.08, abs(float(ueq))))})
             i += consumed
             continue
-        if free_h_anis and is_shelx_atom_line(line) and shelx_label_element(toks[0]) == "H":
+        if free_h and is_shelx_atom_line(line) and shelx_label_element(toks[0]) == "H":
             label = toks[0]
             sfac = int(toks[1])
             x, y, z = [float(v) for v in toks[2:5]]
@@ -18800,9 +18807,29 @@ def prepare_push_endpoint_model(args: argparse.Namespace, out_dir: Path) -> tupl
             if multiplier < 0.5 or multiplier > 2.0:
                 multiplier = 1.2
             u = max(0.010, min(0.080, parent_ueq * multiplier))
-            new_lines.append(f"{label:<4} {sfac:>2d} {x:11.6f} {y:11.6f} {z:11.6f} {occ:11.5f} {u:10.5f} {u:10.5f} =")
-            new_lines.append(f" {u:10.5f} {0.0:10.5f} {0.0:10.5f} {0.0:10.5f}")
-            converted_h.append({"label": label, "parent": parent, "parent_ueq": parent_ueq, "init_u_diag": u, "old_u": old_u})
+            if free_h_anis:
+                new_lines.append(
+                    f"{label:<4} {sfac:>2d} {x:11.6f} {y:11.6f} {z:11.6f} "
+                    f"{occ:11.5f} {u:10.5f} {u:10.5f} ="
+                )
+                new_lines.append(
+                    f" {u:10.5f} {0.0:10.5f} {0.0:10.5f} {0.0:10.5f}"
+                )
+            else:
+                new_lines.append(
+                    f"{label:<4} {sfac:>2d} {x:11.6f} {y:11.6f} {z:11.6f} "
+                    f"{occ:11.5f} {u:10.5f}"
+                )
+            converted_h.append(
+                {
+                    "label": label,
+                    "parent": parent,
+                    "parent_ueq": parent_ueq,
+                    "initial_adp_type": "anisotropic" if free_h_anis else "isotropic",
+                    "init_u_diag": u,
+                    "old_u": old_u,
+                }
+            )
             i += 1
             continue
 
@@ -22891,7 +22918,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_push.add_argument("--best-cycle-tolerance", type=float, default=0.001, help="Safety report tolerance above the best row wR(I)all.")
     p_push.add_argument(
         "--model-prep",
-        choices=["as-is", "no-restraints", "free-h-anis-no-restraints", "adp-stabilized"],
+        choices=[
+            "as-is",
+            "no-restraints",
+            "free-h-isotropic-no-restraints",
+            "free-h-anis-no-restraints",
+            "adp-stabilized",
+        ],
         default="as-is",
         help="Optional start-model preparation before the push. adp-stabilized adds RIGU/SIMU/targeted ISOR and converts known NPD atoms to isotropic fallback; free-H is a stress-test branch.",
     )

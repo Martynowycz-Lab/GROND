@@ -2651,6 +2651,20 @@ def test_utility_commands_parse():
     assert push.post_bloch_sigma_policy == "none"
     assert push.model_prep == "free-h-anis-no-restraints"
     assert push.set_ls_cycles == 1
+    push_free_h_iso = build_parser().parse_args(
+        [
+            "push-endpoint",
+            "--source-summary",
+            "summary.json",
+            "--start-res",
+            "model.res",
+            "--out-dir",
+            "push",
+            "--model-prep",
+            "free-h-isotropic-no-restraints",
+        ]
+    )
+    assert push_free_h_iso.model_prep == "free-h-isotropic-no-restraints"
     push_adp = build_parser().parse_args(
         [
             "push-endpoint",
@@ -2719,6 +2733,58 @@ def test_adp_stabilized_model_prep_targets_npd_atoms(tmp_path: Path):
     assert any(line.startswith("C005") and "0.00600" in line and "=" not in line for line in text.splitlines())
     assert payload["adp_stabilized_npd_atoms"] == ["C005"]
     assert payload["adp_stabilized_isotropic_fallback"][0]["label"] == "C005"
+
+
+@pytest.mark.parametrize(
+    ("mode", "anisotropic"),
+    [
+        ("free-h-isotropic-no-restraints", False),
+        ("free-h-anis-no-restraints", True),
+    ],
+)
+def test_free_h_model_prep_removes_afix_and_restraints(
+    tmp_path: Path, mode: str, anisotropic: bool
+):
+    res = tmp_path / "model.res"
+    res.write_text(
+        "\n".join(
+            [
+                "TITL test",
+                "CELL 0.025079 7 8 9 90 90 90",
+                "LATT -1",
+                "SFAC C H",
+                "UNIT 1 1",
+                "DFIX 1.09 C1 H1",
+                "FVAR 1",
+                "C1 1 0.100000 0.200000 0.300000 11.00000 0.02000 0.03000 =",
+                " 0.04000 0.00100 0.00200 0.00300",
+                "AFIX 13",
+                "H1 2 0.200000 0.200000 0.300000 11.00000 -1.20000",
+                "AFIX 0",
+                "L.S. 10",
+                "HKLF 4",
+                "END",
+            ]
+        )
+        + "\n"
+    )
+    args = argparse.Namespace(start_res=str(res), model_prep=mode, set_ls_cycles=1)
+
+    prepared, audit = cli.prepare_push_endpoint_model(args, tmp_path / mode)
+    text = prepared.read_text()
+    payload = json.loads(audit.read_text())
+
+    assert "AFIX" not in text
+    assert "DFIX" not in text
+    assert "L.S. 1" in text
+    assert payload["removed_afix"] == 2
+    assert payload["removed_restraints"] == ["DFIX 1.09 C1 H1"]
+    assert payload["converted_hydrogens"][0]["initial_adp_type"] == (
+        "anisotropic" if anisotropic else "isotropic"
+    )
+    h_line = next(line for line in text.splitlines() if line.startswith("H1"))
+    assert float(h_line.split()[6]) > 0
+    assert h_line.rstrip().endswith("=") is anisotropic
 
 
 def test_sfac_check_rejects_element_only_shelx_factors(tmp_path: Path, capsys):
