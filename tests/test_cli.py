@@ -2759,7 +2759,7 @@ def test_free_h_model_prep_removes_afix_and_restraints(
                 "C1 1 0.100000 0.200000 0.300000 11.00000 0.02000 0.03000 =",
                 " 0.04000 0.00100 0.00200 0.00300",
                 "AFIX 13",
-                "H1 2 0.200000 0.200000 0.300000 11.00000 -1.20000",
+                "OH1 2 0.200000 0.200000 0.300000 11.00000 -1.20000",
                 "AFIX 0",
                 "L.S. 10",
                 "HKLF 4",
@@ -2782,7 +2782,7 @@ def test_free_h_model_prep_removes_afix_and_restraints(
     assert payload["converted_hydrogens"][0]["initial_adp_type"] == (
         "anisotropic" if anisotropic else "isotropic"
     )
-    h_line = next(line for line in text.splitlines() if line.startswith("H1"))
+    h_line = next(line for line in text.splitlines() if line.startswith("OH1"))
     assert float(h_line.split()[6]) > 0
     assert h_line.rstrip().endswith("=") is anisotropic
 

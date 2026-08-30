@@ -18652,11 +18652,29 @@ def prepare_push_endpoint_model(args: argparse.Namespace, out_dir: Path) -> tupl
             break
 
     cell = [1.0, 1.0, 1.0]
+    sfac_elements: list[str] = []
     for line in active:
         toks = line.split()
         if toks and toks[0].upper() == "CELL" and len(toks) >= 8:
             cell = [float(x) for x in toks[2:5]]
-            break
+        if toks and toks[0].upper() == "SFAC" and len(toks) >= 2:
+            candidates = [str(value).strip().upper() for value in toks[1:]]
+            element_tokens = [
+                value for value in candidates if re.fullmatch(r"[A-Z][A-Z]?", value)
+            ]
+            if len(element_tokens) == len(candidates):
+                sfac_elements.extend(element_tokens)
+            elif element_tokens:
+                sfac_elements.append(element_tokens[0])
+
+    def atom_element(toks: list[str]) -> str:
+        try:
+            sfac_index = int(toks[1])
+        except (IndexError, ValueError):
+            sfac_index = 0
+        if 1 <= sfac_index <= len(sfac_elements):
+            return sfac_elements[sfac_index - 1]
+        return shelx_label_element(toks[0])
 
     heavy: list[dict[str, object]] = []
     i = 0
@@ -18665,7 +18683,7 @@ def prepare_push_endpoint_model(args: argparse.Namespace, out_dir: Path) -> tupl
         if is_shelx_atom_line(line):
             toks = line.split()
             label = toks[0]
-            if shelx_label_element(label) != "H" and line.rstrip().endswith("=") and i + 1 < len(active):
+            if atom_element(toks) != "H" and line.rstrip().endswith("=") and i + 1 < len(active):
                 cont = active[i + 1].split()
                 try:
                     ueq = (float(toks[6]) + float(toks[7]) + float(cont[0])) / 3.0
@@ -18796,7 +18814,7 @@ def prepare_push_endpoint_model(args: argparse.Namespace, out_dir: Path) -> tupl
             adp_isotropic.append({"label": label, "old_u": old_u, "fallback_u": max(0.006, min(0.08, abs(float(ueq))))})
             i += consumed
             continue
-        if free_h and is_shelx_atom_line(line) and shelx_label_element(toks[0]) == "H":
+        if free_h and is_shelx_atom_line(line) and atom_element(toks) == "H":
             label = toks[0]
             sfac = int(toks[1])
             x, y, z = [float(v) for v in toks[2:5]]
