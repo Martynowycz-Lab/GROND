@@ -11,10 +11,7 @@ from grond.legacy.engine.bloch_engine import (
     XDSBlochPort,
     parse_hkl_transform,
 )
-from grond.legacy.engine.native_row_regularize import (
-    filter_unreachable_dials_rows,
-    sg_jitter_candidate_rejection,
-)
+from grond.legacy.engine.native_row_regularize import sg_jitter_candidate_rejection
 
 
 def fake_prediction_result(idx, *, continuation=False):
@@ -54,44 +51,30 @@ def test_local_sg_solver_keeps_strict_bound_with_typed_unreachable_error():
         port.solve_omega_for_sg((1, 0, 0), 0.0, 0.0)
 
 
-def test_dials_unreachable_row_is_filtered_and_ledgered(monkeypatch):
-    data = SimpleNamespace(
-        header={"GROND_SOURCE": "DIALS"},
-        hkl=np.asarray([[1, 0, 0], [2, 0, 0]], dtype=int),
-        zcal=np.asarray([10.0, 20.0]),
-        zobs=np.asarray([10.1, 24.5]),
-        omega_from_z=lambda value: float(value),
+def test_unreachable_zero_sg_is_nullable_reporting_diagnostic():
+    port = object.__new__(XDSBlochPort)
+    port.cfg = SimpleNamespace(profile_coordinate="target_sg")
+    port.solve_omega_for_sg = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        LocalSgCrossingError("outside strict local branch")
     )
 
-    def fake_root(_data, hkl, omega):
-        if int(hkl[0]) == 2:
-            raise ValueError("no local Sg=0 crossing near XDS ZCAL")
-        return float(omega) + 0.25
+    omega, available = port.row_diagnostic_omega_bragg((1, 2, 3), 12.25)
 
-    monkeypatch.setattr(
-        "grond.legacy.engine.native_row_regularize._xds_header_bragg_omega",
-        fake_root,
+    assert np.isnan(omega)
+    assert available is False
+
+
+def test_direct_angle_reporting_diagnostic_uses_recorded_center():
+    port = object.__new__(XDSBlochPort)
+    port.cfg = SimpleNamespace(profile_coordinate="direct_angle")
+    port.solve_omega_for_sg = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AssertionError("direct-angle diagnostic must not solve a target-Sg root")
     )
 
-    retained, audit = filter_unreachable_dials_rows(data, np.asarray([0, 1]))
+    omega, available = port.row_diagnostic_omega_bragg((1, 2, 3), 12.25)
 
-    np.testing.assert_array_equal(retained, [0])
-    assert audit["status"] == "filtered"
-    assert audit["input_rows"] == 2
-    assert audit["retained_rows"] == 1
-    assert audit["excluded_rows"] == 1
-    assert audit["excluded"][0]["row_index"] == 1
-    assert audit["excluded"][0]["hkl"] == [2, 0, 0]
-
-
-def test_local_sg_filter_does_not_change_xds_membership():
-    data = SimpleNamespace(header={"GROND_SOURCE": "XDS"})
-
-    retained, audit = filter_unreachable_dials_rows(data, np.asarray([3, 7]))
-
-    np.testing.assert_array_equal(retained, [3, 7])
-    assert audit["status"] == "not_applicable"
-    assert audit["excluded_rows"] == 0
+    assert omega == pytest.approx(12.25)
+    assert available is True
 
 
 def test_active_jitter_unreachable_profile_point_rejects_whole_candidate():

@@ -53,7 +53,6 @@ try:  # Package import.
         DEFAULT_MAX_SUPPORT_SG,
         Config,
         InfeasibleSgJitterProfileError,
-        LocalSgCrossingError,
         XDSBlochPort,
         XDSData,
         alternate_hand_model,
@@ -76,7 +75,6 @@ except ImportError:  # Direct script execution from this directory.
         DEFAULT_MAX_SUPPORT_SG,
         Config,
         InfeasibleSgJitterProfileError,
-        LocalSgCrossingError,
         XDSBlochPort,
         XDSData,
         alternate_hand_model,
@@ -385,74 +383,6 @@ def xds_frame_datum_summary(data: XDSData, indices: np.ndarray, max_samples: int
         "p95_offset_frames": p95,
         "median_abs_deviation_frames": float(np.median(np.abs(values - median))),
         "reliability_reasons": reliability_reasons,
-    }
-
-
-def filter_unreachable_dials_rows(
-    data: XDSData, indices: np.ndarray
-) -> tuple[np.ndarray, dict]:
-    """Ledger and remove DIALS rows lacking a strict local Bragg crossing.
-
-    Old or heavily cropped DIALS reflection tables can retain a small tail of
-    calculated centroids whose zero-Sg crossing is outside both the strict
-    local solver window and the integration geometry represented by that row.
-    Such a row cannot support the target-Sg Bloch profile.  Excluding it is
-    preferable to widening the root search onto another Ewald branch or
-    aborting an otherwise valid multi-crystal AUTO run.
-
-    XDS and PETS contracts are unchanged.  Immutable row-contract replays are
-    also checked elsewhere and are never silently altered by this filter.
-    """
-
-    selected = np.asarray(indices, dtype=int)
-    source = str(data.header.get("GROND_SOURCE", "XDS") or "XDS").strip().upper()
-    if source != "DIALS":
-        return selected, {
-            "status": "not_applicable",
-            "source": source,
-            "input_rows": int(len(selected)),
-            "retained_rows": int(len(selected)),
-            "excluded_rows": 0,
-        }
-
-    retained: list[int] = []
-    excluded: list[dict] = []
-    for row_idx in selected:
-        row_idx = int(row_idx)
-        omega_center = float(data.omega_from_z(data.zcal[row_idx]))
-        try:
-            omega_bragg = _xds_header_bragg_omega(
-                data, data.hkl[row_idx], omega_center
-            )
-        except ValueError as exc:
-            excluded.append(
-                {
-                    "row_index": row_idx,
-                    "hkl": [int(value) for value in data.hkl[row_idx]],
-                    "zcal": float(data.zcal[row_idx]),
-                    "zobs": (
-                        float(data.zobs[row_idx])
-                        if np.isfinite(data.zobs[row_idx])
-                        else None
-                    ),
-                    "omega_center_deg": omega_center,
-                    "reason": str(exc),
-                }
-            )
-            continue
-        if not math.isfinite(omega_bragg):
-            raise RuntimeError("local Bragg solver returned a nonfinite angle")
-        retained.append(row_idx)
-
-    return np.asarray(retained, dtype=int), {
-        "status": "filtered" if excluded else "ok",
-        "source": source,
-        "policy": "strict_local_zero_sg_crossing_required",
-        "input_rows": int(len(selected)),
-        "retained_rows": int(len(retained)),
-        "excluded_rows": int(len(excluded)),
-        "excluded_fraction": float(len(excluded) / max(1, len(selected))),
-        "excluded": excluded,
     }
 
 
@@ -1612,6 +1542,9 @@ def evaluate_trial(data, target, base_sig, pred, indices, masks, nui: Nuisance, 
         "center_sg": expand_pred_array("center_sg"),
         "omega_bragg": expand_pred_array("omega_bragg"),
         "omega_delta": expand_pred_array("omega_delta"),
+        "omega_bragg_root_available": expand_pred_array(
+            "omega_bragg_root_available", dtype=bool, default=False
+        ),
         "sg_window": expand_pred_array("sg_window"),
         "sg_window_raw": expand_pred_array("sg_window_raw"),
         "sg_window_half_frames": expand_pred_array("sg_window_half_frames"),
@@ -2972,7 +2905,7 @@ def write_row_table(path: Path, data: XDSData, target, best_eval, masks):
     with path.open("w", newline="") as f:
         fields = [
             "row_index", "h", "k", "l", "d_A", "target_I", "source_sigma", "sigma_eff", "xds_sigma", "peak", "corr", "rlp",
-            "group", "detector_bin", "basis_size", "basis_support_hash64", "center_sg_inv_A", "omega_bragg_deg", "omega_bragg_minus_center_deg",
+            "group", "detector_bin", "basis_size", "basis_support_hash64", "center_sg_inv_A", "omega_bragg_deg", "omega_bragg_minus_center_deg", "omega_bragg_root_available",
             "sg_window_inv_A", "sg_window_raw_inv_A", "sg_window_half_frames", "sg_window_clipped",
             "sg_dSg_domega_inv_A_per_deg", "sg_dSg_dframe_inv_A", "sg_jitter_sigma_inv_A",
             "sg_jitter_d_inv_A", "sg_jitter_frame_fraction", "sg_jitter_kernel_points",
@@ -3013,6 +2946,9 @@ def write_row_table(path: Path, data: XDSData, target, best_eval, masks):
                 "center_sg_inv_A": float(arrays.get("center_sg", default_float)[i]),
                 "omega_bragg_deg": float(arrays.get("omega_bragg", default_float)[i]),
                 "omega_bragg_minus_center_deg": float(arrays.get("omega_delta", default_float)[i]),
+                "omega_bragg_root_available": int(
+                    bool(arrays.get("omega_bragg_root_available", default_bool)[i])
+                ),
                 "sg_window_inv_A": float(arrays.get("sg_window", default_float)[i]),
                 "sg_window_raw_inv_A": float(arrays.get("sg_window_raw", default_float)[i]),
                 "sg_window_half_frames": float(arrays.get("sg_window_half_frames", default_float)[i]),
@@ -3666,12 +3602,6 @@ def main():
             )
     target, base_sig = target_arrays(data, args.target_mode)
     row_contract_summary = {}
-    local_sg_crossing_summary = {
-        "status": "not_evaluated",
-        "input_rows": 0,
-        "retained_rows": 0,
-        "excluded_rows": 0,
-    }
     if str(args.row_contract).strip():
         if int(args.max_rows) > 0:
             raise ValueError("--max-rows cannot be combined with --row-contract; membership must remain exact")
@@ -3708,26 +3638,6 @@ def main():
             args.geometry_percentile,
         )
         indices = row_selection(data, target, args.positive_only, args.min_d_spacing, args.min_peak, args.max_rows, args.geometry_percentile)
-        datum_indices, local_sg_datum_summary = filter_unreachable_dials_rows(
-            data, datum_indices
-        )
-        indices, local_sg_crossing_summary = filter_unreachable_dials_rows(
-            data, indices
-        )
-        if not len(indices):
-            raise ValueError("no rows remain after the strict local-Sg crossing filter")
-        # The datum grid is geometry-only and can use the broader uncapped
-        # eligibility set, but it must obey the same physical crossing rule.
-        local_sg_crossing_summary["datum_input_rows"] = int(
-            local_sg_datum_summary["input_rows"]
-        )
-        local_sg_crossing_summary["datum_retained_rows"] = int(
-            local_sg_datum_summary["retained_rows"]
-        )
-        local_sg_crossing_summary["datum_excluded_rows"] = int(
-            local_sg_datum_summary["excluded_rows"]
-        )
-        geometry_summary["local_sg_crossing_filter"] = local_sg_crossing_summary
     model = parse_model(Path(args.res))
     split_contract_summary = {}
     if str(args.split_contract).strip():
@@ -3912,20 +3822,6 @@ def main():
                                                             )
                                                         except InfeasibleSgJitterProfileError as exc:
                                                             rejection = sg_jitter_candidate_rejection(cfg, exc)
-                                                            rejected_prediction_candidates.append(rejection)
-                                                            print(
-                                                                "rejected nuisance candidate: "
-                                                                f"{rejection['reason']}: {rejection['message']}",
-                                                                flush=True,
-                                                            )
-                                                            continue
-                                                        except LocalSgCrossingError as exc:
-                                                            rejection = {
-                                                                "status": "rejected",
-                                                                "reason": "infeasible_local_sg_crossing",
-                                                                "message": str(exc),
-                                                                "config": asdict(cfg),
-                                                            }
                                                             rejected_prediction_candidates.append(rejection)
                                                             print(
                                                                 "rejected nuisance candidate: "
@@ -4126,6 +4022,7 @@ def main():
             "center_sg",
             "omega_bragg",
             "omega_delta",
+            "omega_bragg_root_available",
             "sg_window",
             "sg_window_raw",
             "sg_window_half_frames",
@@ -4344,6 +4241,17 @@ def main():
         dtype=int,
     )
     predicted_mask = np.isfinite(np.asarray(best["arrays"].get("dyn_raw", np.full(len(target), np.nan))))
+    omega_bragg_root_available = np.asarray(
+        best["arrays"].get(
+            "omega_bragg_root_available",
+            np.isfinite(
+                np.asarray(
+                    best["arrays"].get("omega_bragg", np.full(len(target), np.nan))
+                )
+            ),
+        ),
+        dtype=bool,
+    )
     valid_continuation_mask = np.asarray(best["arrays"]["valid"], dtype=bool) & continuation_used
     profile_root_solver_audit = {
         "contract": "strict_bragg_same_branch_base_profile_v1",
@@ -4352,6 +4260,16 @@ def main():
         "active_jitter": "strict_local_bound_or_reject_candidate",
         "prediction_cache_schema": PREDICTION_CACHE_SCHEMA,
         "predicted_rows": int(np.count_nonzero(predicted_mask)),
+        "predicted_rows_with_local_zero_sg_diagnostic": int(
+            np.count_nonzero(predicted_mask & omega_bragg_root_available)
+        ),
+        "predicted_rows_without_local_zero_sg_diagnostic": int(
+            np.count_nonzero(predicted_mask & ~omega_bragg_root_available)
+        ),
+        "unavailable_zero_sg_diagnostic_policy": (
+            "retain row; report omega_bragg as NaN because propagation uses the "
+            "recorded scan-centered Sg profile, not this diagnostic"
+        ),
         "predicted_rows_using_same_branch_continuation": int(
             np.count_nonzero(predicted_mask & continuation_used)
         ),
@@ -4496,7 +4414,6 @@ def main():
             "work_rows": int(np.count_nonzero(masks["work"])),
             "free_rows": int(np.count_nonzero(masks["free"])),
             "geometry_filter": geometry_summary,
-            "local_sg_crossing_filter": local_sg_crossing_summary,
             "contract": row_contract_summary,
             "transform_hand_split_contract": split_contract_summary,
         },

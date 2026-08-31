@@ -738,8 +738,6 @@ def row_plan_cache_validation_errors(cache: dict, indices, expected_key: str, ex
     finite_row_arrays = (
         "center_sg",
         "omega_center",
-        "omega_bragg",
-        "omega_delta",
         "sg_window",
         "sg_domega",
         "sg_dframe",
@@ -791,6 +789,27 @@ def row_plan_cache_validation_errors(cache: dict, indices, expected_key: str, ex
         valid = ~np.isinf(numeric) if allows_nan else np.isfinite(numeric)
         if not np.all(valid):
             errors.append(f"{name} is incomplete or non-finite")
+    if "omega_bragg" in cache or "omega_delta" in cache:
+        root_available = np.asarray(
+            cache.get(
+                "omega_bragg_root_available",
+                np.isfinite(np.asarray(cache.get("omega_bragg", []), dtype=float)),
+            ),
+            dtype=bool,
+        )
+        if root_available.shape != (len(indices),):
+            errors.append("omega_bragg_root_available is incomplete")
+        for name in ("omega_bragg", "omega_delta"):
+            values = np.asarray(cache.get(name, []), dtype=float)
+            if values.shape != (len(indices),):
+                errors.append(f"{name} is incomplete or non-finite")
+                continue
+            if root_available.shape == values.shape and np.any(
+                root_available & ~np.isfinite(values)
+            ):
+                errors.append(f"{name} is non-finite despite an available local root")
+            if np.any(np.isinf(values)):
+                errors.append(f"{name} contains an infinite diagnostic")
     if all(
         name in cache
         for name in (
@@ -3243,6 +3262,23 @@ class XDSBlochPort:
             )
         return omega
 
+    def row_diagnostic_omega_bragg(self, hkl, omega_center):
+        """Return the reporting-only zero-Sg angle and its availability.
+
+        Propagation uses the recorded scan-centered Sg profile and never this
+        diagnostic. Coarse-sliced DIALS shoeboxes can legitimately span a
+        crossing just outside the deliberately strict local-root window. In
+        that case retain the observation and report the unavailable diagnostic
+        as NaN instead of aborting or changing row membership.
+        """
+
+        if str(getattr(self.cfg, "profile_coordinate", "target_sg")) == "direct_angle":
+            return float(omega_center), True
+        try:
+            return float(self.solve_omega_for_sg(hkl, omega_center, 0.0)), True
+        except LocalSgCrossingError:
+            return float("nan"), False
+
     def solve_sg_profile_target(self, row_idx, hkl, omega_center, target_sg, jitter_meta):
         """Solve one profile target while preserving the strict local-root contract.
 
@@ -4760,10 +4796,9 @@ class XDSBlochPort:
         zcal = self.data.zcal[row_idx]
         omega_center = self.omega_from_z(zcal)
         center_sg = float(self.sg_for_hkls(np.asarray([hkl], dtype=int), omega_center)[0])
-        if str(getattr(self.cfg, "profile_coordinate", "target_sg")) == "direct_angle":
-            omega_bragg = float(omega_center)
-        else:
-            omega_bragg = self.solve_omega_for_sg(hkl, omega_center, 0.0)
+        omega_bragg, omega_bragg_root_available = self.row_diagnostic_omega_bragg(
+            hkl, omega_center
+        )
         sg_window_i, sg_width_meta = self.row_sg_window(row_idx, hkl, omega_center)
         (
             solved_omegas,
@@ -4818,6 +4853,7 @@ class XDSBlochPort:
             "omega_center_deg": float(omega_center),
             "omega_bragg_deg": float(omega_bragg),
             "omega_bragg_minus_center_deg": float(omega_bragg - omega_center),
+            "omega_bragg_root_available": bool(omega_bragg_root_available),
             "sg_window_inv_A": float(sg_window_i),
             "dose_delta_b_A2": float(self.row_delta_b(row_idx)),
             "thickness_model": str(getattr(self.cfg, "thickness_model", "uniform_gradient")),
@@ -4998,6 +5034,7 @@ class XDSBlochPort:
         omega_center = []
         omega_bragg = []
         omega_delta = []
+        omega_bragg_root_available = []
         sg_window = []
         sg_domega = []
         sg_dframe = []
@@ -5069,6 +5106,7 @@ class XDSBlochPort:
                 # but the cache validator requires finite fixed-width arrays.
                 omega_c = 0.0
                 omega_b = 0.0
+                omega_b_available = False
                 sg_resid_values = np.asarray([], dtype=float)
                 sg_width_meta = {
                     "sg_dSg_domega_inv_A_per_deg": derivative,
@@ -5095,13 +5133,9 @@ class XDSBlochPort:
                 c_sg = float(
                     self.sg_for_hkls(np.asarray([hkl], dtype=int), omega_c)[0]
                 )
-                if (
-                    str(getattr(self.cfg, "profile_coordinate", "target_sg"))
-                    == "direct_angle"
-                ):
-                    omega_b = float(omega_c)
-                else:
-                    omega_b = self.solve_omega_for_sg(hkl, omega_c, 0.0)
+                omega_b, omega_b_available = self.row_diagnostic_omega_bragg(
+                    hkl, omega_c
+                )
                 sg_window_i, sg_width_meta = self.row_sg_window(
                     row_idx, hkl, omega_c
                 )
@@ -5171,6 +5205,7 @@ class XDSBlochPort:
             omega_center.append(float(omega_c))
             omega_bragg.append(float(omega_b))
             omega_delta.append(float(omega_b - omega_c))
+            omega_bragg_root_available.append(bool(omega_b_available))
             sg_window.append(float(sg_window_i))
             sg_domega.append(float(sg_width_meta["sg_dSg_domega_inv_A_per_deg"]))
             sg_dframe.append(float(sg_width_meta["sg_dSg_dframe_inv_A"]))
@@ -5224,6 +5259,9 @@ class XDSBlochPort:
             "omega_center": np.asarray(omega_center, dtype=float),
             "omega_bragg": np.asarray(omega_bragg, dtype=float),
             "omega_delta": np.asarray(omega_delta, dtype=float),
+            "omega_bragg_root_available": np.asarray(
+                omega_bragg_root_available, dtype=bool
+            ),
             "sg_window": np.asarray(sg_window, dtype=float),
             "sg_domega": np.asarray(sg_domega, dtype=float),
             "sg_dframe": np.asarray(sg_dframe, dtype=float),
@@ -5407,6 +5445,12 @@ class XDSBlochPort:
             "omega_center_deg": float(cache["omega_center"][pos]),
             "omega_bragg_deg": float(cache["omega_bragg"][pos]),
             "omega_bragg_minus_center_deg": float(cache["omega_delta"][pos]),
+            "omega_bragg_root_available": bool(
+                cache.get(
+                    "omega_bragg_root_available",
+                    np.isfinite(cache["omega_bragg"]),
+                )[pos]
+            ),
             "sg_window_inv_A": float(cache["sg_window"][pos]),
             "sg_dSg_domega_inv_A_per_deg": float(cache["sg_domega"][pos]),
             "sg_dSg_dframe_inv_A": float(cache["sg_dframe"][pos]),
@@ -5659,6 +5703,7 @@ class XDSBlochPort:
         center_sg = np.zeros(len(indices), dtype=float)
         omega_bragg = np.zeros(len(indices), dtype=float)
         omega_delta = np.zeros(len(indices), dtype=float)
+        omega_bragg_root_available = np.ones(len(indices), dtype=bool)
         sg_window = np.zeros(len(indices), dtype=float)
         sg_domega = np.zeros(len(indices), dtype=float)
         sg_dframe = np.zeros(len(indices), dtype=float)
@@ -5693,6 +5738,9 @@ class XDSBlochPort:
             center_sg[n] = r["center_sg_inv_A"]
             omega_bragg[n] = r["omega_bragg_deg"]
             omega_delta[n] = r["omega_bragg_minus_center_deg"]
+            omega_bragg_root_available[n] = bool(
+                r.get("omega_bragg_root_available", np.isfinite(r["omega_bragg_deg"]))
+            )
             sg_window[n] = r["sg_window_inv_A"]
             sg_domega[n] = r["sg_dSg_domega_inv_A_per_deg"]
             sg_dframe[n] = r["sg_dSg_dframe_inv_A"]
@@ -5727,6 +5775,7 @@ class XDSBlochPort:
             "center_sg": center_sg,
             "omega_bragg": omega_bragg,
             "omega_delta": omega_delta,
+            "omega_bragg_root_available": omega_bragg_root_available,
             "sg_window": sg_window,
             "sg_dSg_domega": sg_domega,
             "sg_dSg_dframe": sg_dframe,
@@ -6780,6 +6829,7 @@ def main():
     full_center_sg = np.full(len(data_all.iobs), np.nan, dtype=float)
     full_omega_bragg = np.full(len(data_all.iobs), np.nan, dtype=float)
     full_omega_delta = np.full(len(data_all.iobs), np.nan, dtype=float)
+    full_omega_bragg_root_available = np.zeros(len(data_all.iobs), dtype=bool)
     full_sg_window = np.full(len(data_all.iobs), np.nan, dtype=float)
     full_sg_domega = np.full(len(data_all.iobs), np.nan, dtype=float)
     full_sg_dframe = np.full(len(data_all.iobs), np.nan, dtype=float)
@@ -6801,6 +6851,10 @@ def main():
     full_center_sg[pred_subset["indices"]] = pred_subset["center_sg"]
     full_omega_bragg[pred_subset["indices"]] = pred_subset["omega_bragg"]
     full_omega_delta[pred_subset["indices"]] = pred_subset["omega_delta"]
+    full_omega_bragg_root_available[pred_subset["indices"]] = pred_subset.get(
+        "omega_bragg_root_available",
+        np.isfinite(pred_subset["omega_bragg"]),
+    )
     full_sg_window[pred_subset["indices"]] = pred_subset["sg_window"]
     full_sg_domega[pred_subset["indices"]] = pred_subset["sg_dSg_domega"]
     full_sg_dframe[pred_subset["indices"]] = pred_subset["sg_dSg_dframe"]
@@ -6870,6 +6924,7 @@ def main():
                     "omega_deg",
                     "omega_bragg_deg",
                     "omega_bragg_minus_center_deg",
+                    "omega_bragg_root_available",
                     "center_sg_inv_A",
                     "max_sg_solve_residual",
                     "sg_window_inv_A",
@@ -6927,6 +6982,7 @@ def main():
                         float(port.omega_from_z(data_all.zcal[idx])),
                         float(full_omega_bragg[idx]),
                         float(full_omega_delta[idx]),
+                        int(bool(full_omega_bragg_root_available[idx])),
                         float(full_center_sg[idx]),
                         float(full_sg_resid[idx]),
                         float(full_sg_window[idx]),
