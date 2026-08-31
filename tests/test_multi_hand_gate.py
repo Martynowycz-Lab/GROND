@@ -779,6 +779,7 @@ def _write_final_hand_rows(path: Path) -> None:
         "group",
         "detector_bin",
         "basis_size",
+        "omega_bragg_root_available",
         "center_sg_inv_A",
         "omega_bragg_deg",
         "omega_bragg_minus_center_deg",
@@ -810,6 +811,7 @@ def _write_final_hand_rows(path: Path) -> None:
         "group": 0,
         "detector_bin": 0,
         "basis_size": 32,
+        "omega_bragg_root_available": 1,
         "center_sg_inv_A": 0.001,
         "omega_bragg_deg": 1.5,
         "omega_bragg_minus_center_deg": 0.1,
@@ -1413,6 +1415,80 @@ def test_row_pair_contract_accepts_matching_optional_geometry_nan_sentinels(tmp_
     assert set(row_contract["nullable_numeric_columns"]) == nullable
     assert all(row_contract["nonfinite_counts"][field] == 0 for field in nullable)
     assert all(row_contract["matched_nullable_nan_counts"][field] == 4 for field in nullable)
+
+
+def test_row_pair_contract_accepts_matching_unavailable_bragg_root_diagnostics(tmp_path: Path):
+    selected_rows = tmp_path / "selected.csv"
+    opposite_rows = tmp_path / "opposite.csv"
+    for path in (selected_rows, opposite_rows):
+        _write_final_hand_rows(path)
+        with path.open(newline="") as handle:
+            reader = csv.DictReader(handle)
+            fields = list(reader.fieldnames or [])
+            rows = list(reader)
+        rows[0]["omega_bragg_root_available"] = "0"
+        rows[0]["omega_bragg_deg"] = "nan"
+        rows[0]["omega_bragg_minus_center_deg"] = "nan"
+        with path.open("w", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fields)
+            writer.writeheader()
+            writer.writerows(rows)
+
+    row_contract = cli._paired_row_split_contract(selected_rows, opposite_rows)
+
+    assert row_contract["passed"] is True
+    assert row_contract["matched_conditional_nan_counts"] == {
+        "omega_bragg_deg": 1,
+        "omega_bragg_minus_center_deg": 1,
+    }
+    assert row_contract["nonfinite_counts"]["omega_bragg_deg"] == 0
+    assert row_contract["nonfinite_counts"]["omega_bragg_minus_center_deg"] == 0
+
+
+def test_row_pair_contract_rejects_bragg_nan_when_root_is_reported_available(tmp_path: Path):
+    selected_rows = tmp_path / "selected.csv"
+    opposite_rows = tmp_path / "opposite.csv"
+    for path in (selected_rows, opposite_rows):
+        _write_final_hand_rows(path)
+        with path.open(newline="") as handle:
+            reader = csv.DictReader(handle)
+            fields = list(reader.fieldnames or [])
+            rows = list(reader)
+        rows[0]["omega_bragg_deg"] = "nan"
+        rows[0]["omega_bragg_minus_center_deg"] = "nan"
+        with path.open("w", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fields)
+            writer.writeheader()
+            writer.writerows(rows)
+
+    row_contract = cli._paired_row_split_contract(selected_rows, opposite_rows)
+
+    assert row_contract["passed"] is False
+    assert row_contract["nonfinite_counts"]["omega_bragg_deg"] == 1
+    assert row_contract["nonfinite_counts"]["omega_bragg_minus_center_deg"] == 1
+
+
+def test_row_pair_contract_requires_matching_bragg_root_availability(tmp_path: Path):
+    selected_rows = tmp_path / "selected.csv"
+    opposite_rows = tmp_path / "opposite.csv"
+    _write_final_hand_rows(selected_rows)
+    _write_final_hand_rows(opposite_rows)
+    with opposite_rows.open(newline="") as handle:
+        reader = csv.DictReader(handle)
+        fields = list(reader.fieldnames or [])
+        rows = list(reader)
+    rows[0]["omega_bragg_root_available"] = "0"
+    rows[0]["omega_bragg_deg"] = "nan"
+    rows[0]["omega_bragg_minus_center_deg"] = "nan"
+    with opposite_rows.open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    row_contract = cli._paired_row_split_contract(selected_rows, opposite_rows)
+
+    assert row_contract["passed"] is False
+    assert row_contract["exact_mismatch_counts"]["omega_bragg_root_available"] == 1
 
 
 @pytest.mark.parametrize("bad_token", ["", "not-a-number", "inf", "-inf"])

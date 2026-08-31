@@ -7856,6 +7856,7 @@ def _paired_row_split_contract(
         "group",
         "detector_bin",
         "basis_size",
+        "omega_bragg_root_available",
         "sg_window_clipped",
         "sg_jitter_kernel_points",
         "sg_profile_points_total",
@@ -7891,6 +7892,14 @@ def _paired_row_split_contract(
         )
     relative_tolerance = 1e-12
     absolute_tolerance = 1e-12
+    conditional_nan_fields = {
+        # These are reporting-only diagnostics.  A scan-centered propagation
+        # profile remains well defined when no local Sg=0 crossing exists.
+        # Accept the paired NaN sentinel only when both branches explicitly
+        # record that the diagnostic root is unavailable.
+        "omega_bragg_deg": ("omega_bragg_root_available", "0"),
+        "omega_bragg_minus_center_deg": ("omega_bragg_root_available", "0"),
+    }
 
     def indexed(path: Path) -> tuple[dict[tuple[str, ...], dict[str, str]], int, list[str]]:
         rows: dict[tuple[str, ...], dict[str, str]] = {}
@@ -7924,6 +7933,7 @@ def _paired_row_split_contract(
     numeric_mismatch_counts = {field: 0 for field in numeric_fields}
     nonfinite_counts = {field: 0 for field in numeric_fields}
     matched_nullable_nan_counts = {field: 0 for field in nullable_numeric_fields}
+    matched_conditional_nan_counts = {field: 0 for field in conditional_nan_fields}
     mismatch_examples: list[dict[str, object]] = []
 
     def parsed_numeric_token(raw: str) -> tuple[str, float]:
@@ -7953,12 +7963,22 @@ def _paired_row_split_contract(
             selected_kind, selected_value = parsed_numeric_token(best[key][field])
             opposite_kind, opposite_value = parsed_numeric_token(other[key][field])
             if selected_kind != "finite" or opposite_kind != "finite":
+                conditional = conditional_nan_fields.get(field)
                 if (
                     field in nullable_numeric_fields
                     and selected_kind == "nan"
                     and opposite_kind == "nan"
                 ):
                     matched_nullable_nan_counts[field] += 1
+                    continue
+                if (
+                    conditional is not None
+                    and selected_kind == "nan"
+                    and opposite_kind == "nan"
+                    and best[key][conditional[0]] == conditional[1]
+                    and other[key][conditional[0]] == conditional[1]
+                ):
+                    matched_conditional_nan_counts[field] += 1
                     continue
                 nonfinite_counts[field] += 1
                 if len(mismatch_examples) < 20:
@@ -8026,6 +8046,11 @@ def _paired_row_split_contract(
         "numeric_columns_checked": list(numeric_fields),
         "nullable_numeric_columns": sorted(nullable_numeric_fields),
         "matched_nullable_nan_counts": matched_nullable_nan_counts,
+        "conditional_nan_contracts": {
+            field: {"exact_field": exact_field, "required_value": required_value}
+            for field, (exact_field, required_value) in conditional_nan_fields.items()
+        },
+        "matched_conditional_nan_counts": matched_conditional_nan_counts,
         "ignored_policy_columns": ["raw_row_weight", "endpoint_weight", "sigma_eff_original"],
         "ignored_policy_reason": (
             "policy annotation columns are not consumed by absolute_structure_diagnostic; sigma_eff itself must "
