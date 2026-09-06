@@ -590,7 +590,10 @@ def _row_arrays(rows: list[dict[str, str]]) -> dict[str, np.ndarray]:
             [_finite_float(row.get("sigma_eff")) for row in rows], dtype=float
         ),
         "xds_sigma": np.asarray(
-            [_finite_float(row.get("xds_sigma")) for row in rows], dtype=float
+            # Retain the historical array key, but source_sigma is the
+            # immutable integration sigma in target_I units when a declared
+            # diagnostic target factor has been applied.
+            [_finite_float(row.get("source_sigma", row.get("xds_sigma"))) for row in rows], dtype=float
         ),
         "dyn_raw": np.asarray(
             [_finite_float(row.get("dyn_raw")) for row in rows], dtype=float
@@ -622,9 +625,9 @@ def _row_arrays(rows: list[dict[str, str]]) -> dict[str, np.ndarray]:
     }
 
 
-def _score_from_metrics(metrics: Mapping[str, object]) -> dict[str, float]:
+def _score_from_metrics(metrics: Mapping[str, object]) -> dict[str, object]:
     all_block = metrics["all"]
-    free_block = metrics["free"]
+    free_block = metrics.get("free", {})
     all_block = all_block if isinstance(all_block, Mapping) else {}
     free_block = free_block if isinstance(free_block, Mapping) else {}
     dyn = all_block.get("dyn")
@@ -634,13 +637,12 @@ def _score_from_metrics(metrics: Mapping[str, object]) -> dict[str, float]:
     born = born if isinstance(born, Mapping) else {}
     free_dyn = free_dyn if isinstance(free_dyn, Mapping) else {}
     dyn_w = float(dyn["wR2_all"])
-    free_w = float(free_dyn["wR2_all"])
+    free_w = float(free_dyn.get("wR2_all", float("nan")))
     dyn_r1 = float(dyn["R1_all"])
     born_r1gt = float(born["R1_gt"])
     born_cc = float(born["CC"])
     score = (
         dyn_w
-        + 0.25 * free_w
         + 0.10 * dyn_r1
         + max(0.0, born_r1gt - 0.35)
         + max(0.0, 0.5 - born_cc)
@@ -654,6 +656,7 @@ def _score_from_metrics(metrics: Mapping[str, object]) -> dict[str, float]:
         "born_R1_gt": born_r1gt,
         "born_CC": born_cc,
         "dyn_CC": float(dyn["CC"]),
+        "selection_scope": "all_rows_free_diagnostic_only",
     }
 
 
@@ -1003,7 +1006,7 @@ def build_common_sigma_hand_evidence(
         "schema_version": 1,
         "status": "replayed",
         "comparison_rule": "matched_rows_common_source_sigma_refit_scales_v1",
-        "common_sigma_rule": "source_xds_sigma_exact_matched_rows_v1",
+        "common_sigma_rule": "immutable_source_sigma_in_target_units_exact_matched_rows_v2",
         "common_sigma_sha256": _json_sha256(sigma_payload),
         "common_sigma_row_count": len(keys),
         "scale_design_rule": (

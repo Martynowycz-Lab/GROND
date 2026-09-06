@@ -110,7 +110,8 @@ def test_absolute_structure_diagnostic_runs_without_pandas(tmp_path: Path):
     )
 
     payload = json.loads(out.read_text())
-    assert payload["status"] == "ok"
+    assert payload["status"] == "calculation_error"
+    assert payload["calculation_errors"]
     assert payload["row_join"]["n_joined"] == 2
     assert payload["all"]["delta_chi2_other_minus_best"] == 8.0
     assert payload["work"]["n"] == 1
@@ -134,7 +135,8 @@ def test_absolute_structure_diagnostic_creates_nested_output_parent(tmp_path: Pa
     )
 
     payload = json.loads(out.read_text())
-    assert payload["status"] == "ok"
+    assert payload["status"] == "calculation_error"
+    assert payload["calculation_errors"]
     assert payload["row_join"]["n_joined"] == 2
 
 
@@ -176,8 +178,8 @@ def test_klar_palatinus_adjusted_hand_z_has_expected_sign_and_split_scope(tmp_pa
 
     assert all_z["status"] == "ok"
     assert all_z["n"] == 4
-    assert all_z["method_version"] == "3"
-    assert all_z["tie_policy"] == "strict_lower_residual_klar_2023"
+    assert all_z["method_version"] == "4"
+    assert all_z["tie_policy"].startswith("neutral_half_ties")
     assert all_z["k_selected_lower_abs_intensity_residual"] == 3
     assert all_z["k_effective_selected_wins_plus_half_ties"] == 3.0
     assert math.isclose(all_z["w"], expected_w)
@@ -207,9 +209,10 @@ def test_klar_palatinus_adjusted_hand_z_reports_exact_residual_ties(tmp_path: Pa
     assert adjusted["n"] == 1
     assert adjusted["k_selected_lower_abs_intensity_residual"] == 0
     assert adjusted["n_tied_abs_intensity_residual"] == 1
-    assert adjusted["k_effective_selected_wins_plus_half_ties"] == 0.0
-    assert adjusted["z"] < 0.0
-    assert adjusted["probability_phi_z"] < 0.5
+    assert adjusted["k_effective_selected_wins_plus_half_ties"] == 0.5
+    assert adjusted["z"] == 0.0
+    assert adjusted["probability_phi_z"] == 0.5
+    assert adjusted["z_strict_lower_residual_klar_2023"] < 0.0
     assert adjusted["z_neutral_half_tie_diagnostic"] == 0.0
 
 
@@ -230,9 +233,9 @@ def test_klar_palatinus_exact_ties_are_neutral_and_swap_antisymmetric(tmp_path: 
 
     assert selected_z["n_tied_abs_intensity_residual"] == 2
     assert selected_z["k_selected_lower_abs_intensity_residual"] == 2
-    assert selected_z["k_effective_selected_wins_plus_half_ties"] == 2.0
-    assert selected_z["z"] < 0.0
-    assert swapped_z["z"] < selected_z["z"]
+    assert selected_z["k_effective_selected_wins_plus_half_ties"] == 3.0
+    assert selected_z["z"] > 0.0
+    assert swapped_z["z"] == -selected_z["z"]
     assert math.isclose(
         swapped_z["z_neutral_half_tie_diagnostic"],
         -selected_z["z_neutral_half_tie_diagnostic"],
@@ -268,9 +271,9 @@ def test_klar_palatinus_all_ties_and_born_ties_are_neutral(tmp_path: Path):
         )
         adjusted = payload["all"]["klar_palatinus_adjusted_hand_z"]
         assert adjusted["n_tied_abs_intensity_residual"] == 3
-        assert adjusted["k_effective_selected_wins_plus_half_ties"] == 0.0
-        assert adjusted["z"] < 0.0
-        assert adjusted["probability_phi_z"] < 0.5
+        assert adjusted["k_effective_selected_wins_plus_half_ties"] == 1.5
+        assert adjusted["z"] == 0.0
+        assert adjusted["probability_phi_z"] == 0.5
         assert adjusted["z_neutral_half_tie_diagnostic"] == 0.0
 
 

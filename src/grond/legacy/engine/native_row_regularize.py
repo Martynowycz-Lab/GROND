@@ -53,6 +53,7 @@ try:  # Package import.
         DEFAULT_MAX_SUPPORT_SG,
         Config,
         InfeasibleSgJitterProfileError,
+        NonPassiveAbsorptionError,
         XDSBlochPort,
         XDSData,
         alternate_hand_model,
@@ -75,6 +76,7 @@ except ImportError:  # Direct script execution from this directory.
         DEFAULT_MAX_SUPPORT_SG,
         Config,
         InfeasibleSgJitterProfileError,
+        NonPassiveAbsorptionError,
         XDSBlochPort,
         XDSData,
         alternate_hand_model,
@@ -108,7 +110,7 @@ TARGET_MODE_LABELS = {
     "recorded_proxy": "IOBS*PEAK/(100*RLP)",
 }
 DEFAULT_ELECTRON_WAVELENGTH_A = 0.025079
-PREDICTION_CACHE_SCHEMA = 6
+PREDICTION_CACHE_SCHEMA = 7
 
 
 def configure_shelxl_executable(executable: str) -> str:
@@ -1212,6 +1214,9 @@ def native_metrics(obs, sig, pred, mask, wght_a: float, wght_b: float, n_params:
         "R2_all": r2,
         "wR2_all": wr2,
         "GooF": goof,
+        "predictive_rms_z": float(np.sqrt(np.mean((res / sig_m) ** 2))),
+        "weighted_rms_residual": float(np.sqrt(np.mean(w * res * res))),
+        "parameter_count": int(n_params),
         "mean_weighted_abs_residual": mw_abs,
         "CC": cc,
         "dof": int(dof),
@@ -1231,6 +1236,7 @@ def prediction_cache_key(data: XDSData, hkl: Path, res: Path, cfg: Config, indic
         "numerical_runtime_versions": NUMERICAL_RUNTIME_VERSIONS,
         "hkl_sha256": sha256(hkl),
         "scan_matrix_sha256": scan_matrix_sha256,
+        "external_geometry": external_geometry_fingerprints(data, cfg),
         "res_sha256": sha256(res),
         "model_tag": str(model_tag),
         "hkl_transform": str(getattr(data, "hkl_transform_spec", "identity")),
@@ -1239,6 +1245,34 @@ def prediction_cache_key(data: XDSData, hkl: Path, res: Path, cfg: Config, indic
     }
     text = canonical_prediction_cache_payload(payload)
     return hashlib.sha256(text.encode()).hexdigest()[:20], payload
+
+
+def external_geometry_fingerprints(data: XDSData, cfg: Config) -> dict:
+    """Bind outer predictions to geometry contents before any cache hit."""
+
+    result = {}
+    for label, value in (
+        ("geometry_path", cfg.geometry_path_file),
+        ("pets_exact_geometry", getattr(data, "pets_exact_geometry_path", None)),
+    ):
+        if value:
+            path = Path(value).expanduser().resolve()
+            if not path.is_file():
+                raise FileNotFoundError(f"required {label} file is missing: {path}")
+            result[label] = {"path": str(path), "sha256": sha256(path)}
+    # A programmatic caller may retain an XDSData object while a sidecar is
+    # replaced. Bind the arrays actually loaded into that object as well as
+    # current file bytes, so it cannot seed a hit for a subsequently reloaded
+    # object with different effective geometry.
+    for name in ("A_at_scan_points", "pets_exact_a_center", "pets_integration_semiangle_deg"):
+        value = getattr(data, name, None)
+        if value is not None:
+            array = np.ascontiguousarray(value, dtype=">f8")
+            result[f"loaded_{name}"] = {
+                "shape": list(array.shape),
+                "sha256": hashlib.sha256(array.tobytes()).hexdigest(),
+            }
+    return result
 
 
 def canonical_prediction_cache_payload(payload: dict) -> str:
@@ -1679,9 +1713,11 @@ def evaluate_trial(data, target, base_sig, pred, indices, masks, nui: Nuisance, 
     )
     metrics = {}
     for split, mask in masks.items():
+        # Parameters fitted on work rows do not consume held-out residual dof.
+        split_n_params = 0 if split == "free" and scale_fit_split == "work" else n_params
         metrics[split] = {
-            "dyn": native_metrics(target, sig, dyn_scaled, mask & valid, use_wght_a, use_wght_b, n_params=n_params),
-            "born": native_metrics(target, sig, born_scaled, mask & valid, use_wght_a, use_wght_b, n_params=n_params),
+            "dyn": native_metrics(target, sig, dyn_scaled, mask & valid, use_wght_a, use_wght_b, n_params=split_n_params),
+            "born": native_metrics(target, sig, born_scaled, mask & valid, use_wght_a, use_wght_b, n_params=split_n_params),
         }
     return {
         "nuisance": asdict(nui),
@@ -2898,13 +2934,14 @@ def endpoint_has_adp_pathology(endpoint: dict) -> bool:
     return npd_count > 0 or bool(shelxl.get("has_npd"))
 
 
-def write_row_table(path: Path, data: XDSData, target, best_eval, masks):
+def write_row_table(path: Path, data: XDSData, target, best_eval, masks, target_mode: str = "iobs"):
     arrays = best_eval["arrays"]
+    source_factors = np.asarray(target_factor(data, target_mode), dtype=float)
     dvals = np.asarray([data.cell.calculate_d(tuple(int(v) for v in h)) for h in data.hkl], dtype=float)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="") as f:
         fields = [
-            "row_index", "h", "k", "l", "d_A", "target_I", "source_sigma", "sigma_eff", "xds_sigma", "peak", "corr", "rlp",
+            "row_index", "h", "k", "l", "d_A", "target_I", "target_mode", "source_to_target_factor", "source_sigma", "sigma_eff", "xds_sigma", "peak", "corr", "rlp",
             "group", "detector_bin", "basis_size", "basis_support_hash64", "center_sg_inv_A", "omega_bragg_deg", "omega_bragg_minus_center_deg", "omega_bragg_root_available",
             "sg_window_inv_A", "sg_window_raw_inv_A", "sg_window_half_frames", "sg_window_clipped",
             "sg_dSg_domega_inv_A_per_deg", "sg_dSg_dframe_inv_A", "sg_jitter_sigma_inv_A",
@@ -2930,7 +2967,11 @@ def write_row_table(path: Path, data: XDSData, target, best_eval, masks):
                 "h": int(data.hkl[i, 0]), "k": int(data.hkl[i, 1]), "l": int(data.hkl[i, 2]),
                 "d_A": float(dvals[i]),
                 "target_I": float(target[i]),
-                "source_sigma": float(data.sigma[i]),
+                "target_mode": str(target_mode),
+                "source_to_target_factor": float(source_factors[i]),
+                # Immutable integration sigma transformed by the same known
+                # factor as target_I; xds_sigma retains the original units.
+                "source_sigma": float(data.sigma[i] * abs(source_factors[i])),
                 "sigma_eff": float(arrays["sigma_eff"][i]),
                 "xds_sigma": float(data.sigma[i]),
                 "peak": float(data.peak[i]),
@@ -2979,6 +3020,52 @@ def write_row_table(path: Path, data: XDSData, target, best_eval, masks):
                 "dyn_residual_over_sigma": float((arrays["dyn_scaled"][i] - target[i]) / max(arrays["sigma_eff"][i], 1e-12)),
                 "born_residual_over_sigma": float((arrays["born_scaled"][i] - target[i]) / max(arrays["sigma_eff"][i], 1e-12)),
             })
+
+
+def paired_inverse_prediction(best: dict) -> dict:
+    """Recover unmodulated inverse predictions and their exact physical support."""
+
+    inverse_raw = np.asarray(best["arrays"]["dyn_inverse_raw_unmodulated"], dtype=float)
+    paired_indices = np.where(
+        np.isfinite(inverse_raw)
+        & np.isfinite(np.asarray(best["arrays"]["born_raw"], dtype=float))
+    )[0]
+    if len(paired_indices) == 0:
+        raise RuntimeError(
+            "paired inverse-hand calculation produced no finite inverse intensities"
+        )
+    inverse_pred = {
+        "indices": paired_indices,
+        "dyn": inverse_raw[paired_indices],
+        "born": np.asarray(best["arrays"]["born_raw"], dtype=float)[paired_indices],
+    }
+    for key in (
+        "basis_size",
+        "basis_support_hash64",
+        "center_sg",
+        "omega_bragg",
+        "omega_delta",
+        "omega_bragg_root_available",
+        "sg_window",
+        "sg_window_raw",
+        "sg_window_half_frames",
+        "sg_window_clipped",
+        "sg_dSg_domega",
+        "sg_dSg_dframe",
+        "sg_jitter_sigma",
+        "sg_jitter_d_inv",
+        "sg_jitter_frame_fraction",
+        "sg_jitter_kernel_points",
+        "sg_profile_points_total",
+        "sg_profile_weight_sum",
+        "sg_profile_same_branch_continuation_used",
+        "sg_profile_same_branch_continuation_segments",
+        "sg_residual",
+    ):
+        values = best["arrays"].get(key)
+        if values is not None:
+            inverse_pred[key] = np.asarray(values)[paired_indices]
+    return inverse_pred
 
 
 def native_row_table_artifact(path: Path) -> dict[str, str]:
@@ -3820,8 +3907,18 @@ def main():
                                                                 cache_compression=args.cache_compression,
                                                                 ug_cache_dir=Path(args.ug_cache_dir),
                                                             )
-                                                        except InfeasibleSgJitterProfileError as exc:
-                                                            rejection = sg_jitter_candidate_rejection(cfg, exc)
+                                                        except (InfeasibleSgJitterProfileError, NonPassiveAbsorptionError) as exc:
+                                                            rejection = (
+                                                                sg_jitter_candidate_rejection(cfg, exc)
+                                                                if isinstance(exc, InfeasibleSgJitterProfileError)
+                                                                else {
+                                                                    "status": "rejected",
+                                                                    "reason": "nonpassive_absorption",
+                                                                    "message": str(exc),
+                                                                    "details": exc.details,
+                                                                    "config": asdict(cfg),
+                                                                }
+                                                            )
                                                             rejected_prediction_candidates.append(rejection)
                                                             print(
                                                                 "rejected nuisance candidate: "
@@ -3911,7 +4008,11 @@ def main():
     if not all_trials:
         failure = {
             "reason": "no_feasible_prediction_candidates",
-            "message": "Every requested nuisance prediction candidate was rejected by the strict local-geometry contract.",
+            "message": (
+                "Every requested nuisance prediction candidate failed a physical contract. "
+                "See rejected_prediction_candidates.json for each configuration and exact error: "
+                + "; ".join(dict.fromkeys(str(r.get("message", "")) for r in rejected_prediction_candidates))
+            ),
             "rejected_prediction_candidates": rejected_prediction_candidates,
         }
         (out / "prediction_grid_failure.json").write_text(
@@ -3999,49 +4100,12 @@ def main():
         writer.writerows(rows)
     (out / "best_native_fit.json").write_text(json.dumps({k: v for k, v in best.items() if k != "arrays"}, indent=2, allow_nan=True) + "\n")
     native_row_table = out / "native_dyn_calc.csv"
-    write_row_table(native_row_table, data, target, best, masks)
+    write_row_table(native_row_table, data, target, best, masks, target_mode=args.target_mode)
     native_row_artifact = native_row_table_artifact(native_row_table)
     paired_inverse_hand = {}
     if args.paired_inverse_hand:
-        inverse_raw = np.asarray(best["arrays"]["dyn_inverse_raw"], dtype=float)
-        paired_indices = np.where(
-            np.isfinite(inverse_raw)
-            & np.isfinite(np.asarray(best["arrays"]["born_raw"], dtype=float))
-        )[0]
-        if len(paired_indices) == 0:
-            raise RuntimeError(
-                "paired inverse-hand calculation produced no finite inverse intensities"
-            )
-        inverse_pred = {
-            "indices": paired_indices,
-            "dyn": inverse_raw[paired_indices],
-            "born": np.asarray(best["arrays"]["born_raw"], dtype=float)[paired_indices],
-        }
-        for key in (
-            "basis_size",
-            "center_sg",
-            "omega_bragg",
-            "omega_delta",
-            "omega_bragg_root_available",
-            "sg_window",
-            "sg_window_raw",
-            "sg_window_half_frames",
-            "sg_window_clipped",
-            "sg_dSg_domega",
-            "sg_dSg_dframe",
-            "sg_jitter_sigma",
-            "sg_jitter_d_inv",
-            "sg_jitter_frame_fraction",
-            "sg_jitter_kernel_points",
-            "sg_profile_points_total",
-            "sg_profile_weight_sum",
-            "sg_profile_same_branch_continuation_used",
-            "sg_profile_same_branch_continuation_segments",
-            "sg_residual",
-        ):
-            values = best["arrays"].get(key)
-            if values is not None:
-                inverse_pred[key] = np.asarray(values)[paired_indices]
+        inverse_pred = paired_inverse_prediction(best)
+        paired_indices = inverse_pred["indices"]
         inverse_eval = evaluate_trial(
             data,
             target,
@@ -4056,7 +4120,7 @@ def main():
             q_control_args=args,
         )
         inverse_row_table = out / "native_inverse_hand_dyn_calc.csv"
-        write_row_table(inverse_row_table, data, target, inverse_eval, masks)
+        write_row_table(inverse_row_table, data, target, inverse_eval, masks, target_mode=args.target_mode)
         paired_inverse_hand = {
             "status": "complete",
             "method": "nakane_negative_thickness_elastic_pair_v1",
@@ -4369,6 +4433,8 @@ def main():
                     "mosaicity_support_width_sigma", 4.0
                 ),
                 geometry_path_file=best["nuisance"].get("geometry_path_file", ""),
+                profile_basis_mode=args.profile_basis_mode,
+                mosaicity_max_sigma_deg=args.mosaicity_max_sigma_deg,
                 profile_coordinate=args.profile_coordinate,
                 profile_angle_max_half_width_deg=args.profile_angle_max_half_width_deg,
                 profile_quadrature=args.profile_quadrature,

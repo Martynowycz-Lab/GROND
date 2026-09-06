@@ -165,7 +165,7 @@ def test_prediction_cache_rejects_source_res_and_config_mismatches(tmp_path, mon
     data = SimpleNamespace(hkl_transform_spec="identity", a_scan_points_path=None)
     indices = np.asarray([1, 2], dtype=np.int64)
     base_key, base_payload = prediction_cache_key(data, hkl, res, Config(), indices)
-    assert base_payload["cache_schema"] == PREDICTION_CACHE_SCHEMA == 6
+    assert base_payload["cache_schema"] == PREDICTION_CACHE_SCHEMA == 7
     cached = {
         "prediction_cache_meta": base_payload,
         "indices": indices,

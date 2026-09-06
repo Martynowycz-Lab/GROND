@@ -77,9 +77,15 @@ def read_rows(run_dir: Path, name: str) -> list[dict]:
     if not path.exists():
         raise FileNotFoundError(path)
     rows = []
+    config = read_json(run_dir / "summary.json").get("config") or {}
+    recorded_target_mode = str(config.get("target_mode", "iobs"))
     with path.open(newline="") as f:
         for r in csv.DictReader(f):
             r = dict(r)
+            # Older diagnostic rows did not carry the restoration factor.
+            # Preserve their declared mode so endpoint export fails explicitly
+            # instead of silently treating those values as ordinary IOBS.
+            r.setdefault("target_mode", recorded_target_mode)
             r["dataset"] = name
             r.setdefault("dataset_role", "primary")
             r.setdefault("raw_row_weight", "1.0")
@@ -433,6 +439,19 @@ def endpoint_rows_and_corrections_from_native(rows: list[dict], lambda_q: float)
     hkl = [(int(r["h"]), int(r["k"]), int(r["l"])) for r in rows]
     target = np.asarray([safe_float(r["target_I"]) for r in rows], dtype=float)
     sig = np.asarray([safe_float(r["sigma_eff"]) for r in rows], dtype=float)
+    restore = []
+    for row in rows:
+        mode = str(row.get("target_mode", "iobs"))
+        value = row.get("source_to_target_factor")
+        if value is None and mode != "iobs":
+            raise ValueError(f"cannot restore {mode} endpoint units: row lacks source_to_target_factor")
+        factor = 1.0 if value is None else safe_float(value)
+        if not math.isfinite(factor) or factor <= 0.0:
+            raise ValueError(f"invalid source_to_target_factor for endpoint export: {value!r}")
+        restore.append(factor)
+    restore = np.asarray(restore, dtype=float)
+    target = target / restore
+    sig = sig / restore
     dyn_raw = np.asarray([safe_float(r["dyn_raw"]) for r in rows], dtype=float)
     dyn_scaled = np.asarray([safe_float(r["dyn_scaled"]) for r in rows], dtype=float)
     q = np.asarray([safe_float(r["q_dyn_over_born"]) for r in rows], dtype=float)

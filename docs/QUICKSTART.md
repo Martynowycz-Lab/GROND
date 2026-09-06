@@ -91,6 +91,8 @@ Use `JANA_ROW_STATISTICS.md` or `.json` for the canonical pooled row table and `
 GROND finish --run-dir grond_out
 ```
 
+The final hand panel also distinguishes the all-row preferred hand from the exported coordinate representation. Exact or numerical ties give no preference, and weak or absent free evidence warns without suppressing an otherwise valid all-row result. A physical calculation error is reported with its cause and retained endpoint; it is not represented as uncertain statistical support. See [Hand results and calculation errors](HAND_RESULT_POLICY.md) for the conditional interpretation of the statistic.
+
 This writes `native_dynamic_maps/` with native row-level dynamical Fo, 2Fo-Fc, and Fo-Fc CCP4 maps, a coefficient table, and `grond_native_dynamical.cif`. For multi-dataset runs, the manifest and CIF list every selected combined-endpoint input row table used for the native map coefficients. The alias `GROND publish --run-dir grond_out` does the same packaging. If you only want a quick corrected-HKL endpoint-map check from SHELXL's FCF output, use `GROND finish --run-dir grond_out --map-mode shelx2map`.
 
 Run the middle-speed automatic profile:

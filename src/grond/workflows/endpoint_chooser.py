@@ -847,9 +847,9 @@ def choose_publication_endpoints(
             ],
             "ranking": (
                 "multi-dataset runs require a passing combined endpoint and never substitute a single-dataset endpoint; "
-                "within the eligible class rank endpoint wR2(F^2)all, R1(F)all, and R1(F)gt"
+                "within the eligible class rank endpoint R1(F)all, R1(F)gt, and wR2(F^2)all"
                 if prefer_combined
-                else "rank endpoint wR2(F^2)all, R1(F)all, and R1(F)gt"
+                else "rank endpoint R1(F)all, R1(F)gt, and wR2(F^2)all"
             ),
             "allow_npd_override": bool(allow_npd),
             "combined_baseline": baseline_policy,

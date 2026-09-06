@@ -25,8 +25,10 @@ BASE_PREDICTION_COLUMNS = ("target_I",)
 SOURCE_SIGMA_COLUMNS = ("source_sigma", "xds_sigma", "sigma_eff")
 SUPPORTED_PREDICTION_COLUMNS = ("dyn_scaled", "born_scaled")
 ADJUSTED_HAND_METHOD = "klar_palatinus_adjusted_reflection_count_hand_z"
-ADJUSTED_HAND_METHOD_VERSION = "3"
-ADJUSTED_HAND_TIE_POLICY = "strict_lower_residual_klar_2023"
+ADJUSTED_HAND_METHOD_VERSION = "4"
+ADJUSTED_HAND_TIE_POLICY = "neutral_half_ties_relative_1e-12_sigma_absolute_1e-12"
+HAND_TIE_REL_TOL = 1e-12
+HAND_TIE_SIGMA_TOL = 1e-12
 KLAR_PALATINUS_REFERENCE = {
     "citation": (
         "Klar, P. B. et al. Accurate structure models and absolute configuration determination using "
@@ -257,36 +259,60 @@ def klar_palatinus_adjusted_hand_z(
         }
 
     k = 0
+    strict_k = 0
     tied = 0
     w = 0.0
     for target, calc_selected, calc_other, sigma in valid:
         residual_selected = abs(target - calc_selected)
         residual_other = abs(target - calc_other)
-        if residual_selected < residual_other:
-            k += 1
-        elif residual_selected == residual_other:
+        strict_k += int(residual_selected < residual_other)
+        if math.isclose(
+            residual_selected,
+            residual_other,
+            rel_tol=HAND_TIE_REL_TOL,
+            abs_tol=HAND_TIE_SIGMA_TOL * sigma,
+        ):
             tied += 1
+        elif residual_selected < residual_other:
+            k += 1
         separation = abs(calc_selected - calc_other) / (2.0 * sigma)
         w += 1.0 - normal_cdf(separation)
 
     denominator_variance = float(n - w)
-    k_effective = float(k)
-    z = float((2 * k - n) / math.sqrt(denominator_variance))
+    k_effective = float(k + 0.5 * tied)
+    z = float((2 * k_effective - n) / math.sqrt(denominator_variance))
+    z_strict = float((2 * strict_k - n) / math.sqrt(denominator_variance))
     k_neutral = float(k + 0.5 * tied)
     z_neutral_ties = float((2.0 * k_neutral - n) / math.sqrt(denominator_variance))
     probability = normal_cdf(z)
     probability_neutral_ties = normal_cdf(z_neutral_ties)
     return {
         **base,
-        "status": "ok",
+        "status": "invalid_row_contract" if any(exclusions.values()) else "ok",
+        "calculation_status": "partial_invalid_rows" if any(exclusions.values()) else "complete",
+        "calculation_errors": [
+            f"{label}: {count} row(s)" for label, count in exclusions.items() if count
+        ],
         "n": int(n),
         "k_selected_lower_abs_intensity_residual": int(k),
+        "k_strict_lower_residual_klar_2023": int(strict_k),
         "n_tied_abs_intensity_residual": int(tied),
         "k_effective_selected_wins_plus_half_ties": k_effective,
         "k_neutral_half_tie_diagnostic": k_neutral,
         "w": float(w),
         "n_minus_w": denominator_variance,
         "z": z,
+        "z_strict_lower_residual_klar_2023": z_strict,
+        "informative_nontied_rows": int(n - tied),
+        "tie_relative_tolerance": HAND_TIE_REL_TOL,
+        "tie_absolute_tolerance_in_source_sigma": HAND_TIE_SIGMA_TOL,
+        "confidence_interpretation": (
+            "Conditional adjusted reflection-count contrast with neutral numerical ties. "
+            "Nominal normal-tail transforms assume independent rows and are not calibrated "
+            "absolute-configuration probabilities; shared scales, repeated reflections, and "
+            "model selection can correlate observations."
+        ),
+        "probability_is_calibrated": False,
         "probability_phi_z": probability,
         "probability_one_sided_other_hand": float(normal_cdf(-z)),
         "z_neutral_half_tie_diagnostic": z_neutral_ties,
@@ -325,6 +351,8 @@ def block(
     adjusted = klar_palatinus_adjusted_hand_z(rows, adjusted_missing, prediction_column)
     rb: list[float] = []
     ro: list[float] = []
+    metric_rows: list[tuple[float, float, float, float]] = []
+    source_sigma_column = adjusted_hand_sigma_column(rows)
     for best, other in rows:
         target_best = finite_float(best.get("target_I"))
         target_other = finite_float(other.get("target_I"))
@@ -332,6 +360,18 @@ def block(
         calc_other = finite_float(other.get(prediction_column))
         sigma_best = finite_float(best.get("sigma_eff"))
         sigma_other = finite_float(other.get("sigma_eff"))
+        source_sigma_best = finite_float(best.get(source_sigma_column))
+        source_sigma_other = finite_float(other.get(source_sigma_column))
+        if (
+            all(math.isfinite(value) for value in (
+                target_best, target_other, calc_best, calc_other,
+                source_sigma_best, source_sigma_other,
+            ))
+            and source_sigma_best > 0.0
+            and same_observation(target_best, target_other)
+            and same_observation(source_sigma_best, source_sigma_other)
+        ):
+            metric_rows.append((target_best, calc_best, calc_other, source_sigma_best))
         if (
             math.isfinite(target_best)
             and math.isfinite(target_other)
@@ -368,6 +408,28 @@ def block(
     else:
         sd = float("nan")
     paired_t = float(mean_d / (sd / math.sqrt(n))) if n > 1 and sd > 0 else float("nan")
+
+    def prediction_metrics(index: int) -> dict[str, float | int]:
+        if not metric_rows:
+            return {"n": 0, "R1_all": float("nan"), "wR2_all": float("nan")}
+        amplitude_denom = sum(math.sqrt(max(row[0], 0.0)) for row in metric_rows)
+        weighted_denom = sum((row[0] / row[3]) ** 2 for row in metric_rows)
+        return {
+            "n": len(metric_rows),
+            "R1_all": (
+                sum(abs(math.sqrt(max(row[0], 0.0)) - math.sqrt(max(row[index], 0.0)))
+                    for row in metric_rows) / amplitude_denom
+                if amplitude_denom > 0.0 else float("nan")
+            ),
+            "wR2_all": (
+                math.sqrt(sum(((row[0] - row[index]) / row[3]) ** 2
+                              for row in metric_rows) / weighted_denom)
+                if weighted_denom > 0.0 else float("nan")
+            ),
+            "rms_z": math.sqrt(sum(((row[0] - row[index]) / row[3]) ** 2
+                                  for row in metric_rows) / len(metric_rows)),
+        }
+
     return {
         "label": label,
         "n": n,
@@ -383,6 +445,12 @@ def block(
         "best_lower_abs_residual_fraction": float(sum(abs(b) < abs(o) for b, o in zip(rb, ro, strict=True)) / n),
         "best_lower_squared_residual_fraction": float(sum(x > 0.0 for x in d) / n),
         "klar_palatinus_adjusted_hand_z": adjusted,
+        "matched_prediction_metrics": {
+            "selected": prediction_metrics(1),
+            "other": prediction_metrics(2),
+            "sigma_column": source_sigma_column,
+            "definition": "same signed observations and immutable source sigmas; R1 amplitude and weighted intensity residuals",
+        },
     }
 
 
@@ -499,13 +567,13 @@ def main() -> None:
                     "number of joined valid rows where |target_I-prediction_selected| is strictly smaller "
                     "than |target_I-prediction_other| for prediction_column"
                 ),
-                "k_effective": "strict k from Klar et al.; exact ties do not increment k",
+                "k_effective": "wins plus half of exact or numerical residual ties",
                 "w": "sum(1-Phi(|prediction_selected-prediction_other|/(2*source_sigma(Iobs))))",
-                "z": "(2*k-N)/sqrt(N-w)",
-                "probability": "Phi(z), reported as probability_phi_z; this is distinct from paired_row_t_delta_chi2",
+                "z": "(2*k_effective-N)/sqrt(N-w)",
+                "probability": "Phi(z) is a nominal normal-tail transform, not a calibrated confidence or absolute-configuration probability",
                 "ties": (
-                    "the primary statistic follows Klar et al.'s strict inequality; a separate neutral-half-tie "
-                    "diagnostic is retained only to expose the otherwise negligible exact-tie edge case"
+                    "exact and numerical residual ties receive half a win so swapping hands changes only "
+                    "the sign; the strict-inequality literature statistic is retained separately"
                 ),
                 "tie_policy": ADJUSTED_HAND_TIE_POLICY,
                 "sigma_contract": (
@@ -522,6 +590,36 @@ def main() -> None:
         "work": block("work", work, adjusted_missing, args.prediction_column),
         "free": block("free", free, adjusted_missing, args.prediction_column),
     }
+    all_adjusted = out["all"]["klar_palatinus_adjusted_hand_z"]
+    errors = list(all_adjusted.get("calculation_errors") or [])
+    if len(joined) != len(best_rows) or len(joined) != len(other_rows):
+        errors.append("hand row join does not preserve both complete signed observation tables")
+    if duplicate_count(best_rows) or duplicate_count(other_rows):
+        errors.append("duplicate hand row keys are ambiguous")
+    if status != "ok":
+        errors.append(f"hand diagnostic status: {status}")
+    if all_adjusted.get("status") != "ok":
+        errors.append(f"all-row adjusted statistic status: {all_adjusted.get('status')}")
+    out["calculation_status"] = "error" if errors else "complete"
+    out["calculation_errors"] = errors
+    if errors:
+        out["status"] = "calculation_error"
+    out["decision_scope"] = "all rows are primary; work/free results are diagnostics"
+    out["confidence_interpretation"] = (
+        "Conditional on the input model, geometry, scaling, and acquisition/import sign. "
+        "Nominal Z is not calibrated sigma confidence because rows can be correlated and selected."
+    )
+    if all("born_scaled" in fields for fields in (best_fields, other_fields)):
+        born_missing = adjusted_hand_missing_columns(best_fields, other_fields, "born_scaled")
+        out["matched_born_control"] = {
+            split: block(split, support, born_missing, "born_scaled")
+            for split, support in (("all", joined), ("work", work), ("free", free))
+        }
+    else:
+        out["matched_born_control"] = {
+            "status": "unavailable",
+            "reason": "born_scaled is absent from one or both input row tables",
+        }
     out_path.write_text(json.dumps(out, indent=2, allow_nan=True) + "\n")
 
 

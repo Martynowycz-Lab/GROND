@@ -4777,9 +4777,14 @@ def _multi_hand_publication_blockers(result: Mapping[str, object]) -> list[str]:
     method = str(diagnostic.get("method") or "")
     final_datasets = diagnostic.get("datasets") if isinstance(diagnostic.get("datasets"), Mapping) else {}
     consistency = diagnostic.get("consistency_gate") if isinstance(diagnostic.get("consistency_gate"), Mapping) else {}
-    explicitly_not_applicable = status in {"not_applicable", "skipped_not_applicable"} and str(
-        consistency.get("status") or ""
-    ) == "not_applicable"
+    symmetry = diagnostic.get("symmetry_policy") if isinstance(diagnostic.get("symmetry_policy"), Mapping) else {}
+    explicitly_not_applicable = status in {"not_applicable", "skipped_not_applicable"} and (
+        str(consistency.get("status") or "") == "not_applicable"
+        or (
+            method == "nakane_negative_thickness_elastic_pair_v1"
+            and symmetry.get("run_hand_control") is False
+        )
+    )
     completed_final_elastic_selection = bool(
         method == "nakane_negative_thickness_elastic_pair_v1"
         and status in {"kept", "switched"}
@@ -4790,7 +4795,14 @@ def _multi_hand_publication_blockers(result: Mapping[str, object]) -> list[str]:
             for record in final_datasets.values()
         )
     )
-    if status == "consistent" or explicitly_not_applicable or completed_final_elastic_selection:
+    completed_conditional_diagnostic = bool(final_datasets) and all(
+        isinstance(record, Mapping)
+        and record.get("status") in {
+            "consistent_no_material_opposite_support", "warning_material_opposite_support"
+        }
+        for record in final_datasets.values()
+    )
+    if status == "consistent" or explicitly_not_applicable or completed_final_elastic_selection or completed_conditional_diagnostic:
         return []
     warnings = [str(value) for value in (consistency.get("warnings") or diagnostic.get("warnings") or []) if str(value)]
     detail = "; ".join(warnings[:4]) or str(diagnostic.get("reason") or "the final matched hand comparison is missing or incomplete")
@@ -6853,12 +6865,13 @@ def choose_hand_by_scout(
     scout_selected = "alternate" if delta > float(args.hand_accept_delta) else "original"
     selected = scout_selected
     gate_reasons: list[str] = []
+    evidence_warnings: list[str] = []
     if not row_selection_match:
         gate_reasons.append("matched hand scouts did not report identical selected/work/free row counts")
     if not positive_matched_free_rows:
-        gate_reasons.append("matched hand scouts did not report the same positive number of held-out free rows")
+        evidence_warnings.append("held-out hand evidence is absent; the matched all-row comparison remains primary")
     if not finite_raw_free_metrics:
-        gate_reasons.append("matched hand scouts did not report finite raw free-row dynamical wR2 metrics")
+        evidence_warnings.append("held-out dynamical wR2 is unavailable; it does not veto the all-row hand comparison")
     if common_sigma_evidence.get("status") != "replayed":
         gate_reasons.append(
             "matched hand scouts could not be replayed with one immutable "
@@ -6871,24 +6884,36 @@ def choose_hand_by_scout(
         alt_all = safe_float(alternate_score.get("dyn_wR2_all"))
         alt_free = alternate_raw_free_wr2
         active_free = original_raw_free_wr2
-        if not math.isfinite(alt_all) or alt_all > max_all:
-            gate_reasons.append(f"alternate all-row wR2 {alt_all:.4g} exceeds hand gate {max_all:.4g}")
+        if not math.isfinite(alt_all):
+            gate_reasons.append("alternate all-row wR2 is nonfinite")
+        elif alt_all > max_all:
+            evidence_warnings.append(f"alternate all-row wR2 {alt_all:.4g} exceeds the warning level {max_all:.4g}")
         if not math.isfinite(alt_free) or alt_free > max_free:
-            gate_reasons.append(f"alternate free-row wR2 {alt_free:.4g} exceeds hand gate {max_free:.4g}")
+            evidence_warnings.append(f"alternate free-row wR2 {alt_free:.4g} exceeds the warning level {max_free:.4g}")
         if math.isfinite(active_free) and math.isfinite(alt_free):
             free_gain = active_free - alt_free
             if free_gain < min_free_gain:
-                gate_reasons.append(f"free-row wR2 gain {free_gain:.4g} is below hand gate {min_free_gain:.4g}")
+                evidence_warnings.append(f"free-row wR2 gain {free_gain:.4g} is below the warning level {min_free_gain:.4g}")
         else:
-            gate_reasons.append("free-row wR2 values were not finite")
-        if gate_reasons:
-            selected = "original"
+            evidence_warnings.append("free-row wR2 values were not finite")
+    if gate_reasons:
+        selected = "original"
+    scout_all_z = safe_float(
+        (common_sigma_evidence.get("adjusted_hand_z_original_favored", {}).get("all") or {}).get("z"),
+        float("nan"),
+    )
     payload = {
+        **hand_preference_summary(
+            scout_all_z, active_hand="original",
+            threshold=float(getattr(args, "hand_min_adjusted_z", 2.0)),
+            calculation_valid=not gate_reasons,
+        ),
         "selected": selected,
         "selected_hand": selected,
         "scout_selected_before_quality_gate": scout_selected,
         "quality_gate_status": "rejected_switch" if gate_reasons else "passed",
         "quality_gate_reasons": gate_reasons,
+        "warnings": evidence_warnings,
         "active_score": original_score,
         "matched_original_score": original_score,
         "alternate_score": alternate_score,
@@ -6923,91 +6948,83 @@ def aggregate_shared_hand_decisions(
     decisions: Mapping[str, Mapping[str, object]],
     args: argparse.Namespace,
 ) -> dict[str, object]:
-    """Choose one hand for a multi-dataset model from per-dataset scouts.
+    """Report pooled all-row hand preference; individual free subsets only warn."""
 
-    Hand is a property of the shared structure, not of an individual dataset.
-    A switch is therefore allowed only when every dataset independently passes
-    the existing hand-quality gates and exceeds the score margin.  This
-    deliberately treats failed, weak, and mixed evidence as support for keeping
-    the input hand.
-    """
-
+    threshold = float(getattr(args, "hand_min_adjusted_z", 2.0))
+    if not math.isfinite(threshold) or threshold <= 0.0:
+        raise ValueError("hand adjusted-Z threshold must be finite and positive")
     accept_delta = float(args.hand_accept_delta)
     evidence: list[dict[str, object]] = []
-    blocking_reasons: list[str] = []
-    finite_deltas: list[float] = []
-
-    def finite_metric(score: Mapping[str, object], key: str) -> float | None:
-        value = safe_float(score.get(key), float("nan"))
-        return value if math.isfinite(value) else None
-
-    for name in sorted(decisions):
-        decision = decisions[name]
-        dataset_selected = str(decision.get("selected_hand") or decision.get("selected") or "original")
-        gate_status = str(decision.get("quality_gate_status") or "not_passed")
+    errors: list[str] = []
+    warnings: list[str] = []
+    deltas: list[float] = []
+    diagnostics: list[dict[str, object]] = []
+    for name, decision in sorted(decisions.items()):
         delta = safe_float(decision.get("score_delta_original_minus_alternate"), float("nan"))
-        warning = str(decision.get("warning") or "")
-        if math.isfinite(delta):
-            finite_deltas.append(delta)
-
-        reasons: list[str] = []
-        if warning:
-            reasons.append(warning)
-        if not math.isfinite(delta):
-            reasons.append("hand-score difference was not finite")
-        elif delta <= accept_delta:
-            reasons.append(f"score improvement {delta:.6g} did not exceed {accept_delta:.6g}")
-        if gate_status != "passed":
-            reasons.append(f"per-dataset quality gate status was {gate_status}")
-        if dataset_selected != "alternate":
-            reasons.append(f"per-dataset scout retained {dataset_selected}")
-        supports_alternate = not reasons
-        if not supports_alternate:
-            blocking_reasons.append(f"{name}: {'; '.join(reasons)}")
-
-        active_score = decision.get("active_score")
-        active_score = active_score if isinstance(active_score, Mapping) else {}
-        alternate_score = decision.get("alternate_score")
-        alternate_score = alternate_score if isinstance(alternate_score, Mapping) else {}
-        evidence.append(
-            {
-                "dataset": name,
-                "dataset_scout_selected_hand": dataset_selected,
-                "quality_gate_status": gate_status,
-                "score_delta_original_minus_alternate": delta if math.isfinite(delta) else None,
-                "active_dyn_wR2_all": finite_metric(active_score, "dyn_wR2_all"),
-                "active_free_dyn_wR2_all": finite_metric(active_score, "free_dyn_wR2_all"),
-                "alternate_dyn_wR2_all": finite_metric(alternate_score, "dyn_wR2_all"),
-                "alternate_free_dyn_wR2_all": finite_metric(alternate_score, "free_dyn_wR2_all"),
-                "supports_shared_alternate": supports_alternate,
-                "blocking_reasons": reasons,
-            }
-        )
-
-    aggregate_delta = sum(finite_deltas) / len(finite_deltas) if finite_deltas else float("nan")
-    all_support_alternate = bool(evidence) and not blocking_reasons and len(finite_deltas) == len(evidence)
-    if all_support_alternate and aggregate_delta <= accept_delta:
-        blocking_reasons.append(
-            f"mean score improvement {aggregate_delta:.6g} did not exceed shared threshold {accept_delta:.6g}"
-        )
-        all_support_alternate = False
-    selected = "alternate" if all_support_alternate else "original"
+        gate_status = str(decision.get("quality_gate_status") or "missing")
+        reasons = [str(reason) for reason in decision.get("quality_gate_reasons", [])]
+        if gate_status not in {"passed", "passed_with_warnings"} or not math.isfinite(delta):
+            errors.append(f"{name}: invalid matched hand calculation ({gate_status}); " + "; ".join(reasons))
+        else:
+            deltas.append(delta)
+        warnings.extend(f"{name}: {warning}" for warning in decision.get("warnings", []))
+        if str(decision.get("warning") or ""):
+            errors.append(f"{name}: {decision['warning']}")
+        comparison = decision.get("comparison_contract") or {}
+        common = comparison.get("common_sigma_hand_evidence") or {}
+        adjusted = (common.get("adjusted_hand_z_original_favored") or {}).get("all") or {}
+        if adjusted.get("status") == "ok":
+            diagnostics.append({"all": {"klar_palatinus_adjusted_hand_z": adjusted}})
+        active = decision.get("active_score") or {}
+        alternate = decision.get("alternate_score") or {}
+        evidence.append({
+            "dataset": name,
+            "dataset_scout_selected_hand": decision.get("selected_hand", decision.get("selected", "original")),
+            "quality_gate_status": gate_status,
+            "score_delta_original_minus_alternate": delta if math.isfinite(delta) else None,
+            "active_dyn_wR2_all": active.get("dyn_wR2_all"),
+            "active_free_dyn_wR2_all": active.get("free_dyn_wR2_all"),
+            "alternate_dyn_wR2_all": alternate.get("dyn_wR2_all"),
+            "alternate_free_dyn_wR2_all": alternate.get("free_dyn_wR2_all"),
+            "supports_shared_alternate": bool(math.isfinite(delta) and delta > accept_delta),
+            "blocking_reasons": reasons if gate_status != "passed" else [],
+        })
+    mean_delta = sum(deltas) / len(deltas) if deltas else float("nan")
+    pooled = _combine_adjusted_hand_z(diagnostics, "all")
+    use_count = len(diagnostics) == len(evidence) and bool(evidence)
+    z = safe_float(pooled.get("z"), float("nan"))
+    valid = bool(evidence) and not errors and len(deltas) == len(evidence)
+    if use_count:
+        preference = hand_preference_summary(z, active_hand="original", threshold=threshold, calculation_valid=valid)
+        switch = bool(valid and z <= -threshold)
+    else:
+        preference = {
+            "preferred_hand": "alternate" if valid and mean_delta > 0.0 else "original" if valid and mean_delta < 0.0 else "no_preference" if valid else "unavailable",
+            "hand_confidence": "residual_preference_only" if valid else "calculation_error",
+            "primary_evidence": "all_rows",
+            "free_evidence_role": "diagnostic_warning_only",
+            "statistic_is_calibrated_probability": False,
+        }
+        switch = bool(valid and mean_delta > accept_delta)
+        warnings.append("Adjusted reflection-count evidence is unavailable in this historical scout; only the all-row residual preference is reported.")
+    if deltas and min(deltas) < 0.0 < max(deltas):
+        warnings.append("Individual datasets disagree about the hand; the pooled all-row preference is conditional.")
+    selected = "alternate" if switch else "original"
     return {
-        "status": "selected_alternate" if selected == "alternate" else "retained_original",
-        "selected": selected,
-        "selected_hand": selected,
+        **preference,
+        "status": "calculation_error" if errors else "selected_alternate" if switch else "retained_original",
+        "selected": selected, "selected_hand": selected,
         "accept_delta": accept_delta,
         "dataset_count": len(evidence),
         "alternate_support_count": sum(bool(row["supports_shared_alternate"]) for row in evidence),
-        "aggregate_score_delta_original_minus_alternate": aggregate_delta if math.isfinite(aggregate_delta) else None,
-        "quality_gate_status": "passed" if selected == "alternate" else "retained_original",
-        "quality_gate_reasons": blocking_reasons,
+        "aggregate_score_delta_original_minus_alternate": mean_delta if math.isfinite(mean_delta) else None,
+        "aggregate_adjusted_z_original_favored": pooled,
+        "quality_gate_status": "calculation_error" if errors else "passed",
+        "quality_gate_reasons": errors,
+        "calculation_errors": errors,
+        "warnings": warnings,
         "dataset_evidence": evidence,
-        "rule": (
-            "switch the one shared model only when every dataset has finite alternate-hand evidence, "
-            "passes the per-dataset all/free-row quality gates, and exceeds the score margin; "
-            "failed, weak, or mixed evidence retains the input hand"
-        ),
+        "rule": "use pooled all-row matched evidence; free-set weakness and between-crystal disagreement warn rather than veto; invalid physical calculations do not select a hand",
     }
 
 
@@ -7139,6 +7156,25 @@ def _adjusted_hand_z_block(stats: Mapping[str, object], split: str) -> dict[str,
     return dict(adjusted) if isinstance(adjusted, Mapping) else {}
 
 
+def _adjusted_hand_blocks_match(
+    recorded: Mapping[str, object], recomputed: Mapping[str, object], *, allow_unavailable: bool = False,
+) -> bool:
+    """Replay finite statistics, allowing matching absent diagnostic splits only."""
+
+    if recorded.get("status") != recomputed.get("status") or int(recorded.get("n") or 0) != int(recomputed.get("n") or 0):
+        return False
+    left = safe_float(recorded.get("z"), float("nan"))
+    right = safe_float(recomputed.get("z"), float("nan"))
+    if math.isfinite(left) and math.isfinite(right):
+        return math.isclose(left, right, rel_tol=1e-12, abs_tol=1e-14)
+    return bool(
+        allow_unavailable
+        and math.isnan(left) and math.isnan(right)
+        and recorded.get("status") != "ok"
+        and int(recorded.get("n") or 0) == 0
+    )
+
+
 def _combine_adjusted_hand_z(
     diagnostics: Iterable[Mapping[str, object]],
     split: str,
@@ -7160,8 +7196,8 @@ def _combine_adjusted_hand_z(
         n = int(adjusted.get("n", 0) or 0)
         k_effective = safe_float(
             adjusted.get(
-                "k_selected_lower_abs_intensity_residual",
-                adjusted.get("k_effective_selected_wins_plus_half_ties"),
+                "k_effective_selected_wins_plus_half_ties",
+                adjusted.get("k_selected_lower_abs_intensity_residual"),
             ),
             float("nan"),
         )
@@ -7190,6 +7226,11 @@ def _combine_adjusted_hand_z(
         "excluded_dataset_indices": excluded,
         "positive_favors_current_coordinates": True,
         "combination_rule": "sum(2*k_effective-n)/sqrt(sum(n-w)) across physical datasets",
+        "confidence_interpretation": (
+            "Conditional count contrast; nominal normal scaling assumes independent observations. "
+            "Shared nuisance/model fitting and repeated rows can invalidate calibrated sigma claims."
+        ),
+        "probability_is_calibrated": False,
     }
 
 
@@ -7201,9 +7242,15 @@ def hand_diagnostic_supports_other(stats: Mapping[str, object], args: argparse.N
     """
 
     threshold = float(getattr(args, "hand_flip_zkp_all", 3.5))
+    if not math.isfinite(threshold) or threshold <= 0.0:
+        raise ValueError("hand inversion threshold must be finite and positive")
     all_adjusted = _adjusted_hand_z_block(stats, "all")
     all_z = safe_float(all_adjusted.get("z"), float("nan"))
     reasons: list[str] = []
+    if stats.get("calculation_status") == "error" or stats.get("status") == "calculation_error":
+        reasons.extend(str(error) for error in stats.get("calculation_errors", []))
+        if not reasons:
+            reasons.append("all-row hand calculation has an explicit error")
     if str(all_adjusted.get("status") or "") != "ok" or not math.isfinite(all_z):
         reasons.append("all-row Klar-Palatinus adjusted hand Z is unavailable")
     elif all_z > -threshold:
@@ -7212,6 +7259,33 @@ def hand_diagnostic_supports_other(stats: Mapping[str, object], args: argparse.N
             f"at the {-threshold:.4g} decision boundary"
         )
     return not reasons, reasons
+
+
+def hand_preference_summary(
+    all_z: float, *, active_hand: str, threshold: float, calculation_valid: bool = True,
+) -> dict[str, object]:
+    """Report the measured preference separately from the exported representation."""
+
+    valid = bool(calculation_valid and math.isfinite(all_z))
+    opposite = "alternate" if active_hand == "original" else "original"
+    preferred = (
+        active_hand if valid and all_z > 0.0
+        else opposite if valid and all_z < 0.0
+        else "no_preference" if valid else "unavailable"
+    )
+    confidence = (
+        "calculation_error" if not valid else "no_sensitivity" if all_z == 0.0
+        else "strong_conditional" if abs(all_z) >= threshold else "weak_conditional"
+    )
+    return {
+        "preferred_hand": preferred,
+        "hand_confidence": confidence,
+        "all_row_adjusted_z_positive_favors_active": all_z if valid else None,
+        "active_hand_before_selection": active_hand,
+        "primary_evidence": "all_rows",
+        "free_evidence_role": "diagnostic_warning_only",
+        "statistic_is_calibrated_probability": False,
+    }
 
 
 def _hand_evidence_warnings(
@@ -7226,7 +7300,10 @@ def _hand_evidence_warnings(
     sign = -1.0 if switched else 1.0
     oriented_all = sign * all_z if math.isfinite(all_z) else float("nan")
     oriented_free = sign * free_z if math.isfinite(free_z) else float("nan")
-    warnings: list[str] = []
+    warnings: list[str] = [
+        "ZKP is a conditional reflection-count contrast, not calibrated sigma confidence; "
+        "shared scales, repeated observations, and model selection can correlate rows."
+    ]
     if not math.isfinite(oriented_all):
         warnings.append("all-row Klar-Palatinus adjusted hand Z is unavailable")
     elif oriented_all < threshold:
@@ -8139,6 +8216,10 @@ def run_multi_final_elastic_hand_selection(
     Hamiltonian.  The paired calculation shares each eigendecomposition.
     """
 
+    hand_flip_threshold = float(getattr(args, "hand_flip_zkp_all", 3.5))
+    if not math.isfinite(hand_flip_threshold) or hand_flip_threshold <= 0.0:
+        raise ValueError("hand inversion threshold must be finite and positive")
+
     artifact = root / "decisions" / "shared_final_elastic_hand_selection.json"
     symmetry_policy = (
         shared_hand_decision.get("symmetry_policy")
@@ -8158,6 +8239,7 @@ def run_multi_final_elastic_hand_selection(
         "known_configuration_used_for_selection": False,
         "datasets": {},
         "artifact": str(artifact),
+        "symmetry_policy": dict(symmetry_policy),
     }
     if not bool(getattr(args, "hand_control", True)) or not bool(symmetry_policy.get("run_hand_control", True)):
         result = {
@@ -8167,6 +8249,9 @@ def run_multi_final_elastic_hand_selection(
             "selected_hand_after": selected_hand,
             "selected_model_after": final_model,
             "reason": str(symmetry_policy.get("reason") or "hand control disabled"),
+            "consistency_gate": {"status": "not_applicable", "passed": None, "warnings": []},
+            "preferred_hand": "not_applicable",
+            "hand_confidence": "not_applicable",
         }
         write_json(artifact, result)
         return result
@@ -8269,7 +8354,19 @@ def run_multi_final_elastic_hand_selection(
             )
             record.update(
                 {
-                    "status": "complete" if exact_rows.get("passed") else "incomplete",
+                    "status": (
+                        "complete" if exact_rows.get("passed") and stats.get("status") == "ok"
+                        and _adjusted_hand_z_block(stats, "all").get("status") == "ok"
+                        else "calculation_error"
+                    ),
+                    "calculation_errors": [
+                        *list(exact_rows.get("errors") or []),
+                        *list(stats.get("calculation_errors") or []),
+                        *(
+                            [f"all-row adjusted statistic: {_adjusted_hand_z_block(stats, 'all').get('status')}"]
+                            if _adjusted_hand_z_block(stats, "all").get("status") != "ok" else []
+                        ),
+                    ],
                     "pair_run": str(pair_run),
                     "selected_row_table": str(pair_run / "native_dyn_calc.csv"),
                     "inverse_row_table": str(pair_run / "native_inverse_hand_dyn_calc.csv"),
@@ -8277,6 +8374,8 @@ def run_multi_final_elastic_hand_selection(
                     "row_pair_contract": exact_rows,
                     "selected_score": selected_score,
                     "inverse_score": inverse_score,
+                    "matched_all_row_metrics": all_block.get("matched_prediction_metrics", {}),
+                    "matched_born_control": stats.get("matched_born_control", {}),
                     "score_delta_selected_minus_inverse": safe_float(selected_score.get("score"), float("nan"))
                     - safe_float(inverse_score.get("score"), float("nan")),
                     "all_t": safe_float(all_block.get("paired_row_t_delta_chi2"), float("nan")),
@@ -8287,7 +8386,10 @@ def run_multi_final_elastic_hand_selection(
                 }
             )
         except Exception as exc:
-            record.update(status="incomplete", reason=f"{type(exc).__name__}: {exc}")
+            record.update(
+                status="calculation_error", reason=f"{type(exc).__name__}: {exc}",
+                calculation_errors=[f"{type(exc).__name__}: {exc}"],
+            )
         records[ds.name] = record
 
     complete = [record for record in records.values() if record.get("status") == "complete"]
@@ -8309,14 +8411,13 @@ def run_multi_final_elastic_hand_selection(
     aggregate_free_t = safe_float((pooled.get("free") or {}).get("paired_row_t_delta_chi2"), float("nan"))
     total_free_rows = int((pooled.get("free") or {}).get("n", 0) or 0)
     total_score_delta = sum(safe_float(record.get("score_delta_selected_minus_inverse"), 0.0) for record in complete)
-    incomplete = len(complete) != len(prep.datasets)
+    incomplete = not records or len(complete) != len(prep.datasets)
     adjusted_z_before = {
         split: _combine_adjusted_hand_z(complete_diagnostics, split)
         for split in ("all", "work", "free")
     }
     aggregate_all_zkp = safe_float(adjusted_z_before["all"].get("z"), float("nan"))
     aggregate_free_zkp = safe_float(adjusted_z_before["free"].get("z"), float("nan"))
-    hand_flip_threshold = float(getattr(args, "hand_flip_zkp_all", 3.5))
     switch = bool(
         complete
         and not incomplete
@@ -8350,8 +8451,17 @@ def run_multi_final_elastic_hand_selection(
     )
     if incomplete:
         hand_warnings.append("one or more datasets lacked a complete exact hand-pair contract; no automatic inversion was made")
+        hand_warnings.extend(
+            f"{name}: hand calculation error: {error}"
+            for name, record in records.items() if record.get("status") != "complete"
+            for error in (record.get("calculation_errors") or [record.get("reason", "incomplete physical row comparison")])
+        )
     result = {
         **base,
+        **hand_preference_summary(
+            aggregate_all_zkp, active_hand=selected_hand, threshold=hand_flip_threshold,
+            calculation_valid=not incomplete,
+        ),
         "status": "switched" if switch else "kept" if not incomplete else "incomplete_kept",
         "datasets": records,
         "aggregate": {
@@ -8370,6 +8480,10 @@ def run_multi_final_elastic_hand_selection(
         "selected_model_after": selected_model_after,
         "hand_flip_zkp_all_threshold": hand_flip_threshold,
         "warnings": hand_warnings,
+        "calculation_errors": {
+            name: record.get("calculation_errors") or [record.get("reason", "incomplete hand calculation")]
+            for name, record in records.items() if record.get("status") != "complete"
+        },
         "decision_rule": (
             "switch once when every dataset has a complete exact row pair and the combined all-row "
             "Klar-Palatinus adjusted Z favors the inverse by at least the declared threshold; held-out "
@@ -8701,6 +8815,7 @@ def run_multi_post_feedback_hand_diagnostic(
                 f"row-pair contract: {error}"
                 for error in row_pair_contract.get("errors", [])
             ]
+            diagnostic_warnings: list[str] = []
             for split in ("all", "work", "free"):
                 block = stats.get(split) if isinstance(stats.get(split), Mapping) else {}
                 n_rows = int(block.get("n", 0) or 0)
@@ -8724,8 +8839,10 @@ def run_multi_post_feedback_hand_diagnostic(
                     ),
                     "positive_favors_selected_hand": True,
                 }
-                if n_rows <= 1 or not math.isfinite(paired) or not math.isfinite(chi2_margin):
-                    incomplete_reasons.append(f"{split} split lacks a finite paired-row diagnostic")
+                if split == "all" and (n_rows <= 0 or not math.isfinite(chi2_margin)):
+                    incomplete_reasons.append("all split lacks a finite matched residual calculation")
+                elif n_rows <= 1 or not math.isfinite(paired) or not math.isfinite(chi2_margin):
+                    diagnostic_warnings.append(f"{split} paired t-style contrast is unavailable or underdetermined; it does not veto the all-row hand result")
             if str(stats.get("status")) != "ok":
                 incomplete_reasons.append(f"diagnostic status is {stats.get('status', 'missing')}")
             n_best = int(row_join.get("n_best", 0) or 0)
@@ -8892,7 +9009,10 @@ def run_multi_post_feedback_hand_diagnostic(
                         "minimum_free_rows": int(getattr(args, "hand_min_free_rows", 10)),
                         "minimum_score_delta": float(getattr(args, "hand_accept_delta", 0.0)),
                     },
-                    "warnings": incomplete_reasons,
+                    "warnings": [*incomplete_reasons, *diagnostic_warnings],
+                    "calculation_errors": incomplete_reasons,
+                    "primary_evidence": "all_rows",
+                    "free_evidence_role": "diagnostic_warning_only",
                 }
             )
         except Exception as exc:
@@ -9349,198 +9469,254 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
     absolute_structure_diagnostic = ""
     post_feedback_hand_promotion: dict = {}
     if args.hand_control and absolute_structure_decision.get("run_hand_control", True) and not args.dry_run:
-        hand_pair = root / "runs" / ds.name / "adaptive_final_elastic_hand_pair"
-        final_summary = read_json(final / "summary.json")
-        final_config = (
-            final_summary.get("config")
-            if isinstance(final_summary.get("config"), Mapping)
-            else {}
-        )
-        hand_nuisance, source_absorption = elastic_hand_nuisance(
-            best_nuisance(final) or regularized_nui
-        )
-        hand_args = _args_with_recorded_native_contract(args, final_config)
-        hand_args.compute_backend = "scipy"
-        hand_n_basis = _positive_summary_int(final_config, "n_basis") or (20 if args.fast else final_n_basis)
-        hand_n_points = _positive_summary_int(final_config, "n_points") or (5 if args.fast else args.n_points)
-        scale_fit_split = str(final_config.get("scale_fit_split") or "work")
-        if scale_fit_split not in {"work", "all"}:
-            scale_fit_split = "work"
-        run_logged(
-            native_stage_cmd(
-                python,
-                ds,
-                final_model,
-                dataset_baseline_hkl(prep, ds),
-                hand_pair,
-                hand_args,
-                n_basis=hand_n_basis,
-                n_points=hand_n_points,
-                stage="hand",
-                pinned=hand_nuisance,
-                make_maps=False,
-                endpoint=False,
-                scale_fit_split_override=scale_fit_split,
-                strict_pinned_contract=True,
-                allow_pinned_jitter_fallback=False,
-                paired_inverse_hand=True,
-            ),
-            logs,
-            f"{ds.name}_adaptive_final_elastic_hand_pair",
-            dry_run=args.dry_run,
-        )
-        stats_path = root / "runs" / ds.name / "adaptive_absolute_structure_diagnostic.json"
-        run_logged(
-            [
-                python,
-                str(engine_script("absolute_structure_diagnostic.py")),
-                "--best",
-                str(hand_pair / "native_dyn_calc.csv"),
-                "--other",
-                str(hand_pair / "native_inverse_hand_dyn_calc.csv"),
-                "--out",
-                str(stats_path),
-            ],
-            logs,
-            f"{ds.name}_adaptive_absolute_structure_diagnostic",
-            dry_run=args.dry_run,
-        )
-        absolute_structure_diagnostic = str(stats_path)
-        pair_summary = read_json(hand_pair / "summary.json")
-        pair_contract = (
-            pair_summary.get("paired_inverse_hand")
-            if isinstance(pair_summary.get("paired_inverse_hand"), Mapping)
-            else {}
-        )
-        final_score = score_native_metrics(
-            pair_summary,
-            pair_contract.get("selected_metrics")
-            if isinstance(pair_contract.get("selected_metrics"), Mapping)
-            else {},
-        )
-        other_score = score_native_metrics(
-            pair_summary,
-            pair_contract.get("inverse_metrics")
-            if isinstance(pair_contract.get("inverse_metrics"), Mapping)
-            else {},
-        )
-        post_feedback_delta = final_score.get("score", float("inf")) - other_score.get("score", float("inf"))
-        hand_stats = try_read_json(stats_path) or {}
-        raw_all_zkp = safe_float(
-            _adjusted_hand_z_block(hand_stats, "all").get("z"),
-            float("nan"),
-        )
-        raw_free_zkp = safe_float(
-            _adjusted_hand_z_block(hand_stats, "free").get("z"),
-            float("nan"),
-        )
-        hand_flip_threshold = float(getattr(args, "hand_flip_zkp_all", 3.5))
-        post_feedback_hand_promotion = {
-            "status": "not_promoted",
-            "method": "nakane_negative_thickness_elastic_pair_v1",
-            "active_hand": active_hand,
-            "opposite_hand": "alternate" if active_hand == "original" else "original",
-            "final_score": final_score,
-            "opposite_score": other_score,
-            "score_delta_final_minus_opposite": post_feedback_delta,
-            "accept_delta": float(args.hand_accept_delta),
-            "diagnostic": str(stats_path),
-            "paired_run": str(hand_pair),
-            "source_absorption_nuisance": source_absorption,
-            "hand_decision_absorption": "disabled",
-            "shared_eigendecomposition": True,
-            "nuisance_refit": False,
-            "jitter_refit": False,
-            "adjusted_z_before_selection": {
-                "all": raw_all_zkp,
-                "free": raw_free_zkp,
-                "positive_favors_active_hand": True,
-            },
-            "hand_flip_zkp_all_threshold": hand_flip_threshold,
-        }
-        diagnostic_gate_ok, diagnostic_gate_reasons = hand_diagnostic_supports_other(
-            hand_stats,
-            args,
-        )
-        post_feedback_hand_promotion["diagnostic_quality_gate_status"] = (
-            "switch_supported" if diagnostic_gate_ok else "keep_current"
-        )
-        post_feedback_hand_promotion["diagnostic_quality_gate_reasons"] = diagnostic_gate_reasons
-        if diagnostic_gate_ok and is_shelx_model(final_model):
-            promoted_model = make_alternate_hand_model(python, final_model, root, logs, args.dry_run)
-            promoted = root / "runs" / ds.name / "adaptive_promoted_hand_final"
+        hand_input_run, hand_input_model, hand_input_representation = final, final_model, active_hand
+        try:
+            hand_pair = root / "runs" / ds.name / "adaptive_final_elastic_hand_pair"
+            final_summary = read_json(final / "summary.json")
+            final_config = (
+                final_summary.get("config")
+                if isinstance(final_summary.get("config"), Mapping)
+                else {}
+            )
+            hand_nuisance, source_absorption = elastic_hand_nuisance(
+                best_nuisance(final) or regularized_nui
+            )
+            hand_args = _args_with_recorded_native_contract(args, final_config)
+            hand_args.compute_backend = "scipy"
+            hand_n_basis = _positive_summary_int(final_config, "n_basis") or (20 if args.fast else final_n_basis)
+            hand_n_points = _positive_summary_int(final_config, "n_points") or (5 if args.fast else args.n_points)
+            scale_fit_split = str(final_config.get("scale_fit_split") or "work")
+            if scale_fit_split not in {"work", "all"}:
+                scale_fit_split = "work"
             run_logged(
                 native_stage_cmd(
                     python,
                     ds,
-                    str(promoted_model),
+                    final_model,
                     dataset_baseline_hkl(prep, ds),
-                    promoted,
-                    args,
-                    n_basis=20 if args.fast else final_n_basis,
-                    n_points=5 if args.fast else args.n_points,
-                    stage="adaptive_promoted_hand_final",
-                    pinned=best_nuisance(final) or regularized_nui,
-                    make_maps=args.make_maps,
-                    endpoint=True,
+                    hand_pair,
+                    hand_args,
+                    n_basis=hand_n_basis,
+                    n_points=hand_n_points,
+                    stage="hand",
+                    pinned=hand_nuisance,
+                    make_maps=False,
+                    endpoint=False,
+                    scale_fit_split_override=scale_fit_split,
                     strict_pinned_contract=True,
                     allow_pinned_jitter_fallback=False,
+                    paired_inverse_hand=True,
                 ),
                 logs,
-                f"{ds.name}_adaptive_promoted_hand_final",
+                f"{ds.name}_adaptive_final_elastic_hand_pair",
                 dry_run=args.dry_run,
             )
-            post_feedback_hand_promotion.update(
-                {
-                    "status": "promoted",
-                    "promoted_run": str(promoted),
-                    "promoted_model_input": str(promoted_model),
-                    "promotion_policy": (
-                        "the matched final elastic hand decision is authoritative; the selected coordinate hand is "
-                        "materialized once under the already selected full nuisance contract"
-                    ),
+            stats_path = root / "runs" / ds.name / "adaptive_absolute_structure_diagnostic.json"
+            run_logged(
+                [
+                    python,
+                    str(engine_script("absolute_structure_diagnostic.py")),
+                    "--best",
+                    str(hand_pair / "native_dyn_calc.csv"),
+                    "--other",
+                    str(hand_pair / "native_inverse_hand_dyn_calc.csv"),
+                    "--out",
+                    str(stats_path),
+                ],
+                logs,
+                f"{ds.name}_adaptive_absolute_structure_diagnostic",
+                dry_run=args.dry_run,
+            )
+            absolute_structure_diagnostic = str(stats_path)
+            pair_summary = read_json(hand_pair / "summary.json")
+            pair_contract = (
+                pair_summary.get("paired_inverse_hand")
+                if isinstance(pair_summary.get("paired_inverse_hand"), Mapping)
+                else {}
+            )
+            final_score = score_native_metrics(
+                pair_summary,
+                pair_contract.get("selected_metrics")
+                if isinstance(pair_contract.get("selected_metrics"), Mapping)
+                else {},
+            )
+            other_score = score_native_metrics(
+                pair_summary,
+                pair_contract.get("inverse_metrics")
+                if isinstance(pair_contract.get("inverse_metrics"), Mapping)
+                else {},
+            )
+            post_feedback_delta = final_score.get("score", float("inf")) - other_score.get("score", float("inf"))
+            hand_stats = try_read_json(stats_path) or {}
+            hand_row_contract = _paired_row_split_contract(
+                hand_pair / "native_dyn_calc.csv",
+                hand_pair / "native_inverse_hand_dyn_calc.csv",
+                nullable_numeric_fields=_row_contract_nullable_numeric_fields(final_config, hand_nuisance),
+            )
+            hand_calculation_errors = [
+                *list(hand_row_contract.get("errors") or []),
+                *list(hand_stats.get("calculation_errors") or []),
+            ]
+            if not hand_row_contract.get("passed"):
+                hand_stats = {
+                    **hand_stats, "calculation_status": "error",
+                    "calculation_errors": hand_calculation_errors,
                 }
+            raw_all_zkp = safe_float(
+                _adjusted_hand_z_block(hand_stats, "all").get("z"),
+                float("nan"),
             )
-            final = promoted
-            final_model = str(best_endpoint_model(promoted) or promoted_model)
-            active_hand = post_feedback_hand_promotion["opposite_hand"]
-            post_feedback_hand_promotion["adjusted_z_final_hand_favored"] = {
-                "all": -raw_all_zkp if math.isfinite(raw_all_zkp) else float("nan"),
-                "free": -raw_free_zkp if math.isfinite(raw_free_zkp) else float("nan"),
-                "positive_favors_final_selected_hand": True,
+            raw_free_zkp = safe_float(
+                _adjusted_hand_z_block(hand_stats, "free").get("z"),
+                float("nan"),
+            )
+            hand_flip_threshold = float(getattr(args, "hand_flip_zkp_all", 3.5))
+            post_feedback_hand_promotion = {
+                **hand_preference_summary(
+                    raw_all_zkp, active_hand=active_hand, threshold=hand_flip_threshold,
+                    calculation_valid=not hand_calculation_errors and hand_stats.get("status") == "ok",
+                ),
+                "status": "not_promoted",
+                "method": "nakane_negative_thickness_elastic_pair_v1",
+                "active_hand": active_hand,
+                "opposite_hand": "alternate" if active_hand == "original" else "original",
+                "final_score": final_score,
+                "opposite_score": other_score,
+                "score_delta_final_minus_opposite": post_feedback_delta,
+                "accept_delta": float(args.hand_accept_delta),
+                "diagnostic": str(stats_path),
+                "paired_run": str(hand_pair),
+                "source_absorption_nuisance": source_absorption,
+                "hand_decision_absorption": "disabled",
+                "shared_eigendecomposition": True,
+                "nuisance_refit": False,
+                "jitter_refit": False,
+                "adjusted_z_before_selection": {
+                    "all": raw_all_zkp,
+                    "free": raw_free_zkp,
+                    "positive_favors_active_hand": True,
+                },
+                "hand_flip_zkp_all_threshold": hand_flip_threshold,
+                "row_pair_contract": hand_row_contract,
+                "calculation_errors": hand_calculation_errors,
+                "matched_all_row_metrics": (hand_stats.get("all") or {}).get("matched_prediction_metrics", {}),
+                "matched_born_control": hand_stats.get("matched_born_control", {}),
             }
-            post_feedback_hand_promotion["warnings"] = _hand_evidence_warnings(
-                all_z=raw_all_zkp,
-                free_z=raw_free_zkp,
-                switched=True,
-                threshold=hand_flip_threshold,
+            diagnostic_gate_ok, diagnostic_gate_reasons = hand_diagnostic_supports_other(
+                hand_stats,
+                args,
             )
+            post_feedback_hand_promotion["diagnostic_quality_gate_status"] = (
+                "switch_supported" if diagnostic_gate_ok else "keep_current"
+            )
+            post_feedback_hand_promotion["diagnostic_quality_gate_reasons"] = diagnostic_gate_reasons
+            if diagnostic_gate_ok and is_shelx_model(final_model):
+                promoted_model = make_alternate_hand_model(python, final_model, root, logs, args.dry_run)
+                promoted = root / "runs" / ds.name / "adaptive_promoted_hand_final"
+                run_logged(
+                    native_stage_cmd(
+                        python,
+                        ds,
+                        str(promoted_model),
+                        dataset_baseline_hkl(prep, ds),
+                        promoted,
+                        args,
+                        n_basis=20 if args.fast else final_n_basis,
+                        n_points=5 if args.fast else args.n_points,
+                        stage="adaptive_promoted_hand_final",
+                        pinned=best_nuisance(final) or regularized_nui,
+                        make_maps=args.make_maps,
+                        endpoint=True,
+                        strict_pinned_contract=True,
+                        allow_pinned_jitter_fallback=False,
+                    ),
+                    logs,
+                    f"{ds.name}_adaptive_promoted_hand_final",
+                    dry_run=args.dry_run,
+                )
+                post_feedback_hand_promotion.update(
+                    {
+                        "status": "promoted",
+                        "promoted_run": str(promoted),
+                        "promoted_model_input": str(promoted_model),
+                        "promotion_policy": (
+                            "the matched final elastic hand decision is authoritative; the selected coordinate hand is "
+                            "materialized once under the already selected full nuisance contract"
+                        ),
+                    }
+                )
+                final = promoted
+                final_model = str(best_endpoint_model(promoted) or promoted_model)
+                active_hand = post_feedback_hand_promotion["opposite_hand"]
+                post_feedback_hand_promotion["adjusted_z_final_hand_favored"] = {
+                    "all": -raw_all_zkp if math.isfinite(raw_all_zkp) else float("nan"),
+                    "free": -raw_free_zkp if math.isfinite(raw_free_zkp) else float("nan"),
+                    "positive_favors_final_selected_hand": True,
+                }
+                post_feedback_hand_promotion["warnings"] = _hand_evidence_warnings(
+                    all_z=raw_all_zkp,
+                    free_z=raw_free_zkp,
+                    switched=True,
+                    threshold=hand_flip_threshold,
+                )
+                absolute_structure_decision = {
+                    **absolute_structure_decision,
+                    "status": "complete",
+                    "post_feedback_selected": active_hand,
+                    "post_feedback_selected_hand": active_hand,
+                    "post_feedback_promotion": post_feedback_hand_promotion,
+                }
+            else:
+                post_feedback_hand_promotion["adjusted_z_final_hand_favored"] = {
+                    "all": raw_all_zkp,
+                    "free": raw_free_zkp,
+                    "positive_favors_final_selected_hand": True,
+                }
+                post_feedback_hand_promotion["warnings"] = _hand_evidence_warnings(
+                    all_z=raw_all_zkp,
+                    free_z=raw_free_zkp,
+                    switched=False,
+                    threshold=hand_flip_threshold,
+                )
+                absolute_structure_decision = {
+                    **absolute_structure_decision,
+                    "status": "complete",
+                    "post_feedback_selected": active_hand,
+                    "post_feedback_selected_hand": active_hand,
+                    "post_feedback_promotion": post_feedback_hand_promotion,
+                }
+
+            if hand_calculation_errors:
+                post_feedback_hand_promotion["status"] = "calculation_error"
+                post_feedback_hand_promotion["warnings"].extend(
+                    f"Hand calculation error: {error}" for error in hand_calculation_errors
+                )
+                absolute_structure_decision["status"] = "hand_calculation_error"
+            post_feedback_hand_promotion["selected_hand_after"] = active_hand
+        except Exception as exc:
+            final, final_model, active_hand = hand_input_run, hand_input_model, hand_input_representation
+            error = f"{type(exc).__name__}: {exc}"
+            post_feedback_hand_promotion = {
+                "status": "calculation_error",
+                "stage": "final_elastic_hand",
+                "preferred_hand": "unavailable",
+                "hand_confidence": "calculation_error",
+                "selected_hand_after": active_hand,
+                "selected_model_after": final_model,
+                "calculation_errors": [error],
+                "warnings": [f"Final hand calculation failed: {error}; the preceding usable structural endpoint is retained."],
+                "source_run": str(final),
+                "logs": str(logs),
+                "primary_evidence": "all_rows",
+                "free_evidence_role": "diagnostic_warning_only",
+            }
             absolute_structure_decision = {
                 **absolute_structure_decision,
-                "status": "complete",
-                "post_feedback_selected": active_hand,
+                "status": "hand_calculation_error",
                 "post_feedback_selected_hand": active_hand,
                 "post_feedback_promotion": post_feedback_hand_promotion,
             }
-        else:
-            post_feedback_hand_promotion["adjusted_z_final_hand_favored"] = {
-                "all": raw_all_zkp,
-                "free": raw_free_zkp,
-                "positive_favors_final_selected_hand": True,
-            }
-            post_feedback_hand_promotion["warnings"] = _hand_evidence_warnings(
-                all_z=raw_all_zkp,
-                free_z=raw_free_zkp,
-                switched=False,
-                threshold=hand_flip_threshold,
-            )
-            absolute_structure_decision = {
-                **absolute_structure_decision,
-                "status": "complete",
-                "post_feedback_selected": active_hand,
-                "post_feedback_selected_hand": active_hand,
-                "post_feedback_promotion": post_feedback_hand_promotion,
-            }
+            write_json(root / "runs" / ds.name / "adaptive_hand_calculation_error.json", post_feedback_hand_promotion)
 
     if args.dry_run:
         final_row_model_contract = {
@@ -10696,10 +10872,8 @@ def _fixed_hand_decision_binding(
             reasons.append(f"decision warning: {payload.get('warning')}")
         if comparison.get("row_selection_match") is not True:
             reasons.append("original/alternate row selections do not match")
-        if comparison.get("positive_matched_free_rows") is not True:
-            reasons.append("matched free-row population is missing or zero")
-        if comparison.get("finite_raw_free_metrics") is not True:
-            reasons.append("free-row metrics are missing or nonfinite")
+        # Free observations are diagnostic only; named sign calibration still
+        # requires exact physical contracts and decisive all-row evidence below.
         recorded_nuisance_selection = comparison.get(
             "branch_symmetric_nuisance_selection"
         )
@@ -10914,17 +11088,8 @@ def _fixed_hand_decision_binding(
                     if isinstance(recomputed_block, Mapping)
                     else {}
                 )
-                if (
-                    recorded_block.get("status")
-                    != recomputed_block.get("status")
-                    or int(recorded_block.get("n") or 0)
-                    != int(recomputed_block.get("n") or 0)
-                    or not math.isclose(
-                        safe_float(recorded_block.get("z"), float("nan")),
-                        safe_float(recomputed_block.get("z"), float("nan")),
-                        rel_tol=1e-12,
-                        abs_tol=1e-14,
-                    )
+                if not _adjusted_hand_blocks_match(
+                    recorded_block, recomputed_block, allow_unavailable=split == "free",
                 ):
                     reasons.append(
                         f"common-sigma adjusted hand Z mismatch for {split} rows"
@@ -16049,7 +16214,7 @@ def _write_final_statistics_table1(
             "row": "JANA/PETS style: Robs, Rall, wRall on unmerged rows and MRobs, MRall, MwRall after post-refinement symmetry merging; wRobs and MwRobs are optional extensions",
             "separation_rule": "SHELXL endpoint and JANA/PETS row factors have different targets and denominators and are never placed in a shared generic R column.",
             "born_rule": "Born is a matched kinematical row control, not a separately refined conventional SHELXL endpoint.",
-            "row_sigma_rule": "JANA/PETS-style weights use sigma_eff from the frozen row table. A separate raw_row_weight is not multiplied into the reported R/MR factors unless its effect is already encoded in sigma_eff.",
+            "row_sigma_rule": "JANA/PETS-style weights use immutable source_sigma in target_I units, with historical xds_sigma/sigma aliases and sigma_eff only as a legacy fallback when no source sigma is available. Fitted sigma_eff and raw_row_weight are not otherwise folded into the reported R/MR factors.",
             "row_instability_u": jana_instability_u,
             "matched_support_rule": "Born and Bloch statistics must use one identical finite observation support; Ninput/Nmatched/Nexcluded and merge-HKL exclusions are reported explicitly when known.",
             "missing_rule": "Unavailable statistics remain explicit null/n/a values and are never inferred from a different target class.",
@@ -16144,7 +16309,7 @@ def _write_final_statistics_table1(
     lines.extend(
         [
             "",
-            f"Row definitions: `Robs`/`Rall` are R1-form amplitude residuals formed from `sqrt(max(I,0))`; observed subsets satisfy `Iobs > 3 sigma(Iobs)`. `wRall` uses the JANA/PETS weighted intensity-residual form with instability factor `u={jana_instability_u_text}`. Born and Bloch factors use the same finite support. `Nmerge excluded` counts supported rows with missing, non-finite, or non-integral HKL indices. `MR`/`MwR` repeat the calculations after arithmetic merging of valid model-symmetry-related observed and calculated rows with propagated merged sigma. Optional `wRobs`/`MwRobs` apply the weighted form to the observed subsets. Weights use `sigma_eff` from the frozen row table; a separate `raw_row_weight` is not multiplied into the reported factors. Values are computed by GROND and are not parsed from JANA or PETS.",
+            f"Row definitions: `Robs`/`Rall` are R1-form amplitude residuals formed from `sqrt(max(I,0))`; observed subsets satisfy `Iobs > 3 sigma(Iobs)`. `wRall` uses the JANA/PETS weighted intensity-residual form with instability factor `u={jana_instability_u_text}`. Born and Bloch factors use the same finite support. `Nmerge excluded` counts supported rows with missing, non-finite, or non-integral HKL indices. `MR`/`MwR` repeat the calculations after arithmetic merging of valid model-symmetry-related observed and calculated rows with propagated merged sigma. Optional `wRobs`/`MwRobs` apply the weighted form to the observed subsets. Weights use immutable `source_sigma` in target intensity units, with historical `xds_sigma`/`sigma` aliases and `sigma_eff` only as a legacy fallback when no source sigma is available. Fitted `sigma_eff` and `raw_row_weight` are not otherwise folded into the reported factors. Values are computed by GROND and are not parsed from JANA or PETS.",
             "",
             "The Born row is the matched single-scattering control under the final GROND row contract. It is not a third SHELXL endpoint.",
         ]
@@ -16516,6 +16681,12 @@ def _format_terminal_finish_summary(payload: Mapping[str, object]) -> str:
             f"{_quick_flat_hand_t_style_text(t_all, t_all_n, t_all_df)} / "
             f"{_quick_flat_hand_t_style_text(t_free, t_free_n, t_free_df)}; "
             "t-style is not a calibrated normal Z score)"
+        )
+    if payload.get("final_hand_preferred") is not None:
+        hand_line += (
+            f"\n  All-row preferred hand: {payload['final_hand_preferred']}; "
+            f"evidence {payload.get('final_hand_confidence', 'unavailable')}; "
+            f"exported representation {final_hand}. ZKP is not calibrated sigma confidence."
         )
     hand_warnings = [str(item) for item in payload.get("final_hand_warnings", [])]
     if hand_warnings:
@@ -17582,6 +17753,18 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
         "quick_stats": str(quick_path),
         "full_json": str(out_dir / "grond_summary.json"),
         "final_hand": hand_summary.get("final_hand", "n/a"),
+        "final_hand_preferred": (
+            multi_hand_diagnostic.get("preferred_hand", "unavailable")
+            if result.get("combined") else promotion_decision.get("preferred_hand", "unavailable")
+        ),
+        "final_hand_confidence": (
+            multi_hand_diagnostic.get("hand_confidence", "unavailable")
+            if result.get("combined") else promotion_decision.get("hand_confidence", "unavailable")
+        ),
+        "final_hand_calculation_errors": (
+            multi_hand_diagnostic.get("calculation_errors", {})
+            if result.get("combined") else promotion_decision.get("calculation_errors", [])
+        ),
         "final_hand_t_style_all": (
             _quick_fraction((multi_hand_pooled.get("all") or {}).get("t"))
             if result.get("combined") and multi_hand_pooled
@@ -17831,7 +18014,8 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
         "",
         "| item | value |",
         "|---|---|",
-        f"| final hand | `{console['final_hand']}` |",
+        f"| final hand representation | `{console['final_hand']}` |",
+        f"| all-row preferred hand | `{console.get('final_hand_preferred', 'unavailable')}`; `{console.get('final_hand_confidence', 'unavailable')}`; conditional statistic, not calibrated sigma confidence |",
         final_hand_zkp_line,
         final_hand_t_line,
         f"| selected HKL transform | `{console['selected_transform']}` |",
@@ -18352,22 +18536,49 @@ def run_finish_native_dynamic_maps(run_dir: Path, result: Mapping[str, object], 
 
 
 def run_finish_maps(run_dir: Path, result: Mapping[str, object], args: argparse.Namespace) -> dict[str, object]:
-    """Run the requested finish-map mode."""
+    """Run requested map families and retain concrete incomplete-output causes."""
 
     if not getattr(args, "make_maps", True):
         return {"status": "disabled"}
     mode = str(getattr(args, "map_mode", "native") or "native").lower()
     if mode == "off":
         return {"status": "disabled"}
+    if mode not in {"native", "shelx2map", "both"}:
+        return {"mode": mode, "status": "warning", "warnings": [f"unknown requested map mode: {mode}"]}
     maps: dict[str, object] = {"mode": mode}
+    requested = []
     if mode in {"native", "both"}:
-        maps["native_dynamic"] = run_finish_native_dynamic_maps(run_dir, result, args)
+        requested.append(("native_dynamic", lambda: run_finish_native_dynamic_maps(run_dir, result, args)))
     if mode in {"shelx2map", "both"}:
-        maps["shelx2map"] = run_finish_endpoint_maps(result, args)
-    if mode not in {"native", "shelx2map", "both", "off"}:
-        maps["status"] = "unknown_mode"
-    else:
-        maps["status"] = "ok"
+        requested.append(("shelx2map", lambda: run_finish_endpoint_maps(result, args)))
+    warnings: list[str] = []
+    succeeded = 0
+    for label, generate in requested:
+        try:
+            record = generate()
+        except Exception as exc:
+            record = {"status": "failed", "error": f"{type(exc).__name__}: {exc}"}
+        maps[label] = record
+        if record.get("status") == "ok":
+            succeeded += 1
+            continue
+        details = [str(record.get("status") or "missing map result status")]
+        for key in ("error", "note", "endpoint_res", "fcf", "row_table", "model", "executable"):
+            if record.get(key):
+                details.append(f"{key}: {record[key]}")
+        replay = record.get("list6_replay")
+        if isinstance(replay, Mapping):
+            for key in ("status", "error", "note", "log", "endpoint_hkl"):
+                if replay.get(key):
+                    details.append(f"LIST 6 {key}: {replay[key]}")
+        outputs = record.get("maps")
+        if isinstance(outputs, Mapping):
+            for name, item in outputs.items():
+                if isinstance(item, Mapping) and (item.get("returncode") != 0 or not item.get("exists")):
+                    details.append(f"{name}: returncode={item.get('returncode')}, exists={item.get('exists')}, log={item.get('log', '')}")
+        warnings.append(f"{label} maps: " + "; ".join(details))
+    maps["status"] = "ok" if succeeded == len(requested) else "partial" if succeeded else "warning"
+    maps["warnings"] = warnings
     return maps
 
 
@@ -18418,8 +18629,10 @@ def cmd_finish(args: argparse.Namespace) -> int:
     if isinstance(native, Mapping):
         outputs = native.get("outputs") if isinstance(native.get("outputs"), Mapping) else {}
         native_cif = str(outputs.get("dynamic_cif", "") or "")
+    finish_status = "ok" if maps.get("status") in {"ok", "disabled"} else maps.get("status", "warning")
     manifest = {
-        "status": "ok",
+        "status": finish_status,
+        "warnings": list(maps.get("warnings") or []),
         "run_dir": str(run_dir),
         "summary": str(result_path),
         "prep": str(prep_path),
@@ -18438,8 +18651,9 @@ def cmd_finish(args: argparse.Namespace) -> int:
     console = quick.get("console") if isinstance(quick.get("console"), Mapping) else {}
     finish_elapsed_seconds = max(0.0, time.perf_counter() - finish_started_monotonic)
     payload = {
-        "status": "ok",
         **console,
+        "status": finish_status,
+        "warnings": [*list(console.get("warnings") or []), *manifest["warnings"]],
         "finished": _quick_progress_finish_info(run_dir),
         "timing_context": {
             "kind": "finish_replay",
@@ -18453,6 +18667,8 @@ def cmd_finish(args: argparse.Namespace) -> int:
         print(json.dumps(payload, indent=2, allow_nan=True))
     else:
         print(_format_terminal_finish_summary(payload), flush=True)
+        for warning in manifest["warnings"]:
+            print(f"Map warning: {warning}", flush=True)
     return 0
 
 

@@ -38,10 +38,12 @@ if __package__:
         XDSBlochPort,
         XDSData,
         alternate_hand_model,
+        model_symmetry_ops,
         parse_model,
         sha256,
         shelx_u_cart_matrix,
         split_masks,
+        unique_symmetry_mates,
     )
     from .native_row_regularize import (
         DEFAULT_BASELINE_HKL,
@@ -72,10 +74,12 @@ else:  # pragma: no cover - direct script execution
         XDSBlochPort,
         XDSData,
         alternate_hand_model,
+        model_symmetry_ops,
         parse_model,
         sha256,
         shelx_u_cart_matrix,
         split_masks,
+        unique_symmetry_mates,
     )
     from native_row_regularize import (
         DEFAULT_BASELINE_HKL,
@@ -278,14 +282,39 @@ def set_atom_ueq(atom, value: float, cell_tuple) -> None:
         atom["uiso"] = value
 
 
+def special_position_coordinate_policy(model, selection: str, label_text: str, parameter_mode: str = "xyz"):
+    """Describe conservative XYZ freezing until a site-tangent basis exists."""
+
+    labels = {x.strip() for x in re.split(r"[,\s]+", label_text or "") if x.strip()}
+    frozen = []
+    if parameter_mode in {"xyz", "xyz_adp_ueq"}:
+        order = len(model_symmetry_ops(model))
+        for ai, atom in enumerate(model["atoms"]):
+            if not atom_is_refinable(atom, selection, labels):
+                continue
+            multiplicity = len(list(unique_symmetry_mates(atom, model)))
+            if multiplicity < order:
+                frozen.append({"atom_index": ai, "atom": atom["name"], "site_multiplicity": multiplicity, "symmetry_operation_count": order})
+    return {
+        "policy": "freeze_special_site_xyz",
+        "frozen_atoms": frozen,
+        "warning": (
+            "Special-position XYZ coordinates are held fixed in native updates because "
+            "a symmetry-constrained tangent parameterization is not implemented. "
+            "Scalar Ueq updates remain available."
+        ) if frozen else "",
+    }
+
+
 def parameter_layout(model, selection: str, label_text: str, parameter_mode: str = "xyz"):
     labels = {x.strip() for x in re.split(r"[,\s]+", label_text or "") if x.strip()}
+    frozen_xyz = {item["atom_index"] for item in special_position_coordinate_policy(model, selection, label_text, parameter_mode)["frozen_atoms"]}
     params = []
     x0 = []
     for ai, atom in enumerate(model["atoms"]):
         if not atom_is_refinable(atom, selection, labels):
             continue
-        if parameter_mode in {"xyz", "xyz_adp_ueq"}:
+        if parameter_mode in {"xyz", "xyz_adp_ueq"} and ai not in frozen_xyz:
             for coord in ("x", "y", "z"):
                 params.append({"kind": "xyz", "atom_index": ai, "atom": atom["name"], "coord": coord, "start": float(atom[coord])})
                 x0.append(float(atom[coord]))
@@ -303,7 +332,8 @@ def parameter_layout(model, selection: str, label_text: str, parameter_mode: str
             )
             x0.append(float(ueq))
     if not params:
-        raise ValueError(f"No parameters selected for mode {parameter_mode!r}")
+        reason = "; special-position XYZ coordinates are held fixed" if frozen_xyz else ""
+        raise ValueError(f"No parameters selected for mode {parameter_mode!r}{reason}")
     return params, np.asarray(x0, dtype=float)
 
 
@@ -1156,10 +1186,11 @@ def main():
 
     for block_no, block_mode in enumerate(block_schedule, start=1):
         block_tag = f"block_{block_no:02d}_{block_mode}"
+        coordinate_policy = special_position_coordinate_policy(current_model, args.atom_selection, args.atom_labels, block_mode)
         try:
             params, x0 = parameter_layout(current_model, args.atom_selection, args.atom_labels, block_mode)
         except ValueError as exc:
-            block_results.append({"block": block_no, "mode": block_mode, "skipped": True, "reason": str(exc)})
+            block_results.append({"block": block_no, "mode": block_mode, "skipped": True, "reason": str(exc), "coordinate_constraints": coordinate_policy})
             continue
         has_xyz_params = any(p.get("kind", "xyz") == "xyz" for p in params)
         has_adp_params = any(p.get("kind") == "adp_ueq" for p in params)
@@ -1343,6 +1374,7 @@ def main():
             "mode": block_mode,
             "skipped": False,
             "parameter_count": int(len(params)),
+            "coordinate_constraints": coordinate_policy,
             "xyz_parameter_count": int(sum(1 for p in params if p.get("kind", "xyz") == "xyz")),
             "adp_parameter_count": int(sum(1 for p in params if p.get("kind") == "adp_ueq")),
             "finite_difference": {

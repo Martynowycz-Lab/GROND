@@ -91,7 +91,11 @@ COMPUTE_BACKENDS = [
 ]
 COMPUTE_BACKEND_HELP = ", ".join(COMPUTE_BACKENDS)
 ROW_PLAN_CACHE_SCHEMA = 6
-UG_CACHE_SCHEMA = 3
+UG_CACHE_SCHEMA = 4
+# Account only for coordinate text rounding, never SHELXL's much wider SPEC
+# constraint-search radius. This is used consistently for occupancy conversion
+# and structure-factor expansion (including six-decimal thirds).
+SITE_SYMMETRY_TOLERANCE_FRACTIONAL = 2e-6
 ELECTRON_COMPTON_WAVELENGTH_A = 0.024263102
 DEFAULT_MAX_DENSE_UG_GIB = 2.0
 # The final complex128 cube is 16 bytes per voxel. Construction also holds
@@ -108,6 +112,56 @@ class LocalSgCrossingError(ValueError):
 
 class InfeasibleSgJitterProfileError(ValueError):
     """An active Sg-jitter candidate requests an unreachable quadrature point."""
+
+
+class NonPassiveAbsorptionError(ValueError):
+    """An optical-potential candidate would amplify some incident state.
+
+    ``details`` is JSON-compatible and survives multiprocessing exception
+    transfer, so an optional grid candidate can be rejected with evidence.
+    """
+
+    def __init__(self, message, *, details=None):
+        super().__init__(message)
+        self.details = dict(details or {})
+
+
+def validate_passive_absorption(H, *, mode="unknown", row_index=None):
+    """Require nonnegative loss for exp(2*pi*i*H*t), without changing H.
+
+    With H=A+iB, d||psi||^2/dt=-4*pi*psi^dagger*B*psi. Gershgorin
+    bounds avoid another eigensolve when positive diagonal loss suffices.
+    This check is performed on the static matrix once per row, because adding
+    real excitation errors at the rocking points cannot change B.
+    """
+
+    matrix = np.asarray(H, dtype=np.complex128)
+    loss = (matrix - matrix.conj().T) / (2j)
+    magnitude = float(np.linalg.norm(loss, ord=np.inf))
+    tolerance = 1e-12 + 1e-10 * magnitude
+    diagonal = np.real(np.diag(loss))
+    radii = np.sum(np.abs(loss), axis=1) - np.abs(np.diag(loss))
+    bound = float(np.min(diagonal - radii))
+    if bound >= -tolerance:
+        return
+    minimum = float(np.linalg.eigvalsh(loss)[0])
+    if minimum < -tolerance:
+        details = {
+            "reason": "nonpassive_absorption",
+            "absorption_mode": str(mode),
+            "row_index": None if row_index is None else int(row_index),
+            "basis_size": int(len(matrix)),
+            "minimum_loss_eigenvalue_inv_A": minimum,
+            "minimum_additional_uniform_mu_inv_A": -minimum,
+            "tolerance_inv_A": tolerance,
+        }
+        raise NonPassiveAbsorptionError(
+            f"absorption candidate {mode!r} is not passive: minimum loss eigenvalue "
+            f"{minimum:.6g} 1/A. Use an elastic candidate or a physically supported "
+            "positive absorptive potential; increasing a fit parameter merely to "
+            "pass this check is not an absorption model.",
+            details=details,
+        )
 
 
 def dense_ug_memory_plan(h_lim: int, k_lim: int, l_lim: int) -> dict[str, int | list[int]]:
@@ -1270,6 +1324,7 @@ def parse_res(path: Path):
                 "y": shelx_parameter(float(tokens[3]), free_variables, field=f"{tokens[0]} y"),
                 "z": shelx_parameter(float(tokens[4]), free_variables, field=f"{tokens[0]} z"),
                 "occ": shelx_parameter(float(tokens[5]), free_variables, field=f"{tokens[0]} occupancy"),
+                "shelx_sof_encoded": float(tokens[5]),
                 "raw_adp": vals,
             }
             numeric_atom_values = [
@@ -1303,7 +1358,24 @@ def parse_res(path: Path):
         raise ValueError(f"No explicit electron-scattering SFAC records in {path}")
     if not atoms:
         raise ValueError(f"No atoms found before HKLF in {path}")
-    return {"cell": cell, "sfac": sfac, "atoms": atoms, "model_source": "shelx_res", "ignored_exti": None, "symmetry_ops": shelx_symmetry_records(latt, symm_texts), "shelx_latt": latt}
+    model = {"cell": cell, "sfac": sfac, "atoms": atoms, "model_source": "shelx_res", "ignored_exti": None, "symmetry_ops": shelx_symmetry_records(latt, symm_texts), "shelx_latt": latt}
+    operation_count = len(model["symmetry_ops"])
+    for atom in atoms:
+        multiplicity = len(list(unique_symmetry_mates(atom, model)))
+        if not multiplicity or operation_count % multiplicity:
+            raise ValueError(
+                f"inconsistent special-position multiplicity for {atom['name']} in {path}: "
+                f"{multiplicity} sites from {operation_count} symmetry operations"
+            )
+        # SHELX's SOF already contains special/general multiplicity. The
+        # internal model, like coreCIF, stores physical site occupancy because
+        # fcalc expands unique sites. Retain both the encoded and decoded source
+        # values so free-variable and partial-occupancy provenance is not lost.
+        atom["shelx_sof"] = float(atom["occ"])
+        atom["site_symmetry_order"] = operation_count // multiplicity
+        atom["site_multiplicity"] = multiplicity
+        atom["occ"] = atom["shelx_sof"] * atom["site_symmetry_order"]
+    return model
 
 
 def loop_rows(block, required_tag):
@@ -1396,15 +1468,23 @@ def parse_cif(path: Path):
         label = str(values_by_tag.get("_atom_site_aniso_label", "")).strip().strip("'\"")
         if not label:
             continue
-        aniso[label] = {
-            "adp_type": "anis",
-            "u11": cif_number(values_by_tag.get("_atom_site_aniso_u_11", 0.0), 0.0),
-            "u22": cif_number(values_by_tag.get("_atom_site_aniso_u_22", 0.0), 0.0),
-            "u33": cif_number(values_by_tag.get("_atom_site_aniso_u_33", 0.0), 0.0),
-            "u12": cif_number(values_by_tag.get("_atom_site_aniso_u_12", 0.0), 0.0),
-            "u13": cif_number(values_by_tag.get("_atom_site_aniso_u_13", 0.0), 0.0),
-            "u23": cif_number(values_by_tag.get("_atom_site_aniso_u_23", 0.0), 0.0),
-        }
+        forms = {}
+        for kind, factor in (("u", 1.0), ("b", 1.0 / (8.0 * math.pi**2))):
+            tags = {ij: f"_atom_site_aniso_{kind}_{ij}" for ij in ("11", "22", "33", "12", "13", "23")}
+            if any(tag in values_by_tag for tag in tags.values()):
+                values = {f"u{ij}": factor * cif_number(values_by_tag.get(tag)) for ij, tag in tags.items()}
+                if not all(math.isfinite(value) for value in values.values()):
+                    raise ValueError(f"CIF {path} has incomplete or non-finite {kind.upper()}ij for atom {label}")
+                forms[kind] = {"adp_type": "anis", "adp_source": f"cif_{kind}ani", **values}
+        if not forms:
+            raise ValueError(f"CIF {path} has an anisotropic record without Uij or Bij for atom {label}")
+        if "u" in forms and "b" in forms and not np.allclose(
+            [forms["u"][f"u{ij}"] for ij in ("11", "22", "33", "12", "13", "23")],
+            [forms["b"][f"u{ij}"] for ij in ("11", "22", "33", "12", "13", "23")],
+            rtol=1e-4, atol=1e-6,
+        ):
+            raise ValueError(f"CIF {path} declares inconsistent Uij and Bij for atom {label}")
+        aniso[label] = forms
 
     _, atom_rows = loop_rows(block, "_atom_site_label")
     atoms = []
@@ -1426,11 +1506,48 @@ def parse_cif(path: Path):
             "z": cif_number(values_by_tag.get("_atom_site_fract_z")),
             "occ": cif_number(values_by_tag.get("_atom_site_occupancy", 1.0), 1.0),
         }
-        if label in aniso and str(values_by_tag.get("_atom_site_adp_type", "")).strip().lower() == "uani":
-            atom.update(aniso[label])
+        def adp_label(tag, values=values_by_tag):
+            value = str(values.get(tag, "")).strip().strip("'\"").lower()
+            return "" if value in {"", ".", "?"} else value
+
+        declared = adp_label("_atom_site_adp_type")
+        alternate = adp_label("_atom_site_thermal_displace_type")
+        if declared and alternate and declared != alternate:
+            raise ValueError(f"CIF {path} has conflicting ADP type labels for atom {label}")
+        declared = declared or alternate
+        if declared and declared not in {"uani", "bani", "uiso", "biso"}:
+            raise ValueError(f"CIF {path} has unsupported ADP type {declared!r} for atom {label}")
+        if label not in aniso:
+            supplied_iso = {}
+            for kind in ("u", "b"):
+                tag = f"_atom_site_{kind}_iso_or_equiv"
+                if tag in values_by_tag:
+                    value = cif_number(values_by_tag[tag])
+                    if not math.isfinite(value):
+                        raise ValueError(f"CIF {path} has a non-finite or malformed isotropic displacement value {tag} for atom {label}")
+                    supplied_iso[kind] = value if kind == "u" else value / (8.0 * math.pi**2)
+            if len(supplied_iso) == 2 and not math.isclose(supplied_iso["u"], supplied_iso["b"], rel_tol=1e-4, abs_tol=1e-6):
+                raise ValueError(f"CIF {path} declares inconsistent Uiso and Biso for atom {label}")
+        if not declared:
+            if label in aniso:
+                declared = "uani" if "u" in aniso[label] else "bani"
+            elif math.isfinite(cif_number(values_by_tag.get("_atom_site_u_iso_or_equiv"))):
+                declared = "uiso"
+            elif math.isfinite(cif_number(values_by_tag.get("_atom_site_b_iso_or_equiv"))):
+                declared = "biso"
+        if declared in {"uani", "bani"}:
+            if declared[0] not in aniso.get(label, {}):
+                raise ValueError(f"CIF {path} declares {declared} but lacks matching anisotropic values for atom {label}")
+            atom.update(aniso[label][declared[0]])
+        elif declared in {"uiso", "biso"}:
+            value = cif_number(values_by_tag.get(f"_atom_site_{declared[0]}_iso_or_equiv"))
+            if not math.isfinite(value):
+                raise ValueError(f"CIF {path} declares {declared} but lacks its displacement value for atom {label}")
+            atom.update(adp_type="iso", uiso=value if declared == "uiso" else value / (8.0 * math.pi**2), adp_source=f"cif_{declared}")
         else:
-            atom["adp_type"] = "iso"
-            atom["uiso"] = cif_number(values_by_tag.get("_atom_site_u_iso_or_equiv", 0.05), 0.05)
+            # Preserve the documented historical fallback only when no ADP
+            # representation was supplied, never for an unsupported one.
+            atom.update(adp_type="iso", uiso=0.05, adp_source="default_uiso")
         numeric_atom_values = [
             value
             for key, value in atom.items()
@@ -1616,16 +1733,23 @@ def atom_dw_array(atom, h, k, l, s2, cell_tuple):
 
 
 def unique_symmetry_mates(atom, model):
-    """Yield unique symmetry-expanded sites, avoiding special-position copies."""
+    """Yield unique sites with only a tight coordinate-rounding tolerance.
+
+    Periodic differences handle positions written as 0.999999 versus zero.
+    This is not a near-special-position constraint or coordinate adjustment.
+    """
 
     xyz = np.asarray([atom["x"], atom["y"], atom["z"]], dtype=float)
-    seen = set()
+    seen = []
     for rotation, translation in model_symmetry_ops(model):
         position = np.mod(rotation @ xyz + translation, 1.0)
-        key = tuple(np.rint(position * 1e10).astype(np.int64) % 10_000_000_000)
-        if key in seen:
+        if any(
+            np.max(np.abs((position - prior) - np.rint(position - prior)))
+            <= SITE_SYMMETRY_TOLERANCE_FRACTIONAL
+            for prior in seen
+        ):
             continue
-        seen.add(key)
+        seen.append(position)
         yield position, rotation
 
 
@@ -1938,6 +2062,11 @@ def frozen_kernel_contract(cfg: Config | None = None):
     offdiag_sign = "basis[j] - basis[i]" if convention == "j_minus_i" else "basis[i] - basis[j]"
     return {
         "name": "audited_signed_row_simple_hermitian",
+        "structure_factors": {
+            "internal_occupancy": "physical site occupancy; parsed SHELX SOF multiplied by the site-symmetry order; coreCIF occupancy unchanged",
+            "site_rounding_tolerance_fractional": SITE_SYMMETRY_TOLERANCE_FRACTIONAL,
+            "displacements": "crystallographic Uij or Uiso in A^2; CIF Bij/Biso converted by division by 8*pi^2",
+        },
         "geometry": {
             "g(alpha)": "S @ R(alpha) @ F @ A(alpha) @ h (S=F=identity for ordinary XDS)",
             "Sg": "(k^2 - |s0 + g(alpha)|^2) / (2*k)",
@@ -1983,6 +2112,7 @@ def frozen_kernel_contract(cfg: Config | None = None):
                 }
             ),
             "absorption": "optional non-Hermitian optical-potential diagnostics; default none. Modes are mean, beam_dependent, offdiag_fraction, offdiag_tds, and midgley_like.",
+            "absorption_passivity": "the static loss operator (H-H^dagger)/(2i) must be positive semidefinite within numerical tolerance; nonpassive grid candidates are rejected",
             "rejected_nonhermitian_modes": [
                 "row-specific imaginary diagonal terms",
                 "EXTI-like extinction inside the raw Bloch matrix",
@@ -1992,6 +2122,7 @@ def frozen_kernel_contract(cfg: Config | None = None):
         },
         "basis": {
             "mode": "direct_target_topup",
+            "profile_basis_mode": None if cfg is None else str(cfg.profile_basis_mode),
             "first_beams": ["direct (0,0,0)", "target signed hkl"],
             "topup_d_min_A": None if cfg is None else float(cfg.topup_d_min),
             "max_support_sg_inv_A": None if cfg is None else float(cfg.max_support_sg),
@@ -4344,6 +4475,8 @@ class XDSBlochPort:
                 u_mat = u_mat + 1j * eta * u_mat
         np.fill_diagonal(u_mat, 0.0 + 0.0j)
         H += u_mat / (2.0 * self.data.k)
+        if absorb and self.absorption_enabled():
+            validate_passive_absorption(H, mode=mode, row_index=row_idx)
         return H
 
     def hamiltonian_from_static(self, static_H, sg_basis):
@@ -5380,6 +5513,8 @@ class XDSBlochPort:
                 u_mat = u_mat + 1j * eta * u_mat
         np.fill_diagonal(u_mat, 0.0 + 0.0j)
         H += u_mat / (2.0 * self.data.k)
+        if absorb and self.absorption_enabled():
+            validate_passive_absorption(H, mode=mode, row_index=row_idx)
         return H
 
     def row_prediction_from_cache(self, cache: dict, pos: int, unique_ug: np.ndarray):

@@ -436,10 +436,30 @@ def native_command(
         if bool(summary_value(source_summary, "positive_only", True))
         else "--include-nonpositive"
     )
+    # These values are part of the selected physical/observation contract, not
+    # parameters to reset when the atomic model is updated. Keep optional
+    # fields absent only for historical summaries that never recorded them.
+    pinned_fields = (
+        "sg_window_min", "sg_window_max", "sg_window_scale", "sg_window_frame_floor",
+        "profile_basis_mode", "profile_coordinate", "profile_angle_max_half_width_deg",
+        "mosaicity_mode", "mosaicity_sigma_deg", "mosaicity_max_sigma_deg", "mosaicity_points",
+        "mosaicity_support_sigma_deg", "mosaicity_support_points", "mosaicity_support_width_sigma",
+        "detector_scale_ridge", "detector_scale_smoothness", "detector_scale_min_rows",
+        "dose_b_ref_frame",
+        "row_contract", "split_contract",
+    )
+    for key in pinned_fields:
+        value = nui.get(key, cfg.get(key))
+        if value is not None and str(value) != "":
+            cmd.extend(["--" + key.replace("_", "-"), str(value)])
+    geometry_path = nui.get("geometry_path_file") or cfg.get("geometry_path") or cfg.get("geometry_path_file")
+    if geometry_path:
+        cmd.extend(["--geometry-path", str(geometry_path)])
     if baseline_hkl:
         cmd.extend(["--baseline-hkl", str(baseline_hkl)])
-    if args.max_rows > 0:
-        cmd.extend(["--max-rows", str(int(args.max_rows))])
+    max_rows = int(args.max_rows) if args.max_rows > 0 else int(cfg.get("max_rows") or 0)
+    if max_rows > 0:
+        cmd.extend(["--max-rows", str(max_rows)])
     if make_maps:
         cmd.append("--make-maps")
     if skip_endpoint_refinement:

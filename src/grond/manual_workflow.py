@@ -713,6 +713,9 @@ def _hand_evidence(
     min_z_free: float = 3.5,
     min_free_rows: int = 10,
 ) -> dict[str, object]:
+    min_z_all = float(min_z_all)
+    if not math.isfinite(min_z_all) or min_z_all <= 0.0:
+        raise ValueError("all-row hand threshold must be finite and positive")
     all_delta = 0.0
     free_delta = 0.0
     all_n = 0
@@ -721,7 +724,10 @@ def _hand_evidence(
     z_numerators = {"all": 0.0, "free": 0.0}
     z_variances = {"all": 0.0, "free": 0.0}
     z_datasets = {"all": 0, "free": 0}
+    calculation_errors: list[str] = []
     for name, diagnostic in diagnostics.items():
+        if diagnostic.get("calculation_status") == "error":
+            calculation_errors.extend(f"{name}: {error}" for error in diagnostic.get("calculation_errors", []))
         all_block = diagnostic.get("all") if isinstance(diagnostic.get("all"), Mapping) else {}
         free_block = diagnostic.get("free") if isinstance(diagnostic.get("free"), Mapping) else {}
         delta_all = float(all_block.get("delta_chi2_other_minus_best", 0.0) or 0.0)
@@ -742,8 +748,8 @@ def _hand_evidence(
             n = int(adjusted.get("n", 0) or 0)
             k_effective = float(
                 adjusted.get(
-                    "k_selected_lower_abs_intensity_residual",
-                    adjusted.get("k_effective_selected_wins_plus_half_ties", float("nan")),
+                    "k_effective_selected_wins_plus_half_ties",
+                    adjusted.get("k_selected_lower_abs_intensity_residual", float("nan")),
                 )
             )
             w = float(adjusted.get("w", float("nan")))
@@ -765,7 +771,10 @@ def _hand_evidence(
         )
         for support in ("all", "free")
     }
-    decisive_support = math.isfinite(combined_z["all"])
+    complete = bool(diagnostics) and z_datasets["all"] == len(diagnostics) and not calculation_errors
+    if not complete and not calculation_errors:
+        calculation_errors.append("one or more datasets lack a complete all-row adjusted hand calculation")
+    decisive_support = bool(complete and math.isfinite(combined_z["all"]) and abs(combined_z["all"]) >= float(min_z_all))
     if (
         decisive_support
         and combined_z["all"] >= float(min_z_all)
@@ -781,6 +790,14 @@ def _hand_evidence(
     selected_sign = -1.0 if recommendation == "inverse" else 1.0
     oriented_free_z = selected_sign * combined_z["free"]
     warnings: list[str] = []
+    preferred = (
+        "input" if complete and combined_z["all"] > 0.0 else "inverse"
+        if complete and combined_z["all"] < 0.0 else "no_preference"
+        if complete else "unavailable"
+    )
+    if complete and not decisive_support:
+        warnings.append(f"All-row hand preference is weak or tied (ZKP={combined_z['all']:.3g}); the calculated preference is retained in the report.")
+    warnings.append("Adjusted ZKP is a conditional count contrast, not calibrated sigma confidence under correlated rows.")
     if not math.isfinite(combined_z["free"]):
         warnings.append("Held-out Klar-Palatinus adjusted hand Z is unavailable.")
     elif oriented_free_z < 0.0:
@@ -809,6 +826,12 @@ def _hand_evidence(
         "minimum_free_rows": int(min_free_rows),
         "decisive_support": decisive_support,
         "recommendation": recommendation,
+        "preferred_hand": preferred,
+        "calculation_status": "complete" if complete else "error",
+        "calculation_errors": calculation_errors,
+        "hand_confidence": "strong_conditional" if decisive_support else "weak_conditional" if complete and combined_z["all"] else "no_sensitivity" if complete else "calculation_error",
+        "primary_evidence": "all_rows",
+        "free_evidence_role": "diagnostic_warning_only",
         "warnings": warnings,
         "decision_rule": (
             "recommend inversion when combined all-row adjusted ZKP <= -threshold; held-out evidence "

@@ -342,14 +342,14 @@ def test_choose_hand_rejects_switch_when_reported_scout_rows_do_not_match(tmp_pa
 @pytest.mark.parametrize(
     ("case", "expected_reason"),
     [
-        ("zero_free", "same positive number of held-out free rows"),
-        ("missing_free_metric", "finite raw free-row dynamical wR2 metrics"),
+        ("zero_free", "held-out hand evidence is absent"),
+        ("missing_free_metric", "held-out dynamical wR2 is unavailable"),
         ("partial_rows", "identical selected/work/free row counts"),
         ("malformed_rows", "identical selected/work/free row counts"),
         ("inconsistent_rows", "identical selected/work/free row counts"),
     ],
 )
-def test_choose_hand_requires_positive_rows_and_raw_free_metrics(
+def test_choose_hand_requires_physical_rows_but_free_metrics_only_warn(
     tmp_path: Path,
     monkeypatch,
     case: str,
@@ -390,6 +390,15 @@ def test_choose_hand_requires_positive_rows_and_raw_free_metrics(
         (out_dir / "summary.json").write_text(json.dumps(summary) + "\n")
 
     monkeypatch.setattr(cli, "run_logged", fake_run_logged)
+    def valid_common_sigma_replay(original, alternate, **_kwargs):
+        left = cli.score_native_summary(json.loads(original.read_text()))
+        right = cli.score_native_summary(json.loads(alternate.read_text()))
+        if case == "missing_free_metric":
+            left["free_dyn_wR2_all"] = right["free_dyn_wR2_all"] = float("nan")
+        return {"status": "replayed", "original_score": left, "alternate_score": right,
+                "score_delta_original_minus_alternate": 0.07,
+                "adjusted_hand_z_original_favored": {"all": {"status": "ok", "z": -5.0}}}
+    monkeypatch.setattr(cli, "build_common_sigma_hand_evidence", valid_common_sigma_replay)
     selected, decision, _alternate_run = cli.choose_hand_by_scout(
         prep,
         ds,
@@ -402,9 +411,15 @@ def test_choose_hand_requires_positive_rows_and_raw_free_metrics(
     )
 
     assert decision["scout_selected_before_quality_gate"] == "alternate"
-    assert selected == "original"
-    assert decision["quality_gate_status"] == "rejected_switch"
-    assert any(expected_reason in reason for reason in decision["quality_gate_reasons"])
+    if case in {"zero_free", "missing_free_metric"}:
+        assert selected == "alternate"
+        assert decision["quality_gate_status"] == "passed"
+        assert decision["quality_gate_reasons"] == []
+        assert any(expected_reason in warning for warning in decision["warnings"])
+    else:
+        assert selected == "original"
+        assert decision["quality_gate_status"] == "rejected_switch"
+        assert any(expected_reason in reason for reason in decision["quality_gate_reasons"])
 
 
 def test_step_estimator_counts_scout_and_final_hand_pairs_per_multi_dataset(tmp_path: Path):
@@ -425,7 +440,7 @@ def test_step_estimator_counts_scout_and_final_hand_pairs_per_multi_dataset(tmp_
     assert with_hand - without_hand == 6 * len(prep.datasets) + 1
 
 
-def test_shared_hand_aggregation_requires_unanimous_quality_gated_support():
+def test_shared_hand_aggregation_uses_complete_all_row_support():
     args = argparse.Namespace(hand_accept_delta=0.015)
     result = cli.aggregate_shared_hand_decisions(
         {
@@ -460,10 +475,15 @@ def test_shared_hand_aggregation_keeps_original_for_weak_mixed_or_failed_evidenc
         args,
     )
 
-    assert result["selected_hand"] == "original"
-    assert result["quality_gate_status"] == "retained_original"
-    assert result["alternate_support_count"] == 1
-    assert any(reason.startswith("blocks_switch:") for reason in result["quality_gate_reasons"])
+    if blocking_decision["quality_gate_status"] == "passed" and not blocking_decision.get("warning"):
+        assert result["selected_hand"] == "alternate"
+        assert result["quality_gate_status"] == "passed"
+        assert result["preferred_hand"] == "alternate"
+    else:
+        assert result["selected_hand"] == "original"
+        assert result["quality_gate_status"] == "calculation_error"
+        assert result["preferred_hand"] == "unavailable"
+        assert any(reason.startswith("blocks_switch:") for reason in result["quality_gate_reasons"])
 
 
 def test_shared_hand_scout_persists_dataset_evidence_and_actual_shared_choice(tmp_path: Path, monkeypatch):
@@ -495,16 +515,16 @@ def test_shared_hand_scout_persists_dataset_evidence_and_actual_shared_choice(tm
         {"a": 500, "b": 600},
     )
 
-    assert selected == "original"
-    assert shared["selected_hand"] == "original"
+    assert selected == "alternate"
+    assert shared["selected_hand"] == "alternate"
     saved_shared = json.loads((tmp_path / "out" / "decisions" / "shared_absolute_structure_decision.json").read_text())
-    assert saved_shared["selected_hand"] == "original"
+    assert saved_shared["selected_hand"] == "alternate"
     saved_a = json.loads((tmp_path / "out" / "decisions" / "a" / "absolute_structure_decision.json").read_text())
     saved_b = json.loads((tmp_path / "out" / "decisions" / "b" / "absolute_structure_decision.json").read_text())
     assert saved_a["dataset_scout_selected_hand"] == "alternate"
-    assert saved_a["selected_hand"] == "original"
+    assert saved_a["selected_hand"] == "alternate"
     assert saved_b["dataset_scout_selected_hand"] == "original"
-    assert saved_b["selected_hand"] == "original"
+    assert saved_b["selected_hand"] == "alternate"
 
 
 def test_shared_hand_dry_run_persists_original_without_executing_scouts(tmp_path: Path, monkeypatch):

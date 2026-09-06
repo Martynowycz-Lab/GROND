@@ -4,6 +4,36 @@ This file records user-visible changes to the installable package. Version `0.2.
 
 ## 0.2.2 (unreleased)
 
+Invalid hand thresholds now produce explicit input errors. Map finishing preserves usable results while reporting partial or missing map families, including the executable or artifact that is missing; a zero exit code no longer hides those warnings in the finish manifest.
+
+The physics audit corrects SHELX special-position occupancies before unique
+symmetry expansion, and accepts coreCIF isotropic/anisotropic B values with the
+required conversion to U. Malformed supplied displacement parameters now give
+an explicit error. Native coordinate updates freeze special-position
+coordinates until symmetry-constrained derivatives are implemented. Absorptive
+matrices must have a passive loss operator: a rejected candidate retains its
+configuration and numerical error while feasible candidates continue; an
+entirely invalid grid reports a calculation failure.
+
+Hand method version 4 gives exact and numerical residual ties half a win.
+All-row evidence is primary; weak, absent or conflicting free subsets warn
+without vetoing it. Reports distinguish the measured preferred hand, its
+conditional support, and the exported coordinate representation. Nominal Z
+values are not calibrated sigma confidence. Both hand predictions and their
+matched Born controls have explicit residual summaries. Physical row or
+geometry mismatches remain calculation errors; a failed final hand calculation
+preserves the preceding usable endpoint with the exact failure details.
+Centrosymmetric not-applicable hand results no longer block endpoint delivery.
+
+Outer prediction-cache schema 7 binds external geometry files and loaded
+geometry arrays. Single-dataset feedback preserves the selected profile,
+mosaicity, detector regularization, dose reference, row and split contracts.
+Diagnostic fit-target units are restored consistently for combined endpoints,
+and immutable row sigmas use the same units as their target intensities.
+Paired inverse predictions preserve basis hashes and apply row-resolution
+modulation once. Held-out residual RMS is reported separately from heuristic
+fit degrees of freedom.
+
 Row-plan cache schema 6 now retains the exact solved profile orientations and
 two-axis tilts that were already computed during cache construction. Repeated
 rocking-profile diagnostics no longer need to solve the same roots again; old

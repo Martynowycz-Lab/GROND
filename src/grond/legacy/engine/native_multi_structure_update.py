@@ -63,6 +63,7 @@ if __package__:
         prediction_for_model,
         residual_vector,
         scaled_prediction,
+        special_position_coordinate_policy,
         update_res_coordinates,
         write_model_delta_csv,
         write_parameter_csv,
@@ -100,6 +101,7 @@ else:  # pragma: no cover - direct script execution
         prediction_for_model,
         residual_vector,
         scaled_prediction,
+        special_position_coordinate_policy,
         update_res_coordinates,
         write_model_delta_csv,
         write_parameter_csv,
@@ -762,10 +764,11 @@ def main():
 
     for block_no, block_mode in enumerate(block_schedule, start=1):
         block_tag = f"block_{block_no:02d}_{block_mode}"
+        coordinate_policy = special_position_coordinate_policy(current_model, args.atom_selection, args.atom_labels, block_mode)
         try:
             params, x0 = parameter_layout(current_model, args.atom_selection, args.atom_labels, block_mode)
         except ValueError as exc:
-            block_results.append({"block": block_no, "mode": block_mode, "skipped": True, "reason": str(exc)})
+            block_results.append({"block": block_no, "mode": block_mode, "skipped": True, "reason": str(exc), "coordinate_constraints": coordinate_policy})
             continue
         has_xyz = any(p.get("kind", "xyz") == "xyz" for p in params)
         has_adp = any(p.get("kind") == "adp_ueq" for p in params)
@@ -915,6 +918,7 @@ def main():
                 "block": block_no,
                 "mode": block_mode,
                 "parameter_count": int(len(params)),
+                "coordinate_constraints": coordinate_policy,
                 "finite_difference": {
                     "scheme": "bounded_two_point_absolute",
                     "xyz_step_frac": float(args.diff_step if args.diff_step is not None else args.xyz_diff_step_frac),
