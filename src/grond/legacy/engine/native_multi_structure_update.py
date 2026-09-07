@@ -16,53 +16,69 @@ The default mode is intentionally conservative:
 
 from __future__ import annotations
 
-import argparse
 import copy
 import csv
 import json
 import math
 import os
 import re
+import sys
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
 
 for _name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
     os.environ[_name] = "1"
 
+if not __package__:
+    # Direct legacy execution must import this checkout, not another installed GROND.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+
 import numpy as np
 from scipy.optimize import least_squares
 
+from grond.refine.arguments_multidataset import build_parser as build_multi_update_parser
+from grond.refine.datasets import (
+    DatasetState as DatasetState,
+    build_dataset_state as build_dataset_state,
+    choose_objective_rows as choose_objective_rows,
+    compact_eval as compact_eval,
+    evaluate_state as evaluate_state,
+    fit_frozen_scale_contract as fit_frozen_scale_contract,
+    parse_bool as parse_bool,
+    parse_float as parse_float,
+    parse_int as parse_int,
+    parse_text as parse_text,
+    predict_state as predict_state,
+    read_datasets_csv as read_datasets_csv,
+    score_eval as score_eval,
+    stable_name_seed as stable_name_seed,
+    state_residual_vector as state_residual_vector,
+    write_dataset_rows as write_dataset_rows,
+)
+from grond.regularize.contracts import Nuisance as Nuisance
+from grond.regularize.scales import native_metrics as native_metrics
+
 if __package__:
     from ...io.config import DATASET_NAME_RE
-    from .bloch_engine import DEFAULT_MAX_SUPPORT_SG, Config, XDSData, parse_model, sha256, split_masks
+    from .bloch_engine import DEFAULT_MAX_SUPPORT_SG, parse_model, sha256
     from .native_row_regularize import (
         TARGET_MODES,
-        Nuisance,
-        native_metrics,
         parse_wght,
-        row_selection,
-        sigma_eff,
-        target_arrays,
     )
     from .native_structure_update import (
         CctbxRiguEvaluator,
         absolute_finite_difference_jacobian,
         adp_similarity_residuals,
-        apply_row_resolution_to_prediction,
         bond_restraint_residuals,
         build_start_restraints,
-        fit_scale_contract,
         inspect_cctbx_bridge,
         model_from_vector,
         parameter_absolute_steps,
         parameter_bounds,
         parameter_layout,
         parameter_prior,
-        prediction_for_model,
-        residual_vector,
-        scaled_prediction,
         special_position_coordinate_policy,
         update_res_coordinates,
         write_model_delta_csv,
@@ -74,33 +90,23 @@ else:  # pragma: no cover - direct script execution
         from grond.io.config import DATASET_NAME_RE
     except ImportError:
         DATASET_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
-    from bloch_engine import DEFAULT_MAX_SUPPORT_SG, Config, XDSData, parse_model, sha256, split_masks
+    from bloch_engine import DEFAULT_MAX_SUPPORT_SG, parse_model, sha256
     from native_row_regularize import (
         TARGET_MODES,
-        Nuisance,
-        native_metrics,
         parse_wght,
-        row_selection,
-        sigma_eff,
-        target_arrays,
     )
     from native_structure_update import (
         CctbxRiguEvaluator,
         absolute_finite_difference_jacobian,
         adp_similarity_residuals,
-        apply_row_resolution_to_prediction,
         bond_restraint_residuals,
         build_start_restraints,
-        fit_scale_contract,
         inspect_cctbx_bridge,
         model_from_vector,
         parameter_absolute_steps,
         parameter_bounds,
         parameter_layout,
         parameter_prior,
-        prediction_for_model,
-        residual_vector,
-        scaled_prediction,
         special_position_coordinate_policy,
         update_res_coordinates,
         write_model_delta_csv,
@@ -109,29 +115,7 @@ else:  # pragma: no cover - direct script execution
     )
 
 
-@dataclass
-class DatasetState:
-    name: str
-    hkl: Path
-    data: XDSData
-    target: np.ndarray
-    base_sig: np.ndarray
-    sig: np.ndarray
-    target_indices: np.ndarray
-    objective_indices: np.ndarray
-    masks: dict
-    validation_fit_indices: np.ndarray
-    nuisance: Nuisance
-    cfg: Config
-    objective_cfg: Config
-    wght_a: float
-    wght_b: float
-    detector_scale_bins: int
-    min_d_spacing: float
-    min_peak: float
-    target_mode: str
-    dataset_weight: float
-    dataset_role: str
+from grond.legacy.engine.bloch_engine import Config as Config, XDSData as XDSData
 
 
 class EarlyStopOptimization(Exception):
@@ -176,313 +160,7 @@ def make_early_stop_result(exc: EarlyStopOptimization, eval_count: int):
     )
 
 
-def parse_bool(text: str | None, default: bool = False) -> bool:
-    if text is None or str(text).strip() == "":
-        return default
-    return str(text).strip().lower() in {"1", "true", "yes", "y", "on"}
-
-
-def parse_float(row: dict, key: str, default: float) -> float:
-    val = row.get(key, "")
-    if val is None or str(val).strip() == "":
-        return float(default)
-    return float(val)
-
-
-def parse_int(row: dict, key: str, default: int) -> int:
-    val = row.get(key, "")
-    if val is None or str(val).strip() == "":
-        return int(default)
-    return int(float(val))
-
-
-def parse_text(row: dict, key: str, default: str) -> str:
-    val = row.get(key, "")
-    if val is None or str(val).strip() == "":
-        return str(default)
-    return str(val).strip()
-
-
-def choose_objective_rows(data: XDSData, indices, masks, target, sig, n_rows: int, n_bins: int, seed: int):
-    candidates = np.asarray(
-        [i for i in indices if masks["work"][i] and target[i] > 0 and np.isfinite(target[i]) and np.isfinite(sig[i])],
-        dtype=int,
-    )
-    if n_rows <= 0 or n_rows >= len(candidates):
-        return np.asarray(candidates, dtype=int)
-    rng = np.random.default_rng(int(seed))
-    dvals = np.asarray([data.cell.calculate_d(tuple(int(v) for v in h)) for h in data.hkl], dtype=float)
-    order = candidates[np.argsort(dvals[candidates])]
-    bins = np.array_split(order, max(1, int(n_bins)))
-    chosen: list[int] = []
-    remaining = int(n_rows)
-    chosen_set: set[int] = set()
-    for b in bins:
-        if len(b) == 0:
-            continue
-        quota = int(round(n_rows * len(b) / max(len(candidates), 1)))
-        quota = max(1, min(quota, len(b), remaining))
-        if quota <= 0:
-            continue
-        remaining -= quota
-        isigi = np.maximum(target[b] / np.maximum(sig[b], 1e-12), 0.0)
-        prob = np.sqrt(isigi + 1.0)
-        prob = prob / np.sum(prob)
-        picked = rng.choice(b, size=quota, replace=False, p=prob).tolist()
-        chosen.extend(int(x) for x in picked)
-        chosen_set.update(int(x) for x in picked)
-    if remaining > 0:
-        pool = np.asarray([int(i) for i in candidates if int(i) not in chosen_set], dtype=int)
-        if len(pool):
-            extra = rng.choice(pool, size=min(remaining, len(pool)), replace=False)
-            chosen.extend(int(x) for x in extra.tolist())
-    return np.asarray(sorted(set(chosen)), dtype=int)
-
-
-def read_datasets_csv(path: Path) -> list[dict]:
-    with path.open(newline="") as f:
-        rows = [dict(r) for r in csv.DictReader(f)]
-    rows = [r for r in rows if parse_bool(r.get("include"), True)]
-    if not rows:
-        raise ValueError(f"No included datasets in {path}")
-    names = [str(row.get("name") or row.get("dataset") or "").strip() for row in rows]
-    for name in names:
-        if not DATASET_NAME_RE.fullmatch(name):
-            raise ValueError(
-                f"dataset name {name!r} must contain only letters, numbers, dots, underscores, or hyphens"
-            )
-    folded = [name.casefold() for name in names]
-    if len(set(folded)) != len(folded):
-        raise ValueError("dataset names in the CSV must be unique without regard to letter case")
-    return rows
-
-
-def stable_name_seed(name: str) -> int:
-    total = 0
-    for ch in str(name):
-        total = (total * 131 + ord(ch)) % 100000
-    return total
-
-
-def build_dataset_state(row: dict, args, wght_a: float, wght_b: float, symmetry_ops=None) -> DatasetState:
-    name = row.get("name") or row.get("dataset") or Path(row["hkl"]).parent.parent.name
-    if not DATASET_NAME_RE.fullmatch(str(name)):
-        raise ValueError(f"unsafe dataset name {name!r}")
-    hkl = Path(row["hkl"])
-    hkl_transform = row.get("hkl_transform") or args.hkl_transform
-    data = XDSData(hkl, hkl_transform=hkl_transform)
-    target_mode = row.get("target_mode") or args.target_mode
-    target, base_sig = target_arrays(data, target_mode)
-    min_d = parse_float(row, "min_d_spacing", args.min_d_spacing)
-    effective_topup_d_min = min(float(args.topup_d_min), float(min_d)) if min_d > 0 else float(args.topup_d_min)
-    min_peak = parse_float(row, "min_peak", args.min_peak)
-    geometry_percentile = parse_float(row, "geometry_percentile", args.geometry_percentile)
-    include_nonpositive = parse_bool(row.get("include_nonpositive"), args.include_nonpositive)
-    target_indices = row_selection(data, target, not include_nonpositive, min_d, min_peak, 0, geometry_percentile)
-    masks = split_masks(
-        data.hkl,
-        args.free_fraction,
-        args.split_seed,
-        symmetry_ops=symmetry_ops,
-    )
-    selected_mask = np.zeros(len(target), dtype=bool)
-    selected_mask[target_indices] = True
-    masks = {k: v & selected_mask for k, v in masks.items()}
-    nuisance = Nuisance(
-        thickness_A=parse_float(row, "thickness_A", parse_float(row, "thickness", args.thickness)),
-        thickness_grad_frac=parse_float(row, "thickness_grad_frac", args.thickness_grad_frac),
-        frame_offset=parse_float(row, "frame_offset", args.frame_offset),
-        group_width_deg=parse_float(row, "group_width_deg", args.group_width_deg),
-        detector_scale_bins=parse_int(row, "detector_scale_bins", args.detector_scale_bins),
-        sigma_a=parse_float(row, "sigma_a", args.sigma_a),
-        sigma_b_corr=parse_float(row, "sigma_b_corr", args.sigma_b_corr),
-        sigma_c_peak=parse_float(row, "sigma_c_peak", args.sigma_c_peak),
-        thickness_model=parse_text(row, "thickness_model", args.thickness_model),
-        thickness_sigma_frac=parse_float(row, "thickness_sigma_frac", args.thickness_sigma_frac),
-        sg_jitter_mode=parse_text(row, "sg_jitter_mode", args.sg_jitter_mode),
-        sg_jitter_sigma0=parse_float(row, "sg_jitter_sigma0", args.sg_jitter_sigma0),
-        sg_jitter_sigma_d_inv=parse_float(row, "sg_jitter_sigma_d_inv", args.sg_jitter_sigma_d_inv),
-        sg_jitter_sigma_frame=parse_float(row, "sg_jitter_sigma_frame", args.sg_jitter_sigma_frame),
-        sg_jitter_points=parse_int(row, "sg_jitter_points", args.sg_jitter_points),
-        sg_jitter_student_df=parse_float(row, "sg_jitter_student_df", args.sg_jitter_student_df),
-        sg_jitter_width_factor=parse_float(row, "sg_jitter_width_factor", args.sg_jitter_width_factor),
-        absorption_mode=parse_text(row, "absorption_mode", args.absorption_mode),
-        absorption_mu=parse_float(row, "absorption_mu", args.absorption_mu),
-        absorption_frac=parse_float(row, "absorption_frac", args.absorption_frac),
-        absorption_mu_g2=parse_float(row, "absorption_mu_g2", args.absorption_mu_g2),
-        absorption_mu_theta2=parse_float(row, "absorption_mu_theta2", args.absorption_mu_theta2),
-        absorption_tds_b=parse_float(row, "absorption_tds_b", args.absorption_tds_b),
-        dose_b_mode=parse_text(row, "dose_b_mode", args.dose_b_mode),
-        dose_b_per_frame=parse_float(row, "dose_b_per_frame", args.dose_b_per_frame),
-        dose_b_ref_frame=parse_float(row, "dose_b_ref_frame", args.dose_b_ref_frame),
-        row_resolution_b=parse_float(row, "row_resolution_b", args.row_resolution_b),
-        native_wght_a=parse_float(row, "native_wght_a", args.native_wght_a),
-        native_wght_b=parse_float(row, "native_wght_b", args.native_wght_b),
-    )
-    use_wght_a = float(nuisance.native_wght_a) if np.isfinite(float(nuisance.native_wght_a)) else float(wght_a)
-    use_wght_b = float(nuisance.native_wght_b) if np.isfinite(float(nuisance.native_wght_b)) else float(wght_b)
-    sig = sigma_eff(data, target, base_sig, nuisance)
-    dataset_weight = max(0.0, parse_float(row, "dataset_weight", parse_float(row, "raw_row_weight", 1.0)))
-    dataset_role = parse_text(row, "dataset_role", "primary")
-    if dataset_weight > 0.0 and dataset_weight < 1.0:
-        sig = sig / math.sqrt(max(dataset_weight, 1e-12))
-    objective_rows = int(parse_float(row, "objective_rows", args.objective_rows_per_dataset))
-    objective_indices = choose_objective_rows(data, target_indices, masks, target, sig, objective_rows, args.objective_bins, args.split_seed + stable_name_seed(name))
-    if args.scale_fit_split == "all":
-        validation_fit_indices = np.asarray(target_indices, dtype=int)
-    else:
-        validation_fit_indices = np.asarray([i for i in target_indices if masks["work"][i]], dtype=int)
-    cfg = Config(
-        n_basis=args.n_basis,
-        n_points=args.n_points,
-        sg_window=args.sg_window,
-        sg_window_mode=args.sg_window_mode,
-        sg_window_min=args.sg_window_min,
-        sg_window_max=args.sg_window_max,
-        sg_window_scale=args.sg_window_scale,
-        sg_window_frame_floor=args.sg_window_frame_floor,
-        sg_jitter_mode=nuisance.sg_jitter_mode,
-        sg_jitter_sigma0=nuisance.sg_jitter_sigma0,
-        sg_jitter_sigma_d_inv=nuisance.sg_jitter_sigma_d_inv,
-        sg_jitter_sigma_frame=nuisance.sg_jitter_sigma_frame,
-        sg_jitter_points=nuisance.sg_jitter_points,
-        sg_jitter_student_df=nuisance.sg_jitter_student_df,
-        sg_jitter_width_factor=nuisance.sg_jitter_width_factor,
-        profile_quadrature=args.profile_quadrature,
-        profile_accumulation=args.profile_accumulation,
-        topup_d_min=effective_topup_d_min,
-        max_support_sg=args.max_support_sg,
-        thickness_A=nuisance.thickness_A,
-        thickness_model=nuisance.thickness_model,
-        thickness_grad_frac=nuisance.thickness_grad_frac,
-        thickness_sigma_frac=nuisance.thickness_sigma_frac,
-        thickness_points=args.thickness_points,
-        group_width_deg=nuisance.group_width_deg,
-        frame_offset=nuisance.frame_offset,
-        free_fraction=args.free_fraction,
-        split_seed=args.split_seed,
-        variance_a=nuisance.sigma_a,
-        variance_b_corr=nuisance.sigma_b_corr,
-        variance_c_peak=nuisance.sigma_c_peak,
-        compute_backend=args.compute_backend,
-        jax_batch_size=args.jax_batch_size,
-        jax_matrix_bucket_size=args.jax_matrix_bucket_size,
-        bethe_strong_count=args.bethe_strong_count,
-        bethe_variant=args.bethe_variant,
-        bethe_promote_denom=args.bethe_promote_denom,
-        bethe_denom_eps=args.bethe_denom_eps,
-        ug_d_min=args.ug_d_min,
-        absorption_mode=nuisance.absorption_mode,
-        absorption_mu=nuisance.absorption_mu,
-        absorption_frac=nuisance.absorption_frac,
-        absorption_mu_g2=nuisance.absorption_mu_g2,
-        absorption_mu_theta2=nuisance.absorption_mu_theta2,
-        absorption_tds_b=nuisance.absorption_tds_b,
-        dose_b_mode=nuisance.dose_b_mode,
-        dose_b_per_frame=nuisance.dose_b_per_frame,
-        dose_b_ref_frame=nuisance.dose_b_ref_frame,
-        row_plan_cache=args.row_plan_cache,
-    )
-    objective_cfg = copy.deepcopy(cfg)
-    objective_cfg.group_width_deg = args.objective_group_width_deg
-    return DatasetState(
-        name=str(name),
-        hkl=hkl,
-        data=data,
-        target=target,
-        base_sig=base_sig,
-        sig=sig,
-        target_indices=np.asarray(target_indices, dtype=int),
-        objective_indices=np.asarray(objective_indices, dtype=int),
-        masks=masks,
-        validation_fit_indices=np.asarray(validation_fit_indices, dtype=int),
-        nuisance=nuisance,
-        cfg=cfg,
-        objective_cfg=objective_cfg,
-        wght_a=float(use_wght_a),
-        wght_b=float(use_wght_b),
-        detector_scale_bins=int(nuisance.detector_scale_bins),
-        min_d_spacing=float(min_d),
-        min_peak=float(min_peak),
-        target_mode=str(target_mode),
-        dataset_weight=float(dataset_weight),
-        dataset_role=str(dataset_role),
-    )
-
-
-def predict_state(state: DatasetState, model, indices, cache_root: Path, tag: str, workers: int, chunksize: int, objective: bool = False):
-    cfg = state.objective_cfg if objective else state.cfg
-    ds_cache = cache_root / state.name
-    return prediction_for_model(state.data, model, cfg, np.asarray(indices, dtype=int), ds_cache, tag, workers, chunksize)
-
-
-def fit_frozen_scale_contract(state: DatasetState, model, cache_root: Path, tag: str, workers: int, chunksize: int):
-    pred = predict_state(state, model, state.objective_indices, cache_root, f"{tag}_{state.name}_scale_anchor", workers, chunksize, objective=True)
-    full = np.full(len(state.target), np.nan, dtype=float)
-    full[pred["indices"]] = pred["dyn"]
-    full, _, _ = apply_row_resolution_to_prediction(state.data, full, state.nuisance.row_resolution_b)
-    contract = fit_scale_contract(
-        state.data,
-        state.target,
-        state.sig,
-        full,
-        state.objective_cfg,
-        state.objective_indices,
-        state.wght_a,
-        state.wght_b,
-        detector_scale_bins=state.detector_scale_bins,
-    )
-    contract["mode"] = "frozen_block"
-    contract["anchor_prediction_seconds"] = float(pred.get("seconds", 0.0))
-    return contract
-
-
-def state_residual_vector(state: DatasetState, model, cache_root: Path, tag: str, workers: int, chunksize: int, scale_contract=None):
-    pred = predict_state(state, model, state.objective_indices, cache_root, f"{tag}_{state.name}_moving", workers, chunksize, objective=True)
-    _, scaled, _, _, _ = scaled_prediction(
-        state.data,
-        state.target,
-        state.sig,
-        pred,
-        state.objective_cfg,
-        state.objective_indices,
-        state.wght_a,
-        state.wght_b,
-        detector_scale_bins=state.detector_scale_bins,
-        scale_contract=scale_contract,
-        row_resolution_b=state.nuisance.row_resolution_b,
-    )
-    return residual_vector(state.data, state.target, state.sig, scaled, state.objective_indices, state.wght_a, state.wght_b)
-
-
-def evaluate_state(state: DatasetState, model, cache_root: Path, tag: str, workers: int, chunksize: int):
-    pred = predict_state(state, model, state.target_indices, cache_root, f"{tag}_{state.name}_validation", workers, chunksize, objective=False)
-    _, scaled, _, _, scale_count = scaled_prediction(
-        state.data,
-        state.target,
-        state.sig,
-        pred,
-        state.cfg,
-        state.validation_fit_indices,
-        state.wght_a,
-        state.wght_b,
-        detector_scale_bins=state.detector_scale_bins,
-        row_resolution_b=state.nuisance.row_resolution_b,
-    )
-    valid = np.isfinite(scaled)
-    splits = {}
-    for split, mask in state.masks.items():
-        splits[split] = native_metrics(state.target, state.sig, scaled, mask & valid, state.wght_a, state.wght_b, n_params=int(scale_count))
-    return {
-        "name": state.name,
-        "splits": splits,
-        "scaled": scaled,
-        "valid": valid,
-        "scale_count": int(scale_count),
-        "prediction_seconds": float(pred.get("seconds", 0.0)),
-    }
-
-
+# Keep the public evaluation dispatcher here so documented legacy hooks remain local.
 def evaluate_all(states: list[DatasetState], model, cache_root: Path, tag: str, workers: int, chunksize: int):
     per_dataset = [evaluate_state(s, model, cache_root, tag, workers, chunksize) for s in states]
     joint = {"datasets": per_dataset, "splits": {}}
@@ -513,217 +191,12 @@ def evaluate_all(states: list[DatasetState], model, cache_root: Path, tag: str, 
     return joint
 
 
-def score_eval(eval_result: dict, metric: str) -> float:
-    split, value = metric.split("_", 1)
-    key = "wR2_all" if value == "wR2" else "R1_all"
-    return float(eval_result["splits"][split][key])
-
-
-def compact_eval(eval_result: dict) -> dict:
-    return {
-        "splits": eval_result["splits"],
-        "datasets": [
-            {k: v for k, v in ds.items() if k not in {"scaled", "valid"}}
-            for ds in eval_result.get("datasets", [])
-        ],
-    }
-
-
-def write_dataset_rows(out: Path, states: list[DatasetState]):
-    with (out / "datasets_used.csv").open("w", newline="") as f:
-        fields = [
-            "name",
-            "hkl",
-            "target_rows",
-            "objective_rows",
-            "work_rows",
-            "free_rows",
-            "min_d_spacing",
-            "min_peak",
-            "target_mode",
-            "dataset_role",
-            "dataset_weight",
-            "thickness",
-            "thickness_grad_frac",
-            "frame_offset",
-            "group_width_deg",
-            "sigma_a",
-            "sigma_b_corr",
-            "sigma_c_peak",
-            "native_wght_a",
-            "native_wght_b",
-            "thickness_model",
-            "thickness_sigma_frac",
-            "sg_jitter_mode",
-            "sg_jitter_sigma0",
-            "sg_jitter_sigma_d_inv",
-            "sg_jitter_sigma_frame",
-            "sg_jitter_points",
-            "sg_jitter_student_df",
-            "sg_jitter_width_factor",
-            "absorption_mode",
-            "absorption_mu",
-            "absorption_frac",
-            "absorption_mu_g2",
-            "absorption_mu_theta2",
-            "absorption_tds_b",
-            "dose_b_mode",
-            "dose_b_per_frame",
-            "dose_b_ref_frame",
-            "row_resolution_b",
-            "hkl_transform",
-        ]
-        w = csv.DictWriter(f, fieldnames=fields)
-        w.writeheader()
-        for s in states:
-            w.writerow(
-                {
-                    "name": s.name,
-                    "hkl": str(s.hkl),
-                    "target_rows": int(len(s.target_indices)),
-                    "objective_rows": int(len(s.objective_indices)),
-                    "work_rows": int(np.count_nonzero(s.masks["work"])),
-                    "free_rows": int(np.count_nonzero(s.masks["free"])),
-                    "min_d_spacing": s.min_d_spacing,
-                    "min_peak": s.min_peak,
-                    "target_mode": s.target_mode,
-                    "dataset_role": s.dataset_role,
-                    "dataset_weight": s.dataset_weight,
-                    "thickness": s.nuisance.thickness_A,
-                    "thickness_grad_frac": s.nuisance.thickness_grad_frac,
-                    "frame_offset": s.nuisance.frame_offset,
-                    "group_width_deg": s.nuisance.group_width_deg,
-                    "sigma_a": s.nuisance.sigma_a,
-                    "sigma_b_corr": s.nuisance.sigma_b_corr,
-                    "sigma_c_peak": s.nuisance.sigma_c_peak,
-                    "native_wght_a": s.nuisance.native_wght_a,
-                    "native_wght_b": s.nuisance.native_wght_b,
-                    "thickness_model": s.nuisance.thickness_model,
-                    "thickness_sigma_frac": s.nuisance.thickness_sigma_frac,
-                    "sg_jitter_mode": s.nuisance.sg_jitter_mode,
-                    "sg_jitter_sigma0": s.nuisance.sg_jitter_sigma0,
-                    "sg_jitter_sigma_d_inv": s.nuisance.sg_jitter_sigma_d_inv,
-                    "sg_jitter_sigma_frame": s.nuisance.sg_jitter_sigma_frame,
-                    "sg_jitter_points": s.nuisance.sg_jitter_points,
-                    "sg_jitter_student_df": s.nuisance.sg_jitter_student_df,
-                    "sg_jitter_width_factor": s.nuisance.sg_jitter_width_factor,
-                    "absorption_mode": s.nuisance.absorption_mode,
-                    "absorption_mu": s.nuisance.absorption_mu,
-                    "absorption_frac": s.nuisance.absorption_frac,
-                    "absorption_mu_g2": s.nuisance.absorption_mu_g2,
-                    "absorption_mu_theta2": s.nuisance.absorption_mu_theta2,
-                    "absorption_tds_b": s.nuisance.absorption_tds_b,
-                    "dose_b_mode": s.nuisance.dose_b_mode,
-                    "dose_b_per_frame": s.nuisance.dose_b_per_frame,
-                    "dose_b_ref_frame": s.nuisance.dose_b_ref_frame,
-                    "row_resolution_b": s.nuisance.row_resolution_b,
-                    "hkl_transform": s.data.hkl_transform_spec,
-                }
-            )
-
-
 def main():
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--datasets-csv", required=True)
-    ap.add_argument("--res", required=True)
-    ap.add_argument("--out-dir", required=True)
-    ap.add_argument("--hkl-transform", default="identity")
-    ap.add_argument("--n-basis", type=int, default=20)
-    ap.add_argument("--n-points", type=int, default=10)
-    ap.add_argument("--sg-window", type=float, default=0.004)
-    ap.add_argument("--sg-window-mode", choices=["fixed", "zobs_residual", "zobs_plus_floor", "rlp_peak", "dials_bbox"], default="fixed")
-    ap.add_argument("--sg-window-min", type=float, default=0.003)
-    ap.add_argument("--sg-window-max", type=float, default=0.012)
-    ap.add_argument("--sg-window-scale", type=float, default=1.0)
-    ap.add_argument("--sg-window-frame-floor", type=float, default=0.50)
-    ap.add_argument("--topup-d-min", type=float, default=0.8)
-    ap.add_argument("--max-support-sg", type=float, default=DEFAULT_MAX_SUPPORT_SG)
-    ap.add_argument("--min-d-spacing", type=float, default=0.70)
-    ap.add_argument("--min-peak", type=float, default=90.0)
-    ap.add_argument("--geometry-percentile", type=float, default=100.0, help="Keep this broad geometry percentile after PEAK/d-spacing filters.")
-    ap.add_argument("--target-mode", choices=list(TARGET_MODES), default="iobs")
-    ap.add_argument("--include-nonpositive", action="store_true")
-    ap.add_argument("--objective-rows-per-dataset", type=int, default=300)
-    ap.add_argument("--objective-bins", type=int, default=10)
-    ap.add_argument("--objective-group-width-deg", type=float, default=3.0)
-    ap.add_argument("--objective-scale-mode", choices=["frozen_block", "refit_each_eval"], default="frozen_block")
-    ap.add_argument("--scale-fit-split", choices=["work", "all"], default="work")
-    ap.add_argument("--block-schedule", default="adp_ueq,xyz")
-    ap.add_argument("--atom-selection", choices=["nonh", "all", "labels"], default="nonh")
-    ap.add_argument("--atom-labels", default="")
-    ap.add_argument("--max-shift-frac", type=float, default=0.006)
-    ap.add_argument("--xyz-restraint-sigma", type=float, default=0.006)
-    ap.add_argument("--adp-shift", type=float, default=0.006)
-    ap.add_argument("--adp-restraint-sigma", type=float, default=0.003)
-    ap.add_argument("--adp-min", type=float, default=0.002)
-    ap.add_argument("--adp-max", type=float, default=0.150)
-    ap.add_argument("--restraints", choices=["none", "start_geometry", "cctbx_rigu"], default="start_geometry")
-    ap.add_argument("--bond-restraint-sigma", type=float, default=0.020)
-    ap.add_argument("--adp-similarity-sigma", type=float, default=0.005)
-    ap.add_argument("--bond-detection-tolerance", type=float, default=0.45)
-    ap.add_argument("--bond-detection-max-distance", type=float, default=1.95)
-    ap.add_argument("--max-nfev", type=int, default=20)
-    ap.add_argument(
-        "--diff-step",
-        type=float,
-        default=None,
-        help="Deprecated compatibility name setting both absolute finite-difference steps in each parameter's native unit; use the group-specific options instead.",
+    ap = build_multi_update_parser(
+        description=__doc__,
+        max_support_sg=DEFAULT_MAX_SUPPORT_SG,
+        target_modes=TARGET_MODES,
     )
-    ap.add_argument("--xyz-diff-step-frac", type=float, default=1e-4, help="Absolute fractional-coordinate step used for native Bloch finite differences.")
-    ap.add_argument("--adp-diff-step-a2", type=float, default=1e-4, help="Absolute Ueq step in A^2 used for native Bloch finite differences.")
-    ap.add_argument("--thickness", type=float, default=800.0)
-    ap.add_argument("--thickness-model", choices=["single", "uniform_gradient", "gaussian", "gaussian_gradient"], default="uniform_gradient")
-    ap.add_argument("--thickness-grad-frac", type=float, default=0.4)
-    ap.add_argument("--thickness-sigma-frac", type=float, default=0.0)
-    ap.add_argument("--thickness-points", type=int, default=5)
-    ap.add_argument("--group-width-deg", type=float, default=1.5)
-    ap.add_argument("--frame-offset", type=float, default=0.0)
-    ap.add_argument("--detector-scale-bins", type=int, default=0)
-    ap.add_argument("--sigma-a", type=float, default=0.06)
-    ap.add_argument("--sigma-b-corr", type=float, default=0.0)
-    ap.add_argument("--sigma-c-peak", type=float, default=0.0)
-    ap.add_argument("--compute-backend", choices=["scipy", "scipy_bethe", "scipy_expm", "scipy_expm_multiply", "jax", "jax_auto", "jax_cpu", "jax_mps", "jax_cuda", "jax_padded", "jax_auto_padded", "jax_cpu_padded", "jax_mps_padded", "jax_cuda_padded", "jax_cpu_real_expm", "jax_mps_real_expm", "jax_mps_real_expm_padded"], default="scipy", help="Bloch propagation backend. SciPy eigensolver is the production reference; scipy_bethe uses an opt-in promoted Bethe/Schur strong-beam reduction; SciPy expm/expm_multiply, real-embedded JAX expm, and JAX eigensolver backends are experimental. *_padded JAX backends pad matrix dimensions into small buckets to reduce compilation churn.")
-    ap.add_argument("--row-plan-cache", choices=["off", "exact", "readwrite", "rebuild"], default="off", help="Cache row geometry. exact is model-keyed; readwrite explicitly freezes the builder basis across moving-model evaluations.")
-    ap.add_argument("--jax-batch-size", type=int, default=0, help="JAX matrix batch size. 0 chooses a conservative size from matrix dimension and device count.")
-    ap.add_argument("--jax-matrix-bucket-size", type=int, default=0, help="Pad JAX matrix dimensions to this multiple. 0 keeps exact sizes unless a *_padded backend is selected, where 0 means 8.")
-    ap.add_argument("--bethe-strong-count", type=int, default=48, help="Strong-beam block size for scipy_bethe. Values >= n_basis recover the dense SciPy matrix.")
-    ap.add_argument("--bethe-variant", choices=["truncate", "schur0", "schur_target", "schur_mean"], default="schur_target", help="Strong/weak-beam reduction used by scipy_bethe.")
-    ap.add_argument("--bethe-promote-denom", type=float, default=0.005, help="Promote weak beams whose diagonal denominator is this close to the Schur energy.")
-    ap.add_argument("--bethe-denom-eps", type=float, default=1e-5, help="Small-denominator floor for scipy_bethe Schur corrections.")
-    ap.add_argument("--profile-quadrature", choices=["uniform", "trapezoid", "gauss_legendre"], default="uniform", help="Rocking-profile Sg quadrature rule.")
-    ap.add_argument("--profile-accumulation", choices=["sum", "mean"], default="sum", help="Accumulate rocking-profile samples as summed detector sub-exposures or legacy normalized means.")
-    ap.add_argument("--sg-jitter-mode", choices=["none", "gaussian", "student_t"], default="none")
-    ap.add_argument("--sg-jitter-sigma0", type=float, default=0.0)
-    ap.add_argument("--sg-jitter-sigma-d-inv", type=float, default=0.0)
-    ap.add_argument("--sg-jitter-sigma-frame", type=float, default=0.0)
-    ap.add_argument("--sg-jitter-points", type=int, default=1)
-    ap.add_argument("--sg-jitter-student-df", type=float, default=4.0)
-    ap.add_argument("--sg-jitter-width-factor", type=float, default=3.0)
-    ap.add_argument("--absorption-mode", choices=["none", "mean", "beam_dependent", "offdiag_fraction", "offdiag_tds", "midgley_like"], default="none")
-    ap.add_argument("--absorption-mu", type=float, default=0.0)
-    ap.add_argument("--absorption-frac", type=float, default=0.0)
-    ap.add_argument("--absorption-mu-g2", type=float, default=0.0)
-    ap.add_argument("--absorption-mu-theta2", type=float, default=0.0)
-    ap.add_argument("--absorption-tds-b", type=float, default=0.0)
-    ap.add_argument("--dose-b-mode", choices=["none", "linear_frame"], default="none")
-    ap.add_argument("--dose-b-per-frame", type=float, default=0.0)
-    ap.add_argument("--dose-b-ref-frame", type=float, default=float("nan"))
-    ap.add_argument("--row-resolution-b", type=float, default=0.0, help="Raw-row dynamical resolution-envelope B from per-dataset nuisance regularization.")
-    ap.add_argument("--native-wght-a", type=float, default=float("nan"))
-    ap.add_argument("--native-wght-b", type=float, default=float("nan"))
-    ap.add_argument("--ug-d-min", type=float, default=0.30)
-    ap.add_argument("--free-fraction", type=float, default=0.10)
-    ap.add_argument("--split-seed", type=int, default=42)
-    ap.add_argument("--acceptance-metric", choices=["all_wR2", "work_wR2", "free_wR2", "all_R1"], default="all_wR2")
-    ap.add_argument("--acceptance-min-delta", type=float, default=0.0)
-    ap.add_argument("--free-wR2-tolerance", type=float, default=0.002)
-    ap.add_argument("--allow-free-worse", action="store_true")
-    ap.add_argument("--early-stop-window", type=int, default=96, help="Stop a structure block after this many residual calls without a meaningful objective improvement; 0 disables.")
-    ap.add_argument("--early-stop-min-evals", type=int, default=0, help="Minimum residual calls before early stopping; 0 uses an automatic parameter-count-aware floor.")
-    ap.add_argument("--early-stop-min-improvement", type=float, default=1e-5, help="Minimum RMS improvement counted as progress for structure-block early stopping.")
-    ap.add_argument("--early-stop-metric", choices=["total_rms", "data_rms"], default="total_rms", help="RMS trace column used by the structure-block plateau stop.")
-    ap.add_argument("--workers", type=int, default=16)
-    ap.add_argument("--chunksize", type=int, default=8)
     args = ap.parse_args()
 
     t0 = time.perf_counter()

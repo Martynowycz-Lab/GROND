@@ -121,7 +121,7 @@ Do not graft `intensity.scale.variance` onto `intensity.sum.value`. The scaled v
 
 Two diagnostic alternatives exist. `--dials-intensity-mode sum_raw` uses the raw summation intensity without `(lp/qe)/partiality` completion. `--dials-intensity-mode scale` uses `intensity.scale.value` from `scaled.refl`, and should be treated as a conventional comparison rather than the default Bloch row target.
 
-If XDS and DIALS are being compared on the same frames, run at least one `sum_raw` DIALS bridge as a diagnostic:
+When comparing XDS and DIALS on the same frames, first record the accepted-row contract. This example retains DIALS-scaled rows while using completed summation intensities:
 
 ```bash
 GROND import-dials \

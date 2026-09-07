@@ -1,0 +1,217 @@
+"""Argument declarations for the native row regularize workflow.
+
+The adapter supplies runtime defaults explicitly. Keep option order, numerical
+defaults, choices, and help text identical to the established command contract.
+"""
+from __future__ import annotations
+
+import argparse
+
+
+def build_parser(description: str, *, default_hkl, default_res, default_baseline_hkl, target_modes, max_support_sg, shelxl, runtime_cache_directory) -> argparse.ArgumentParser:
+    """Build the parser without reading data or starting a calculation."""
+
+    ap = argparse.ArgumentParser(description=description)
+    ap.add_argument("--hkl", default=str(default_hkl))
+    ap.add_argument("--res", default=str(default_res))
+    ap.add_argument("--baseline-hkl", default=str(default_baseline_hkl))
+    ap.add_argument("--hkl-transform", default="identity", help="Signed axis permutation mapping XDS HKLs into the model basis, e.g. 'l,-k,h'.")
+    ap.add_argument(
+        "--row-contract",
+        default="",
+        help=(
+            "Immutable GROND native_dyn_calc.csv row-membership contract. When supplied, select exactly its "
+            "row_index set after verifying HKL, target_I, xds_sigma, and d_A against the XDS input; do not "
+            "rebuild membership from raw eligibility filters."
+        ),
+    )
+    ap.add_argument(
+        "--split-contract",
+        default="",
+        help=(
+            "Immutable candidate-union raw-row work/free split shared by every "
+            "transform candidate and subsequent hand comparison."
+        ),
+    )
+    ap.add_argument("--out-dir", required=True)
+    ap.add_argument("--n-basis", type=int, default=20)
+    ap.add_argument("--n-points", type=int, default=10)
+    ap.add_argument("--sg-window", type=float, default=0.004)
+    ap.add_argument("--sg-window-mode", choices=["fixed", "zobs_residual", "zobs_plus_floor", "rlp_peak", "dials_bbox"], default="fixed")
+    ap.add_argument("--sg-window-min", type=float, default=0.003)
+    ap.add_argument("--sg-window-max", type=float, default=0.012)
+    ap.add_argument("--sg-window-scale", type=float, default=1.0)
+    ap.add_argument("--sg-window-frame-floor", type=float, default=0.50)
+    ap.add_argument("--sg-jitter-mode-grid", default="none", help="Comma grid: none, gaussian, student_t.")
+    ap.add_argument("--sg-jitter-sigma0-grid", default="0.0", help="Base target-Sg jitter sigma grid in inverse Angstrom.")
+    ap.add_argument("--sg-jitter-sigma-d-inv-grid", default="0.0", help="Target-Sg jitter sigma slope grid versus 1/d.")
+    ap.add_argument("--sg-jitter-sigma-frame-grid", default="0.0", help="Target-Sg jitter sigma slope grid versus normalized frame number.")
+    ap.add_argument("--sg-jitter-points", type=int, default=5, help="Kernel quadrature points for jitter convolution.")
+    ap.add_argument("--sg-jitter-student-df", type=float, default=4.0)
+    ap.add_argument("--sg-jitter-width-factor", type=float, default=3.0)
+    ap.add_argument("--mosaicity-mode", choices=["none", "gaussian_omega", "gaussian_cone"], default="none", help="Fixed projected one-axis or incoherent two-axis Gaussian mosaic model.")
+    ap.add_argument("--mosaicity-sigma-deg", type=float, default=0.0, help="Projected Gaussian mosaicity sigma in degrees; one nuisance parameter when active.")
+    ap.add_argument("--mosaicity-max-sigma-deg", type=float, default=0.5, help="Hard upper bound for projected mosaicity sigma.")
+    ap.add_argument("--mosaicity-points", type=int, default=3, help="Gauss-Hermite points for direct-angle mosaic quadrature.")
+    ap.add_argument("--mosaicity-support-sigma-deg", type=float, default=0.0, help="Largest tested two-axis cone sigma used to construct one common beam basis for every candidate width.")
+    ap.add_argument("--mosaicity-support-points", type=int, default=5, help="Points per scan/cone axis used only for common-basis construction.")
+    ap.add_argument("--mosaicity-support-width-sigma", type=float, default=4.0, help="Half-width of the common basis cone in support-sigma units.")
+    ap.add_argument("--geometry-path", default="", help="Fixed geometry-only slew/two-axis tilt contract fitted without intensities.")
+    ap.add_argument("--profile-basis-mode", choices=["center", "common_profile"], default="center", help="Use the historical center-orientation basis or one fixed beam union over the complete rocking-profile support.")
+    ap.add_argument("--profile-coordinate", choices=["target_sg", "direct_angle"], default="target_sg", help="Integrate through solved target-Sg points or directly in recorded scan angle.")
+    ap.add_argument("--profile-angle-max-half-width-deg", type=float, default=2.0, help="Hard half-width bound for direct-angle integration.")
+    ap.add_argument("--profile-quadrature", choices=["uniform", "trapezoid", "gauss_legendre"], default="uniform", help="Rocking-profile Sg quadrature rule.")
+    ap.add_argument("--profile-accumulation", choices=["sum", "mean"], default="sum", help="Accumulate rocking-profile samples as summed detector sub-exposures or legacy normalized means.")
+    ap.add_argument("--min-d-spacing", type=float, default=0.70)
+    ap.add_argument("--min-peak", type=float, default=0.0)
+    ap.add_argument("--geometry-percentile", type=float, default=100.0, help="Keep this broad geometry percentile after PEAK/d-spacing filters; 99 removes only the worst 1 percent geometry tail.")
+    ap.add_argument("--target-mode", choices=list(target_modes), default="iobs")
+    ap.add_argument("--positive-only", action="store_true", default=True)
+    ap.add_argument("--include-nonpositive", dest="positive_only", action="store_false")
+    ap.add_argument("--thickness-grid", default="1200,1600,1800,2200")
+    ap.add_argument("--thickness-model-grid", default="uniform_gradient", help="Comma grid: single, uniform_gradient, gaussian, gaussian_gradient.")
+    ap.add_argument("--thickness-grad-grid", default="0.0,0.2,0.4,0.6")
+    ap.add_argument("--thickness-sigma-frac-grid", default="0.0", help="Gaussian thickness sigma/t0 grid. Used only by thickness_model=gaussian.")
+    ap.add_argument(
+        "--frame-offset-grid",
+        default="auto",
+        help=(
+            "Comma grid in XDS frames, or 'auto'. Auto measures the global-header/ZCAL "
+            "scan-datum mismatch without using intensities and tests a compact symmetric residual grid."
+        ),
+    )
+    ap.add_argument("--absorption-mode-grid", default="none", help="Comma grid: none, mean, beam_dependent, offdiag_fraction, offdiag_tds, midgley_like.")
+    ap.add_argument("--absorption-mu-grid", default="0.0", help="Uniform imaginary diagonal damping grid in inverse Angstrom.")
+    ap.add_argument("--absorption-frac-grid", default="0.0", help="Imaginary absorptive off-diagonal fraction grid.")
+    ap.add_argument("--absorption-mu-g2-grid", default="0.0", help="Beam-dependent diagonal damping slope grid versus |g|^2.")
+    ap.add_argument("--absorption-mu-theta2-grid", default="0.0", help="Beam-dependent diagonal damping slope grid versus Bragg-angle^2.")
+    ap.add_argument("--absorption-tds-b-grid", default="0.0", help="B_TDS grid for offdiag_tds eta*U_g*(1-exp(-B_TDS*|g|^2/4)).")
+    ap.add_argument("--dose-b-mode-grid", default="none", help="Comma grid: none, linear_frame.")
+    ap.add_argument("--dose-b-per-frame-grid", default="0.0", help="Extra isotropic B per XDS frame for dose_b_mode=linear_frame.")
+    ap.add_argument("--dose-b-ref-frame", type=float, default=float("nan"), help="Reference ZCAL frame for dose-dependent B. Default uses the first frame in the data.")
+    ap.add_argument("--row-resolution-b-grid", default="0.0", help="Raw-row dynamical resolution-envelope grid. Positive values boost high-resolution Idyn and are roughly the alternate sign of endpoint-B.")
+    ap.add_argument(
+        "--matrix-convention",
+        choices=["j_minus_i", "i_minus_j"],
+        default="j_minus_i",
+        help="Off-diagonal U_g indexing convention. j_minus_i is the production signed-row default; i_minus_j is a diagnostic.",
+    )
+    ap.add_argument(
+        "--q-control",
+        choices=["real", "shuffle_global", "shuffle_shell", "shuffle_shell_scan"],
+        default="real",
+        help="Diagnostic null that permutes log(Idyn/Iborn) before normal scale fitting and endpoint export.",
+    )
+    ap.add_argument("--q-control-seed", type=int, default=12345)
+    ap.add_argument("--q-control-shells", type=int, default=10, help="Resolution shells used by shell and shell+scan q-shuffle controls.")
+    ap.add_argument(
+        "--group-width-grid",
+        default="auto",
+        help="Comma grid of physical frame-scale group widths. Values are degrees; also accepts frame, 2frame, 3frames, and auto.",
+    )
+    ap.add_argument("--detector-scale-bins", default="0", help="Comma grid for optional NxN detector-position scale correction fitted with frame scales. Use 0 to disable.")
+    ap.add_argument("--detector-scale-ridge", type=float, default=0.05, help="Dimensionless shrinkage of detector factors toward unity.")
+    ap.add_argument("--detector-scale-smoothness", type=float, default=0.10, help="Dimensionless nearest-neighbor detector-field smoothness penalty.")
+    ap.add_argument("--detector-scale-min-rows", type=int, default=20, help="Minimum work rows required before a detector tile receives an independent data term.")
+    ap.add_argument("--sigma-a-grid", default="0.0,0.03,0.06")
+    ap.add_argument("--sigma-b-corr-grid", default="0.0")
+    ap.add_argument("--sigma-c-peak-grid", default="0.0")
+    ap.add_argument("--wght-a-grid", default="", help="Native SHELX-style weight a grid. Empty uses the WGHT value parsed from the RES.")
+    ap.add_argument("--wght-b-grid", default="", help="Native SHELX-style weight b grid. Empty uses the WGHT value parsed from the RES.")
+    ap.add_argument("--thickness-points", type=int, default=5)
+    ap.add_argument("--topup-d-min", type=float, default=0.8)
+    ap.add_argument(
+        "--max-support-sg",
+        type=float,
+        default=max_support_sg,
+        help="Maximum absolute excitation error for beam-basis support (default 0.01 A^-1).",
+    )
+    ap.add_argument("--free-fraction", type=float, default=0.10)
+    ap.add_argument("--split-seed", type=int, default=42)
+    ap.add_argument("--scale-fit-split", choices=["work", "all"], default="work", help="Rows used to fit nuisance group scales. Use 'all' to reproduce final all-data model-update statistics; use 'work' for validation.")
+    ap.add_argument(
+        "--selection-metric",
+        choices=["work_born_wR2", "work_wR2", "free_wR2", "all_wR2", "all_R1"],
+        default="work_wR2",
+        help=(
+            "Metric used to choose the reported best nuisance trial. "
+            "work_born_wR2 is reserved for hand-invariant transform scouting."
+        ),
+    )
+    ap.add_argument(
+        "--promotion-baseline-json",
+        default="",
+        help="Internal automatic-workflow contract: exact starting nuisance used for a post-ranking held-out no-harm gate.",
+    )
+    ap.add_argument("--promotion-min-gain", type=float, default=5e-5)
+    ap.add_argument("--promotion-max-free-wr2-loss", type=float, default=0.002)
+    ap.add_argument("--promotion-max-all-r1-loss", type=float, default=0.001)
+    ap.add_argument("--fail-if-born-r1gt-above", type=float, default=0.0, help="Fail after the prediction grid if matched Born R1gt is above this value. Use as a basis/indexing sanity gate.")
+    ap.add_argument(
+        "--lambda-grid",
+        default="1.0",
+        help="Diagnostic q-exponent grid. Production workflows use the full Bloch/Born correction with lambda_q=1.0.",
+    )
+    ap.add_argument(
+        "--scale-smoothness",
+        type=float,
+        default=0.0,
+        help="Experimental L2 frame-scale smoothness coefficient. Default 0 keeps per-group scales independent; use post-hoc scale compression for publication parameter reduction.",
+    )
+    ap.add_argument("--endpoint-b-grid", default="0.0", help="Diagnostic endpoint resolution-scale grid in intensity B units: Icorr *= exp(B*(1/4d^2 - median(1/4d^2))). Nonzero values are not promoted over a neutral B=0 endpoint.")
+    ap.add_argument("--endpoint-exti-grid", default="off", help="Comma grid of endpoint EXTI modes: off,on. Off removes EXTI from the corrected endpoint; on keeps/regularizes the source EXTI term.")
+    ap.add_argument("--shelxl", default=shelxl, help="Explicit SHELXL executable used for corrected-HKL endpoints.")
+    ap.add_argument("--shelxl-iterations", type=int, default=1, help="Number of SHELXL polish passes per corrected endpoint. Later passes feed .res back into .ins.")
+    ap.add_argument("--endpoint-ls-cycles", type=int, default=1, help="Internal L.S./CGLS cycle count written into generated endpoint .ins/.res files. Production uses 1; larger values are diagnostic stress tests.")
+    ap.add_argument(
+        "--endpoint-wght-mode",
+        choices=["freeze-zero", "inherit", "promote"],
+        default="freeze-zero",
+        help="SHELXL WGHT policy for corrected-HKL endpoints. freeze-zero is the production default after GROND sigma calibration; inherit keeps the source-model WGHT; promote uses SHELXL recommendations on later external passes.",
+    )
+    ap.add_argument("--skip-endpoint-refinement", action="store_true", help="Run the fixed-model Bloch row calculation and row reports only. No corrected-HKL SHELXL endpoint is written or refined.")
+    ap.add_argument("--post-bloch-sigma-policy", choices=["none", "uniform_z_rms"], default="none", help="Endpoint uncertainty policy applied after Bloch correction and before SHELXL. uniform_z_rms fits one residual RMS(z) scalar from the current model and scales endpoint sigmas only.")
+    ap.add_argument("--post-bloch-sigma-holdout-fraction", type=float, default=0.20, help="Deterministic HKL holdout fraction reported for uniform_z_rms diagnostics.")
+    ap.add_argument("--post-bloch-sigma-min-scale", type=float, default=0.25, help="Lower guardrail for the uniform_z_rms sigma multiplier.")
+    ap.add_argument("--post-bloch-sigma-max-scale", type=float, default=4.0, help="Upper guardrail for the uniform_z_rms sigma multiplier.")
+    ap.add_argument("--rescale", choices=["median-iobs", "none"], default="median-iobs")
+    ap.add_argument("--hkl-float-format", choices=["shelx_fixed", "wide"], default="shelx_fixed")
+    ap.add_argument("--workers", type=int, default=1)
+    ap.add_argument("--chunksize", type=int, default=8)
+    ap.add_argument("--prediction-cache-dir", default=str(runtime_cache_directory("native_row_regularize", "predictions")))
+    ap.add_argument(
+        "--ug-cache-dir",
+        default=str(runtime_cache_directory("native_row_regularize", "ug")),
+        help="Directory for model-dependent U_g cubes; use a run-local path on restricted systems.",
+    )
+    ap.add_argument("--cache-compression", choices=["compressed", "none"], default="compressed", help="Use none for faster local SSD caches; compressed saves disk on slow/limited storage.")
+    ap.add_argument("--compute-backend", choices=["scipy", "scipy_bethe", "scipy_expm", "scipy_expm_multiply", "jax", "jax_auto", "jax_cpu", "jax_mps", "jax_cuda", "jax_padded", "jax_auto_padded", "jax_cpu_padded", "jax_mps_padded", "jax_cuda_padded", "jax_cpu_real_expm", "jax_mps_real_expm", "jax_mps_real_expm_padded"], default="scipy", help="Prediction backend. SciPy eigensolver is the production reference; scipy_bethe uses an opt-in promoted Bethe/Schur strong-beam reduction; SciPy expm/expm_multiply, real-embedded JAX expm, and JAX eigensolver backends are experimental agreement/speed probes. *_padded JAX backends pad matrix dimensions into small buckets to reduce compilation churn.")
+    ap.add_argument(
+        "--row-plan-cache",
+        choices=["auto", "off", "exact", "readwrite", "rebuild"],
+        default="off",
+        help=(
+            "Row-geometry cache. auto enables the model-keyed exact cache only "
+            "when enough fixed-model candidates share a geometry key to amortize "
+            "its serial build; readwrite is the opt-in frozen-basis mode across "
+            "model updates."
+        ),
+    )
+    ap.add_argument("--jax-batch-size", type=int, default=0, help="JAX matrix batch size. 0 chooses a conservative size from matrix dimension and device count.")
+    ap.add_argument("--jax-matrix-bucket-size", type=int, default=0, help="Pad JAX matrix dimensions to this multiple. 0 keeps exact sizes unless a *_padded backend is selected, where 0 means 8.")
+    ap.add_argument("--bethe-strong-count", type=int, default=48, help="Strong-beam block size for scipy_bethe. Values >= n_basis recover the dense SciPy matrix.")
+    ap.add_argument("--bethe-variant", choices=["truncate", "schur0", "schur_target", "schur_mean"], default="schur_target", help="Strong/weak-beam reduction used by scipy_bethe.")
+    ap.add_argument("--bethe-promote-denom", type=float, default=0.005, help="Promote weak beams whose diagonal denominator is this close to the Schur energy.")
+    ap.add_argument("--bethe-denom-eps", type=float, default=1e-5, help="Small-denominator floor for scipy_bethe Schur corrections.")
+    ap.add_argument("--max-rows", type=int, default=0)
+    ap.add_argument("--make-maps", action="store_true")
+    ap.add_argument("--alternate-hand", dest="alternate_hand", action="store_true", help="Use alternate fractional xyz before building U_g for an alternate-hand control run.")
+    ap.add_argument(
+        "--paired-inverse-hand",
+        action="store_true",
+        help=(
+            "Also calculate the elastic inverse hand by negative-thickness propagation from each "
+            "already diagonalized Bloch matrix. Requires absorption off and the SciPy backend."
+        ),
+    )
+    return ap

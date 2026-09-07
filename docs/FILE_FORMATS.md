@@ -258,8 +258,9 @@ changed by this block; only the endpoint sigmas are scaled.
 
 ## Summary JSON
 
-Each major stage writes a machine-readable summary. The keys are stable enough
-for scripts, while the values remain explicit about what population was scored.
+Each major stage writes a machine-readable summary. The schematic below shows
+the kinds of information it records; actual stage keys differ. Scripts should
+read the documented output for their stage and preserve its schema/version.
 
 ```json
 {
@@ -268,7 +269,7 @@ for scripts, while the values remain explicit about what population was scored.
   "selected": {
     "transform": "identity",
     "hand": "original",
-    "thickness_nm": 0.86,
+    "thickness_nm": 86.0,
     "basis_n": 60,
     "quadrature_q": 9
   },
@@ -298,7 +299,8 @@ launched, how long it took, and whether the stage succeeded.
 ```
 
 `grond_progress.json` is the resume file. If the process is interrupted, GROND
-uses this file to skip stages that already finished successfully.
+uses this file to reuse successfully completed stages only when the command,
+input and output fingerprints still match.
 
 ```json
 {
@@ -313,7 +315,8 @@ uses this file to skip stages that already finished successfully.
 
 ## Maps and Reports
 
-Map files are written when the necessary external map tools are available.
+Native dynamical Fourier maps use the installed Python/Gemmi stack. Optional
+corrected-HKL endpoint maps require the configured external map tool.
 Human-readable `REPORT.md` files sit next to the machine-readable summaries and
 explain which branch won, which branches were rejected, and what residual
 patterns still deserve attention.

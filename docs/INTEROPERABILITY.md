@@ -17,6 +17,16 @@ An ordinary `sample.cif_pets` does not record the acquisition frame for each
 row. Supply its companion 13-column `sample.hkl`; GROND checks every HKL,
 intensity, uncertainty, and frame before writing the bridge.
 
+The cell must have finite positive lengths and a physically valid angle/volume
+combination. GROND checks that `UB.T @ UB` agrees with the declared reciprocal
+cell metric; a normalized zone-axis direction alone cannot establish its scale.
+The check propagates a half-last-digit allowance of `5e-6` inverse Angstroms
+per UB entry, appropriate to five-decimal PETS output, and adds `1e-4` of the
+reciprocal metric scale for cell/model serialization. A legitimate orientation
+rotation preserves this metric. A unit or cell mismatch raises an explicit error.
+The general-cell reciprocal-basis sign was corrected during the numerical audit;
+regenerate earlier PETS bridges for nonorthogonal cells before comparing results.
+
 ```bash
 grond import-pets \
   --cif-pets sample.cif_pets \
@@ -204,9 +214,10 @@ virtual frame: the frame with minimum absolute excitation error, with a
 deterministic lower-frame tie break. The source-row count, candidate occurrence
 count, unique owned count, and removed overlap count are recorded in the
 manifest. This changes only virtual-frame ownership; it does not alter HKL,
-intensity, uncertainty, partiality filtering, or geometry. A fixed-geometry
-calculation should therefore give the same scored observations and predictions
-under either representation. Use the default overlap representation for Jana
+intensity, uncertainty, partiality filtering, or geometry. Overlapping occurrences still have their recorded zone geometry and induce
+correlated evidence. Compare predictions only after matching both the source
+observation and its retained zone geometry; removing overlap alone does not
+establish equivalence of downstream objectives. Use the default overlap representation for Jana
 unless that program's import contract explicitly calls for unique ownership.
 
 ## Outputs and validation

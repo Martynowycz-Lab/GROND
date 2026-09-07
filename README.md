@@ -2,9 +2,17 @@
 
 **Global Regularization Of Non-kinematical Diffraction**
 
-GROND applies row-level Bloch-wave calculations to rotation electron-diffraction data. It starts from an XDS or DIALS integration and a solved structure, keeps each signed observation tied to its scan geometry, and writes an auditable regularization and refinement bundle.
+“Grond, the Hammer of the Underworld”\
+— J. R. R. Tolkien, *The Silmarillion*, “Of the Ruin of Beleriand and the Fall of Fingolfin”
 
-The package is alpha research software. It is useful in the small-molecule and peptide-sized workflows for which it has been tested, but it is not a replacement for careful integration, chemical judgment, or established crystallographic refinement programs. Read [LIMITATIONS.md](LIMITATIONS.md) before treating a result as final.
+“Grond crawled on.”\
+— J. R. R. Tolkien, *The Return of the King*, “The Siege of Gondor”
+
+GROND brings dynamical electron-diffraction calculations to ordinary **XDS and DIALS integrations**, then returns corrected reflections and structural models that can be refined, evaluated, and opened with standard crystallographic tools. It does **not require PETS2 overlapping virtual frames (OVF/VF)**. A solved structure, signed summation intensities, and their measurement geometry are the starting point.
+
+The calculation follows each observation through a Bloch-wave model, estimates thickness and selected nuisance terms, and alternates dynamical corrections with conventional structural refinement. The output includes the corrected HKL, model, maps, familiar endpoint R factors, matched Born/Bloch row residuals, and the commands and decisions needed to check the result. PETS interoperability is an optional comparison route, not a prerequisite for this workflow.
+
+GROND is alpha research software. Small-molecule development results support the approach, but a lower R factor alone does not establish a better structure, a measured physical thickness, or a named absolute configuration. Read [LIMITATIONS.md](LIMITATIONS.md) and inspect the row statistics, model health, maps, and parameter counts together.
 
 ## Why row-level data matter
 
@@ -50,7 +58,7 @@ The final report names both the all-row preferred hand and the exported coordina
 
 A proper transform makes the coordinate-hand comparison identifiable, but it does not by itself calibrate the sign of an acquisition and import chain. GROND therefore reports a conditional inversion preference by default. A named absolute configuration requires a separate, hash-bound sign calibration from a reserved known crystal processed through the same acquisition/import setup; that calibrant must not also be counted as validation. An explicitly requested mixed-parity transform search is diagnostic only and cannot establish a named configuration.
 
-After these decisions, GROND writes row-level residuals, corrected reflection files, endpoint diagnostics, maps when the required external tools are available, and a complete command and decision ledger.
+After these decisions, GROND writes row-level residuals, corrected reflection files, endpoint diagnostics, native dynamical maps, optional external endpoint maps, and a complete command and decision ledger.
 
 The default fast structure-update route is an alternating Bloch/LS1 calculation. GROND freezes the current row-wise correction, performs one conventional least-squares model update, and recalculates the Bloch rows from the updated model. This is a practical surrogate, not exact native dynamical least squares. `GROND validate-ls1` supplies fixed-q, q=1, shuffled-q, alternate-hand, and optional native finite-difference controls for judging that approximation.
 
@@ -76,7 +84,7 @@ GROND doctor --workflow small-molecule --config grond.config.json --probe-bloch 
 
 Native Bloch calculations use Python, NumPy, SciPy, and Gemmi. The default small-molecule LS1 endpoint needs a separately installed SHELXL executable. Native dynamical maps are written by `GROND finish` with no external map program; `shelx2map` is optional and is used only for quick corrected-HKL endpoint maps. XDS, XDSCONV, SHELXT, DIALS, and Olex2 are not general GROND runtime requirements. A DIALS Python is needed only to import `.refl`/`.expt` observations or to write the optional PETS/Jana/diffBloch interoperability format; the XDS export uses DIALS solely for the PETS coordinate-frame writer.
 
-The complete installation and update instructions are in [docs/INSTALL.md](docs/INSTALL.md).
+The [benchmark and experiment summary](docs/BENCHMARKS.md) separates demonstrated improvements from approaches that remain experimental or did not help. The complete installation and update instructions are in [docs/INSTALL.md](docs/INSTALL.md).
 
 ## Run one dataset
 
@@ -168,7 +176,7 @@ Start with the [quickstart](docs/QUICKSTART.md), then use the guide that matches
 - [Source-code map](docs/CODE_MAP.md)
 - [Scientific and software references](docs/REFERENCES.md)
 
-The public repository is limited to the installable source under `src/grond`, its tests, documentation, synthetic examples, schemas, and release tooling. The name `src/grond/legacy/engine` is historical; it currently contains much of the mature numerical engine used by the CLI. Standalone experiment workspaces, dataset-derived benchmark outputs, article-drafting material, and private data stay outside this repository.
+The public repository is limited to the installable source under `src/grond`, its tests, documentation, synthetic examples, schemas, and release tooling. The numerical implementation is organized under `src/grond/bloch`, `src/grond/regularize`, and `src/grond/refine`. Historical engine entry points retain explicit compatibility adapters; workflow and reporting code have separate owners. Standalone experiment workspaces, dataset-derived benchmark outputs, article-drafting material, and private data stay outside this repository.
 
 ## Development
 

@@ -92,9 +92,14 @@ grond manual thickness --workflow manual_run/manual_workflow.json --skip \
   --summary crystal_2=/path/to/summary.json
 ```
 
-Every reused summary is verified against the named source-HKL hash, proper
+Every reused summary must match the named dataset's current HKL, proper
 transform, resolution cutoff, PEAK/partiality floor, and geometry percentile.
-Swapping two crystals' summaries fails before feedback.
+When the summary records its original source-HKL SHA256, that hash must also
+match the current files; editing an HKL at the same path therefore fails before
+feedback. Older summaries without a saved source hash remain usable, but the
+handoff explicitly marks historical identity as unverified and prints a
+warning. Matching two current files cannot prove what an older calculation
+read. Preserve the original inputs and use a new setup when observations change.
 
 ## Check the pre-feedback hand and pause for a choice
 

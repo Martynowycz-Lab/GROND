@@ -1,396 +1,58 @@
 # Changelog
 
-This file records user-visible changes to the installable package. Version `0.2.2` has not yet been tagged as a GitHub release.
+This file records user-visible changes to the installable package. Version `0.2.2` has not yet been tagged as a GitHub release. The unreleased entry describes the final behavior; superseded development policies remain in Git history.
 
 ## 0.2.2 (unreleased)
 
-Invalid hand thresholds now produce explicit input errors. Map finishing preserves usable results while reporting partial or missing map families, including the executable or artifact that is missing; a zero exit code no longer hides those warnings in the finish manifest.
+### Source organization and public package
 
-The physics audit corrects SHELX special-position occupancies before unique
-symmetry expansion, and accepts coreCIF isotropic/anisotropic B values with the
-required conversion to U. Malformed supplied displacement parameters now give
-an explicit error. Native coordinate updates freeze special-position
-coordinates until symmetry-constrained derivatives are implemented. Absorptive
-matrices must have a passive loss operator: a rejected candidate retains its
-configuration and numerical error while feasible candidates continue; an
-entirely invalid grid reports a calculation failure.
+The command line, physics, regularization, endpoint, input and reporting implementations now have explicit domain owners. `grond.cli` and historical engine entry points retain compatibility reexports and necessary dispatch boundaries. Argument registration is split by command family; the public parser, defaults and help remain unchanged. Scientific cache fingerprints include the new implementation files, so moving a numerical helper does not make later edits invisible to an old cache.
 
-Hand method version 4 gives exact and numerical residual ties half a win.
-All-row evidence is primary; weak, absent or conflicting free subsets warn
-without vetoing it. Reports distinguish the measured preferred hand, its
-conditional support, and the exported coordinate representation. Nominal Z
-values are not calibrated sigma confidence. Both hand predictions and their
-matched Born controls have explicit residual summaries. Physical row or
-geometry mismatches remain calculation errors; a failed final hand calculation
-preserves the preceding usable endpoint with the exact failure details.
-Centrosymmetric not-applicable hand results no longer block endpoint delivery.
+Tests are grouped by domain, with CLI behavior separated into focused files and explicit shared synthetic helpers. Repository paths no longer depend on each test's folder depth, and tests no longer make bare engine imports work by modifying `sys.path`. The public tree contains package source, portable regression tests, documentation, synthetic examples, schemas and release tools. Real-data workspaces, exploratory experiments, drafts and caches remain separate. README and code-map documentation explain the ordinary XDS/DIALS integration route and the distinction between production behavior, interfaces and experimental approaches.
 
-Outer prediction-cache schema 7 binds external geometry files and loaded
-geometry arrays. Single-dataset feedback preserves the selected profile,
-mosaicity, detector regularization, dose reference, row and split contracts.
-Diagnostic fit-target units are restored consistently for combined endpoints,
-and immutable row sigmas use the same units as their target intensities.
-Paired inverse predictions preserve basis hashes and apply row-resolution
-modulation once. Held-out residual RMS is reported separately from heuristic
-fit degrees of freedom.
+### Physics and numerical contracts
 
-Row-plan cache schema 6 now retains the exact solved profile orientations and
-two-axis tilts that were already computed during cache construction. Repeated
-rocking-profile diagnostics no longer need to solve the same roots again; old
-schema-5 caches rebuild automatically. Uniform scalar absorption is propagated
-as exact analytic damping around the Hermitian elastic eigensystem, avoiding a
-general complex eigensolve while preserving intensities to numerical precision.
-The direct-engine `--row-index-file` reader now also accepts a conventional
-single-column CSV headed `row_index`, in addition to plain text and
-multi-column CSV inputs.
+The numerical audit repairs wavelength-dependent relativistic scaling, nonorthogonal anisotropic displacement factors, symmetry-mate tensors, alternate-hand symmetry translations and SHELX special-position occupancies. SHELX FVAR values are resolved, Q peaks and instruction records are excluded from atoms, and explicit electron scattering coefficients are required. Coefficient-based coreCIF input must identify electron factors; isotropic and anisotropic B values are converted to U. Malformed supplied displacement parameters fail explicitly. Native coordinate updates freeze special-position coordinates until symmetry-constrained derivatives are available.
 
-Native continuous-rotation PETS2 input is now available through the bounded
-`import-pets` and `pets-evaluate` commands. The importer preserves PETS-owned
-signed rows, uncertainties, UB/zone orientations, rocking widths, wavelength,
-and systematic absences that can receive dynamical intensity. An ordinary
-`cif_pets` import becomes eligible for normal `grond auto` only when its
-companion PETS `.hkl` and supplied static SHELX HKL match every ordered HKL,
-intensity, and sigma. AUTO then trusts the importer-validated proper identity
-setting, selects its own beam basis, quadrature, thickness, compact angular
-frame scales, hand, and q/LS1 feedback, while keeping detector scales disabled.
-The evaluator
-requires explicit convergence-tested beam, quadrature, reciprocal-support, and
-thickness settings; uses one work-fitted scale per PETS zone and no detector
-field; and writes JANA/PETS-style row statistics plus the elastic
-negative-thickness hand diagnostic. Precession, nonidentity settings, unmatched
-static HKLF4 files, and unsupported nuisance paths fail closed. PETS
-`*_dyn.cif_pets` virtual-frame rows remain a native row-space target, not a
-fabricated static HKLF4 endpoint.
+PETS import corrects the reciprocal-basis off-diagonal sign for general unit cells. It rejects nonphysical cells and UB matrices inconsistent with the declared reciprocal metric while allowing documented serialization precision. Existing PETS bridges with nonorthogonal cells should be regenerated before comparison; XDS and DIALS geometry do not use this conversion.
 
-SHELXL feedback now preserves the source run's positive/nonpositive row policy
-instead of silently forcing positive-only rows. This fixes a support mismatch
-that could remove negative integrated observations from later q/LS1 cycles.
+Fixed-XDS excitation crossings and angular derivatives use exact sinusoidal geometry with conservative numerical fallbacks. Scan-varying and fitted geometry retain the numerical route. Base-profile continuation is confined to a certified monotonic Ewald branch; the Bragg-assignment and active-jitter gates remain strict. Infeasible jitter candidates retain their configuration and error while feasible candidates continue. Entirely invalid grids fail explicitly. Multiprocessing retries cannot retain partial rows from a failed context.
 
-The release-candidate workflow audit now keeps user-declared row support
-immutable: preflight may suggest a lower PEAK/partiality floor or a stricter
-geometry percentile, but automatic execution no longer applies either change
-silently. Profile-fitted XDS rows produce a visible warning. The final
-multi-dataset elastic negative-thickness statuses `kept` and `switched` are now
-recognized by endpoint selection and user reports; exact pooled all/work/free
-hand evidence is shown instead of the stale “no pooled statistic” message.
-Only policy-active primary/downweighted crystals enter that shared hand
-selection. A missing conventional comparison or a corrected endpoint R1all
-worse than the conventional control is warning-only and no longer withholds an
-otherwise healthy model-handoff endpoint.
+General absorptive propagation requires a passive loss operator. Exactly uniform scalar imaginary absorption factors into Hermitian propagation and analytic damping. The latter shortcut does not apply to beam-dependent or off-diagonal loss. Experimental JAX, real-embedded exponential and Bethe/Schur backends remain explicit alternatives; dense SciPy is the reference. The common-basis incoherent mosaic cone and external geometry-path controls remain default-off experiments.
 
-The simplified manual workflow is hardened for independent use. Setup can
-persist Python, worker, config, and SHELXL defaults into every printed next
-command and can write a fresh hash-bound conventional control. Setup checks
-electron SFAC records; skipped scouts still enforce proper transforms and run
-preflight; reused thickness summaries must match the named source-HKL hash,
-transform, resolution, PEAK, and geometry contract. Manual feedback no longer
-adds an undeclared final coordinate-polish cycle when a fixed basis is
-requested, and it refuses to fall back to an NPD best-native diagnostic when no
-clean cycle exists. Reports now label its hand choice as pre-feedback and state
-that compact scales are audit-only; `auto` remains the production workflow.
+Fourier-potential allocation has a memory guard. Potential, row-plan and prediction caches validate schema, model and geometry fingerprints, shapes and finite values, and write atomically. Exact fixed-model row-plan reuse is enabled automatically only when expected reuse justifies construction; cross-model support freezing is explicit. Sparse-active potential storage and batched/packed thickness response preserve the underlying calculation. Packed propagation has a memory-bounded scalar fallback. Thickness grids include their declared bounds, and local searches remain inside the selected basin with gradient in `[0,1]`. Reports describe broad or weakly identified optima as effective thickness/dephasing, not calibrated specimen measurements.
 
-Multi-dataset `--h-omit` now fails explicitly instead of being ignored. The
-single-dataset branch is labeled a retrospective strip-H sensitivity control;
-`only` and `both` remain deprecated aliases for `on`. DIALS import validates
-input paths and executable permissions before launching its helper, truncates
-helper stderr, and returns a concise JSON/CLI error instead of a raw traceback
-or the embedded helper source. Symlinked virtual-environment and DIALS Python
-launchers are preserved rather than resolved to a base interpreter that may
-lack NumPy, DIALS, or dxtbx. Documentation now includes public HTTPS install,
-small-molecule doctor, detached-server, multi-experiment DIALS splitting,
-electron-SFAC recovery, and current hand-artifact guidance.
+### Workflow and structural endpoints
 
-Single-dataset automatic runs now enforce the same final-model row contract as
-the shared multi-dataset feedback loop. When the accepted SHELXL endpoint or a
-final hand switch changes the model hash, GROND performs one fixed-nuisance,
-endpoint-free Bloch recomputation before scale checks, calibration, row tables,
-or native maps are generated. The accepted coordinates and final native rows
-therefore cannot silently describe adjacent LS1 states. The public
-`audit-hydrogen-omit` command validates a prospective zero-H model, samples
-multiple CCP4 difference maps at independent full-H reference sites within a
-declared radius, and writes hash-bound CSV/JSON/Markdown artifacts. Parity
-calibration help now states explicitly that the current final-elastic hand
-artifact is not yet accepted by the legacy branch-symmetric/common-sigma
-calibration replay. The tracked workflow figures were rebuilt to show hand at
-the final elastic stage rather than before thickness and coordinate feedback.
+Automatic preflight preserves declared resolution, row, partiality and geometry support. It can report alternatives but does not silently lower a user's acceptance floor. Every accepted final structural model receives a matching fixed-nuisance Bloch row recomputation before row reports and native maps. Feedback preserves profile, mosaicity, scale, sigma, source-row and split contracts. Diagnostic fit-target transformations are restored to ordinary endpoint intensity units, with source sigmas in the same units as the target.
 
-Finite, provenance-valid, NPD-free corrected endpoints remain available for
-continued model building when SHELXL GooF lies outside the preferred range.
-GooF remains prominently reported with weight, sigma, map, and continued-
-refinement guidance, but is now a warning rather than an endpoint, compact-
-scale, or publication-model handoff gate.
-An endpoint R1all that is finite but worse than the conventional baseline is
-handled the same way: the comparison is retained as a warning while the model
-remains openable for maps and continued refinement.
+The fast structural path alternates a frozen Bloch/Born correction with one conventional least-squares update. The inner LS1 step remains a dynamical surrogate; it does not include the structural derivative of q. `validate-ls1` exposes updated-q, fixed-q, q=1, permuted-q and optional native-gradient controls. Internal SHELXL cycle count, repeated external SHELXL calls and Bloch macrocycles are separate controls. Native finite differences use explicit absolute steps and preserve their physical bounds.
 
-The manual interface now uses one state file instead of requiring users to
-copy nested paths and nuisance values between expert commands. `grond manual`
-provides `setup`, `scout`, `thickness`, `hand`, `feedback`, `scales`, `finish`,
-and `status` stages. Every stage writes a numbered directory and `handoff.json`,
-updates `manual_workflow.json`, records exact child commands and elapsed time,
-and prints the next command. Multi-dataset feedback is built from a generated
-hash-bound checkpoint containing the selected per-dataset nuisance summaries;
-it does not rerun transform scouting or thickness selection. The selected
-clean feedback cycle is recomputed without another coordinate move so its row
-tables and native maps use the same model.
-Long manual child stages now tee their high-level `STEP`, `DONE`, elapsed-time,
-and ETA stream to both the terminal and the stage-local `manual_*.log` file.
-Child Python output is unbuffered, so a healthy thickness search no longer
-looks frozen while its detailed per-trial logs continue in the stage `logs/`
-directory. If a child emits no high-level line for 30 seconds, the controller
-prints an elapsed-time heartbeat until output resumes.
-Each manual stage now has its own focused `--help` page. The controller keeps
-the complete child stream in the stage log but prints only milestones by
-default; `--verbose-child-output` restores the full stream. `manual finish`
-also writes `MANUAL_TOP_LEVEL_SUMMARY.md` and JSON in the run root. Those files
-place starting and selected SHELXL endpoints, combined and per-crystal
-JANA/PETS-style row statistics, selected-coordinate hand evidence, thickness,
-transforms, feedback cycles, and separate applied frame/detector parameter
-counts in one report. Compact-scale candidates are labeled audit-only whenever
-they were not replayed into the shared endpoint. The report states explicitly
-that per-crystal feedback jobs only recompute rows/scales and that each
-macrocycle contains one joint inverse-variance/model-symmetry merge and one
-shared SHELXL LS1 coordinate update.
-Single-dataset manual workflows now promote their pinned source summary into the
-top-level continuation checkpoint and understand the single-dataset feedback,
-decision, and final-row-recompute artifact layout. A leave-one-crystal-out run
-can explicitly suppress a larger-cohort baseline HKL inherited from a reused
-nuisance summary with `--ignore-source-baseline-hkl`; the manual controller
-does this automatically when no baseline was supplied at setup. With an
-explicit configured SHELXL executable, setup writes a fresh one-cycle control
-bound to the supplied source RES and baseline HKL; final reporting prefers that
-control and otherwise retains the older hash-matched sibling-LST fallback.
-XDS PETS exports can now be filtered by the immutable `row_index` and `split`
-columns of a GROND native row table. This permits a work-only diffBloch input
-whose optimizer never sees GROND free rows; the selected source IDs, split
-counts, row-contract hash, and source hashes are recorded in the export
-manifest. The new `apply-diffbloch-model` command transfers a refined CIF back
-into the exact source RES while preserving SHELX instructions and rejecting
-cell/label/element mismatches or NPD ADPs. diffBloch remains optional and
-experimental; candidates must pass a fresh GROND work/free replay before
-promotion.
+Shared refinement recomputes each accepted crystal from one model, applies per-dataset nuisance and dataset-policy weights, scales corrected observations through overlaps, merges model-symmetry equivalents with the declared uncertainty rule, and performs one shared structural update. Completeness-only crystals may add endpoint coverage without entering shared raw-row model statistics. Continuation checkpoints preserve this contract; after a manually changed model, compact scales require reselection rather than inheriting their earlier promotion automatically.
 
-Experimental XDS target-transform fits now restore their corrected HKLF4
-endpoints to the ordinary XDS IOBS intensity and uncertainty convention before
-SHELXL feedback. This keeps a reconstructed recorded-intensity nuisance fit
-separate from the units expected by a conventional merged endpoint. The hidden
-target-ablation harness also passes leading-minus signed transforms safely and
-uses the automatic exact row-plan-cache policy by default.
+Corrected small-molecule endpoints use HKLF 4, no EXTI, calibrated endpoint uncertainties and fixed `WGHT 0 0` by default. Empirical weights, endpoint-B and observation-polish corrections remain explicit diagnostics with their own acceptance conditions. Model/endpoint selection verifies source hashes, current metrics and artifact health. An NPD step is retried from its unchanged input with the documented bounded DAMP ladder; the first complete zero-NPD step is retained, every attempt is archived, and failed later steps cannot reuse stale output. Damping does not add restraints or relax the NPD requirement.
 
-Continuous-thickness polishing now packs the cached eigenvalues and
-direct-to-target couplings by basis size and evaluates scalar/Powell candidates
-in bounded NumPy chunks. The retained scalar loop remains the exact fallback,
-including for responses that cannot be packed, and a 2 GiB default additional-
-memory ceiling can be changed with `GROND_MAX_PACKED_THICKNESS_GIB`. Guard-grid
-axes now include their declared upper bound without crossing it, and Powell is
-restricted to the immediate neighboring thickness samples around the guard-
-grid winner. These changes preserve the Hamiltonians, rows, scales, weights,
-and promotion gates while avoiding repeated Python-level spectral loops and
-unproductive movement between separated thickness basins.
+General model handoff, compact-scale promotion and scientific evidence are separate decisions. Finite, provenance-valid, otherwise usable endpoints remain available when their GooF, modulation or R1all comparison is unfavorable; those values are reported as warnings. Missing required baseline evidence, nonfinite metrics, invalid support/provenance, disallowed NPD pathology or a failed specialized contract can still block the relevant path. Compact scale and detector promotion additionally require prospective row preservation, coverage and zero split/NPD pathology. Frame and detector parameter counts remain separate, and a more flexible topology cannot win solely through a lower SHELXL endpoint R factor. Detector-free models are preferred unless a field earns its gates; 8x8 requires an explicit independent calibration.
 
-Endpoint modulation p95 is now a reporting diagnostic, not a validity or
-publication gate. Missing or large values remain explicit warnings, but no
-longer reject an otherwise healthy endpoint, veto a compact scale contract,
-or stop a shared LS1 feedback loop. Automatic absolute-structure selection is
-now deferred until the final thickness, geometry, nuisance, and structural
-model. It uses the exact elastic negative-thickness identity to evaluate both
-hands from each eigendecomposition with absorption disabled only for that
-decision. No hand-specific thickness, jitter, or nuisance grids are rerun. If
-the matched all/free-row evidence and score materially favor the inverse,
-GROND materializes that coordinate hand once and continues with the already
-selected full nuisance contract.
+### Hand, maps and reports
 
-Fixed-geometry XDS rows now solve the local Ewald crossing and its
-`dSg/domega` Jacobian analytically. Scan-varying DIALS orientation matrices
-and fitted geometry paths retain the established numerical solver. The new
-path preserves the nearest local branch and falls back to the numerical
-solver at tangencies or rounded domain limits; it changes no beam-selection or
-physics contract.
+Proper indexing-transform selection is separated from coordinate inversion and uses a hand-invariant matched-Born work-row target. The final elastic negative-thickness hand calculation shares rows, basis, geometry, thickness and nuisance settings. Absorption is disabled only for this Hermitian comparison. Method version 4 assigns half credit to exact/numerical residual ties and retains the historical strict-count statistic separately. The all-row adjusted count contrast controls the automatic inversion threshold; weak, missing or conflicting free evidence warns without vetoing it. Invalid thresholds or physical row/geometry mismatches produce explicit errors. A failed hand calculation retains the preceding usable structural endpoint; centrosymmetric not-applicable results are handled explicitly.
 
-Fixed-model row-plan calculations now skip the dense Fourier-potential cube
-and evaluate only the exact reciprocal-space differences used by the cached
-beam bases. Dense storage remains the default when row plans are not frozen.
-The continuous-thickness guard grid also broadcasts candidates through each
-cached eigensystem instead of repeating scalar propagation. Both changes are
-algebraically exact and leave the selected rows, beam support, Born/Bloch
-intensities, and nuisance objective unchanged.
+The manual final report now uses the same tie-neutral effective count as the v4 hand decision, with strict counts retained only as a fallback for older diagnostics. Reports distinguish preferred hand, conditional support and the exported coordinate representation. Nominal count Z values are not calibrated sigma confidence under correlated observations. Named configuration still requires acquisition/import sign calibration; the legacy branch-symmetric calibration replay does not yet accept the current final-elastic AUTO artifact.
 
-Detector-position scaling is no longer fixed unconditionally at 8x8. Physical
-nuisance selection is detector-free by default; the subsequent frozen-row
-scale audit evaluates detector-free, 2x2, 4x4, and diagnostic 8x8 fields. Added fields must improve
-multiple held-out splits, preserve the Born-to-Bloch advantage, have adequate
-rows in every tile, reproduce across data halves, agree when inferred from
-Born and Bloch predictions, and survive the fixed-weight endpoint GooF,
-NPD, and split gates. An 8x8 field cannot be promoted without explicitly
-declared independent calibration. Detector fits now include dimensionless
-shrinkage toward unity and nearest-neighbor smoothness, and reports separate
-frame-scale and detector-scale parameter counts. DIALS imports also preserve a
-present inverse-scale-factor column as a fixed control sidecar rather than
-silently substituting a GROND detector field.
+Table 1 separates SHELXL endpoint factors from GROND-computed JANA/PETS-style Born/Bloch row factors. Row reporting uses immutable source sigmas in the target intensity units, and unavailable quantities remain unavailable. Endpoint and row files are bound to their selected model. Native maps use ratio-derived amplitudes and model phases; optional `shelx2map` endpoint maps explicitly request weighting and retain an unweighted diagnostic. Finish regenerates reports/maps without structural refinement and exposes partial/missing map families with their precise cause.
 
-The advanced native-row engine now offers an opt-in incoherent two-axis
-Gaussian mosaic cone. Direct-angle quadrature avoids extra excitation-error
-root searches, and every candidate width uses one per-row beam basis selected
-over the widest declared cone. Result tables record row-level basis hashes so
-candidate comparisons can prove identical support. The default automatic
-workflow is unchanged; finite mosaic widths still require explicit numerical
-convergence and repeated held-out validation before use.
+The prospective hydrogen-omit audit checks a zero-H model, compatible cells/symmetry, alignment from common non-H atoms, input hashes and actual map peaks near independently supplied H coordinates. The built-in strip-H branch remains a retrospective single-dataset sensitivity control and is rejected for multiple datasets.
 
-`grond auto` can now use a model-keyed exact row-plan cache inside sufficiently
-large fixed-model nuisance grids. Repeated thickness and absorption candidates
-reuse detector geometry, the signed direct/target beam basis, rocking-profile
-points, and difference-HKL lookup only while the structural-model hash is
-unchanged. Because a cold cache is built serially, automatic mode enables it
-only when at least 16 predictions share one geometry key; smaller searches stay
-uncached. Moving-model coordinate/ADP updates remain uncached by the automatic
-policy. The older cross-model frozen-basis behavior is still available only
-through an explicit `--row-plan-cache readwrite`. The requested mode, resolved
-mode, reuse estimate, threshold, and cache key remain recorded in the row
-summary.
+### Input interfaces and operation
 
-Automatic thickness promotion now compares the complete nuisance contract
-correctly after mosaicity and geometry-path provenance were added. String-valued
-fields no longer make an unchanged starting trial fail to match itself and abort
-an otherwise healthy non-fast run. XDS all-zero `XOBS/YOBS/ZOBS` sentinels are
-also treated as missing centroids rather than detector measurements at the
-origin. Such rows remain available through predicted geometry, are excluded
-from observed-geometry tail estimates, and are counted explicitly in preflight
-and row-selection diagnostics.
+DIALS import preserves signed summation rows, raw detector-model variances, scan-varying crystal geometry and row-quality decisions; empirical/gain sigma changes are explicit diagnostics. Cropped scans retain their array-frame origin. One bridge represents one experiment. The helper runs in a configured DIALS Python, validates launchers and inputs, and reports concise errors. Portable row input retains explicit units and geometry rather than reconstructing them from a merged HKL.
 
-The low-level expert commands remain available beneath the stateful manual
-controller. `grond scout` performs only proper-transform preflight and
-scouting, `grond thickness` aliases the thickness audit, `grond hand-check`
-replays a completed native row contract, and `grond refine` aliases pinned
-endpoint continuation.
+Optional PETS export records source hashes, signed-row mapping, intensity/variance transformations and virtual-frame ownership. Native PETS2 import preserves PETS-owned observation and zone geometry. An ordinary import can enter normal AUTO only after exact ordered agreement with its companion PETS HKL and static SHELX export. Correlated virtual-frame rows remain a native row-space target; they are not presented as a conventional static endpoint. Unsupported settings, precession and incompatible contracts fail explicitly. The work-only diffBloch adapter preserves original model instructions and requires a matched GROND replay before any returned structural candidate can be promoted. Macromolecular FreeR/MTZ and endpoint templates remain explicit experimental interfaces.
 
-Elastic hand checking now implements the negative-thickness identity. One
-Hermitian eigendecomposition produces both the supplied-coordinate and
-coordinate-inverted intensities on the same signed rows, proper transform,
-split, thickness distribution, and nonabsorptive nuisance contract. Absorption
-is disabled explicitly in both branches and recorded; GROND refuses to apply
-the shortcut when absorptive terms are requested. A separate explicit
-coordinate-inversion mode remains available when absorption must be preserved
-or when a full two-model control is required.
+The staged manual interface records setup, scout, thickness, pre-feedback hand, shared feedback, scale audit and finish handoffs. It is an expert decomposition, not every AUTO policy in manual form. Resuming requires matching fingerprints; going backward invalidates downstream state while retaining artifacts. Doctor tests the requested interpreter and reports readiness for the chosen workflow. Explicit executable paths are frozen and forwarded, subprocess failures retain recovery information, and dry runs produce planning summaries without requiring unmaterialized outputs.
 
-The native Bloch engine now has an opt-in direct-angle rocking-profile
-coordinate. It projects the existing finite profile width into scan angle,
-applies an explicit angular half-width bound, and can convolve that profile
-with one bounded Gaussian projected-mosaic width per dataset. Unlike the older
-target-Sg jitter experiment, this mode never asks for extra offset Ewald roots.
-The default target-Sg production path is unchanged. XDS reflecting range and
-beam divergence, DIALS profile-model parameters, and the presence of DIALS
-frame-sliced shoeboxes are now retained as provenance; a DIALS GaussianRS
-`sigma_m` or XDS reflecting-range width is exposed only as an optional prior
-centre and is never activated automatically.
-
-An experimental geometry-only scan-path fitter can derive a bounded,
-zero-median along-scan slew and two transverse Chebyshev rotations from XDS
-centroids. The global frame datum remains a separate nuisance. The fitter uses
-no intensities, structure, hand label, or GROND residuals, records contiguous-
-frame validation and source hashes, and rejects transverse corrections that do
-not improve held-out detector centroids or hit a coefficient bound. Geometry
-contracts are opt-in and fail closed on source-HKL or bound mismatches.
-
-The new `GROND export-pets` command writes audited `cif_pets` files from DIALS
-or summation-only XDS integrations for PETS/Jana2020/Dyngo and diffBloch. DIALS
-exports use its native PETS geometry writer, with an explicit bounded projection
-when a scan-varying cell cannot be represented by the one-cell PETS contract.
-For XDS, GROND inverts the documented `RLP/PEAK` correction, verifies the raw-to-
-CORRECT signed-row mapping and basis transform, and refuses unlabeled or
-profile-fitted input by default. Every output is reparsed, receives an actual
-nonzero `dstarmax`, and is accompanied by source hashes and a complete transform,
-filter, variance, and cell-projection manifest.
-
-PETS exports now have an explicit virtual-frame ownership contract. The default
-`overlap` mode preserves the stock PETS/Jana candidate-frame representation.
-The opt-in `--frame-ownership nearest-excitation` mode assigns every selected
-source observation to exactly one minimum-absolute-excitation-error frame for
-diffBloch refinement and records the complete ownership accounting in the
-manifest. This prevents overlapping virtual frames from being mistaken for
-independent repeat observations without changing the underlying measurement.
-XDS PETS exports now also declare their uncertainty contract. The default
-retains the calibrated XDS-reported sigma after the same PEAK/RLP transform as
-the intensity; `--xds-sigma-mode raw` is an explicit sensitivity mode that
-inverts the declared XDS variance model. The raw-mode nonpositive fallback now
-retains variance on the correct recorded-intensity scale.
-
-`GROND validate-ls1` now exposes and correctly forwards `--endpoint-ls-cycles` and `--endpoint-wght-mode` to every updated-q and fixed-q endpoint calculation. This repairs a diagnostic-only wrapper failure that prevented a controlled comparison of one versus several conventional LS/CGLS cycles under one frozen Bloch correction; production automatic feedback remains at one internal cycle by default. The new auto-workflow guide lists the automatic stage order, optional-stage switches, direct subcommands, and the separate meanings of inner LS cycles, repeated SHELXL calls, and updated-q macrocycles.
-
-Corrected-HKL endpoint maps now pass their weighting mode to `shelx2map` explicitly. The primary Fo, Fo-Fc, and 2Fo-Fc maps use `-w 1`; a raw `-w 0` Fo-Fc map is retained under an unambiguous diagnostic filename. This avoids silently receiving unweighted maps from `shelx2map` builds whose executable default does not match the documented default, while preserving the untouched LIST 6 FCF and the unweighted control for audit.
-
-The diagnostic native-gradient structure updater now uses explicit absolute finite-difference steps in each parameter's physical unit instead of passing one nominal step to SciPy as a relative multiplier. Coordinates and Ueq therefore receive stable, separately configurable perturbations even when a coordinate is zero or an ADP is small; the former `--diff-step` spelling remains as a deprecated absolute shorthand, and every block records the applied scheme and steps. This change is confined to the optional native finite-difference updater and does not alter the production Bloch/LS1 feedback path. The opt-in row-plan cache is also now wired through both single- and multi-dataset native updates. Its validator accepts NaN sentinels only for audit quantities that are explicitly inapplicable under the fixed-window/no-jitter contract, so valid caches now produce real geometry-cache hits while stale, incompatible, or geometry-nonfinite entries still rebuild.
-
-The install and external-tool surface now matches the workflows GROND actually executes. Pandas was removed because no shipped runtime imports it. XDS, XDSCONV, and SHELXT were removed from the executable registry because GROND reads their existing products but never launches those programs; Olex2 likewise remains an optional user interface rather than a runtime dependency. The default config and doctor report now show only the small-molecule tools, while optional macromolecular/custom endpoint adapters are available through explicit expanded views. Doctor readiness can be scoped to the portable core, the SHELXL small-molecule endpoint, native maps, or the optional `shelx2map` endpoint-map path. Automatic runs no longer request legacy `shelx2map` maps by default. The production small-molecule runtime therefore needs only NumPy, SciPy, Gemmi, and SHELXL; native maps from `GROND finish` require no external map executable. DIALS Python remains necessary only when converting `.refl`/`.expt` input.
-
-The DIALS bridge can now select rows accepted by `dials.scale` independently of
-the intensity source. `--row-selection scaled` therefore preserves raw
-summation intensities and variances from a `scaled.refl` table while respecting
-documented scaling exclusions; requesting it without scaled rows fails closed.
-New DIALS bridges also record the experiment UUID, actual space-group number,
-and source Miller-index basis. A DIALS cell-metric failure now names the
-offending dataset, prints both cells, and explains when a post-cosym identity
-transform may safely be trusted. The bounded distorted-P1 fallback remains
-specific to native XDS input and is no longer suggested for a DIALS bridge.
-
-HKL-transform candidates now use one internally consistent cell metric. GROND preserves the input `UNIT_CELL_CONSTANTS` as raw provenance, derives the working identity and transformed model-basis cells from the same oriented `UNIT_CELL_[ABC]-AXIS` vectors used by the Ewald geometry, and reports both sources with an explicit basis label. This removes a rounding-dependent identity/nonidentity asymmetry from resolution filtering, Fourier-potential normalization, support construction, and transform scoring. Fourier-potential and row-plan cache schemas were advanced so results created under the former mixed-cell convention cannot be reused.
-
-Automatic indexing alignment and absolute-structure testing now have an explicit parity contract. Calibration-grade scouting enumerates the complete 24 determinant-positive signed-axis permutations, applies only a recorded source/model unit-cell metric filter, and sends every retained operator through one matched-Born work-row nuisance trial. One candidate-union symmetry/Friedel split is rebuilt deterministically from the bound HKL, model, retained operators, and seed, so operator changes cannot move observations between work and free. Rankings are replayed from hash-bound row artifacts with a fixed candidate priority; every candidate must reproduce one exact N/Q, row-budget, selected/work/free support, nuisance, kernel, and backend contract. Expected chemistry and metadata overlap cannot select, eliminate, or break ties. A mixed-parity search remains available only as an explicit diagnostic mode and cannot authorize a named absolute configuration.
-
-The new `GROND canonicalize-hand` command repairs a legacy improper-transform endpoint without changing its physical content. It materializes the exact inverted-coordinate and inverted-symmetry RES, changes `T` to the proper `-T` representative, negates every model-basis HKLF4 index, preserves the observation and trailing fields byte-for-byte, and writes a hash-bound gauge-equivalence manifest. This operation is calibration-free and remains conditional. Hand control now evaluates the same predeclared nuisance grid once for each coordinate hand, chooses one common nuisance by the label-symmetric mean work-row dynamical wR2 with a nuisance-hash tie-break, and performs two singleton evidence replays at that state. This doubles the initial hand-scout evaluations but removes the previous dependence on a nuisance selected from the as-supplied hand. Matched decisions are then replayed from both hash-bound row artifacts with one source-sigma vector and one scale-design rule; the calibration gate requires a sign-consistent Klar--Palatinus adjusted Z above its frozen threshold. The separate `GROND create-parity-calibration` and `GROND apply-parity-calibration` commands require the setup ID, setup-manifest hash, physical-crystal ID, and raw-acquisition fingerprint to have been frozen before either decision. Exact declared reuse of the calibrant reflection content or decision artifacts fails closed. Setup, physical-crystal, and acquisition identifiers are nevertheless caller-attested provenance, not cryptographic proof of raw-data identity; a deliberately false relabeling remains outside the package trust boundary.
-
-The Klar--Palatinus adjusted reflection-count hand diagnostic now treats exact equal-residual rows as neutral half wins. This versioned finite-precision extension restores exact sign antisymmetry when the selected and other hand are swapped. Diagnostic JSON retains the former strict-lower-residual statistic and probabilities as explicitly labeled legacy fields. Ordinary diagnostics retain the paired-row contrast, while calibration-grade decisions require the independently replayed common-source-sigma adjusted-Z evidence described above.
-
-Multi-dataset `push-endpoint` can now take one immutable policy-selected `native_dyn_calc.csv` contract per dataset. The continuation verifies every recorded row index, transformed HKL, target intensity, raw XDS sigma, and d spacing against the live XDS input, then restores the table's declared dataset role plus raw-row and endpoint weights rather than falling back to an older checkpoint policy. It records content hashes in each cycle and refuses partial mappings, stale input, duplicate rows, inconsistent policy annotations, or a `max-rows` truncation. This preserves a promoted multi-dataset support exactly through later Bloch/LS1 controls instead of silently recreating membership from raw eligibility filters; compact-scale selection remains a separate explicit replay after the selected safe model.
-
-Every successful multi-dataset Bloch/LS1 continuation now finishes with one fixed-nuisance, no-extra-LS1 Bloch row recomputation from the accepted shared endpoint model. Final row metrics, maps, and compact-scale replays therefore no longer risk pairing a cycle's input-model predictions with the coordinate/ADP-updated SHELXL output model.
-`push-endpoint --cycles 0 --recompute-final-rows` exposes that same exact replay for an already accepted multi-dataset endpoint without performing another SHELXL step.
-Multi-dataset continuations can now bind one compact scale topology per dataset with `--dataset-scale-spec`. GROND materializes those refitted scale rows after every fresh Bloch calculation and before the shared corrected-HKL/SHELXL step, so an endpoint control cannot quietly broaden a previously promoted compact scale contract.
-
-Native dynamical map export now uses the correct crystallographic Fourier sign, so off-origin map peaks appear at the model rather than its inverted hand. Map coefficients merge model-symmetry equivalents with propagated amplitude uncertainties, retain independent Friedel observations through dynamical amplitude inference, and then make the necessary uncertainty-weighted Hermitian projection only while synthesizing a real electrostatic-potential map. The resulting manifest records the symmetry expansion, Friedel disagreement, and projection rather than silently discarding a branch. Hydrogen-omit peak auditing now samples Gemmi/CCP4 grids at their actual `ijk/grid_shape` positions and uses the nearest sample at a site. The alternate-hand row diagnostic additionally reports the Klar--Pálatiňus adjusted reflection-count statistic for valid, matched single-dataset rows, while failing closed on mismatched observations or undeclared multi-dataset pooling; the legacy paired residual diagnostic remains separately labeled.
-
-Final statistics now have an explicit reporting contract. Every completed report bundle writes root-level `TABLE1_FINAL_STATISTICS.md` and `.json` with separate SHELXL endpoint and GROND-computed JANA/PETS-style row panels. Canonical `JANA_ROW_STATISTICS.*` and per-dataset `JANA_ROW_STATISTICS_PER_DATASET.*` artifacts distinguish unmerged `Robs/Rall/wRall` from post-symmetry-merged `MRobs/MRall/MwRall`; optional observed-subset weighted factors remain labeled separately. Born and Bloch factors are evaluated on one enforced finite row support, the actual instability factor `u` is recorded, and invalid HKL indices are surfaced as merge exclusions instead of disappearing from `MR` counts. Conventional kinematical, matched Born, and Bloch dynamical entries are shown only where computed, with explicit `n/a` elsewhere. Legacy native-objective residuals remain available for optimization audit but are no longer presented as publication endpoint or row factors.
-
-The DIALS bridge now preserves cropped-scan frame origins by exporting DIALS' zero-based array-range start as `STARTING_FRAME` and applying the same origin when validating omega and scan-point A matrices. Imports whose predicted rows remain grossly off the Ewald sphere fail before writing a new reflection bridge, with an auditable diagnostic summary instead of a misleading `status: ok`.
-
-Multi-dataset automatic runs now evaluate alternate-hand evidence for every crystal but make one conservative decision for the shared structure. Each decision compares matched original- and alternate-hand scouts on the same selected, work, and positive held-out row counts, with work-only scale fitting even when production scales use all rows. The alternate hand is selected only when every dataset passes the all-row and raw held-out quality gates; weak, failed, missing-free, or mixed evidence keeps the input hand for all downstream thickness, nuisance, LS1, and endpoint stages. Materialized SHELX alternate models now invert both atomic coordinates and explicit `SYMM`/`EQIV` translations, validate the written model against the scouted geometry, and use source/output hashes so a changed same-name input cannot reuse an old variant. Models with signed `CHIV` restraints retain the input hand because automatic CHIV-target inversion is not yet supported.
-
-Multi-dataset automatic runs now materialize and test full, BIC-selected compact, and minimum-strict scale contracts before writing the canonical combined endpoint. Compact scales reuse the exact frozen Bloch predictions and may be promoted only when their row identity and physics contract match the full control, their aggregate fitted-variance BIC improves, all/work/free and per-dataset row costs remain bounded, pooled Bloch predictions still beat the matched Born control, merged coverage is unchanged, and the SHELXL endpoint remains healthy, publication-like, and free of new ADP pathology. If more than one compact contract passes, GROND chooses the smallest scale count; every incomplete or failed gate keeps the full-scale result. Reports, publication tables, run configuration, and continuation checkpoints record the selected materialized contract rather than mixing compact metadata with full-scale rows.
-
-Combined corrected-HKL endpoints now accept a separate paper-facing resolution cutoff. Row membership is recalculated from signed HKL and the shared structure cell, and the same retained rows drive per-dataset, joint, held-out, merge, and SHELXL statistics. Reports preserve the unfiltered source metrics separately, record requested and discrete achieved resolution plus retained/dropped counts, and keep full-scale controls distinct from the selected compact publication rows. Multi-dataset endpoint continuation also states its actual contract: `push-endpoint` refits the pinned full grouping, while compact reselection is a separate post-push publication step.
-
-Repeated endpoint refinement now snapshots each matching NPD-free SHELXL RES/LST/FCF set. If a later least-squares pass fails, omits final statistics, writes a structurally incomplete model, or develops a non-positive-definite ADP, GROND restores the last safe endpoint for refinement and maps while retaining the rejected pass as an explicit diagnostic artifact. Feedback endpoints must contain a parseable explicit electron-SFAC model with atoms, complete R-factor statistics, and a path/hash record that still matches the summary-selected lambda. Single- and multi-dataset feedback therefore cannot pair current metrics with a stale endpoint file left by a resumed run.
-
-When the first corrected-HKL SHELXL step is otherwise complete but develops NPD atoms, single-dataset feedback, shared multi-dataset feedback, and scale-contract replay now retry that same step from the unchanged input model with the bounded `DAMP 100`, `300`, `1000`, `3000`, and `10000` ladder. GROND accepts the first complete zero-NPD result and archives the undamped and every damped RES/LST/FCF attempt. This is step control only: it does not add restraints, enable XNPD, alter the corrected reflection data, or relax the zero-NPD gate. If no safe step exists, the endpoint remains rejected.
-
-Discrete thickness polishing continues to rank candidate grids using work rows and work-fitted scales alone, but its single winner must now pass a post-selection held-out no-harm gate against the exact starting nuisance already evaluated in the same grid. A negligible training gain, missing or changed row counts, changed valid-row identity, nonfinite validation statistics, failure to improve the full-row composite score, excessive free-wR2 loss, or excessive all-row R1 loss restores the starting trial and its already-computed Bloch arrays with no extra propagation. Continuous thickness polishing now enforces the Bloch engine's physical `0 <= thickness_grad_frac <= 1` domain in its CLI bounds, every objective evaluation, quadrature construction, and final promotion gate. Its search interval is the local fractional basin around the coarse-grid winner, including for the final Powell step, so it cannot jump to a separated dynamical-thickness alias. The former numerical 400--2600 A limits are no longer treated as physical bounds; any finite positive coarse winner is accepted, while explicit hard bounds may only clamp its local basin. A bounded optimizer that returns a nonfinite or slightly out-of-bounds point is recorded as rejected instead of passing an invalid nuisance value into later physics gates or shared LS1 cycles.
-
-Optional Sg-jitter searches now reject a nuisance candidate when one of its convolved quadrature targets has no crossing inside the strict local rotation bracket. Feasible no-jitter and jitter candidates continue normally, the rejected configuration and row are recorded, and GROND does not widen the geometry bound or silently truncate the requested orientation distribution.
-
-Required zero-jitter base-profile targets that lie beyond the short Bragg-assignment bracket can now be reached by exact continuation through a bounded sequence of strict local solves on one interior-certified monotonic Ewald branch. The Sg=0 Bragg gate and active-jitter gate remain unchanged and fail closed. Row-plan and prediction caches, native row tables, and summaries record whether continuation was used and how many local segments were required. Multiprocessing prediction retries are also transactional, so a failed context cannot leak partial rows into a fallback, duplicate progress, or produce a mixed-backend prediction.
-
-Repeated Bloch/LS1 feedback cycles now share their content-addressed row-prediction cache, so a final recomputation of an unchanged model reuses the exact preceding prediction instead of repeating the matrix propagation. Prediction-cache metadata now compares NaN sentinels canonically and fingerprints the prediction-engine source plus numerical runtime, preventing both false misses and unsafe reuse after a code or library change.
-
-`GROND doctor --python PATH` now tests the requested interpreter instead of silently substituting another Python. The new `--strict` mode returns a failing exit status when required packages, installed GROND features, or requested SciPy Bloch operations are not ready, and reports machine-readable `ready` and `failures` fields. An explicit `--shelxl /path/to/shelxl` now satisfies automatic-run tool preflight, is resolved once to an absolute executable, and is forwarded through every normal native, feedback, combination, observation-polish, baseline, and endpoint-calibration stage. Endpoint-enabled workers fail closed if that executable is missing or not launchable, row-only scouts skip redundant SHELXL baseline work, and resume fingerprints include the executable contents. Failed workflow stages write a concise recovery artifact and log tail without masking the original subprocess error, while malformed or structurally invalid resume records are warned about and quarantined before a fresh record is started. Automatic dry runs now finish with a planning-only summary instead of trying to read row tables that intentionally were not materialized; real runs retain the strict missing-row refusal.
-
-`grond auto` and `grond finish` now compare a corrected publication endpoint with the fresh conventional baseline rerun from the same final native stage. A corrected endpoint with worse `R1all` is retained as a diagnostic but is no longer promoted, and the reports point directly to the conventional RES/HKL/LST that should be kept. Single-dataset thickness reporting states both the mean in nanometres and the support implied by the selected distribution. Multi-dataset reports instead list each crystal's independent center, gradient, support, scale field, and nuisance contract; they no longer assign a fabricated support interval to an arithmetic aggregate.
-
-Publication modulation gates now measure the correction that was actually applied instead of accepting a placeholder. The recorded `mod_p95` is the 95th percentile of the symmetric fold change after removing the arbitrary overall intensity scale in log space. Native, compact-scale replay, observation-polish, and combined endpoints all write this audit; combined values include the fitted inter-dataset overlap scales. Missing or excessive modulation fails publication selection, and a shared multi-dataset LS1 loop keeps the preceding clean model rather than feeding an unmeasured or over-modulated endpoint into another Bloch cycle.
-
-Automatic XDS runs now measure the scan-datum difference between the global header orientation and row-level `ZCAL` positions before testing rocking-profile offsets. This prevents an unvalidated zero-frame assumption from forcing thickness to compensate for a profile-center error while keeping nuisance selection on work rows. Sparse, inconsistent, or extreme geometry estimates fall back without recentering, and the higher-quality thickness polish retains the original geometry-derived probes. Fixed-nuisance row runs also correctly translate the public `sigma_a`, `sigma_b_corr`, and `sigma_c_peak` names into the frozen Bloch configuration instead of failing while writing their summary. A selected continuous-thickness nuisance is now materialized on the full native row contract before feature comparison or multi-dataset policy, preventing a summary-only optimizer directory from silently disabling structure-update weighting. Calibrated single-dataset scale-contract endpoints enter the final publication chooser with their actual HKL safety evidence. Multi-dataset automatic calibration is explicitly marked not applicable because a one-table replay would incorrectly share scale fields across crystals; the validated combined endpoint remains authoritative.
-
-GROND now supports the combined multi-dataset Bloch/LS1 feedback path, model-symmetry endpoint merging, resumable endpoint continuation, native final maps, and explicit endpoint-selection reports. Publication endpoints reject non-positive-definite model updates and use the declared post-Bloch uncertainty model with fixed `WGHT 0 0`; inherited or promoted SHELXL weights remain diagnostic choices. Earlier small-value automatic DAMP retries were removed after they proved unsuitable as a silent repair policy; the current bounded first-safe-step recovery is explicit in the endpoint provenance and never accepts an NPD model.
-
-The command-line workflow now exposes diagnostic SHELXL cycle control, clearer stale-install checks, portable XDS and DIALS input preparation, expanded row and endpoint reports, and guarded experimental acceleration backends. The public package continues to use dense SciPy as its numerical reference.
-
-Multi-dataset feedback and its final row recomputation now retain the pinned native row-weight contract instead of re-reading the preceding SHELXL endpoint's `WGHT` line. This prevents a `WGHT 0 0` endpoint from making the next cycle's weighted row statistic look artificially different while the unweighted row fit is unchanged or worse. `push-endpoint --native-wght-a/--native-wght-b` supplies an explicit global recovery contract for checkpoints written before this fix.
-
-The package audit for this release corrected wavelength-dependent relativistic scaling, nonorthogonal anisotropic displacement factors, symmetry-mate tensors, alternate-hand symmetry translations, special-position expansion, local excitation-error root finding, and DIALS `S R F A` goniometer geometry. The DIALS bridge now applies LP and quantum-efficiency corrections together and keeps raw detector-model variances by default. SHELX parsing resolves FVAR parameters, excludes Q peaks and instruction records, and rejects models without explicit electron scattering coefficients.
-
-Validation scales now fit work reflections by default, while symmetry and Friedel mates remain on the same side of the held-out split. Sparse or free-only scale groups borrow a finite work-derived scale instead of producing a zero denominator. Multi-dataset overlap scales require overlap between distinct datasets and use leave-self-out equations. Invalid sigma rows no longer acquire artificial weight.
-
-Dense Fourier-potential allocation is checked against a declared memory ceiling before NumPy allocates it. Fourier-potential, row-plan, and prediction caches now validate their schema, input fingerprints, shapes, and finite values before reuse, and cache writes are atomic. Resume records fingerprint the GROND source and declared inputs. Failed external refinements cannot reuse stale output files.
-
-The numerical engine is included in Ruff checks and every shipped legacy module is tested as an ordinary package import and as a direct script where supported. The README and user guides were rewritten as concise package documentation, and release metadata, citation data, policy files, and artifact checks now agree on the package boundary.
+Reused manual thickness summaries reject a recorded source-HKL hash mismatch, including edits at the same path. Older summaries without a saved source hash remain explicit legacy reuse and report historical identity as unverified.
 
 ## 0.2.1
 

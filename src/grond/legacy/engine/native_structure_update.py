@@ -12,13 +12,13 @@ path when the SHELXL feedback loop is available.
 
 from __future__ import annotations
 
-import argparse
 import copy
 import csv
 import json
 import math
 import os
 import re
+import sys
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -27,9 +27,54 @@ from types import SimpleNamespace
 for _name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
     os.environ[_name] = "1"
 
-import gemmi
+if not __package__:
+    # Direct legacy execution must import this checkout, not another installed GROND.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+
 import numpy as np
 from scipy.optimize import least_squares
+
+from grond.refine.arguments_native import build_parser as build_native_update_parser
+from grond.refine.geometry_restraints import (
+    COVALENT_RADII_A as COVALENT_RADII_A,
+    adp_similarity_residuals as adp_similarity_residuals,
+    atom_distance_A as atom_distance_A,
+    bond_restraint_residuals as bond_restraint_residuals,
+    build_start_restraints as build_start_restraints,
+    cart_delta as cart_delta,
+    frac_delta_min_image as frac_delta_min_image,
+    frac_xyz as frac_xyz,
+    write_cctbx_restraint_view as write_cctbx_restraint_view,
+    write_restraints_csv as write_restraints_csv,
+)
+from grond.refine.native_objective import (
+    apply_row_resolution_to_prediction as apply_row_resolution_to_prediction,
+    apply_scale_contract as apply_scale_contract,
+    choose_objective_rows as choose_objective_rows,
+    fit_scale_contract as fit_scale_contract,
+    residual_vector as residual_vector,
+    scaled_prediction as scaled_prediction,
+    validation_score as validation_score,
+)
+from grond.refine.native_output import (
+    format_native_value as format_native_value,
+    update_res_coordinates as update_res_coordinates,
+    write_model_delta_csv as write_model_delta_csv,
+    write_objective_rows as write_objective_rows,
+    write_parameter_csv as write_parameter_csv,
+)
+from grond.refine.parameters import (
+    absolute_finite_difference_jacobian as absolute_finite_difference_jacobian,
+    atom_is_refinable as atom_is_refinable,
+    atom_ueq as atom_ueq,
+    model_from_vector as model_from_vector,
+    parameter_absolute_steps as parameter_absolute_steps,
+    parameter_bounds as parameter_bounds,
+    parameter_layout as parameter_layout,
+    parameter_prior as parameter_prior,
+    set_atom_ueq as set_atom_ueq,
+    special_position_coordinate_policy as special_position_coordinate_policy,
+)
 
 if __package__:
     from .bloch_engine import (
@@ -38,12 +83,10 @@ if __package__:
         XDSBlochPort,
         XDSData,
         alternate_hand_model,
-        model_symmetry_ops,
         parse_model,
         sha256,
         shelx_u_cart_matrix,
         split_masks,
-        unique_symmetry_mates,
     )
     from .native_row_regularize import (
         DEFAULT_BASELINE_HKL,
@@ -52,18 +95,12 @@ if __package__:
         TARGET_MODES,
         Nuisance,
         copy_baseline,
-        detector_bin_indices,
         evaluate_trial,
         export_corrected_endpoint,
-        fit_frame_detector_scales,
-        fit_group_scales,
-        group_indices,
         native_metrics,
         parse_float_grid,
         parse_wght,
-        row_resolution_modulation,
         row_selection,
-        shelx_weights,
         sigma_eff,
         target_arrays,
     )
@@ -74,12 +111,10 @@ else:  # pragma: no cover - direct script execution
         XDSBlochPort,
         XDSData,
         alternate_hand_model,
-        model_symmetry_ops,
         parse_model,
         sha256,
         shelx_u_cart_matrix,
         split_masks,
-        unique_symmetry_mates,
     )
     from native_row_regularize import (
         DEFAULT_BASELINE_HKL,
@@ -88,18 +123,12 @@ else:  # pragma: no cover - direct script execution
         TARGET_MODES,
         Nuisance,
         copy_baseline,
-        detector_bin_indices,
         evaluate_trial,
         export_corrected_endpoint,
-        fit_frame_detector_scales,
-        fit_group_scales,
-        group_indices,
         native_metrics,
         parse_float_grid,
         parse_wght,
-        row_resolution_modulation,
         row_selection,
-        shelx_weights,
         sigma_eff,
         target_arrays,
     )
@@ -172,391 +201,6 @@ def make_early_stop_result(exc: EarlyStopOptimization, eval_count: int):
         early_stop_metric=float(exc.metric),
         early_stop_eval=int(exc.eval_no),
     )
-
-
-def parameter_absolute_steps(
-    params: list[dict],
-    *,
-    xyz_step_frac: float = 1e-4,
-    adp_step_a2: float = 1e-4,
-    legacy_step: float | None = None,
-) -> np.ndarray:
-    """Return finite-difference steps in each parameter's physical units.
-
-    SciPy's ``least_squares(diff_step=...)`` treats its input as a relative
-    multiplier of the current parameter value.  Fractional coordinates can be
-    zero and Ueq values are normally much smaller than coordinates, so one
-    relative scalar gives parameter-dependent, and sometimes near-zero, steps.
-    Native GROND instead uses explicit fractional-coordinate and A^2 steps.
-    ``legacy_step`` retains the old single-knob CLI as an absolute shorthand.
-    """
-
-    if legacy_step is not None:
-        xyz_step_frac = float(legacy_step)
-        adp_step_a2 = float(legacy_step)
-    values = {
-        "xyz": float(xyz_step_frac),
-        "adp_ueq": float(adp_step_a2),
-    }
-    for name, value in values.items():
-        if not math.isfinite(value) or value <= 0.0:
-            raise ValueError(f"{name} finite-difference step must be finite and positive")
-    steps = []
-    for param in params:
-        kind = str(param.get("kind", "xyz"))
-        if kind not in values:
-            raise ValueError(f"unknown parameter kind {kind!r} for finite-difference step")
-        steps.append(values[kind])
-    return np.asarray(steps, dtype=float)
-
-
-def absolute_finite_difference_jacobian(
-    fun,
-    x,
-    bounds,
-    absolute_steps,
-    *,
-    f0=None,
-) -> np.ndarray:
-    """Calculate a bounded two-point Jacobian using explicit absolute steps."""
-
-    x = np.asarray(x, dtype=float)
-    lower, upper = (np.asarray(value, dtype=float) for value in bounds)
-    steps = np.asarray(absolute_steps, dtype=float)
-    if x.ndim != 1 or lower.shape != x.shape or upper.shape != x.shape or steps.shape != x.shape:
-        raise ValueError("x, bounds, and absolute finite-difference steps must be matching vectors")
-    if not np.all(np.isfinite(x)) or not np.all(np.isfinite(steps)) or np.any(steps <= 0.0):
-        raise ValueError("finite-difference parameters and steps must be finite with positive steps")
-    base = np.asarray(fun(x) if f0 is None else f0, dtype=float)
-    if base.ndim != 1:
-        raise ValueError("finite-difference residual function must return a vector")
-    jac = np.empty((len(base), len(x)), dtype=float)
-    for column, requested in enumerate(steps):
-        forward_room = float(upper[column] - x[column])
-        backward_room = float(x[column] - lower[column])
-        if forward_room >= requested:
-            delta = float(requested)
-        elif backward_room >= requested:
-            delta = -float(requested)
-        elif forward_room >= backward_room and forward_room > 0.0:
-            delta = forward_room
-        elif backward_room > 0.0:
-            delta = -backward_room
-        else:
-            raise ValueError(f"parameter {column} has no room for a bounded finite-difference step")
-        trial = x.copy()
-        trial[column] += delta
-        shifted = np.asarray(fun(trial), dtype=float)
-        if shifted.shape != base.shape:
-            raise ValueError("finite-difference residual size changed between parameter evaluations")
-        jac[:, column] = (shifted - base) / delta
-    return jac
-
-
-def atom_is_refinable(atom, selection: str, labels: set[str]) -> bool:
-    if atom["name"].upper().startswith("Q"):
-        return False
-    if selection == "all":
-        return True
-    if selection == "nonh":
-        return atom.get("element", "").upper() != "H"
-    if selection == "labels":
-        return atom["name"] in labels
-    raise ValueError(f"unknown atom selection {selection!r}")
-
-
-def atom_ueq(atom, cell_tuple) -> float:
-    if atom.get("adp_type") == "anis":
-        return float(np.trace(shelx_u_cart_matrix(atom, cell_tuple))) / 3.0
-    return float(atom.get("uiso", 0.05))
-
-
-def set_atom_ueq(atom, value: float, cell_tuple) -> None:
-    value = max(float(value), 1e-5)
-    if atom.get("adp_type") == "anis":
-        start = atom_ueq(atom, cell_tuple)
-        scale = value / max(start, 1e-8)
-        for key in ("u11", "u22", "u33", "u23", "u13", "u12"):
-            atom[key] = float(atom[key]) * scale
-    else:
-        atom["uiso"] = value
-
-
-def special_position_coordinate_policy(model, selection: str, label_text: str, parameter_mode: str = "xyz"):
-    """Describe conservative XYZ freezing until a site-tangent basis exists."""
-
-    labels = {x.strip() for x in re.split(r"[,\s]+", label_text or "") if x.strip()}
-    frozen = []
-    if parameter_mode in {"xyz", "xyz_adp_ueq"}:
-        order = len(model_symmetry_ops(model))
-        for ai, atom in enumerate(model["atoms"]):
-            if not atom_is_refinable(atom, selection, labels):
-                continue
-            multiplicity = len(list(unique_symmetry_mates(atom, model)))
-            if multiplicity < order:
-                frozen.append({"atom_index": ai, "atom": atom["name"], "site_multiplicity": multiplicity, "symmetry_operation_count": order})
-    return {
-        "policy": "freeze_special_site_xyz",
-        "frozen_atoms": frozen,
-        "warning": (
-            "Special-position XYZ coordinates are held fixed in native updates because "
-            "a symmetry-constrained tangent parameterization is not implemented. "
-            "Scalar Ueq updates remain available."
-        ) if frozen else "",
-    }
-
-
-def parameter_layout(model, selection: str, label_text: str, parameter_mode: str = "xyz"):
-    labels = {x.strip() for x in re.split(r"[,\s]+", label_text or "") if x.strip()}
-    frozen_xyz = {item["atom_index"] for item in special_position_coordinate_policy(model, selection, label_text, parameter_mode)["frozen_atoms"]}
-    params = []
-    x0 = []
-    for ai, atom in enumerate(model["atoms"]):
-        if not atom_is_refinable(atom, selection, labels):
-            continue
-        if parameter_mode in {"xyz", "xyz_adp_ueq"} and ai not in frozen_xyz:
-            for coord in ("x", "y", "z"):
-                params.append({"kind": "xyz", "atom_index": ai, "atom": atom["name"], "coord": coord, "start": float(atom[coord])})
-                x0.append(float(atom[coord]))
-        if parameter_mode in {"adp_ueq", "xyz_adp_ueq"}:
-            ueq = atom_ueq(atom, model["cell"])
-            params.append(
-                {
-                    "kind": "adp_ueq",
-                    "atom_index": ai,
-                    "atom": atom["name"],
-                    "coord": "Ueq",
-                    "start": float(ueq),
-                    "start_tensor": {k: float(atom[k]) for k in ("u11", "u22", "u33", "u23", "u13", "u12") if k in atom},
-                }
-            )
-            x0.append(float(ueq))
-    if not params:
-        reason = "; special-position XYZ coordinates are held fixed" if frozen_xyz else ""
-        raise ValueError(f"No parameters selected for mode {parameter_mode!r}{reason}")
-    return params, np.asarray(x0, dtype=float)
-
-
-def model_from_vector(base_model, params, x):
-    model = copy.deepcopy(base_model)
-    for p, value in zip(params, x, strict=False):
-        atom = model["atoms"][p["atom_index"]]
-        if p.get("kind", "xyz") == "xyz":
-            atom[p["coord"]] = float(value) % 1.0
-        elif p["kind"] == "adp_ueq":
-            set_atom_ueq(atom, float(value), model["cell"])
-        else:
-            raise ValueError(f"unknown parameter kind {p.get('kind')!r}")
-    return model
-
-
-def parameter_bounds(params, x0, max_shift_frac: float, adp_shift: float, adp_min: float, adp_max: float):
-    lo, hi = [], []
-    for p, v in zip(params, x0, strict=False):
-        if p.get("kind", "xyz") == "xyz":
-            lo.append(float(v) - float(max_shift_frac))
-            hi.append(float(v) + float(max_shift_frac))
-        elif p["kind"] == "adp_ueq":
-            center = float(v)
-            lo_val = max(float(adp_min), center - float(adp_shift))
-            hi_val = min(float(adp_max), center + float(adp_shift))
-            lo.append(min(lo_val, center))
-            hi.append(max(hi_val, center))
-        else:
-            raise ValueError(f"unknown parameter kind {p.get('kind')!r}")
-    return np.asarray(lo, dtype=float), np.asarray(hi, dtype=float)
-
-
-def parameter_prior(params, x, x0, xyz_sigma: float, adp_sigma: float):
-    out = []
-    for p, value, start in zip(params, x, x0, strict=False):
-        sigma = float(adp_sigma) if p.get("kind") == "adp_ueq" else float(xyz_sigma)
-        out.append((float(value) - float(start)) / max(sigma, 1e-12))
-    return np.asarray(out, dtype=float)
-
-
-COVALENT_RADII_A = {
-    "H": 0.31,
-    "C": 0.76,
-    "N": 0.71,
-    "O": 0.66,
-    "S": 1.05,
-    "P": 1.07,
-    "F": 0.57,
-    "CL": 1.02,
-    "BR": 1.20,
-    "I": 1.39,
-}
-
-
-def frac_xyz(atom):
-    return np.asarray([float(atom["x"]), float(atom["y"]), float(atom["z"])], dtype=float)
-
-
-def frac_delta_min_image(atom_i, atom_j, cell_tuple):
-    """Return the closest periodic image under the full unit-cell metric."""
-
-    delta = frac_xyz(atom_j) - frac_xyz(atom_i)
-    basis = np.column_stack(
-        [
-            cart_delta(cell_tuple, np.asarray([1.0, 0.0, 0.0])),
-            cart_delta(cell_tuple, np.asarray([0.0, 1.0, 0.0])),
-            cart_delta(cell_tuple, np.asarray([0.0, 0.0, 1.0])),
-        ]
-    )
-    _q, upper = np.linalg.qr(basis)
-    target = upper @ delta
-    if np.any(np.abs(np.diag(upper)) <= np.finfo(float).eps):
-        raise ValueError("unit-cell basis is singular; no periodic closest image exists")
-
-    # Babai's nearest-plane point supplies a finite initial radius. A short
-    # three-dimensional sphere search then proves the closest lattice vector,
-    # even when a highly skew, non-reduced cell needs a translation beyond +/-1.
-    best_translation = np.zeros(3, dtype=int)
-    for index in range(2, -1, -1):
-        tail = float(upper[index, index + 1 :] @ best_translation[index + 1 :])
-        best_translation[index] = int(np.rint((target[index] - tail) / upper[index, index]))
-    best_distance2 = float(np.sum((target - upper @ best_translation) ** 2))
-    candidate = np.zeros(3, dtype=int)
-
-    def search(index: int, partial_distance2: float) -> None:
-        nonlocal best_distance2, best_translation
-        if index < 0:
-            if partial_distance2 < best_distance2:
-                best_distance2 = partial_distance2
-                best_translation = candidate.copy()
-            return
-        remaining = max(best_distance2 - partial_distance2, 0.0)
-        tail = float(upper[index, index + 1 :] @ candidate[index + 1 :])
-        center = (target[index] - tail) / upper[index, index]
-        radius = math.sqrt(remaining) / abs(float(upper[index, index]))
-        lower = math.ceil(center - radius - 1e-12)
-        upper_bound = math.floor(center + radius + 1e-12)
-        values = sorted(range(lower, upper_bound + 1), key=lambda value: abs(value - center))
-        for value in values:
-            residual = target[index] - tail - upper[index, index] * value
-            new_distance2 = partial_distance2 + float(residual * residual)
-            if new_distance2 <= best_distance2 + 1e-15:
-                candidate[index] = int(value)
-                search(index - 1, new_distance2)
-
-    search(2, 0.0)
-    return np.asarray(delta - best_translation, dtype=float)
-
-
-def cart_delta(cell_tuple, frac_delta):
-    a, b, c, alpha, beta, gamma = (float(v) for v in cell_tuple)
-    if abs(alpha - 90.0) < 1e-6 and abs(beta - 90.0) < 1e-6 and abs(gamma - 90.0) < 1e-6:
-        return np.asarray([frac_delta[0] * a, frac_delta[1] * b, frac_delta[2] * c], dtype=float)
-    cell = gemmi.UnitCell(a, b, c, alpha, beta, gamma)
-    zero = cell.orthogonalize(gemmi.Fractional(0.0, 0.0, 0.0))
-    vec = cell.orthogonalize(gemmi.Fractional(float(frac_delta[0]), float(frac_delta[1]), float(frac_delta[2])))
-    return np.asarray([vec.x - zero.x, vec.y - zero.y, vec.z - zero.z], dtype=float)
-
-
-def atom_distance_A(model, ai: int, aj: int) -> float:
-    dfrac = frac_delta_min_image(model["atoms"][ai], model["atoms"][aj], model["cell"])
-    return float(np.linalg.norm(cart_delta(model["cell"], dfrac)))
-
-
-def build_start_restraints(model, selection: str, label_text: str, tolerance_A: float, max_distance_A: float):
-    labels = {x.strip() for x in re.split(r"[,\s]+", label_text or "") if x.strip()}
-    atoms = model["atoms"]
-    bonds = []
-    for i, ai in enumerate(atoms):
-        if ai["name"].upper().startswith("Q"):
-            continue
-        ei = ai.get("element", "").upper()
-        ri = COVALENT_RADII_A.get(ei, 0.77)
-        for j in range(i + 1, len(atoms)):
-            aj = atoms[j]
-            if aj["name"].upper().startswith("Q"):
-                continue
-            ej = aj.get("element", "").upper()
-            rj = COVALENT_RADII_A.get(ej, 0.77)
-            target = atom_distance_A(model, i, j)
-            cutoff = min(float(max_distance_A), ri + rj + float(tolerance_A))
-            if target < 0.45 or target > cutoff:
-                continue
-            update_i = atom_is_refinable(ai, selection, labels)
-            update_j = atom_is_refinable(aj, selection, labels)
-            if not (update_i or update_j):
-                continue
-            bonds.append(
-                {
-                    "i": i,
-                    "j": j,
-                    "atom_i": ai["name"],
-                    "atom_j": aj["name"],
-                    "element_i": ei,
-                    "element_j": ej,
-                    "target_A": float(target),
-                    "start_ueq_diff": atom_ueq(ai, model["cell"]) - atom_ueq(aj, model["cell"]),
-                    "updates_i": bool(update_i),
-                    "updates_j": bool(update_j),
-                }
-            )
-    return bonds
-
-
-def bond_restraint_residuals(model, restraints, sigma_A: float):
-    if sigma_A <= 0.0 or not restraints:
-        return np.zeros(0, dtype=float)
-    out = []
-    for r in restraints:
-        d = atom_distance_A(model, int(r["i"]), int(r["j"]))
-        out.append((d - float(r["target_A"])) / float(sigma_A))
-    return np.asarray(out, dtype=float)
-
-
-def adp_similarity_residuals(model, restraints, sigma_u: float):
-    if sigma_u <= 0.0 or not restraints:
-        return np.zeros(0, dtype=float)
-    out = []
-    atoms = model["atoms"]
-    for r in restraints:
-        ai = atoms[int(r["i"])]
-        aj = atoms[int(r["j"])]
-        if ai.get("element", "").upper() == "H" or aj.get("element", "").upper() == "H":
-            continue
-        diff = atom_ueq(ai, model["cell"]) - atom_ueq(aj, model["cell"])
-        out.append((diff - float(r["start_ueq_diff"])) / float(sigma_u))
-    return np.asarray(out, dtype=float)
-
-
-def write_restraints_csv(path: Path, restraints):
-    with path.open("w", newline="") as f:
-        fieldnames = ["atom_i", "atom_j", "element_i", "element_j", "target_A", "start_ueq_diff", "updates_i", "updates_j"]
-        w = csv.DictWriter(f, fieldnames=fieldnames)
-        w.writeheader()
-        for r in restraints:
-            w.writerow({k: r[k] for k in fieldnames})
-
-
-def write_cctbx_restraint_view(src: Path, dst: Path) -> None:
-    """Write a SHELX view cctbx can parse without losing the ED SFAC in src.
-
-    cctbx's SHELX parser rejects explicit electron scattering coefficient SFAC
-    rows, but the restraint/constraint grammar only needs element labels.  This
-    view is therefore for cctbx/smtbx restraint and constraint discovery only;
-    the Bloch calculator still reads the original ED SFAC rows.
-    """
-    elems = []
-    lines = []
-    for line in src.read_text(errors="replace").splitlines():
-        if line.upper().startswith("SFAC"):
-            parts = line.split()
-            if len(parts) > 1:
-                elems.append(parts[1])
-            continue
-        lines.append(line)
-    insert_at = 0
-    for i, line in enumerate(lines):
-        if line.upper().startswith("LATT"):
-            insert_at = i + 1
-            break
-    lines.insert(insert_at, "SFAC  " + " ".join(elems))
-    dst.write_text("\n".join(lines) + "\n")
 
 
 def inspect_cctbx_bridge(src: Path, out_dir: Path):
@@ -674,175 +318,11 @@ class CctbxRiguEvaluator:
         return np.sqrt(np.maximum(values, 0.0))
 
 
-def choose_objective_rows(data: XDSData, indices, masks, target, sig, n_rows: int, n_bins: int, seed: int):
-    candidates = np.asarray([i for i in indices if masks["work"][i] and target[i] > 0 and np.isfinite(target[i]) and np.isfinite(sig[i])], dtype=int)
-    if n_rows <= 0 or n_rows >= len(candidates):
-        return np.asarray(candidates, dtype=int)
-    rng = np.random.default_rng(int(seed))
-    dvals = np.asarray([data.cell.calculate_d(tuple(int(v) for v in h)) for h in data.hkl], dtype=float)
-    order = candidates[np.argsort(dvals[candidates])]
-    bins = np.array_split(order, max(1, int(n_bins)))
-    chosen = []
-    remaining = int(n_rows)
-    for _bi, b in enumerate(bins):
-        if len(b) == 0:
-            continue
-        quota = int(round(n_rows * len(b) / max(len(candidates), 1)))
-        quota = max(1, min(quota, len(b), remaining))
-        remaining -= quota
-        # Keep the row set representative but gently favor informative rows.
-        isigi = np.maximum(target[b] / np.maximum(sig[b], 1e-12), 0.0)
-        prob = np.sqrt(isigi + 1.0)
-        prob = prob / np.sum(prob)
-        chosen.extend(rng.choice(b, size=quota, replace=False, p=prob).tolist())
-    if remaining > 0:
-        pool = np.asarray([i for i in candidates if i not in set(chosen)], dtype=int)
-        if len(pool):
-            extra = rng.choice(pool, size=min(remaining, len(pool)), replace=False)
-            chosen.extend(extra.tolist())
-    return np.asarray(sorted(set(int(i) for i in chosen)), dtype=int)
-
-
-def write_objective_rows(path: Path, data: XDSData, rows, target, sig, masks) -> None:
-    fieldnames = [
-        "row_index",
-        "h",
-        "k",
-        "l",
-        "d_A",
-        "Iobs",
-        "sigma",
-        "I_over_sigma",
-        "split",
-        "zcal",
-        "rlp",
-        "peak",
-        "corr",
-    ]
-    with path.open("w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=fieldnames)
-        w.writeheader()
-        for i in np.asarray(rows, dtype=int):
-            h, k, l = (int(v) for v in data.hkl[i])
-            split = "free" if masks["free"][i] else "work"
-            sigma = float(sig[i])
-            w.writerow(
-                {
-                    "row_index": int(i),
-                    "h": h,
-                    "k": k,
-                    "l": l,
-                    "d_A": float(data.cell.calculate_d((h, k, l))),
-                    "Iobs": float(target[i]),
-                    "sigma": sigma,
-                    "I_over_sigma": float(target[i] / sigma) if sigma > 0 else float("nan"),
-                    "split": split,
-                    "zcal": float(data.zcal[i]),
-                    "rlp": float(data.rlp[i]),
-                    "peak": float(data.peak[i]),
-                    "corr": float(data.corr[i]),
-                }
-            )
-
-
 def prediction_for_model(data, model, cfg, indices, cache_root: Path, model_tag: str, workers: int, chunksize: int):
     # Do not use the persistent prediction cache for moving models.  The Ug cube
     # cache is still content-addressed by model hash inside XDSBlochPort.
     port = XDSBlochPort(data, model, cfg, cache_dir=cache_root / "ug", res_hash=model_tag)
     return port.predict_rows(indices, workers=workers, chunksize=chunksize)
-
-
-def fit_scale_contract(data, target, sig, pred_full, cfg, fit_indices, wght_a, wght_b, detector_scale_bins: int = 0):
-    groups = group_indices(data, cfg.group_width_deg, cfg.frame_offset)
-    det_bins = detector_bin_indices(data, int(detector_scale_bins))
-    fit_mask = np.zeros(len(target), dtype=bool)
-    fit_mask[np.asarray(fit_indices, dtype=int)] = True
-    if int(detector_scale_bins) > 1:
-        scaled, group_scales, detector_scales = fit_frame_detector_scales(
-            target,
-            sig,
-            pred_full,
-            groups,
-            det_bins,
-            fit_mask,
-            wght_a,
-            wght_b,
-        )
-    else:
-        scaled, group_scales = fit_group_scales(target, sig, pred_full, groups, fit_mask, wght_a, wght_b)
-        detector_scales = {}
-    return {
-        "mode": "fit",
-        "group_width_deg": float(cfg.group_width_deg),
-        "frame_offset": float(cfg.frame_offset),
-        "detector_scale_bins": int(detector_scale_bins),
-        "groups": groups,
-        "detector_bins": det_bins,
-        "group_scales": {str(k): float(v) for k, v in group_scales.items()},
-        "detector_scales": {str(k): float(v) for k, v in detector_scales.items()},
-        "scale_count": int(len(group_scales) + len(detector_scales)),
-        "scaled": scaled,
-    }
-
-
-def apply_scale_contract(pred_full, contract):
-    scaled = np.full_like(pred_full, np.nan, dtype=float)
-    groups = np.asarray(contract["groups"], dtype=int)
-    group_scales = {int(k): float(v) for k, v in contract.get("group_scales", {}).items()}
-    detector_scales = {int(k): float(v) for k, v in contract.get("detector_scales", {}).items()}
-    det_bins = np.asarray(contract.get("detector_bins", np.zeros_like(groups)), dtype=int)
-    for i, value in enumerate(pred_full):
-        if not np.isfinite(value):
-            continue
-        scale = group_scales.get(int(groups[i]))
-        if scale is None or not np.isfinite(scale) or scale <= 0:
-            continue
-        if int(contract.get("detector_scale_bins", 0)) > 1:
-            dscale = detector_scales.get(int(det_bins[i]))
-            if dscale is None or not np.isfinite(dscale) or dscale <= 0:
-                continue
-            scale *= dscale
-        scaled[i] = float(value) * float(scale)
-    return scaled
-
-
-def apply_row_resolution_to_prediction(data, pred_full, row_resolution_b: float = 0.0):
-    """Apply the raw-row resolution envelope used by dynamic gradients."""
-
-    valid = np.isfinite(pred_full) & (pred_full > 0.0)
-    factor, meta = row_resolution_modulation(data, valid, row_resolution_b)
-    return pred_full * factor, factor, meta
-
-
-def scaled_prediction(data, target, sig, pred, cfg, fit_indices, wght_a, wght_b, detector_scale_bins: int = 0, scale_contract=None, row_resolution_b: float = 0.0):
-    full = np.full(len(target), np.nan, dtype=float)
-    full[pred["indices"]] = pred["dyn"]
-    full, row_factor, row_meta = apply_row_resolution_to_prediction(data, full, row_resolution_b)
-    if scale_contract is not None:
-        groups = np.asarray(scale_contract["groups"], dtype=int)
-        scaled = apply_scale_contract(full, scale_contract)
-        scales = dict(scale_contract.get("group_scales", {}))
-        scale_count = int(scale_contract.get("scale_count", len(scales)))
-    else:
-        contract = fit_scale_contract(data, target, sig, full, cfg, fit_indices, wght_a, wght_b, detector_scale_bins=detector_scale_bins)
-        groups = np.asarray(contract["groups"], dtype=int)
-        scaled = contract["scaled"]
-        scales = dict(contract["group_scales"])
-        scale_count = int(contract["scale_count"])
-    return full, scaled, scales, groups, scale_count
-
-
-def residual_vector(data, target, sig, pred_scaled, indices, wght_a, wght_b):
-    idx = np.asarray(indices, dtype=int)
-    obs = target[idx]
-    calc = pred_scaled[idx]
-    sig_i = sig[idx]
-    good = np.isfinite(obs) & np.isfinite(calc) & np.isfinite(sig_i)
-    obs = obs[good]
-    calc = calc[good]
-    sig_i = np.maximum(sig_i[good], 1e-12)
-    w = shelx_weights(obs, sig_i, calc, wght_a, wght_b)
-    return np.sqrt(w) * (obs - calc)
 
 
 def evaluate_model(data, model, cfg, target, sig, indices, masks, fit_indices, wght_a, wght_b, cache_root, tag, workers, chunksize, detector_scale_bins: int = 0, row_resolution_b: float = 0.0):
@@ -856,207 +336,15 @@ def evaluate_model(data, model, cfg, target, sig, indices, masks, fit_indices, w
     return out
 
 
-def validation_score(eval_result, metric: str) -> float:
-    split, value = metric.split("_", 1)
-    if split not in eval_result["splits"]:
-        raise ValueError(f"unknown validation split in metric {metric!r}")
-    key = "wR2_all" if value == "wR2" else "R1_all"
-    return float(eval_result["splits"][split][key])
-
-
-def format_native_value(eval_result, split: str, key: str) -> float:
-    return float(eval_result["splits"][split][key])
-
-
-def update_res_coordinates(src: Path, dst: Path, model) -> None:
-    atom_by_name = {a["name"]: a for a in model["atoms"]}
-    lines = src.read_text(errors="replace").splitlines()
-    out = []
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        stripped = line.strip()
-        parts = stripped.split()
-        if len(parts) >= 6 and parts[0] in atom_by_name and parts[1].lstrip("-").isdigit():
-            atom = atom_by_name[parts[0]]
-            prefix_len = len(line) - len(line.lstrip())
-            prefix = line[:prefix_len]
-            if atom.get("adp_type") == "anis":
-                occ = parts[5]
-                out.append(
-                    f"{prefix}{parts[0]:<4s} {parts[1]:>2s} "
-                    f"{float(atom['x']):11.6f}{float(atom['y']):10.6f}{float(atom['z']):10.6f} "
-                    f"{occ:>8s} {float(atom['u11']):8.5f} {float(atom['u22']):8.5f} ="
-                )
-                out.append(
-                    f" {float(atom['u33']):8.5f} {float(atom['u23']):8.5f} {float(atom['u13']):8.5f} {float(atom['u12']):8.5f}"
-                )
-                if line.rstrip().endswith("=") and i + 1 < len(lines):
-                    i += 1
-            else:
-                # Preserve riding-H negative Uiso multipliers and occupancy
-                # conventions unless this atom has an explicit updated Uiso.
-                rest = parts[5:]
-                if atom.get("element", "").upper() != "H" and "uiso" in atom and len(rest) >= 2:
-                    rest = [rest[0], f"{float(atom['uiso']):.5f}"] + rest[2:]
-                newline = (
-                    f"{prefix}{parts[0]:<4s} {parts[1]:>2s} "
-                    f"{float(atom['x']):11.6f}{float(atom['y']):10.6f}{float(atom['z']):10.6f} "
-                    + " ".join(rest)
-                )
-                out.append(newline)
-        else:
-            out.append(line)
-        i += 1
-    dst.write_text("\n".join(out) + "\n")
-
-
-def write_parameter_csv(path: Path, params, x0, x_final):
-    with path.open("w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=["atom", "kind", "coord", "start", "final", "shift"])
-        w.writeheader()
-        for p, a, b in zip(params, x0, x_final, strict=False):
-            w.writerow({"atom": p["atom"], "kind": p.get("kind", "xyz"), "coord": p["coord"], "start": float(a), "final": float(b), "shift": float(b - a)})
-
-
-def write_model_delta_csv(path: Path, start_model, final_model):
-    start_by_name = {a["name"]: a for a in start_model["atoms"]}
-    with path.open("w", newline="") as f:
-        fieldnames = ["atom", "element", "dx", "dy", "dz", "start_ueq", "final_ueq", "delta_ueq"]
-        w = csv.DictWriter(f, fieldnames=fieldnames)
-        w.writeheader()
-        for atom in final_model["atoms"]:
-            start = start_by_name.get(atom["name"])
-            if start is None:
-                continue
-            w.writerow(
-                {
-                    "atom": atom["name"],
-                    "element": atom.get("element", ""),
-                    "dx": float(atom["x"]) - float(start["x"]),
-                    "dy": float(atom["y"]) - float(start["y"]),
-                    "dz": float(atom["z"]) - float(start["z"]),
-                    "start_ueq": atom_ueq(start, start_model["cell"]),
-                    "final_ueq": atom_ueq(atom, final_model["cell"]),
-                    "delta_ueq": atom_ueq(atom, final_model["cell"])
-                    - atom_ueq(start, start_model["cell"]),
-                }
-            )
-
-
 def main():
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--hkl", default=str(DEFAULT_HKL))
-    ap.add_argument("--res", default=str(DEFAULT_RES))
-    ap.add_argument("--baseline-hkl", default=str(DEFAULT_BASELINE_HKL))
-    ap.add_argument("--hkl-transform", default="identity", help="Signed axis permutation mapping XDS HKLs into the model basis, e.g. 'l,-k,h'.")
-    ap.add_argument("--out-dir", required=True)
-    ap.add_argument("--n-basis", type=int, default=20)
-    ap.add_argument("--n-points", type=int, default=10)
-    ap.add_argument("--sg-window", type=float, default=0.004)
-    ap.add_argument("--sg-window-mode", choices=["fixed", "zobs_residual", "zobs_plus_floor", "rlp_peak", "dials_bbox"], default="fixed")
-    ap.add_argument("--sg-window-min", type=float, default=0.003)
-    ap.add_argument("--sg-window-max", type=float, default=0.012)
-    ap.add_argument("--sg-window-scale", type=float, default=1.0)
-    ap.add_argument("--sg-window-frame-floor", type=float, default=0.50)
-    ap.add_argument("--min-d-spacing", type=float, default=0.70)
-    ap.add_argument("--min-peak", type=float, default=0.0)
-    ap.add_argument("--geometry-percentile", type=float, default=100.0, help="Keep this broad geometry percentile after PEAK/d-spacing filters.")
-    ap.add_argument("--target-mode", choices=list(TARGET_MODES), default="iobs")
-    ap.add_argument("--include-nonpositive", action="store_true")
-    ap.add_argument("--alternate-hand", dest="alternate_hand", action="store_true", help="Use alternate fractional xyz before native row-parameter regularization as an alternate-hand control.")
-    ap.add_argument("--objective-rows", type=int, default=800)
-    ap.add_argument("--objective-bins", type=int, default=10)
-    ap.add_argument("--objective-group-width-deg", type=float, default=3.0, help="Coarse frame-angle group width used only while fitting coordinate steps.")
-    ap.add_argument(
-        "--objective-scale-mode",
-        choices=["frozen_block", "refit_each_eval"],
-        default="frozen_block",
-        help="Scale policy inside coordinate/ADP microcycles. frozen_block fits objective scales once from the block-start model and reuses them for every finite-difference evaluation; refit_each_eval preserves the older, more fragile behavior.",
+    ap = build_native_update_parser(
+        description=__doc__,
+        default_hkl=DEFAULT_HKL,
+        default_res=DEFAULT_RES,
+        default_baseline_hkl=DEFAULT_BASELINE_HKL,
+        target_modes=TARGET_MODES,
+        max_support_sg=DEFAULT_MAX_SUPPORT_SG,
     )
-    ap.add_argument("--scale-fit-split", choices=["work", "all"], default="work", help="Rows used to fit validation/final nuisance scales.")
-    ap.add_argument("--detector-scale-bins", type=int, default=0, help="Optional NxN detector-position scales in objective and validation fits.")
-    ap.add_argument("--block-schedule", default="xyz", help="Comma-separated model-update blocks: xyz, adp_ueq, or xyz_adp_ueq. Each block is validation-gated before the next starts.")
-    ap.add_argument("--atom-selection", choices=["nonh", "all", "labels"], default="nonh")
-    ap.add_argument("--atom-labels", default="")
-    ap.add_argument("--max-shift-frac", type=float, default=0.015)
-    ap.add_argument("--xyz-restraint-sigma", type=float, default=0.008)
-    ap.add_argument("--adp-shift", type=float, default=0.010, help="Maximum Ueq change allowed per ADP block.")
-    ap.add_argument("--adp-restraint-sigma", type=float, default=0.004)
-    ap.add_argument("--adp-min", type=float, default=0.002)
-    ap.add_argument("--adp-max", type=float, default=0.080)
-    ap.add_argument("--restraints", choices=["none", "start_geometry"], default="start_geometry")
-    ap.add_argument("--bond-restraint-sigma", type=float, default=0.025)
-    ap.add_argument("--adp-similarity-sigma", type=float, default=0.006)
-    ap.add_argument("--bond-detection-tolerance", type=float, default=0.45)
-    ap.add_argument("--bond-detection-max-distance", type=float, default=1.95)
-    ap.add_argument("--max-nfev", type=int, default=80)
-    ap.add_argument(
-        "--diff-step",
-        type=float,
-        default=None,
-        help="Deprecated compatibility name setting both absolute finite-difference steps in each parameter's native unit; use the group-specific options instead. This is no longer a SciPy relative multiplier.",
-    )
-    ap.add_argument("--xyz-diff-step-frac", type=float, default=1e-4, help="Absolute fractional-coordinate step used for native Bloch finite differences.")
-    ap.add_argument("--adp-diff-step-a2", type=float, default=1e-4, help="Absolute Ueq step in A^2 used for native Bloch finite differences.")
-    ap.add_argument("--thickness", type=float, default=2200.0)
-    ap.add_argument("--thickness-grad-frac", type=float, default=0.8)
-    ap.add_argument("--thickness-points", type=int, default=5)
-    ap.add_argument("--topup-d-min", type=float, default=0.8, help="Resolution limit for Bloch support top-up beams.")
-    ap.add_argument(
-        "--max-support-sg",
-        type=float,
-        default=DEFAULT_MAX_SUPPORT_SG,
-        help="Maximum absolute excitation error for candidate support beams.",
-    )
-    ap.add_argument("--group-width-deg", type=float, default=1.0)
-    ap.add_argument("--frame-offset", type=float, default=0.0)
-    ap.add_argument("--row-resolution-b", type=float, default=0.0, help="Raw-row dynamical resolution-envelope B from nuisance regularization.")
-    ap.add_argument("--ug-d-min", type=float, default=0.30, help="Model-dependent U_g cutoff used by the production kernel; raising it is an explicit speed/accuracy tradeoff.")
-    ap.add_argument("--sg-jitter-mode", choices=["none", "gaussian", "student_t"], default="none", help="Accepted rocking-profile Sg jitter model from the production row regularizer.")
-    ap.add_argument("--sg-jitter-sigma0", type=float, default=0.0, help="Base Sg jitter sigma in inverse Angstrom.")
-    ap.add_argument("--sg-jitter-sigma-d-inv", type=float, default=0.0, help="Resolution-dependent Sg jitter coefficient.")
-    ap.add_argument("--sg-jitter-sigma-frame", type=float, default=0.0, help="Frame-dependent Sg jitter coefficient.")
-    ap.add_argument("--sg-jitter-points", type=int, default=1, help="Quadrature points used for the accepted Sg jitter convolution.")
-    ap.add_argument("--sg-jitter-student-df", type=float, default=4.0, help="Student-t degrees of freedom for student_t Sg jitter.")
-    ap.add_argument("--sg-jitter-width-factor", type=float, default=3.0, help="Finite support width in sigma units for the Sg jitter convolution.")
-    ap.add_argument("--absorption-mode", choices=["none", "mean", "beam_dependent", "offdiag_fraction", "offdiag_tds", "midgley_like"], default="none", help="Accepted absorptive Bloch Hamiltonian mode from the production row regularizer.")
-    ap.add_argument("--absorption-mu", type=float, default=0.0, help="Uniform imaginary diagonal damping in inverse Angstrom.")
-    ap.add_argument("--absorption-frac", type=float, default=0.0, help="Imaginary absorptive off-diagonal fraction.")
-    ap.add_argument("--absorption-mu-g2", type=float, default=0.0, help="Beam-dependent diagonal damping slope versus |g|^2.")
-    ap.add_argument("--absorption-mu-theta2", type=float, default=0.0, help="Beam-dependent diagonal damping slope versus Bragg-angle^2.")
-    ap.add_argument("--absorption-tds-b", type=float, default=0.0, help="B_TDS parameter for offdiag_tds absorption.")
-    ap.add_argument("--sigma-a", type=float, default=0.0)
-    ap.add_argument("--sigma-b-corr", type=float, default=0.0)
-    ap.add_argument("--sigma-c-peak", type=float, default=0.05)
-    ap.add_argument("--compute-backend", choices=["scipy", "scipy_bethe", "scipy_expm", "scipy_expm_multiply", "jax", "jax_auto", "jax_cpu", "jax_mps", "jax_cuda", "jax_padded", "jax_auto_padded", "jax_cpu_padded", "jax_mps_padded", "jax_cuda_padded", "jax_cpu_real_expm", "jax_mps_real_expm", "jax_mps_real_expm_padded"], default="scipy", help="Bloch propagation backend. SciPy eigensolver is the production reference; scipy_bethe uses an opt-in promoted Bethe/Schur strong-beam reduction; SciPy expm/expm_multiply, real-embedded JAX expm, and JAX eigensolver backends are experimental. *_padded JAX backends pad matrix dimensions into small buckets to reduce compilation churn.")
-    ap.add_argument("--row-plan-cache", choices=["off", "exact", "readwrite", "rebuild"], default="off", help="Cache row geometry. exact is model-keyed; readwrite explicitly freezes the builder basis across moving-model evaluations.")
-    ap.add_argument("--jax-batch-size", type=int, default=0, help="JAX matrix batch size. 0 chooses a conservative size from matrix dimension and device count.")
-    ap.add_argument("--jax-matrix-bucket-size", type=int, default=0, help="Pad JAX matrix dimensions to this multiple. 0 keeps exact sizes unless a *_padded backend is selected, where 0 means 8.")
-    ap.add_argument("--bethe-strong-count", type=int, default=48, help="Strong-beam block size for scipy_bethe. Values >= n_basis recover the dense SciPy matrix.")
-    ap.add_argument("--bethe-variant", choices=["truncate", "schur0", "schur_target", "schur_mean"], default="schur_target", help="Strong/weak-beam reduction used by scipy_bethe.")
-    ap.add_argument("--bethe-promote-denom", type=float, default=0.005, help="Promote weak beams whose diagonal denominator is this close to the Schur energy.")
-    ap.add_argument("--bethe-denom-eps", type=float, default=1e-5, help="Small-denominator floor for scipy_bethe Schur corrections.")
-    ap.add_argument("--profile-quadrature", choices=["uniform", "trapezoid", "gauss_legendre"], default="uniform", help="Rocking-profile Sg quadrature rule.")
-    ap.add_argument("--profile-accumulation", choices=["sum", "mean"], default="sum", help="Accumulate rocking-profile samples as summed detector sub-exposures or legacy normalized means.")
-    ap.add_argument("--free-fraction", type=float, default=0.10)
-    ap.add_argument("--split-seed", type=int, default=42)
-    ap.add_argument(
-        "--lambda-grid",
-        default="1.0",
-        help="Diagnostic q-exponent grid. Production workflows use the full Bloch/Born correction with lambda_q=1.0.",
-    )
-    ap.add_argument("--acceptance-metric", choices=["all_wR2", "work_wR2", "free_wR2", "all_R1"], default="all_wR2")
-    ap.add_argument("--acceptance-min-delta", type=float, default=0.0, help="Required absolute improvement in the acceptance metric before exporting a moved model.")
-    ap.add_argument("--free-wR2-tolerance", type=float, default=0.0, help="Maximum allowed free wR2 worsening unless --allow-free-worse is set.")
-    ap.add_argument("--allow-free-worse", action="store_true")
-    ap.add_argument("--early-stop-window", type=int, default=96, help="Stop a structure block after this many residual calls without a meaningful objective improvement; 0 disables.")
-    ap.add_argument("--early-stop-min-evals", type=int, default=0, help="Minimum residual calls before early stopping; 0 uses an automatic parameter-count-aware floor.")
-    ap.add_argument("--early-stop-min-improvement", type=float, default=1e-5, help="Minimum RMS improvement counted as progress for structure-block early stopping.")
-    ap.add_argument("--early-stop-metric", choices=["total_rms", "data_rms"], default="total_rms", help="RMS trace column used by the structure-block plateau stop.")
-    ap.add_argument("--workers", type=int, default=8)
-    ap.add_argument("--chunksize", type=int, default=8)
-    ap.add_argument("--make-maps", action="store_true")
     args = ap.parse_args()
 
     t0 = time.perf_counter()

@@ -1,192 +1,74 @@
-# GROND Code Map
+# GROND code map
 
-This file is the practical reading map for the GROND source tree. If you only want the core numerical path, read `src/grond/legacy/engine/bloch_engine.py`, then `src/grond/legacy/engine/native_row_regularize.py`, then `src/grond/cli.py`. The first file builds the electron structure-factor grid, constructs the Bloch-wave Hamiltonian, and predicts row intensities. The second file uses those predictions to regularize row-level nuisance terms, scales, corrected intensities, and endpoint statistics. The third file wires the whole automatic workflow together.
+Start with `src/grond/io/xds.py` for the observation geometry, `src/grond/bloch/model.py` for the atomic model and electron structure factors, and the modules in `src/grond/bloch` for a row's propagation. Then follow `src/grond/regularize` into `src/grond/refine` and the single/shared controllers in `src/grond/workflows`. The command line connects these parts; it is not the numerical implementation.
 
-The `legacy/engine` name is historical. In the current package it is still where the mature command-line numerical engine lives. The public package namespaces in `src/grond/io`, `src/grond/workflows`, `src/grond/forensics`, and the top-level CLI call into those engine scripts.
+`src/grond/cli.py` preserves historical imports through explicit reexports. Argument registration lives in `src/grond/cli_options`, command handlers in `src/grond/commands`, execution/tool support in `src/grond/cli_support`, and report writers in `src/grond/reports`. Reexported function objects keep their defining module's globals. A test or extension that replaces a collaborator must replace it in the actual consumer module rather than assuming the CLI facade is a live proxy.
 
-## Short Answer
+## Source ownership
 
-The central numerical file is `src/grond/legacy/engine/bloch_engine.py`.
+| Area | Files to start with | Responsibility |
+|---|---|---|
+| Integration inputs | `src/grond/io/xds.py`, `src/grond/io/dials_bridge.py`, `src/grond/io/row_contract.py` | Signed observations, source uncertainties and measurement geometry. DIALS geometry, row selection and sigma helpers have separate modules. |
+| PETS interoperability | `src/grond/io/pets_import.py`, `src/grond/io/pets_export.py`, `src/grond/io/pets_contract.py`, `src/grond/io/pets_geometry.py` | Preserve PETS-owned rows and validate optional import/export contracts. |
+| DIALS subprocess readers | `src/grond/io/_dials_reader.py`, `src/grond/io/_dials_pets_helper.py` | Code run in a separately configured DIALS Python. These are package files, not dependencies of ordinary row prediction. |
+| Atomic model | `src/grond/bloch/model.py` | SHELX/coreCIF reading, symmetry, occupancy, electron SFAC and displacement factors. |
+| Bloch calculation | `src/grond/bloch/potential.py`, `src/grond/bloch/geometry.py`, `src/grond/bloch/profiles.py`, `src/grond/bloch/basis.py`, `src/grond/bloch/hamiltonian.py`, `src/grond/bloch/prediction.py` | Potential, excitation path, profile quadrature, beam support, matrix construction and integrated intensities. |
+| Numerical contracts | `src/grond/bloch/config.py`, `src/grond/bloch/backends.py`, `src/grond/bloch/numerics.py` | Validated configuration, backend routing and numerical helpers. |
+| Cache and reuse | `src/grond/bloch/cache.py`, `src/grond/bloch/row_plans.py`, `src/grond/bloch/row_cache.py`, `src/grond/regularize/prediction_cache.py` | Exact potential/row plans and outer prediction cache identity. |
+| Row regularization | `src/grond/regularize/observations.py`, `src/grond/regularize/scales.py`, `src/grond/regularize/evaluation.py`, `src/grond/regularize/grid.py` | Target units, source sigma, fitted scales, candidate evaluation and nuisance-grid execution. |
+| Row output and combination | `src/grond/regularize/row_output.py`, `src/grond/regularize/multidataset.py` | Preserve row evidence and form corrected multi-crystal endpoint observations. |
+| Scale compression | `src/grond/regularize/compression_topology.py`, `src/grond/regularize/compression_weights.py`, `src/grond/regularize/compression_policy.py` | Frame grouping, work-row fits and prospective compact-contract gates. |
+| Thickness response | `src/grond/regularize/thickness_response.py` | Cached eigensystem response, packed propagation and bounded searches. |
+| Structural refinement | `src/grond/refine/parameters.py`, `src/grond/refine/geometry_restraints.py`, `src/grond/refine/native_objective.py`, `src/grond/refine/feedback_contract.py` | Native parameter updates and preservation of the frozen feedback contract. |
+| SHELXL endpoints | `src/grond/refine/shelx_input.py`, `src/grond/refine/shelxl_iterations.py`, `src/grond/refine/shelxl_diagnostics.py`, `src/grond/refine/endpoints.py` | Instruction writing, bounded external calls, model health and endpoint registry. |
+| Automatic workflow | `src/grond/workflows/single.py`, `src/grond/workflows/multi.py`, `src/grond/workflows/shared_refinement.py` | Stage ordering and one shared structural model across accepted crystals. |
+| Scientific decisions | `src/grond/workflows/transform_selection.py`, `src/grond/workflows/final_hand_selection.py`, `src/grond/workflows/scale_selection.py`, `src/grond/workflows/endpoint_selection.py` | Proper transform, conditional hand evidence, scale and endpoint decisions. |
+| Reports | `src/grond/reports/table1.py`, `src/grond/reports/quick_stats.py`, `src/grond/reports/terminal.py` | Separate row and SHELXL statistics, provenance and user output. |
+| Maps | `src/grond/maps/native_dynamic.py`, `src/grond/workflows/finish_maps.py` | Ratio-derived native Fourier coefficients and optional corrected-HKL endpoint maps. |
+| Protein adapters | `src/grond/macromolecule.py` | Fixed unique-HKL FreeR flags, corrected MTZ and explicit external endpoint templates. |
 
-That file reads XDS-like row data through `XDSData`, reads the structural model through `parse_model`, calculates electron structure factors through `fcalc_res_grid`, converts them to Fourier potential coefficients in `XDSBlochPort.build_ug_cube`, selects the direct beam, target reflection, and support beams in `XDSBlochPort.select_basis`, builds the matrix in `XDSBlochPort.hamiltonian`, and propagates the direct beam to the target beam in `XDSBlochPort.propagate_direct_to_target`. `XDSBlochPort.predict_rows` repeats that calculation over the selected rows, rocking-profile quadrature points, and thickness quadrature points.
+The historical engine scripts remain executable adapters where standalone commands, multiprocessing identities or established dispatch hooks need a stable location. `XDSBlochPort` remains defined in `src/grond/legacy/engine/bloch_engine.py`; its disjoint method groups come from the modern Bloch modules. `native_row_regularize.py` and the feedback scripts retain their command/dispatch boundary while using the domain modules. New numerical code should go in its owning domain, with an explicit compatibility reexport only when needed.
 
-The main regularization wrapper is `src/grond/legacy/engine/native_row_regularize.py`. It calls `XDSBlochPort.predict_rows`, fits frame or compact scale terms, evaluates native and GROND row/MR residuals, writes `native_dyn_calc.csv`, and exports the corrected no-EXTI reflection endpoint. `src/grond/cli.py` then decides which stages to run, when to scout transforms and hand, when to polish continuous thickness, when to run the SHELXL feedback loop, when to combine datasets, and when to write publication reports.
-
-## Source Tree
-
-```text
-src/grond/
-  __main__.py                    console entry point for python -m grond
-  cli.py                         GROND auto, run, prep, doctor, validate, and workflow orchestration
-  macromolecule.py               FreeR flags, corrected MTZ export, and protein endpoint wrappers
-  runtime.py                     external executable discovery and configured tool paths
-  progress.py                    progress logging, timing, and resume ledger helpers
-  accelerators.py                optional backend detection and acceleration metadata
-
-  io/
-    config.py                    prep JSON and dataset CSV parsing
-    dials_bridge.py              DIALS refl/expt to GROND row-contract conversion
-    row_contract.py              portable CSV/TSV/JSONL row contract, metadata validation, XDS-like bridge writer
-
-  bloch/
-    contract.py                  public kernel-contract helper that exposes the frozen numerical defaults
-
-  refine/
-    endpoints.py                 model-update endpoint registry and custom-command adapter helpers
-
-  workflows/
-    decision.py                  preflight, transform candidates, and bad-data stop decisions
-    transform_metadata.py        baseline-HKL transform prefilter before Bloch scouts
-    dataset_policy.py            multi-dataset include, downweight, completeness-only, exclude policy
-    endpoint_chooser.py          publication endpoint selection and rejection reasons
-
-  forensics/
-    resolution.py                shell-stability and resolution-limit logic
-
-  legacy/engine/
-    bloch_engine.py              core structure factors, U_g grid, Sg geometry, Hamiltonian, Bloch propagation
-    native_row_regularize.py    row-level dynamical nuisance regularization and corrected endpoint export
-    continuous_thickness_polish.py  continuous thickness and thickness-gradient polish from cached eigensystems
-    support_basis_scan.py        final N recommendation from observed support-beam requirements
-    shelxl_feedback_loop.py      fast Bloch -> one least-squares step -> Bloch endpoint loop
-    native_structure_update.py   native finite-difference single-dataset coordinate/ADP regularization
-    native_multi_structure_update.py  shared-model multi-dataset finite-difference regularization
-    combine_native_nuisance_runs.py  corrected-HKL combination and overlap scaling across datasets
-    row_mr_report.py         raw and merged residual tables
-    scale_compression_polish.py  compact frame-scale manifold promotion
-    resolution_limit_audit.py    row-table shell audit and suggested resolution endpoint
-    map_hydrogen_omit_audit.py   no-H difference-map and hydrogen-visibility audit
-    residual_compass.py          row-space trend and forensic summaries
-```
-
-## Automatic Workflow
-
-```mermaid
-flowchart TD
-    A["GROND auto"] --> B["cli.cmd_auto"]
-    B --> C["cli.cmd_run"]
-    C --> D["cli.prep_from_args"]
-    D --> E["XDS INTEGRATE.HKL or XDS_ASCII.HKL"]
-    D --> F["DIALS refl/expt"]
-    D --> Y["portable grond-row-v1 rows"]
-    F --> G["io.dials_bridge.convert_dials_to_grond"]
-    Y --> Z["io.row_contract.write_xds_compatibility_dir"]
-    E --> H["DatasetSpec row contract"]
-    G --> H
-    Z --> H
-    H --> I["workflows.decision.preflight_dataset"]
-    I --> J["workflows.transform_metadata baseline-HKL prefilter"]
-    J --> K["cli.choose_transform_by_scout"]
-    K --> L["native_row_regularize low-N/Q scout"]
-    L --> N["native_row_regularize nuisance gates"]
-    N --> O["continuous_thickness_polish"]
-    O --> P["support_basis_scan"]
-    P --> Q["shelxl_feedback_loop or native_structure_update"]
-    Q --> R["native_row_regularize final row table"]
-    R --> HN["final elastic negative-thickness hand pair"]
-    HN --> S["scale_compression_polish"]
-    R --> T["resolution_limit_audit"]
-    R --> U["residual_compass and forensics"]
-    S --> V["row_mr_report"]
-    T --> V
-    U --> V
-    V --> W["workflows.endpoint_chooser"]
-    W --> X["models, maps, tables, logs, and resume state"]
-```
-
-For multi-dataset jobs, `cli.run_multi` runs the same per-dataset gates, then `workflows.dataset_policy` assigns each crystal to the primary, downweight, completeness-only, or exclude role. The production shared-model path is `cli.run_multi_shelxl_feedback_loop`: it recalculates each active dataset from one model, asks `combine_native_nuisance_runs.py` to scale and merge the corrected rows, runs one shared SHELXL LS step, and repeats. `native_multi_structure_update.py` is the slower native-gradient diagnostic selected with `--structure-update native_gradient`. Per-dataset thickness, jitter, absorption, scale, and sigma policies remain attached to their own row tables until combination.
-
-## Single-Row Bloch Calculation
+## One row through the calculation
 
 ```mermaid
 flowchart LR
-    A["Signed h,k,l row plus frame geometry"] --> B["XDSData"]
-    C["RES or CIF model"] --> D["parse_model"]
-    D --> E["fcalc_res_grid"]
-    E --> F["build_ug_cube: U_g = gamma F_e(g) / (pi V)"]
-    B --> G["omega_from_z and sg_for_hkls"]
-    G --> H["row_profile_sg_points"]
-    F --> I["select_basis"]
-    H --> I
-    I --> J["hamiltonian"]
-    J --> K["eigh or eig"]
-    K --> L["propagate_direct_to_target"]
-    L --> M["Idyn and Iborn for the row"]
+    A[Signed integration row and geometry] --> B[Excitation path and profile nodes]
+    C[Model and electron SFAC] --> D[Fourier potential]
+    B --> E[Direct, target and support beams]
+    D --> E
+    E --> F[Bloch Hamiltonian]
+    F --> G[Propagate over profile and thickness]
+    G --> H[Matched Bloch and Born intensities]
+    H --> I[Row correction and declared scales]
 ```
 
-The row identity is always the signed reflection plus its observation geometry. For XDS input, `XDSData` reads the row, header geometry, detector position, frame number, and intensity columns. For DIALS input, `io.dials_bridge` converts `.refl` and `.expt` into the same row contract and writes the scan-point orientation sidecar that lets `XDSData` evaluate the correct frame-dependent reciprocal basis. For integrations from other software, `io.row_contract` reads the portable `grond-row-v1` CSV/TSV/JSONL row table and metadata sidecar, validates the geometry, and writes a clearly marked `GROND_PORTABLE_XDS_COMPAT` directory for the current engine.
+For beam indices `g_i`, the excitation error forms the diagonal. The off-diagonal element is `U(g_j-g_i)/(2k)`, where `k=1/wavelength`, and propagation is `psi(t)=exp(2*pi*i*H*t) psi(0)`. The source model gives `U_g=gamma*F_e(g)/(pi*V)`. Read `hamiltonian.py` and its tests together when changing sign or matrix conventions: a transposition or conjugation can preserve some residuals while changing a hand comparison.
 
-## Matrix Construction
+Elastic matrices use Hermitian propagation. Exactly uniform scalar imaginary absorption factors analytically; general loss requires the non-Hermitian path and the passive-loss check. The final inverse-hand identity is evaluated with the elastic contract. Profile and thickness quadrature average intensities, and the matched Born reference uses the same row support and normalization.
 
-The Bloch calculation uses a basis ordered as direct beam, target reflection, then support beams. For a basis of `N` reciprocal-lattice vectors `g_i`, `XDSBlochPort.hamiltonian` builds an `N x N` complex matrix. The diagonal term is the excitation error for each beam,
+## From rows to a refined endpoint
 
-```text
-H_ii = S(g_i)
+```mermaid
+flowchart TD
+    A[Validate signed observations and model] --> B[Choose proper indexing transform]
+    B --> C[Fit effective thickness and accepted nuisance terms]
+    C --> D[Final support and Bloch/Born predictions]
+    D --> E[Correct observations using q and declared scales]
+    E --> F[One conventional structural LS step]
+    F --> D
+    D --> G[Final model row recomputation]
+    G --> H[Matched elastic hand comparison]
+    H --> I[Compact scale and endpoint checks]
+    I --> J[Models, reflections, maps and reports]
 ```
 
-and the elastic off-diagonal coupling is the Fourier potential difference between beam `i` and beam `j`,
+The fast LS1 loop freezes `q=Idyn/Iborn` within a conventional model update and recomputes it at the next macrocycle. Its inner derivative omits the structural derivative of q. This boundary is why the native row objective and [LS1 controls](LS1_VALIDATION.md) matter even when the corrected-HKL endpoint R factor is attractive. Multi-crystal feedback recalculates each crystal using its own nuisance contract, combines corrected observations on an overlap scale, and updates one shared structure.
 
-```text
-H_ij = U(g_j - g_i) / (2 k)
-```
+## Debugging and change discipline
 
-where `k` is the electron wave-vector length. Absorption-like terms, when explicitly accepted by the automatic gates or requested by the user, add imaginary diagonal or off-diagonal terms and switch propagation from Hermitian `eigh` to general complex `eig`.
+For a suspicious row, follow its immutable source identity into the profile, support, Hamiltonian and propagation modules. For an unexpected selection, start from the decision JSON and its candidate rejection reasons. `grond_progress.json` and `logs/commands.jsonl` identify stages, commands and timing; they do not replace the numerical row table or endpoint artifacts.
 
-For a three-beam example with direct beam `0`, target beam `g`, and one support beam `q`, the matrix has this shape:
+The explicit manifests in `src/grond/bloch/source.py` and `src/grond/regularize/source.py` bind numerical implementations into cache fingerprints. Add a new numerical owner to the relevant manifest when moving or adding code. Hashing only a compatibility facade would leave cached predictions valid after its implementation changed.
 
-```text
-          direct              target g            support q
-direct    S(0)                U(g-0)/(2k)         U(q-0)/(2k)
-target    U(0-g)/(2k)         S(g)                U(q-g)/(2k)
-support   U(0-q)/(2k)         U(g-q)/(2k)         S(q)
-```
-
-`XDSBlochPort.propagate_direct_to_target` evaluates the matrix exponential through the eigensystem,
-
-```text
-psi(t) = exp(2 pi i H t) psi(0)
-```
-
-and returns the squared amplitude transferred from the direct beam into the target beam. `XDSBlochPort.predict_rows` repeats this over the rocking-profile quadrature points and thickness quadrature points. The default accumulation stores summed sub-exposure intensity so that future raw detector forward models use the same count convention as the integrated data.
-
-## Where Regularization Happens
-
-`native_row_regularize.py` is the row-level regularization workhorse. It chooses the target intensity columns, inflates sigmas when accepted nuisance terms require that, calls `predict_with_cache` to obtain dynamic and Born predictions, fits group or detector scale contracts, evaluates work/free and all-row metrics, writes `native_dyn_calc.csv`, and exports corrected no-EXTI HKL files. This is the main place to inspect when a run gives suspicious raw-row R factors or odd scale behavior.
-
-`continuous_thickness_polish.py` is the fast thickness polish. It caches eigensystems from a selected row subset, then searches continuous thickness and thickness-gradient values without rebuilding every Hamiltonian for every scalar trial. This is why modern auto runs can report non-round thicknesses rather than only the coarse grid value.
-
-`shelxl_feedback_loop.py` is the default fast single-dataset full-mode structure feedback loop when SHELXL is configured. It runs a high-N/Q Bloch correction, performs one least-squares update with the declared endpoint `WGHT` policy, and repeats. After the last SHELXL update it runs one final Bloch-only row recompute on the final coordinates so the reported row statistics correspond to the final structure. The native finite-difference diagnostics are `native_structure_update.py` for one dataset and `native_multi_structure_update.py` for several datasets.
-
-`src/grond/refine/endpoints.py` is the interface layer for model-update backends. It declares the implemented SHELXL endpoint, the no-refiner Bloch-only path, the slow native-gradient diagnostic, and the custom command-template adapter. The registry is intentionally separate from the working numerical path: it tells users what each endpoint must accept and return without pretending every external refiner is already a fully tested `auto` replacement.
-
-`src/grond/macromolecule.py` is the macromolecular wrapper layer. It assigns deterministic unique-HKL FreeR flags, propagates those flags back to signed rows, merges corrected rows into `IMEAN/SIGIMEAN/FreeR_flag` MTZ files, applies the optional low-resolution q damping policy for protein tests, and renders one-cycle endpoint command templates for Phenix, REFMAC, Servalcat, or a custom wrapper. It is deliberately outside the small-molecule `auto` implementation.
-
-`scale_compression_polish.py` is where dense frame scales are replaced by a compact, smooth scale manifold when that does not hurt all-row residuals beyond the accepted penalty. `resolution_limit_audit.py` and `forensics/resolution.py` decide whether the final endpoint should be reported at the requested resolution or a suggested shell-stable resolution. `row_mr_report.py` writes the final-report raw and merged residual tables.
-
-## How To Follow A Real Run
-
-Start at the run directory, then read `grond_progress.json` and the `logs/` directory to see which stage ran and how long it took. For a single-dataset job, the strongest numerical artifacts are usually `final/native_dyn_calc.csv`, `final/summary.json`, `scale_polish/summary.json`, `resolution_limits/*/summary.json`, `tables/publication_table.md`, and `publication_endpoint_choice/REPORT.md`. For a multi-dataset job, also read `dataset_policy/` and the combined endpoint directory.
-
-To debug the physics for one row, trace this path:
-
-```text
-native_dyn_calc.csv row
-  -> XDSData row index and transformed h,k,l
-  -> XDSBlochPort.row_profile_sg_points
-  -> XDSBlochPort.select_basis
-  -> XDSBlochPort.hamiltonian
-  -> XDSBlochPort.propagate_direct_to_target
-```
-
-To debug why auto promoted or rejected a correction, trace this path:
-
-```text
-cli.run_single or cli.run_multi
-  -> native_row_regularize summary.json
-  -> feature gate output directory
-  -> scale_compression_polish summary.json
-  -> resolution_limit_audit summary.json
-  -> endpoint_chooser report
-```
-
-This is also the safest entry point for new contributors. Changes to file parsing should start in `src/grond/io`. Changes to automatic decisions should start in `src/grond/workflows`. Changes to residual interpretation should start in `src/grond/forensics` or `src/grond/legacy/engine/row_mr_report.py`. Changes to the actual Bloch physics should start in `src/grond/legacy/engine/bloch_engine.py`, with tests in `tests/test_bloch_contract.py` and any new numerical-contract tests needed to pin the behavior.
+Tests are organized by contract in `tests/physics`, `tests/io`, `tests/hand`, `tests/regularize`, `tests/refine`, `tests/workflows`, `tests/reporting`, `tests/package` and `tests/cli`. CLI cases are further split by functional area. Shared synthetic helpers are explicit test-package imports; repository-relative paths come from `tests/_support.py`. The full suite remains one ordinary pytest run. Historical data experiments are indexed separately and summarized in [BENCHMARKS.md](BENCHMARKS.md).

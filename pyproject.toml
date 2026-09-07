@@ -62,6 +62,9 @@ target-version = "py311"
 select = ["E", "F", "I", "B", "UP", "SIM"]
 ignore = ["E501"]
 
+[tool.ruff.lint.isort]
+combine-as-imports = true
+
 [tool.ruff.lint.per-file-ignores]
 # h, k, l and I are conventional crystallographic symbols in the numerical engine.
 # E402 keeps BLAS thread limits ahead of NumPy/SciPy imports. Optimizer callbacks
@@ -81,3 +84,5 @@ ignore = ["E501"]
 "src/grond/legacy/engine/scale_contract_replay.py" = ["E741"]
 "src/grond/legacy/engine/support_basis_scan.py" = ["E402"]
 "src/grond/legacy/engine/xds_raw_profile_integrator.py" = ["E741"]
+"src/grond/refine/native_output.py" = ["E741"]
+"src/grond/refine/shelx_input.py" = ["E741"]

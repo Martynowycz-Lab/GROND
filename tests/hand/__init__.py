@@ -1,0 +1,1 @@
+"""GROND hand regression tests."""

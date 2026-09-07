@@ -22,6 +22,7 @@ if __package__:
     from .native_row_regularize import (
         DEFAULT_HKL,
         DEFAULT_RES,
+        SHELXL as DEFAULT_SHELXL,
         configure_shelxl_executable,
         enforce_hkl_row_width,
         exact_hkl_merge,
@@ -35,12 +36,12 @@ if __package__:
         write_hkl,
         write_no_exti_ins,
     )
-    from .native_row_regularize import SHELXL as DEFAULT_SHELXL
 else:  # pragma: no cover - direct script execution
     from endpoint_modulation import modulation_manifest_fields
     from native_row_regularize import (
         DEFAULT_HKL,
         DEFAULT_RES,
+        SHELXL as DEFAULT_SHELXL,
         configure_shelxl_executable,
         enforce_hkl_row_width,
         exact_hkl_merge,
@@ -54,7 +55,6 @@ else:  # pragma: no cover - direct script execution
         write_hkl,
         write_no_exti_ins,
     )
-    from native_row_regularize import SHELXL as DEFAULT_SHELXL
 
 
 def read_rows(path: Path) -> list[dict[str, str]]:

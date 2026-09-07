@@ -4,6 +4,7 @@ import csv
 import json
 import math
 from dataclasses import dataclass
+from io import StringIO
 from pathlib import Path
 from typing import Any
 
@@ -200,12 +201,7 @@ def _required_geometry(metadata: dict[str, Any]) -> dict[str, Any]:
     if beam.shape != (3,) or not np.all(np.isfinite(beam)) or float(np.linalg.norm(beam)) <= 0.0:
         raise ValueError("geometry.incident_beam_direction must be a finite nonzero 3-vector")
     cell = np.asarray(geometry["unit_cell"], dtype=float)
-    if (
-        not np.all(np.isfinite(cell))
-        or np.any(cell[:3] <= 0.0)
-        or np.any(cell[3:] <= 0.0)
-        or np.any(cell[3:] >= 180.0)
-    ):
+    if not np.all(np.isfinite(cell)) or np.any(cell[:3] <= 0.0) or np.any(cell[3:] <= 0.0) or np.any(cell[3:] >= 180.0):
         raise ValueError("geometry.unit_cell must contain positive lengths and angles between 0 and 180 degrees")
     alpha, beta, gamma = np.radians(cell[3:])
     expected_metric = np.asarray(
@@ -287,7 +283,8 @@ def validate_row_contract(rows: list[dict[str, Any]], metadata: dict[str, Any]) 
         warnings.append("portable row files should normally contain one dataset; use prep JSON for multiple datasets")
     if abs(float(geometry["oscillation_range_deg"])) < 1e-12:
         warnings.append(
-            "oscillation_range_deg is near zero; alpha_deg rows can still be converted but frame rows are ambiguous"
+            "oscillation_range_deg is near zero; frame rows have no angular progression "
+            "and alpha_deg rows cannot be converted to frame coordinates"
         )
 
     return RowContractSummary(
@@ -358,21 +355,11 @@ def example_row_csv() -> str:
             "bbox_z1": "18.6",
         },
     ]
-    out = []
-    writer = csv.DictWriter(_ListWriter(out), fieldnames=fields)
+    out = StringIO(newline="")
+    writer = csv.DictWriter(out, fieldnames=fields)
     writer.writeheader()
     writer.writerows(rows)
-    return "".join(out)
-
-
-class _ListWriter:
-    """Tiny file-like adapter used to build CSV templates without StringIO import noise."""
-
-    def __init__(self, parts: list[str]) -> None:
-        self.parts = parts
-
-    def write(self, value: str) -> None:
-        self.parts.append(value)
+    return out.getvalue()
 
 
 def example_metadata() -> dict[str, Any]:

@@ -1,8 +1,8 @@
-# Experimental JAX Backend Backup
+# Experimental JAX backends
 
 GROND's production Bloch backend is SciPy. Keep `--compute-backend scipy` as the default and treat all JAX paths as experimental until a future JAX/Metal implementation can run the required complex eigensolvers correctly and faster than SciPy.
 
-## Current Status
+## Retained interfaces and historical results
 
 The backend options are:
 
@@ -14,6 +14,8 @@ The backend options are:
 - `jax`, `jax_auto`, `jax_mps`: experimental. On the tested Apple Silicon/JAX-MPS environment, MPS saw the GPU but failed the required complex `eigh`/`eig` operations, so the ordinary complex-eigensolver MPS backend is not usable for GROND.
 
 GROND intentionally raises a backend error if a JAX backend cannot run the complex Hermitian and non-Hermitian eigensolvers. It must not silently fall back to SciPy, because that would make timing comparisons meaningless.
+
+The timings and device probes below are historical development snapshots. Later CUDA driver failures prevented other planned experiments; they do not invalidate these earlier agreement checks, and neither snapshot establishes current device availability. Probe the configured device before starting a new comparison. See [the experiment summary](BENCHMARKS.md) for promotion decisions.
 
 ## Benchmark Snapshot
 

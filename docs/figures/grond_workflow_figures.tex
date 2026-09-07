@@ -92,7 +92,7 @@
     line width=0.8pt
   },
   stage/.style={font=\sffamily\bfseries\large, text=grondInk},
-  note/.style={font=\sffamily\scriptsize, text=grondMuted, align=center},
+  note/.style={font=\sffamily\scriptsize, text=grondMuted, align=center, fill=white, inner sep=1pt},
   tag/.style={
     rounded corners=3pt,
     fill=grondInk!6,
@@ -121,7 +121,7 @@
 \thispagestyle{empty}
 
 \section*{Figure Set}
-These figures describe how GROND takes a reintegrated XDS directory plus a solved
+These figures illustrate the XDS route through GROND: a summation integration plus a solved
 structure and turns row-level observations into Bloch/Born predictions, corrected
 reflection files, endpoint statistics, forensic audits, and maps. The diagrams
 are written as source figures for reports, talks, and lab documentation. For a
@@ -129,7 +129,9 @@ non-expert reader, a \emph{row} means one measured spot observation from the
 integration table. A \emph{merged reflection} means several rows have already
 been combined. GROND keeps rows alive for as long as possible because row-level
 geometry, thickness, hand, and weak-reflection behavior are where many useful
-diagnostics live.
+diagnostics live. Ordinary DIALS summation integrations use the same downstream
+workflow through their reflection/experiment bridge. PETS2 overlapping virtual
+frames are not required.
 
 \clearpage
 
@@ -164,9 +166,9 @@ diagnostics live.
     resume ledger};
 
   \begin{scope}[on background layer]
-    \draw[flow] (before) -- node[tag, above=2mm] {solved structure} (reint);
-    \draw[flow] (reint) -- node[tag, above=2mm] {XDS dir + model dir} (grond);
-    \draw[flow] (grond) -- node[tag, above=2mm] {promoted endpoint} (out);
+    \draw[flow] (before) -- (reint);
+    \draw[flow] (reint) -- (grond);
+    \draw[flow] (grond) -- (out);
   \end{scope}
 
   \node[note, below=7mm of before, text width=36mm] {This path finds the structure. GROND then uses it to regularize row intensities.};
@@ -231,7 +233,7 @@ diagnostics live.
   \end{scope}
 
   \node[note, text width=48mm, below=8mm of feed] {The command prints stages, timings, current statistics, and resume hints.};
-  \node[note, text width=42mm, below=8mm of xdsdir] {The geometry file anchors detector, beam, frame, and reciprocal-space axes.};
+  \node[note, text width=30mm, below=8mm of xdsdir, xshift=10mm] {The geometry file anchors detector, beam, frame, and reciprocal-space axes.};
 \end{tikzpicture}
 \caption{Recommended GROND intake. The row-preserving XDS run provides the observation contract; the solved structure provides the atomic model and baseline reflection alignment.}
 \end{figure}
@@ -258,7 +260,7 @@ diagnostics live.
     \draw[flow] (parser) -- (json);
   \end{scope}
 
-  \node[riskbox, text width=114mm, below=12mm of parser] (audit) {Hard failures happen here when files are missing, rows are non-numeric, sigmas are unusable, geometry columns are absent, or too few reflections survive basic filters. This keeps bad integrations from silently entering regularization.};
+  \node[riskbox, text width=114mm, anchor=north] (audit) at ($(parser.center |- base.south)+(0,-12mm)$) {Hard failures happen here when files are missing, rows are non-numeric, sigmas are unusable, geometry columns are absent, or too few reflections survive basic filters. This keeps bad integrations from silently entering regularization.};
   \begin{scope}[on background layer]
     \draw[softflow] (json.south) |- (audit.east);
   \end{scope}
@@ -324,7 +326,7 @@ diagnostics live.
   \begin{scope}[on background layer]
     \draw[flow] (ledger) -- (align);
     \draw[flow] (align) -- (support);
-    \draw[flow] (support) |- (thick);
+    \draw[flow] (support.south) -- ++(0,-5mm) -| (thick.north);
     \draw[flow] (thick) -- (geo);
     \draw[flow] (geo) -- (pinned);
   \end{scope}
@@ -391,7 +393,7 @@ diagnostics live.
     \draw[flow] (audit) -- (gate);
     \draw[flow] (gate) -- node[tag, above] {yes} (promote);
     \draw[rejectflow] (gate) -- node[tag, right] {no} (drop);
-    \draw[softflow] (drop.west) -| (families.south);
+    \draw[softflow] (drop.west) -| ($(families.west)+(-8mm,0)$) -- (families.west);
   \end{scope}
 
   \node[note, text width=124mm, below=9mm of drop] {A strong-row improvement is not enough. GROND checks all-row behavior, weak-row bias, high-resolution residuals, and held-out scatter before a correction can enter the endpoint.};
@@ -407,7 +409,7 @@ diagnostics live.
 \grondSub{Every run ends with auditable artifacts, even when optional external map or regularization programs are absent.}
 \begin{tikzpicture}[node distance=8mm and 9mm]
   \node[outputbox, text width=32mm] (corr) {Corrected reflection files\\work/free splits\\all-row exports\\endpoint HKL};
-  \node[outputbox, text width=32mm, right=of corr] (stats) {Statistics\\raw row R factors\\merge-style R factors\\hand $\Delta\chi^2$\\timings};
+  \node[outputbox, text width=32mm, right=of corr] (stats) {Statistics\\raw row R factors\\merge-style R factors\\conditional hand $Z_{KP}$\\timings};
   \node[outputbox, text width=32mm, right=of stats] (maps) {Maps\\native dynamical\\corrected endpoint\\prospective never-H\\in a separate zero-H run};
   \node[outputbox, text width=32mm, below=13mm of stats] (ledger) {Run ledger\\\texttt{commands.jsonl}\\\texttt{grond\_progress.json}\\decision JSON\\resume state};
   \node[enginebox, text width=35mm, below=13mm of corr] (user) {Human review\\inspect trends\\compare endpoints\\choose next action};
@@ -447,9 +449,9 @@ diagnostics live.
     \draw[flow] (struct) -- (prep);
     \draw[flow] (list) -- (prep);
     \draw[flow] (prep) -- (fan);
-    \draw[flow] (fan) |- (d1);
-    \draw[flow] (fan) -- (d2);
-    \draw[flow] (fan) |- (d3);
+    \draw[flow] (fan.south) -- ++(0,-7mm) -| (d1.north);
+    \draw[flow] (fan.south) -- ++(0,-7mm) -| (d2.north);
+    \draw[flow] (fan.south) -- ++(0,-7mm) -| (d3.north);
     \draw[flow] (d1) -- (summary);
     \draw[flow] (d2) -- (summary);
     \draw[flow] (d3) -- (summary);
@@ -463,7 +465,7 @@ diagnostics live.
 \begin{figure}[p]
 \centering
 \grondTitle{Run Modes and Relative Cost}
-\grondSub{The modes expose the same science at different levels of speed, automation, and endpoint ambition. The chart is qualitative, not a benchmark.}
+\grondSub{The modes have different numerical fidelity, automation, and endpoint scope. The chart is qualitative, not a benchmark.}
 \begin{tikzpicture}
   \begin{axis}[
     width=0.92\linewidth,
@@ -489,12 +491,12 @@ diagnostics live.
     \addplot coordinates {(fast,1) (bloch,2) (regularize,4) (auto,6) (raw-polish,8)};
   \end{axis}
 
-  \node[smallbox, text width=29mm, anchor=north west] at (0.25,-1.9) {\textbf{fast}\\small N/Q\\Hermitian only\\triage Z, hand, thickness};
-  \node[smallbox, text width=31mm, anchor=north west] at (0.25,-3.05) {\textbf{full-fast}\\automatic gates\\N24/Q10\\light structure pass};
-  \node[smallbox, text width=29mm, anchor=north west] at (3.1,-1.9) {\textbf{bloch}\\fixed structure\\full setup\\dynamic R factors\\maps};
-  \node[smallbox, text width=29mm, anchor=north west] at (5.95,-1.9) {\textbf{regularize}\\Bloch row polish\\geometry/nuisance gates\\endpoint HKL};
-  \node[smallbox, text width=29mm, anchor=north west] at (8.8,-1.9) {\textbf{auto}\\full staged decisions\\best promoted endpoint\\all reports};
-  \node[smallbox, text width=29mm, anchor=north west] at (11.65,-1.9) {\textbf{raw-polish}\\optional raw-CBF test\\forward observation polish\\experimental};
+  \node[smallbox, text width=23mm, anchor=north west] at (0.25,-1.9) {\textbf{fast}\\small N/Q\\Hermitian only\\triage Z, hand, thickness};
+  \node[smallbox, text width=23mm, anchor=north west] at (0.25,-3.85) {\textbf{full-fast}\\automatic gates\\N24/Q10\\light structure pass};
+  \node[smallbox, text width=23mm, anchor=north west] at (3.1,-1.9) {\textbf{bloch}\\fixed structure\\full setup\\dynamic R factors\\maps};
+  \node[smallbox, text width=23mm, anchor=north west] at (5.95,-1.9) {\textbf{regularize}\\Bloch row polish\\geometry/nuisance gates\\endpoint HKL};
+  \node[smallbox, text width=23mm, anchor=north west] at (8.8,-1.9) {\textbf{auto}\\full staged decisions\\best promoted endpoint\\all reports};
+  \node[smallbox, text width=23mm, anchor=north west] at (11.65,-1.9) {\textbf{raw-polish}\\optional raw-CBF test\\forward observation polish\\experimental};
 \end{tikzpicture}
 \caption{Mode chart. Fast mode is for immediate sanity checks; auto mode is the default walk-away path; raw-polish remains an optional final test layer when raw images and calibration are available.}
 \end{figure}

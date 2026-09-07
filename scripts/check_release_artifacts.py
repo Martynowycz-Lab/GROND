@@ -110,8 +110,8 @@ REQUIRED_SDIST_SUFFIXES = (
     "docs/REFERENCES.md",
     "scripts/check_release_artifacts.py",
     "scripts/smoke_install_wheel.py",
-    "tests/test_package_metadata.py",
-    "tests/test_release_artifact_checker.py",
+    "tests/package/test_package_metadata.py",
+    "tests/package/test_release_artifact_checker.py",
 )
 
 REQUIRED_WHEEL_SUFFIXES = (
