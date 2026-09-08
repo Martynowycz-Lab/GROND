@@ -237,6 +237,45 @@ def _finish_list6_fcf(
     return replay_fcf, replay
 
 
+def _shelx2map_compatible_fcf(source: Path) -> tuple[Path, dict[str, object]]:
+    """Keep long descriptive titles out of shelx2map's fixed-width header reader.
+
+    The legacy reader loops forever after a header line exceeds its buffer.
+    Shorten only the title in a separate copy. Reflection data, cell and
+    symmetry must stay exactly as written by SHELXL.
+    """
+
+    with source.open(encoding="utf-8", newline="") as handle:
+        lines = handle.read().splitlines(keepends=True)
+    changed = []
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped == "_refln_phase_calc":
+            break
+        header_bytes = len(line.rstrip("\r\n").encode("utf-8"))
+        if header_bytes <= 79:
+            continue
+        if stripped.split(maxsplit=1)[:1] == ["_shelx_title"]:
+            lines[index] = "_shelx_title GROND_endpoint_map\n"
+            changed.append(index + 1)
+        else:
+            raise ValueError(
+                f"shelx2map cannot safely read FCF header line {index + 1} "
+                f"({header_bytes} UTF-8 bytes); source preserved: {source}"
+            )
+    record = {"status": "unchanged", "source_fcf": str(source.resolve()), "source_sha256": sha256_file(source)}
+    if not changed:
+        return source, record
+    directory = source.parent / "grond_finish_map_input"
+    directory.mkdir(exist_ok=True)
+    compatible = directory / "map_input.fcf"
+    with compatible.open("w", encoding="utf-8", newline="") as handle:
+        handle.write("".join(lines))
+    record.update(status="shortened_descriptive_title", title_lines=changed,
+                  map_input_fcf=str(compatible.resolve()), map_input_sha256=sha256_file(compatible))
+    return compatible, record
+
+
 def run_finish_endpoint_maps(result: Mapping[str, object], args: argparse.Namespace) -> dict[str, object]:
     """Generate corrected-HKL endpoint maps from the selected publication endpoint."""
 
@@ -259,11 +298,16 @@ def run_finish_endpoint_maps(result: Mapping[str, object], args: argparse.Namesp
     fcf, list6_replay = _finish_list6_fcf(endpoint, endpoint_res, source_fcf, args)
     if fcf is None:
         return {"status": "list6_replay_failed", "endpoint_res": str(endpoint_res), "list6_replay": list6_replay}
-    map_work_dir = fcf.resolve().parent
-    map_stem = fcf.stem
     exe = _shelx2map_executable(args)
     if ("/" in exe and not Path(exe).exists()) or ("/" not in exe and shutil.which(exe) is None):
         return {"status": "missing_shelx2map", "executable": exe}
+    try:
+        fcf, fcf_compatibility = _shelx2map_compatible_fcf(fcf)
+    except ValueError as exc:
+        return {"status": "fcf_header_incompatible", "error": str(exc), "fcf": str(fcf.resolve()),
+                "endpoint_res": str(endpoint_res.resolve()), "list6_replay": list6_replay}
+    map_work_dir = fcf.resolve().parent
+    map_stem = fcf.stem
     maps: dict[str, dict[str, object]] = {}
     map_specs = [
         ("fofc", "0", "1"),
@@ -273,14 +317,30 @@ def run_finish_endpoint_maps(result: Mapping[str, object], args: argparse.Namesp
     ]
     for label, mode, map_weight in map_specs:
         out_map = work_dir / f"grond_corrected_{label}.map"
-        proc = subprocess.run(
-            [exe, "-w", map_weight, "-m", mode, "-o", str(out_map), map_stem],
-            cwd=str(map_work_dir),
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-        )
         log_path = work_dir / f"grond_finish_shelx2map_{label}.log"
+        out_map.unlink(missing_ok=True)
+        try:
+            proc = subprocess.run(
+                [exe, "-w", map_weight, "-m", mode, "-o", str(out_map), map_stem],
+                cwd=str(map_work_dir),
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                timeout=120,
+            )
+        except subprocess.TimeoutExpired as exc:
+            # subprocess.run has killed and reaped the converter. Its partial
+            # output is not a map that a later caller should mistake for usable.
+            out_map.unlink(missing_ok=True)
+            output = exc.stdout or ""
+            if isinstance(output, bytes):
+                output = output.decode(errors="replace")
+            log_path.write_text(output + "\nshelx2map exceeded its 120-second limit; endpoint artifacts are preserved.\n")
+            maps[label] = {"status": "timed_out", "map": str(out_map), "requested_map": str(out_map),
+                           "log": str(log_path), "returncode": None, "exists": out_map.exists(),
+                           "timeout_seconds": 120, "shelx2map_weight": float(map_weight),
+                           "display_role": "diagnostic_unweighted" if map_weight == "0" else "primary_weighted"}
+            continue
         log_path.write_text(proc.stdout)
         actual = out_map
         for line in proc.stdout.splitlines():
@@ -303,6 +363,7 @@ def run_finish_endpoint_maps(result: Mapping[str, object], args: argparse.Namesp
         "definition": "GROND-corrected endpoint maps from the selected corrected-HKL publication endpoint; primary maps use explicit shelx2map -w 1 model-reliability weighting, and the raw unweighted Fo-Fc map is retained as a labeled diagnostic. These are not native dynamical residual-potential maps.",
         "endpoint_res": str(endpoint_res.resolve()),
         "fcf": str(fcf.resolve()),
+        "fcf_compatibility": fcf_compatibility,
         "list6_replay": list6_replay,
         "maps": maps,
     }

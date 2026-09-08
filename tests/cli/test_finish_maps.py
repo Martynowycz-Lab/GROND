@@ -164,7 +164,7 @@ def test_finish_endpoint_maps_replays_list3_as_zero_cycle_list6(tmp_path: Path, 
 
     calls: list[list[str]] = []
 
-    def fake_run(command, *, cwd, text, stdout, stderr):
+    def fake_run(command, *, cwd, text, stdout, stderr, timeout=None):
         calls.append(list(command))
         work = Path(cwd)
         if Path(command[0]) == fake_shelxl:
@@ -174,6 +174,7 @@ def test_finish_endpoint_maps_replays_list3_as_zero_cycle_list6(tmp_path: Path, 
             (work / f"{stem}.fcf").write_text("data_model\n_shelx_refln_list_code 6\n")
             (work / f"{stem}.lst").write_text(metrics)
             return SimpleNamespace(returncode=0, stdout="SHELXL replay ok\n")
+        assert timeout == 120
         out_map = Path(command[command.index("-o") + 1])
         out_map.write_text("map\n")
         return SimpleNamespace(returncode=0, stdout=f'Map data written to "{out_map}"\n')

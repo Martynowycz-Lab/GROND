@@ -4,6 +4,12 @@ This file records user-visible changes to the installable package. Version `0.2.
 
 ## 0.2.2 (unreleased)
 
+### Runtime recovery
+
+Rejected non-passive absorption candidates now propagate their physical error immediately in both cached and uncached prediction paths. Retrying the same invalid candidate under another multiprocessing context caused stalled worker startup on a production run. Accepted scattering calculations are unchanged.
+
+Endpoint map export handles the legacy shelx2map reader's short header buffer by shortening an overlong descriptive title in a separate, hash-recorded FCF copy. Cell, symmetry, reflection coefficients and the original file remain unchanged. Other incompatible headers report their exact cause. Converter calls have a 120-second limit, terminate stalled processes, discard partial maps and retain a warning alongside the usable structural result.
+
 ### Source organization and public package
 
 The command line, physics, regularization, endpoint, input and reporting implementations now have explicit domain owners. `grond.cli` and historical engine entry points retain compatibility reexports and necessary dispatch boundaries. Argument registration is split by command family; the public parser, defaults and help remain unchanged. Scientific cache fingerprints include the new implementation files, so moving a numerical helper does not make later edits invisible to an old cache.

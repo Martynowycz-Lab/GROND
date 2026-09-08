@@ -21,7 +21,7 @@ from grond.bloch.backends import (
     _stack_square_matrices,
 )
 from grond.bloch.constants import ALL_JAX_BACKENDS
-from grond.bloch.errors import InfeasibleSgJitterProfileError, LocalSgCrossingError
+from grond.bloch.errors import InfeasibleSgJitterProfileError, LocalSgCrossingError, NonPassiveAbsorptionError
 
 _WORKER_PORT = None
 
@@ -227,7 +227,7 @@ class PredictionMixin:
                         commit_attempt(attempt_results)
                         ran_parallel = True
                         break
-                    except (LocalSgCrossingError, InfeasibleSgJitterProfileError):
+                    except (LocalSgCrossingError, InfeasibleSgJitterProfileError, NonPassiveAbsorptionError):
                         raise
                     except Exception as exc:
                         parallel_errors.append(f"{context_name}: {type(exc).__name__}: {str(exc)[:160]}")
@@ -433,7 +433,7 @@ class PredictionMixin:
                         )
                     results = _ordered_prediction_attempt(indices, attempt_results)
                     break
-                except (LocalSgCrossingError, InfeasibleSgJitterProfileError):
+                except (LocalSgCrossingError, InfeasibleSgJitterProfileError, NonPassiveAbsorptionError):
                     raise
                 except Exception:
                     continue
