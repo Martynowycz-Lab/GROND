@@ -8,6 +8,7 @@ from pathlib import Path
 
 from grond.forensics.resolution import classify_endpoint_candidate
 from grond.legacy.engine.shelx_diagnostics import parse_shelx_lst_metrics, parse_shelx_lst_pathologies
+from grond.legacy.engine.shelx_hkl import audit_fixed_width_precision
 
 
 def _float(value, fallback: float = float("nan")) -> float:
@@ -623,6 +624,15 @@ def classify_publication_endpoint(
     ).to_dict()
     reasons: list[str] = list(safety.get("reasons") or [])
     warnings: list[str] = list(safety.get("warnings") or [])
+    hkl_path = str(candidate.get("hkl") or candidate.get("endpoint_hkl") or "").strip()
+    hkl_precision = audit_fixed_width_precision(Path(hkl_path)) if hkl_path else {"status": "not_provided"}
+    if hkl_precision["status"] == "invalid":
+        reasons.append(f"written HKL validation failed: {hkl_precision['reason']}")
+    elif hkl_precision["status"] == "ok" and hkl_precision["rounding_bound_sigma_units_max"] > 0.01:
+        warnings.append(
+            f"HKLF4 rounding can reach {hkl_precision['rounding_bound_sigma_units_max']:.4g} sigma(I); "
+            "inspect the weakest observations"
+        )
     endpoint_b = _float(candidate.get("endpoint_b"), 0.0)
     lambda_q = _float(candidate.get("lambda_q"), 1.0)
     source_kind = str(candidate.get("source_kind", ""))
@@ -701,6 +711,7 @@ def classify_publication_endpoint(
         "rejection_reasons": reasons,
         "warnings": warnings,
         "safety": safety,
+        "hkl_precision": hkl_precision,
     }
 
 
@@ -834,7 +845,8 @@ def choose_publication_endpoints(
                 "q exponent equal to one",
                 "EXTI off",
                 "endpoint-B equal to zero",
-                f"HKL safety factor >= {min_hkl_safe_factor:g}",
+                "finite positive HKL export scale; written HKLF4 values are finite with positive sigmas",
+                f"HKL rescaling below {min_hkl_safe_factor:g} warns but cannot by itself reject a model",
                 f"95th percentile modulation is reported and warned above {max_modulation_p95:g}, but never blocks promotion",
                 f"SHELXL GooF is finite; values outside {publication_goof_min:g}-{publication_goof_max:g} are warned but do not block model handoff",
                 "hash-bound final LST pathology audit is complete and NPD == 0; split warnings are reported but do not block promotion",

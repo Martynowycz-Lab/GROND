@@ -152,7 +152,7 @@ def add_endpoints(ap: argparse.ArgumentParser, *, expose_lambda_controls: bool) 
         "--publication-endpoint-min-hkl-safe-factor",
         type=float,
         default=0.25,
-        help="Minimum fixed-width HKL safety factor for a publication endpoint.",
+        help="Warn below this fixed-width HKL rescaling factor; written precision, not intensity units, determines validity.",
     )
     ap.add_argument(
         "--publication-endpoint-max-modulation-p95",

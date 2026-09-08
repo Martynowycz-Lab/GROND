@@ -77,14 +77,13 @@ def classify_endpoint_candidate(
 ) -> EndpointSafetyDecision:
     """Classify whether an endpoint is promotable or diagnostic-only.
 
-    A near-singular fixed-width HKL rescale and incomplete endpoint metrics are
-    promotion failures. Intensity modulation remains visible as a diagnostic
-    warning, but is not itself evidence of invalid mathematics and never
-    changes promotion status.
+    Positive global rescaling changes intensity units, not the physics. Its
+    magnitude and intensity modulation are warnings. Actual written HKL
+    precision is checked by the artifact-owning workflow.
     """
 
     shelxl = candidate.get("shelxl") if isinstance(candidate.get("shelxl"), Mapping) else candidate
-    safe = _float(candidate.get("hkl_safe_factor"), 1.0)
+    safe = _float(candidate.get("hkl_safe_factor", 1.0))
     mod95 = _float(candidate.get("mod_p95", candidate.get("modulation_p95")))
     wr2 = _float(shelxl.get("wR2_all"))
     r1_all = _float(shelxl.get("R1_all"))
@@ -92,8 +91,13 @@ def classify_endpoint_candidate(
     reasons: list[str] = []
     warnings: list[str] = []
 
-    if safe < min_hkl_safe_factor:
-        reasons.append(f"HKL safety factor {safe:.4g} is below {min_hkl_safe_factor:.4g}")
+    if not math.isfinite(safe) or safe <= 0.0:
+        reasons.append("HKL export scale factor must be finite and positive")
+    elif safe < min_hkl_safe_factor:
+        warnings.append(
+            f"fixed-width HKL rescaling factor {safe:.4g} is below warning level {min_hkl_safe_factor:.4g}; "
+            "this is an intensity-unit conversion, not a physical rejection criterion"
+        )
     if not math.isfinite(mod95):
         warnings.append("95th percentile endpoint modulation is unavailable")
     elif mod95 > max_modulation_p95:

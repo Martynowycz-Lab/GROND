@@ -252,7 +252,7 @@ def test_existing_split_warning_is_not_counted_as_a_new_compact_pathology() -> N
         ({"returncode": 1}, "endpoint_shelxl_failed"),
         ({"safe_for_feedback": False}, "endpoint_res_unsafe_for_feedback"),
         ({"artifacts_exist": False}, "endpoint_artifacts_missing"),
-        ({"hkl_safe_factor": 0.249}, "endpoint_hkl_safety_below_minimum"),
+        ({"hkl_safe_factor": 0.0}, "endpoint_hkl_scale_invalid"),
     ],
 )
 def test_compact_endpoint_health_and_physical_safety_fail_closed(
@@ -313,3 +313,11 @@ def test_missing_required_values_fail_closed_as_an_invalid_contract(
     assert result["accepted"] is False
     assert result["selected_contract"] == "full"
     assert "invalid_candidate_contract" in result["reasons"]
+
+
+def test_compact_selection_is_not_rejected_by_intensity_units():
+    full, compact = _passing_pair()
+    compact["endpoint"]["hkl_safe_factor"] = 0.01
+    result = _select(full, compact)
+    assert result["accepted"] is True
+    assert any("HKL rescaling" in item for item in result["warnings"])

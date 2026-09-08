@@ -36,7 +36,7 @@ def materialize_endpoint_artifacts(root: Path, name: str, candidate: dict, *, pa
     hkl = endpoint_dir / "endpoint.hkl"
     lst = endpoint_dir / "endpoint.lst"
     res.write_text("TITL endpoint\nEND\n")
-    hkl.write_text("   0   0   0    0.00    0.00\n")
+    hkl.write_text("   1   0   0   10.00    1.00\n   0   0   0    0.00    0.00\n")
     pathology_line = "0 atoms may be split and 0 atoms NPD\n" if pathology == "complete" else ""
     shelxl = candidate.get("shelxl") or {}
     lst.write_text(
@@ -693,10 +693,11 @@ def test_write_combined_baseline_gate_records_policy_and_report(tmp_path: Path):
     assert "/validated/combined_baseline.lst" in report
 
 
-def test_combined_collection_preserves_unsafe_fixed_width_factor(tmp_path: Path):
+def test_combined_collection_preserves_small_fixed_width_factor_as_warning(tmp_path: Path):
     combined = tmp_path / "combined"
     combined.mkdir()
-    unsafe = endpoint(1.0, 0.0, 0.18, 0.12, safe=0.10)
+    unsafe = materialize_endpoint_artifacts(tmp_path, "small_scale", endpoint(1.0, 0.0, 0.18, 0.12, safe=0.10))
+    unsafe.update(unsafe["artifacts"])
     (combined / "combined_summary.json").write_text(
         json.dumps({"combined_endpoint": unsafe})
     )
@@ -710,7 +711,44 @@ def test_combined_collection_preserves_unsafe_fixed_width_factor(tmp_path: Path)
         require_combined_baseline=True,
     )
 
-    assert decision["status"] == "diagnostic_only"
-    candidate = decision["best_diagnostic_endpoint"]
+    assert decision["status"] == "ok"
+    candidate = decision["best_physical_endpoint"]
     assert candidate["hkl_safe_factor"] == pytest.approx(0.10)
-    assert any("HKL safety factor 0.1 is below 0.25" in reason for reason in candidate["rejection_reasons"])
+    assert any("HKL rescaling factor 0.1" in warning for warning in candidate["warnings"])
+
+
+def test_identical_hkl_bytes_have_identical_admission_under_different_units(tmp_path):
+    from grond.legacy.engine.shelx_hkl import safe_fixed_width_factor, write_fixed_width_hkl
+    from grond.workflows.endpoint_chooser import classify_publication_endpoint
+
+    rows = [(1, 0, 0, 500_000.0, 100.0), (0, 1, 0, 1000.0, 20.0)]
+    decisions = []
+    payloads = []
+    for units in (1.0, 0.5):
+        source = [(h, k, ell, intensity * units, sigma * units) for h, k, ell, intensity, sigma in rows]
+        factor = safe_fixed_width_factor(source)
+        path = tmp_path / f"units_{units}.hkl"
+        write_fixed_width_hkl(path, [(h, k, ell, intensity * factor, sigma * factor) for h, k, ell, intensity, sigma in source])
+        payloads.append(path.read_bytes())
+        candidate = {"lambda_q": 1.0, "endpoint_b": 0.0, "keep_exti": False,
+                     "hkl_safe_factor": factor, "hkl": str(path), "modulation_p95": 1.0,
+                     "R1_all": 0.10, "R1_gt": 0.08, "wR2_all": 0.12, "GooF": 1.0}
+        decisions.append(classify_publication_endpoint(candidate))
+    assert payloads[0] == payloads[1]
+    assert all(result["promotable"] for result in decisions)
+    assert decisions[0]["warnings"] and not decisions[1]["warnings"]
+    assert all(result["hkl_precision"]["status"] == "ok" for result in decisions)
+
+
+@pytest.mark.parametrize("factor", [1.0, 0.01])
+def test_unusable_written_sigma_blocks_endpoint_regardless_of_scale(tmp_path, factor):
+    from grond.legacy.engine.shelx_hkl import write_fixed_width_hkl
+    from grond.workflows.endpoint_chooser import classify_publication_endpoint
+
+    path = tmp_path / "zero_sigma.hkl"
+    write_fixed_width_hkl(path, [(1, 0, 0, 100.0, 0.0)])
+    result = classify_publication_endpoint({"hkl": str(path), "hkl_safe_factor": factor,
+        "lambda_q": 1.0, "endpoint_b": 0.0, "keep_exti": False,
+        "R1_all": 0.10, "R1_gt": 0.08, "wR2_all": 0.12, "GooF": 1.0})
+    assert not result["promotable"]
+    assert any("sigma is nonpositive" in message for message in result["rejection_reasons"])

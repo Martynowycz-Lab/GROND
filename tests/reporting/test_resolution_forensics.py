@@ -13,7 +13,8 @@ def test_classify_endpoint_candidate_separates_promoted_from_diagnostic():
     )
     assert promoted.status == "promote"
     assert diagnostic.status == "diagnostic"
-    assert any("safety factor" in reason for reason in diagnostic.reasons)
+    assert any("wR2 penalty" in reason for reason in diagnostic.reasons)
+    assert any("HKL rescaling factor" in warning for warning in diagnostic.warnings)
 
 
 def test_suggest_resolution_limit_uses_first_failed_shell():

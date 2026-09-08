@@ -187,3 +187,37 @@ def write_sign_paired_hklf4(source: Path, output: Path) -> dict[str, object]:
         "observation_payload_preserved": True,
         "index_operation": "h,k,l -> -h,-k,-l",
     }
+
+
+def audit_fixed_width_precision(path: Path) -> dict[str, object]:
+    """Check the written observations, not the arbitrary units before export.
+
+    Each F8.2 field rounds by at most 0.005. Expressing that bound in sigma
+    units shows whether the printed precision matters to the observations.
+    """
+    try:
+        lines, record = _fixed_width_hklf4_records(path)
+        sigmas = []
+        for line in lines:
+            body = line.rstrip(b"\r\n")
+            if not body or tuple(int(body[i:i + 4]) for i in (0, 4, 8)) == (0, 0, 0):
+                continue
+            intensity, sigma = float(body[12:20]), float(body[20:28])
+            if not math.isfinite(intensity) or not math.isfinite(sigma):
+                raise ValueError("written HKLF4 intensity or sigma is nonfinite")
+            if sigma <= 0:
+                raise ValueError("written HKLF4 sigma is nonpositive; the observation has no valid weight")
+            sigmas.append(sigma)
+        if not sigmas:
+            raise ValueError("written HKLF4 contains no reflections")
+    except (OSError, ValueError) as exc:
+        return {"status": "invalid", "path": str(path), "reason": str(exc)}
+    bounds = sorted(0.005 / sigma for sigma in sigmas)
+    position = 0.95 * (len(bounds) - 1)
+    lower = int(position)
+    p95 = bounds[lower] + (position - lower) * (bounds[min(lower + 1, len(bounds) - 1)] - bounds[lower])
+    return {"status": "ok", "path": str(path), "reflection_count": len(sigmas),
+            "observation_payload_sha256": record["observation_payload_sha256"],
+            "minimum_sigma": min(sigmas), "rounding_bound_sigma_units_p95": p95,
+            "rounding_bound_sigma_units_max": bounds[-1],
+            "definition": "F8.2 half-step 0.005 divided by each positive written sigma(I); a precision bound, not an uncertainty calibration"}

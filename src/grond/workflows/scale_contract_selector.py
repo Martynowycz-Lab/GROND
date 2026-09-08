@@ -162,8 +162,10 @@ def select_multi_scale_contract(
             reasons.append("endpoint_res_unsafe_for_feedback")
         if not compact_artifacts_exist:
             reasons.append("endpoint_artifacts_missing")
-    if compact_hkl_safe_factor + epsilon < float(min_hkl_safe_factor):
-        reasons.append("endpoint_hkl_safety_below_minimum")
+    if compact_hkl_safe_factor <= 0.0:
+        reasons.append("endpoint_hkl_scale_invalid")
+    elif compact_hkl_safe_factor + epsilon < float(min_hkl_safe_factor):
+        warnings.append("small fixed-width HKL rescaling factor; check written precision, not the original intensity units")
     if not math.isfinite(compact_modulation_p95):
         warnings.append("endpoint modulation p95 is unavailable")
     elif compact_modulation_p95 > float(max_modulation_p95) + epsilon:

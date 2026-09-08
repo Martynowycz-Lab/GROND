@@ -1310,7 +1310,8 @@ def main():
         balanced_candidates = [
             ep for ep in (safe_neutral_endpoint_results or neutral_endpoint_results)
             if (
-                float(ep.get("hkl_safe_factor", 1.0)) >= minimum_hkl_safe_factor
+                math.isfinite(float(ep.get("hkl_safe_factor", 1.0)))
+                and float(ep.get("hkl_safe_factor", 1.0)) > 0.0
                 and float(ep.get("shelxl", {}).get("wR2_all", 999)) <= best_wR2 + balanced_wR2_tolerance
             )
         ]
@@ -1327,7 +1328,8 @@ def main():
             best_r1_ep is not balanced_ep
             and (
                 abs(float(best_r1_ep.get("endpoint_b", 0.0))) > 1e-12
-                or float(best_r1_ep.get("hkl_safe_factor", 1.0)) < minimum_hkl_safe_factor
+                or not math.isfinite(float(best_r1_ep.get("hkl_safe_factor", 1.0)))
+                or float(best_r1_ep.get("hkl_safe_factor", 1.0)) <= 0.0
                 or float(best_r1_sh.get("wR2_all", 999)) > best_wR2 + balanced_wR2_tolerance
             )
         )

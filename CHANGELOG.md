@@ -6,6 +6,8 @@ This file records user-visible changes to the installable package. Version `0.2.
 
 ### Runtime recovery
 
+A global fixed-width HKL rescale no longer rejects an otherwise usable endpoint. Changing the original intensity units can change this factor while producing exactly the same HKL bytes. Small factors are reported; publication selection checks the actual written fields for finite intensities and positive sigmas and records their rounding bound in sigma units. Missing or invalid scale factors still fail. Compact-contract and balanced-endpoint decisions use the same unit-invariant rule.
+
 Missing XDS centroids now report limited diagnostic coverage without claiming the configured geometry filter was disabled. Observations remain eligible under the same row-support rules. Optional centroid-derived profile widths reject unavailable centroids with a specific row/HKL error rather than producing a NaN width or silently treating missing position as zero residual. This input error is never retried under another multiprocessing context; the default fixed profile is unchanged.
 
 Rejected non-passive absorption candidates now propagate their physical error immediately in both cached and uncached prediction paths. Retrying the same invalid candidate under another multiprocessing context caused stalled worker startup on a production run. Accepted scattering calculations are unchanged.

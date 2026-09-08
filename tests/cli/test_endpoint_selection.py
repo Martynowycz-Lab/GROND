@@ -21,7 +21,7 @@ def test_publication_endpoint_chooser_includes_calibrated_replay(tmp_path: Path)
     endpoint_hkl = endpoint / "dyn_scale_replay.hkl"
     endpoint_lst = endpoint / "dyn_scale_replay.lst"
     endpoint_res.write_text("TITL calibrated\nEND\n")
-    endpoint_hkl.write_text("   0   0   0    0.00    0.00\n")
+    endpoint_hkl.write_text("   1   0   0   10.00    1.00\n   0   1   0    5.00    1.00\n   0   0   0    0.00    0.00\n")
     endpoint_lst.write_text(
         "wR2 = 0.1115, GooF = S = 0.906 for all data\n"
         "R1 = 0.05 for 1 Fo > 4sig(Fo) and 0.1105 for all 2 data\n"
