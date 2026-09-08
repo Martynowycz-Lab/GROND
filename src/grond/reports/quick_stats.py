@@ -115,7 +115,7 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
         rejected_gate = _endpoint_baseline_no_harm_gate(
             final_summary,
             rejected_endpoint,
-            baseline_override=_validated_fresh_conventional_baseline(result) if result.get("combined") else None,
+            baseline_override=_validated_fresh_conventional_baseline(result),
             require_baseline=bool(result.get("combined")),
         )
         if rejected_endpoint and str(rejected_gate.get("status")) == "failed":
@@ -1192,6 +1192,8 @@ def _append_quick_stats_endpoint_selection(
                 if _quick_goof_warning(publication_shelxl.get("GooF"))
                 else ""
             ),
+            *["**Endpoint warning:** " + str(warning) for warning in
+              (publication_endpoint.get("baseline_no_harm_gate") or {}).get("warnings", [])],
             "## Endpoint Calibration",
             "",
             f"Status: `{endpoint_calibration.get('status', 'n/a') if isinstance(endpoint_calibration, Mapping) else 'n/a'}`. {endpoint_calibration.get('reason', '') if isinstance(endpoint_calibration, Mapping) else ''}",
@@ -1487,6 +1489,7 @@ def _prepare_quick_stats_console(
             "lst": final_feedback_shelxl.get("lst", file_block["final_feedback_lst"]),
         },
         "publication_endpoint": {
+            "baseline_comparison": selected_row.get("baseline_no_harm_gate", {}),
             "R1gt": _quick_fraction(selected_row.get("shelxl_R1gt")),
             "R1all": _quick_fraction(selected_row.get("shelxl_R1all")),
             "wR2all": _quick_fraction(selected_row.get("shelxl_wR2all")),
@@ -1665,6 +1668,8 @@ def _write_quick_stats_final_summary(
         f"| GROND publication minus conventional reference, SHELXL endpoints | {_quick_delta_percent(input_shelxl.get('R1_all'), publication_shelxl.get('R1_all'))} | {_quick_delta_percent(input_shelxl.get('wR2_all'), publication_shelxl.get('wR2_all'))} | n/a | n/a |",
         "",
         f"**Endpoint warning:** {endpoint_warning}." if endpoint_warning else "",
+        *["**Endpoint warning:** " + str(warning) for warning in
+          (console["publication_endpoint"].get("baseline_comparison") or {}).get("warnings", [])],
         "",
         endpoint_note,
         "",

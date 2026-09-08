@@ -341,6 +341,7 @@ def _publication_model_endpoint_candidate(result: Mapping[str, object]) -> dict[
         "lst_sha256": str(canonical_lst.get("sha256") or ""),
         "shelxl": shelxl,
         "endpoint_origin_summary": str(origin_summary_path),
+        "endpoint_row_table": str(origin_summary_path.parent / "native_dyn_calc.csv") if not result.get("combined") else "",
         "artifact_provenance_ok": provenance_ok,
         "artifact_provenance": artifact_provenance,
         "res_provenance_ok": provenance_ok,

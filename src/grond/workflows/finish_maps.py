@@ -56,11 +56,11 @@ def _publication_endpoint_from_result(result: Mapping[str, object]) -> Mapping[s
         if result.get("combined") and "endpoint_calibration" in source_kind:
             return {}
         final_summary = _quick_load_run_summary(_quick_final_run(result))
-        combined_baseline = _validated_fresh_conventional_baseline(result) if result.get("combined") else {}
+        fresh_baseline = _validated_fresh_conventional_baseline(result)
         gate = _endpoint_baseline_no_harm_gate(
             final_summary,
             endpoint,
-            baseline_override=combined_baseline,
+            baseline_override=fresh_baseline,
             require_baseline=bool(result.get("combined")),
         )
         if not bool(gate.get("passed", False)):
@@ -388,6 +388,21 @@ def _finish_native_row_tables(result: Mapping[str, object]) -> list[tuple[str, P
     endpoint_row_table = str(endpoint.get("endpoint_row_table", "") or "").strip()
     endpoint_run_dir = str(endpoint.get("run_dir", "") or "").strip()
     endpoint_label = str(endpoint.get("label", "") or "publication_endpoint").strip()
+
+    if source_kind == "native_corrected_hkl":
+        # LS1 recomputes the rows after handing back the refined model. Use
+        # those rows only when their recorded model is this exact endpoint.
+        final_run = _quick_final_run(result)
+        final_inputs = _quick_load_run_summary(final_run).get("inputs")
+        final_inputs = final_inputs if isinstance(final_inputs, Mapping) else {}
+        endpoint_hash = str(endpoint.get("res_sha256") or "")
+        if final_run is not None and endpoint_hash and final_inputs.get("res_sha256") == endpoint_hash:
+            return [(endpoint_label, final_run / "native_dyn_calc.csv")]
+        # Older reports recorded the parent summary but omitted the row-table
+        # field. The endpoint subdirectory itself contains no Bloch row table.
+        origin_summary = str(endpoint.get("endpoint_origin_summary") or "").strip()
+        if not endpoint_row_table and origin_summary:
+            endpoint_row_table = str(Path(origin_summary).expanduser().parent / "native_dyn_calc.csv")
 
     if source_kind in {"native_corrected_hkl", "observation_polish"}:
         if endpoint_row_table:

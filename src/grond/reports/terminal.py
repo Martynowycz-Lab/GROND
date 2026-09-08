@@ -192,6 +192,8 @@ def _format_terminal_finish_summary(payload: Mapping[str, object]) -> str:
             )
     if endpoint_warning:
         endpoint_lines.append(f"  Warning: {endpoint_warning}")
+    for warning in (endpoint.get("baseline_comparison") or {}).get("warnings", []):
+        endpoint_lines.append(f"  Warning: {warning}")
     hand_scope = str(payload.get("final_hand_t_style_scope") or payload.get("final_hand_z_scope") or "")
     if hand_scope == "per_dataset":
         evidence = "; ".join(
