@@ -211,3 +211,23 @@ def test_metadata_transform_prefilter_promotes_hkl_overlap(tmp_path: Path):
     assert selected == ["l,-k,h"]
     assert payload["records"][0]["transform"] == "l,-k,h"
     assert payload["records"][0]["paired_rows"] >= 200
+
+
+@pytest.mark.parametrize("percentile", [99.0, 100.0])
+def test_sparse_centroid_warning_reports_actual_support_contract(tmp_path, percentile):
+    hkl = tmp_path / "INTEGRATE.HKL"
+    _write_minimal_xds(hkl)
+    lines = hkl.read_text().splitlines()
+    for index in range(1, 201):
+        fields = lines[index].split()
+        fields[12:15] = ["0", "0", "0"]
+        lines[index] = " ".join(fields)
+    hkl.write_text("\n".join(lines) + "\n")
+    ds = DatasetSpec(name="sparse", hkl=str(hkl), geometry_percentile=percentile)
+    decision = preflight_dataset(ds, requested_min_peak=90,
+        requested_geometry_percentile=percentile, requested_scout_rows=500)
+    assert decision.status == "ok"
+    assert decision.recommended_geometry_percentile == 100
+    assert apply_preflight(ds, decision).geometry_percentile == percentile
+    assert any(f"configured geometry percentile {percentile:g} is unchanged" in x for x in decision.warnings)
+    assert not any("filter disabled" in x for x in decision.warnings)

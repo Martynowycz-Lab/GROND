@@ -1304,3 +1304,28 @@ def test_stack_square_matrices_pads_with_uncoupled_zero_beams():
     assert np.allclose(stack[0, 2:, :], 0.0)
     assert np.allclose(stack[0, :, 2:], 0.0)
     assert np.allclose(stack[1, :3, :3], b)
+
+
+@pytest.mark.parametrize("mode", ["fixed", "zobs_residual", "zobs_plus_floor"])
+def test_profile_width_requires_centroid_only_for_centroid_modes(mode):
+    from grond.bloch.errors import MissingObservedCentroidError
+    from grond.bloch.profiles import ProfileMixin
+
+    port = SimpleNamespace(
+        cfg=Config(sg_window_mode=mode, sg_window=0.004, sg_window_frame_floor=0.5),
+        data=SimpleNamespace(zobs=np.array([11.5]), zcal=np.array([10.0]),
+                             peak=np.array([100.0]), rlp=np.array([1.0]), oscillation_range=0.2),
+        median_rlp=1.0, sg_derivative_per_deg=lambda *_: 0.01,
+    )
+    hkl = np.array([1, 2, 3])
+    width, _ = ProfileMixin.row_sg_window(port, 0, hkl, 0.0)
+    expected = {"fixed": 0.004, "zobs_residual": 0.006, "zobs_plus_floor": 0.008}
+    assert width == pytest.approx(expected[mode], abs=1e-15)
+    port.data.zobs[0] = np.nan
+    if mode == "fixed":
+        missing_width, diagnostic = ProfileMixin.row_sg_window(port, 0, hkl, 0.0)
+        assert missing_width == width
+        assert np.isnan(diagnostic["sg_window_zobs_minus_zcal_frame"])
+    else:
+        with pytest.raises(MissingObservedCentroidError, match="requires an observed centroid for row 0"):
+            ProfileMixin.row_sg_window(port, 0, hkl, 0.0)

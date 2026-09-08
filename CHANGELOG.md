@@ -6,6 +6,8 @@ This file records user-visible changes to the installable package. Version `0.2.
 
 ### Runtime recovery
 
+Missing XDS centroids now report limited diagnostic coverage without claiming the configured geometry filter was disabled. Observations remain eligible under the same row-support rules. Optional centroid-derived profile widths reject unavailable centroids with a specific row/HKL error rather than producing a NaN width or silently treating missing position as zero residual. This input error is never retried under another multiprocessing context; the default fixed profile is unchanged.
+
 Rejected non-passive absorption candidates now propagate their physical error immediately in both cached and uncached prediction paths. Retrying the same invalid candidate under another multiprocessing context caused stalled worker startup on a production run. Accepted scattering calculations are unchanged.
 
 Endpoint map export handles the legacy shelx2map reader's short header buffer by shortening an overlong descriptive title in a separate, hash-recorded FCF copy. Cell, symmetry, reflection coefficients and the original file remain unchanged. Other incompatible headers report their exact cause. Converter calls have a 120-second limit, terminate stalled processes, discard partial maps and retain a warning alongside the usable structural result.

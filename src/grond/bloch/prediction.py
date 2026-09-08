@@ -21,7 +21,20 @@ from grond.bloch.backends import (
     _stack_square_matrices,
 )
 from grond.bloch.constants import ALL_JAX_BACKENDS
-from grond.bloch.errors import InfeasibleSgJitterProfileError, LocalSgCrossingError, NonPassiveAbsorptionError
+from grond.bloch.errors import (
+    InfeasibleSgJitterProfileError,
+    LocalSgCrossingError,
+    MissingObservedCentroidError,
+    NonPassiveAbsorptionError,
+)
+
+# Another process context cannot repair missing observations or invalid physics.
+_NON_RETRYABLE_ERRORS = (
+    LocalSgCrossingError,
+    InfeasibleSgJitterProfileError,
+    NonPassiveAbsorptionError,
+    MissingObservedCentroidError,
+)
 
 _WORKER_PORT = None
 
@@ -227,7 +240,7 @@ class PredictionMixin:
                         commit_attempt(attempt_results)
                         ran_parallel = True
                         break
-                    except (LocalSgCrossingError, InfeasibleSgJitterProfileError, NonPassiveAbsorptionError):
+                    except _NON_RETRYABLE_ERRORS:
                         raise
                     except Exception as exc:
                         parallel_errors.append(f"{context_name}: {type(exc).__name__}: {str(exc)[:160]}")
@@ -433,7 +446,7 @@ class PredictionMixin:
                         )
                     results = _ordered_prediction_attempt(indices, attempt_results)
                     break
-                except (LocalSgCrossingError, InfeasibleSgJitterProfileError, NonPassiveAbsorptionError):
+                except _NON_RETRYABLE_ERRORS:
                     raise
                 except Exception:
                     continue

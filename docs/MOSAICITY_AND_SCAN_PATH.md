@@ -3,6 +3,8 @@
 These controls are opt-in native-row experiments. They do not change the
 default `grond auto` production contract.
 
+The optional `zobs_residual` and `zobs_plus_floor` width modes require a finite observed-minus-calculated centroid for each calculated row. Missing XDS centroids are not measured zero offsets. These modes report the row and HKL when the required position is unavailable; use the normal `--sg-window-mode fixed` for integrations without observed centroids. Missing centroids alone do not remove reflections from the standard calculation.
+
 `grond import-dials` records the DIALS profile model and its serialized
 parameters when available. For a GaussianRS model, `sigma_m` is retained in
 degrees as an optional projected-mosaic prior centre. The bridge also records

@@ -197,10 +197,14 @@ def preflight_dataset(ds: DatasetSpec, *, requested_min_peak: float, requested_g
     if missing_geometry_count:
         warnings.append(
             f"{missing_geometry_count} rows have absent XDS observed centroids; "
-            "excluded from geometry-tail diagnostics"
+            "centroid-mismatch diagnostics use available observations; "
+            "missing centroids alone do not exclude rows"
         )
     if observed_geometry_fraction < 0.5:
-        warnings.append("observed XDS geometry columns are mostly absent; geometry-tail filter disabled")
+        warnings.append(
+            "fewer than half of rows have observed XDS centroids; "
+            f"configured geometry percentile {float(ds.geometry_percentile):g} is unchanged"
+        )
 
     requested_min_peak = float(requested_min_peak)
     base_d = np.ones(n, dtype=bool)

@@ -7,7 +7,7 @@ import pytest
 from scipy.linalg import expm
 
 from grond.bloch import prediction
-from grond.bloch.errors import NonPassiveAbsorptionError
+from grond.bloch.errors import MissingObservedCentroidError, NonPassiveAbsorptionError
 from grond.legacy.engine.bloch_engine import XDSBlochPort
 
 
@@ -100,3 +100,19 @@ def test_accepted_propagation_matches_serial_and_matrix_exponential(monkeypatch,
     np.testing.assert_array_equal(parallel["indices"], indices)
     np.testing.assert_array_equal(parallel["dyn"], serial["dyn"])
     np.testing.assert_allclose(parallel["dyn"], parallel["reference"], atol=2e-15, rtol=2e-14)
+
+
+@pytest.mark.parametrize("cached", [False, True])
+def test_missing_centroid_error_is_not_retried(monkeypatch, cached):
+    contexts = install_controlled_pool(monkeypatch)
+    port = ControlledPort(cached)
+    calls = []
+
+    def reject(index):
+        calls.append(index)
+        raise MissingObservedCentroidError("row 7 has no observed centroid")
+
+    port.row_prediction = reject
+    with pytest.raises(MissingObservedCentroidError, match="row 7"):
+        port.predict_rows(np.array([3, 1, 7]), workers=96, chunksize=1)
+    assert len(contexts) == len(calls) == 1

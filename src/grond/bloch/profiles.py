@@ -11,6 +11,8 @@ import numpy as np
 from numpy.polynomial.hermite import hermgauss
 from numpy.polynomial.legendre import leggauss
 
+from grond.bloch.errors import MissingObservedCentroidError
+
 
 class ProfileMixin:
     """One cohesive part of XDSBlochPort; initialized by the public facade."""
@@ -27,6 +29,14 @@ class ProfileMixin:
         deriv_deg = abs(float(self.sg_derivative_per_deg(hkl, omega_bragg)))
         deriv_frame = deriv_deg * abs(float(self.data.oscillation_range))
         dz = abs(float(self.data.zobs[row_idx] - self.data.zcal[row_idx]))
+        if mode in {"zobs_residual", "zobs_plus_floor"} and not math.isfinite(dz):
+            # A missing centroid is not a measured zero residual. The normal
+            # fixed window needs no centroid and remains available explicitly.
+            raise MissingObservedCentroidError(
+                f"sg_window_mode={mode} requires an observed centroid for row {row_idx}, "
+                f"HKL {tuple(int(v) for v in hkl)}; ZOBS/ZCAL is unavailable. "
+                "Use sg_window_mode=fixed for integrations without observed centroids."
+            )
         peak_frac = max(float(self.data.peak[row_idx]) / 100.0, 1e-6)
         rlp_ratio = max(float(self.data.rlp[row_idx]), 1e-12) / max(self.median_rlp, 1e-12)
         half_frames = float(self.cfg.sg_window_frame_floor)
