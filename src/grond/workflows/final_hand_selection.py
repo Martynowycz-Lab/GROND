@@ -278,6 +278,9 @@ def run_multi_final_elastic_hand_selection(
     adjusted_z_final = {
         split: {
             **block,
+            # Keep Z = numerator / sqrt(variance) in the final hand convention.
+            # The original counts remain in adjusted_z_before_selection.
+            "signed_numerator": orientation * safe_float(block.get("signed_numerator"), float("nan")),
             "z": (
                 orientation * safe_float(block.get("z"), float("nan"))
                 if math.isfinite(safe_float(block.get("z"), float("nan")))

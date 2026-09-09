@@ -6,6 +6,8 @@ This file records user-visible changes to the installable package. Version `0.2.
 
 ### Runtime recovery
 
+After a final hand inversion, the reported count numerator now uses the same sign convention as its Z value. Original pre-selection counts remain available. This repairs JSON bookkeeping; predictions, scores, selected hands and their warnings are unchanged.
+
 Single-dataset native maps use the final row recomputation when its recorded model hash matches the selected endpoint. Older result records retain an explicit route to the endpoint's originating row table instead of looking in the SHELXL subdirectory. Fresh conventional-baseline comparisons now reach single-dataset reports and terminal output too: a worse corrected endpoint remains available with the actual R1all warning.
 
 A global fixed-width HKL rescale no longer rejects an otherwise usable endpoint. Changing the original intensity units can change this factor while producing exactly the same HKL bytes. Small factors are reported; publication selection checks the actual written fields for finite intensities and positive sigmas and records their rounding bound in sigma units. Missing or invalid scale factors still fail. Compact-contract and balanced-endpoint decisions use the same unit-invariant rule.

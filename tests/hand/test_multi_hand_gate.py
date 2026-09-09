@@ -1034,6 +1034,14 @@ def test_final_multi_hand_selection_uses_one_elastic_pair_and_switches_without_n
     assert result["selected_model_after"] == str(inverse)
     assert result["nuisance_refit"] is False
     assert result["jitter_refit"] is False
+    before = result["aggregate"]["adjusted_z_before_selection"]
+    after = result["aggregate"]["adjusted_z_final_hand_favored"]
+    for split in ("all", "work", "free"):
+        assert after[split]["signed_numerator"] == -before[split]["signed_numerator"]
+        assert after[split]["adjusted_variance"] == before[split]["adjusted_variance"]
+        assert after[split]["z"] == pytest.approx(
+            after[split]["signed_numerator"] / after[split]["adjusted_variance"] ** 0.5
+        )
 
 
 def test_completed_final_elastic_hand_selection_does_not_block_endpoint():
