@@ -183,7 +183,7 @@ def _endpoint_calibration_chooser_candidate(result: Mapping[str, object]) -> dic
 
 
 def _publication_model_endpoint_candidate(result: Mapping[str, object]) -> dict[str, object]:
-    """Return the last LS1 corrected-HKL endpoint as a chooser candidate."""
+    """Describe the adopted corrected-HKL model, including an earlier safe cycle."""
 
     model_text = str(result.get("model", "") or "").strip()
     if not model_text:
@@ -304,8 +304,9 @@ def _publication_model_endpoint_candidate(result: Mapping[str, object]) -> dict[
     }
     source_kind = "combined_corrected_hkl" if result.get("combined") else "native_corrected_hkl"
     return {
+        # Keep the saved candidate ID stable; display the actual model filename.
         "id": "final_ls1_corrected_hkl",
-        "label": "final_ls1_corrected_hkl",
+        "label": res.name,
         "source_kind": source_kind,
         "run_dir": str(res.parent),
         "lambda_q": 1.0,

@@ -4,6 +4,8 @@ This file records user-visible changes to the installable package. Version `0.2.
 
 ## 0.2.2 (unreleased)
 
+The endpoint chooser displays the adopted model filename and the selected RES, HKL and LST paths. Its stable candidate ID is identified as a report entry, so single-dataset feedback endpoints no longer look like missing output directories. Selection, validation and numerical results are unchanged.
+
 ### Runtime recovery
 
 After a final hand inversion, the reported count numerator now uses the same sign convention as its Z value. Original pre-selection counts remain available. This repairs JSON bookkeeping; predictions, scores, selected hands and their warnings are unchanged.

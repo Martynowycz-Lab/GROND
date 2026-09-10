@@ -170,15 +170,17 @@ def test_publication_endpoint_chooser_rejects_unpassed_or_unsafe_calibration(tmp
     assert cli._endpoint_calibration_chooser_candidate(passed_without_safety)["hkl_safe_factor"] == 0.0
 
 
-def test_publication_model_candidate_preserves_hash_bound_hkl_safety(tmp_path: Path):
+@pytest.mark.parametrize("multi", [False, True])
+def test_publication_model_candidate_preserves_hash_bound_hkl_safety(tmp_path: Path, multi):
     import hashlib
 
     combined = tmp_path / "cycle" / "combined"
     endpoint_dir = combined / "combined_endpoint_lam_1p0"
     endpoint_dir.mkdir(parents=True)
-    res = endpoint_dir / "multi_dyn_corrected.res"
-    lst = endpoint_dir / "multi_dyn_corrected.lst"
-    hkl = endpoint_dir / "multi_dyn_corrected.hkl"
+    stem = "multi_dyn_corrected" if multi else "dyn_nuisance_corrected"
+    res = endpoint_dir / f"{stem}.res"
+    lst = endpoint_dir / f"{stem}.lst"
+    hkl = endpoint_dir / f"{stem}.hkl"
     res.write_text("TITL endpoint\nCELL 0.025079 5 6 7 90 90 90\nSFAC C\nC1 1 0 0 0 1 0.05\nEND\n")
     lst.write_text(
         "WGHT 0 0\n"
@@ -190,10 +192,10 @@ def test_publication_model_candidate_preserves_hash_bound_hkl_safety(tmp_path: P
     digest = hashlib.sha256(res.read_bytes()).hexdigest()
     hkl_digest = hashlib.sha256(hkl.read_bytes()).hexdigest()
     lst_digest = hashlib.sha256(lst.read_bytes()).hexdigest()
-    (combined / "combined_summary.json").write_text(
+    (combined / ("combined_summary.json" if multi else "summary.json")).write_text(
         json.dumps(
             {
-                "combined_endpoint": {
+                ("combined_endpoint" if multi else "best_endpoint"): {
                     "hkl_safe_factor": 0.10,
                     "endpoint_b": 0.0,
                     "keep_exti": False,
@@ -218,9 +220,11 @@ def test_publication_model_candidate_preserves_hash_bound_hkl_safety(tmp_path: P
         )
     )
 
-    candidate = cli._publication_model_endpoint_candidate(
-        {"combined": str(combined), "model": str(res)}
-    )
+    source = {"combined" if multi else "primary_run": str(combined), "model": str(res)}
+    candidate = cli._publication_model_endpoint_candidate(source)
+
+    assert candidate["id"] == "final_ls1_corrected_hkl"
+    assert candidate["label"] == res.name
 
     assert candidate["res_provenance_ok"] is True
     assert candidate["hkl_safe_factor"] == pytest.approx(0.10)
@@ -239,9 +243,7 @@ def test_publication_model_candidate_preserves_hash_bound_hkl_safety(tmp_path: P
     assert normalized["shelxl_split_count"] == 0
 
     res.write_text(res.read_text() + "REM mutated\n")
-    stale = cli._publication_model_endpoint_candidate(
-        {"combined": str(combined), "model": str(res)}
-    )
+    stale = cli._publication_model_endpoint_candidate(source)
     assert stale["res_provenance_ok"] is False
     assert stale["hkl_safe_factor"] == 0.0
 

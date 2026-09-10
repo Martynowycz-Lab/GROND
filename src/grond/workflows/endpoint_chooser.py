@@ -916,8 +916,13 @@ def _write_markdown(out_dir: Path, decision: Mapping) -> Path:
     ]
     if best_physical:
         lines.append(
-            f"Best physical endpoint: `{best_physical.get('id')}` with `R1(F)all={_percent(best_physical.get('R1_all'))}` and `wR2(F^2)all={_percent(best_physical.get('wR2_all'))}`."
+            f"Best physical endpoint: `{best_physical.get('label') or best_physical.get('id')}` with `R1(F)all={_percent(best_physical.get('R1_all'))}` and `wR2(F^2)all={_percent(best_physical.get('wR2_all'))}`."
         )
+        lines.extend(["", "Selected files:", ""])
+        for kind in ("res", "hkl", "lst"):
+            if best_physical.get(kind):
+                lines.append(f"- {kind.upper()}: `{best_physical[kind]}`")
+        lines.extend(["", "Candidate IDs identify report entries, not filenames or directories.", ""])
     else:
         lines.append("No physical endpoint passed the publication gate. The run should be reported as diagnostic-only until a no-EXTI, B=0 endpoint with finite metrics is available.")
     if global_blockers:

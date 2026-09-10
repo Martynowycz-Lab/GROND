@@ -485,6 +485,11 @@ def test_write_publication_endpoint_choice_collects_outputs(tmp_path: Path):
     assert (out / "publication_endpoint_choice.json").exists()
     assert (out / "PUBLICATION_ENDPOINT_CHOOSER.md").exists()
     report = (out / "PUBLICATION_ENDPOINT_CHOOSER.md").read_text()
+    selected = decision["best_physical_endpoint"]
+    assert f"Best physical endpoint: `{selected['label']}`" in report
+    for kind in ("res", "hkl", "lst"):
+        assert f"- {kind.upper()}: `{selected[kind]}`" in report
+    assert "Candidate IDs identify report entries, not filenames or directories." in report
     assert "Rejected Corrections" in report
     assert "| label | source | endpoint B | EXTI | class | R1(F)gt | R1(F)all | wR2(F^2)all | GooF | modulation p95 | pathology |" in report
     assert "| label | source | lambda |" not in report
