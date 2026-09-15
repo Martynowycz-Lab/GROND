@@ -31,6 +31,7 @@ from pathlib import Path
 import gemmi
 import numpy as np
 
+from grond.bloch.model import shelx_u_cart_matrix
 from grond.legacy.engine.bloch_engine import fcalc_res_grid, inv_d2_from_hkl_array, parse_model
 
 DEFAULT_ELECTRON_WAVELENGTH_A = 0.025079
@@ -882,10 +883,11 @@ def _write_dynamic_cif(
     )
     for atom in model.get("atoms", []):
         adp_type = "Uani" if atom.get("adp_type") == "anis" else "Uiso"
-        uiso = float(
-            atom.get(
-                "uiso", (float(atom.get("u11", 0.0)) + float(atom.get("u22", 0.0)) + float(atom.get("u33", 0.0))) / 3.0
-            )
+        # Ueq is the mean Cartesian displacement, not the trace in a skew basis.
+        uiso = (
+            float(np.trace(shelx_u_cart_matrix(atom, model["cell"])) / 3.0)
+            if adp_type == "Uani"
+            else float(atom.get("uiso", 0.0))
         )
         lines.append(
             " ".join(
