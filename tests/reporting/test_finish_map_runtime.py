@@ -110,6 +110,16 @@ def test_timeout_kills_and_reaps_actual_converter_processes(tmp_path, monkeypatc
     monkeypatch.setattr(finish_maps, "_publication_endpoint_from_result", lambda _result: {"endpoint_res": str(model)})
     monkeypatch.setattr(finish_maps, "_shelx2map_executable", lambda _args: str(executable))
     actual_run = subprocess.run
+    actual_popen = subprocess.Popen
+    spawned = []
+
+    def tracked_popen(*args, **kwargs):
+        process = actual_popen(*args, **kwargs)
+        spawned.append(process.pid)
+        return process
+
+    # Track children in the parent; a short timeout may interrupt Python startup.
+    monkeypatch.setattr(subprocess, "Popen", tracked_popen)
 
     def short_deadline(command, **kwargs):
         assert kwargs["timeout"] == 120
@@ -119,10 +129,28 @@ def test_timeout_kills_and_reaps_actual_converter_processes(tmp_path, monkeypatc
     monkeypatch.setattr(finish_maps.subprocess, "run", short_deadline)
     result = finish_maps.run_finish_endpoint_maps({}, SimpleNamespace())
     assert result["status"] == "failed"
-    pids = list(tmp_path.glob('grond_corrected_*.pid'))
-    assert len(pids) == 4
-    for path in pids:
+    assert len(spawned) == 4
+    for pid in spawned:
         with pytest.raises(ProcessLookupError):
-            os.kill(int(path.read_text()), 0)
+            os.kill(pid, 0)
     assert not list(tmp_path.glob('grond_corrected_*.map'))
     assert all(item["status"] == "timed_out" for item in result["maps"].values())
+
+
+def test_successful_converter_with_invalid_map_reports_error(tmp_path, monkeypatch):
+    model = tmp_path / "endpoint.res"
+    model.write_text("selected model retained\n")
+    model.with_suffix(".fcf").write_text("data_test\n_shelx_refln_list_code 6\n_refln_phase_calc\n")
+    executable = tmp_path / "invalid_converter"
+    executable.write_text(
+        "#!/usr/bin/env python3\n"
+        "import pathlib, sys\n"
+        "pathlib.Path(sys.argv[sys.argv.index('-o')+1]).write_text('not a map')\n"
+    )
+    executable.chmod(0o755)
+    monkeypatch.setattr(finish_maps, "_publication_endpoint_from_result", lambda _result: {"endpoint_res": str(model)})
+    monkeypatch.setattr(finish_maps, "_shelx2map_executable", lambda _args: str(executable))
+    result = finish_maps.run_finish_endpoint_maps({}, SimpleNamespace())
+    assert result["status"] == "failed"
+    assert all(item["status"] == "invalid_map" and item["error"] for item in result["maps"].values())
+    assert model.read_text() == "selected model retained\n"

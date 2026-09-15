@@ -23,7 +23,6 @@ from __future__ import annotations
 import csv
 import json
 import math
-import re
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -213,13 +212,13 @@ def _model_wavelength_A(model_path: Path) -> float:
                     return normalized(float(tokens[1]))
                 except ValueError:
                     return DEFAULT_ELECTRON_WAVELENGTH_A
-    if path.suffix.lower() == ".cif":
-        match = re.search(r"_diffrn_radiation_wavelength\\s+([^\\s]+)", text)
-        if match:
-            try:
-                return normalized(float(match.group(1).strip("'\"")))
-            except ValueError:
-                return DEFAULT_ELECTRON_WAVELENGTH_A
+    if path.suffix.lower() == ".cif" and path.exists():
+        try:
+            block = gemmi.cif.read_file(str(path))[0]
+            value = gemmi.cif.as_number(block.find_value("_diffrn_radiation_wavelength") or "?")
+            return normalized(value)
+        except (ValueError, RuntimeError, IndexError):
+            return DEFAULT_ELECTRON_WAVELENGTH_A
     return DEFAULT_ELECTRON_WAVELENGTH_A
 
 
@@ -749,11 +748,9 @@ def _cif_token(value: object) -> str:
     if isinstance(value, int):
         return str(value)
     text = str(value)
-    if not text:
-        return "?"
-    if re.search(r"\\s|['\"]|^[_;]", text):
-        return "'" + text.replace("'", "''") + "'"
-    return text
+    token = gemmi.cif.quote(text) if text else "?"
+    # CIF semicolon text fields must start and end on their own lines.
+    return "\n" + token + "\n" if token.startswith(";") else token
 
 
 def _fraction_text(value: float) -> str:
@@ -799,6 +796,8 @@ def _write_dynamic_cif(
     maps: Mapping[str, object],
     wavelength_A: float,
 ) -> None:
+    operations = [gemmi.Op(_op_triplet(op)) for op in model.get("symmetry_ops", [])]
+    spacegroup = gemmi.find_spacegroup_by_ops(gemmi.GroupOps(operations)) if operations else None
     cell = [float(v) for v in model["cell"]]
     lines = [
         "data_grond_native_dynamical",
@@ -812,7 +811,7 @@ def _write_dynamic_cif(
         f"_cell_angle_alpha {cell[3]:.8g}",
         f"_cell_angle_beta {cell[4]:.8g}",
         f"_cell_angle_gamma {cell[5]:.8g}",
-        "_space_group_name_H-M_alt 'model supplied operations'",
+        "_space_group_name_H-M_alt " + _cif_token(spacegroup.xhm() if spacegroup else None),
         "_grond_dynamic_map_source_model " + _cif_token(str(model_path)),
         "_grond_dynamic_map_source_row_table_count " + _cif_token(len(row_tables)),
         "_grond_dynamic_map_formula '|F_dyn_obs,row| = |F_model| * sqrt(I_obs / I_dyn_scaled); map phases are model phases'",

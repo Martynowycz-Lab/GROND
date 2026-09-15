@@ -176,7 +176,15 @@ def test_finish_endpoint_maps_replays_list3_as_zero_cycle_list6(tmp_path: Path, 
             return SimpleNamespace(returncode=0, stdout="SHELXL replay ok\n")
         assert timeout == 120
         out_map = Path(command[command.index("-o") + 1])
-        out_map.write_text("map\n")
+        import gemmi
+
+        grid = gemmi.FloatGrid(2, 2, 2)
+        grid.unit_cell = gemmi.UnitCell(5, 5, 5, 90, 90, 90)
+        grid.spacegroup = gemmi.find_spacegroup_by_name("P 1")
+        converted = gemmi.Ccp4Map()
+        converted.grid = grid
+        converted.update_ccp4_header()
+        converted.write_ccp4_map(str(out_map))
         return SimpleNamespace(returncode=0, stdout=f'Map data written to "{out_map}"\n')
 
     monkeypatch.setattr(cli.subprocess, "run", fake_run)

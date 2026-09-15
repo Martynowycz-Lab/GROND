@@ -78,6 +78,8 @@ def test_native_dynamic_map_package_uses_row_level_dynamical_coefficients(
     assert "mean_q_dyn_over_born" in coeff_text
     assert "mean_row_scale" in coeff_text
     cif_text = Path(manifest["outputs"]["dynamic_cif"]).read_text()
+    cif_block = gemmi.cif.read_string(cif_text).sole_block()
+    assert gemmi.cif.as_string(cif_block.find_value("_space_group_name_H-M_alt")) == "P 1"
     assert "_grond_dynamic_map_formula" in cif_text
     assert "_refln_F_dyn_obs" in cif_text
     assert "_refln_grond_mean_q_dyn_over_born" in cif_text

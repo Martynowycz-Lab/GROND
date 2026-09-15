@@ -19,6 +19,8 @@ from pathlib import Path
 import gemmi
 import numpy as np
 
+from grond.maps.ccp4 import read_ccp4_map
+
 if __package__:
     from .bloch_engine import parse_model
 else:  # pragma: no cover - direct script execution
@@ -40,7 +42,7 @@ def parse_map_specs(specs: list[str]) -> list[tuple[str, Path]]:
 
 
 def read_map(path: Path):
-    m = gemmi.read_ccp4_map(str(path))
+    m = read_ccp4_map(path)
     m.setup(float("nan"))
     grid = m.grid
     arr = np.asarray(grid, dtype=np.float32)

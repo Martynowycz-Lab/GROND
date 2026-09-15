@@ -14,6 +14,7 @@ from grond.cli_support.tools import external_tool_statuses
 from grond.cli_support.values import try_read_json
 from grond.legacy.engine.shelx_diagnostics import parse_shelx_lst_metrics
 from grond.macromolecule import sha256_file
+from grond.maps.ccp4 import normalize_ccp4_map
 from grond.maps.native_dynamic import NativeDynamicMapOptions, write_native_dynamic_map_package
 from grond.reports.endpoints import _chooser_publication_endpoint, _endpoint_calibration_publication_endpoint
 from grond.reports.values import _quick_final_run, _quick_load_run_summary
@@ -348,7 +349,17 @@ def run_finish_endpoint_maps(result: Mapping[str, object], args: argparse.Namesp
             if match:
                 reported = Path(match.group(1))
                 actual = reported if reported.is_absolute() else map_work_dir / reported
+        normalization = None
+        map_error = ""
+        if proc.returncode == 0 and actual.exists():
+            try:
+                normalization = normalize_ccp4_map(actual)
+            except (ValueError, RuntimeError, OSError) as exc:
+                map_error = str(exc)
         maps[label] = {
+            "status": "invalid_map" if map_error else "ok",
+            "error": map_error,
+            "normalization": normalization,
             "map": str(actual),
             "requested_map": str(out_map),
             "log": str(log_path),
@@ -357,7 +368,7 @@ def run_finish_endpoint_maps(result: Mapping[str, object], args: argparse.Namesp
             "shelx2map_weight": float(map_weight),
             "display_role": "diagnostic_unweighted" if map_weight == "0" else "primary_weighted",
         }
-    maps_ok = all(item.get("returncode") == 0 and item.get("exists") for item in maps.values())
+    maps_ok = all(item.get("returncode") == 0 and item.get("exists") and item.get("status") != "invalid_map" for item in maps.values())
     return {
         "status": "ok" if maps_ok else "failed",
         "definition": "GROND-corrected endpoint maps from the selected corrected-HKL publication endpoint; primary maps use explicit shelx2map -w 1 model-reliability weighting, and the raw unweighted Fo-Fc map is retained as a labeled diagnostic. These are not native dynamical residual-potential maps.",
