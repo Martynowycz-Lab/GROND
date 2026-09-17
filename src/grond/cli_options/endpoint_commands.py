@@ -64,10 +64,18 @@ def register_push(sub: argparse._SubParsersAction) -> None:
             "without a SHELXL step. Use this to make maps/statistics for an already accepted endpoint model."
         ),
     )
-    p_push.add_argument("--n-basis", type=int, default=108)
-    p_push.add_argument("--n-points", type=int, default=20)
-    p_push.add_argument("--final-n-basis", type=int, default=0)
+    p_push.add_argument("--n-basis", type=int, default=None, help="Override the beam count for all continuation crystals; otherwise retain each saved count (single-dataset default: 108).")
+    p_push.add_argument("--n-points", type=int, default=None, help="Override rocking samples for all continuation crystals; otherwise retain each saved count (single-dataset default: 20).")
+    p_push.add_argument("--final-n-basis", type=int, default=0, help="Single-dataset final beam override; for multiple crystals use --dataset-n-basis or --n-basis.")
     p_push.add_argument("--final-n-points", type=int, default=20)
+    p_push.add_argument(
+        "--dataset-n-basis", action="append", default=[], metavar="DATASET=N",
+        help="Multi-dataset checkpoint: fix this crystal's beam count (integer >= 2). Repeat per crystal. Overrides --n-basis.",
+    )
+    p_push.add_argument(
+        "--dataset-thickness-nm", action="append", default=[], metavar="DATASET=NM",
+        help="Multi-dataset checkpoint: fix this crystal's thickness center in nm. Repeat per crystal. The saved thickness distribution is retained.",
+    )
     p_push.add_argument("--shelxl", default=default_shelxl_executable())
     p_push.add_argument("--shelxl-iterations", type=int, default=1, help="SHELXL executable calls per macrocycle.")
     p_push.add_argument(
@@ -135,7 +143,7 @@ def register_push(sub: argparse._SubParsersAction) -> None:
         default=0.0,
         help="Optional cutoff applied again to each combined corrected-HKL endpoint; zero follows --min-d-spacing.",
     )
-    p_push.add_argument("--topup-d-min", type=float, default=0.7)
+    p_push.add_argument("--topup-d-min", type=float, default=None, help="Override the beam-pool resolution; otherwise use each checkpoint value (single-dataset default: 0.7 Angstrom).")
     p_push.add_argument("--min-peak", type=float, default=-1.0)
     p_push.add_argument("--geometry-percentile", type=float, default=0.0)
     p_push.add_argument("--max-rows", type=int, default=0)

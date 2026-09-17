@@ -13,6 +13,7 @@ from grond.cli_support.tools import choose_python, external_tool_statuses
 from grond.io.config import write_datasets_csv, write_prep
 from grond.paths import engine_script
 from grond.reports.push import write_multi_push_endpoint_report, write_push_endpoint_report
+from grond.workflows.crystal_parameters import resolve_crystal_parameters
 from grond.workflows.dataset_gates import all_primary_policy
 from grond.workflows.push_contracts import (
     apply_push_checkpoint,
@@ -40,12 +41,18 @@ def cmd_push_endpoint_multi(
     checkpoint = checkpoint_info.get("checkpoint_data")
     if not isinstance(checkpoint, Mapping):
         raise SystemExit("Internal error: multi-dataset continuation missing checkpoint data.")
-    args = hydrate_push_args_for_multi(args)
     prep, nuisance = prep_from_multi_checkpoint(
         checkpoint,
         start_model,
         min_d_spacing=float(getattr(args, "min_d_spacing", 0.0) or 0.0),
     )
+    if args.final_n_basis:
+        raise SystemExit("For multi-dataset continuation, use --dataset-n-basis DATASET=N or --n-basis N instead of --final-n-basis.")
+    args.crystal_parameters, nuisance = resolve_crystal_parameters(
+        checkpoint, prep.datasets, nuisance, args,
+        checkpoint_dir=Path(str(checkpoint_info["checkpoint"])).parent,
+    )
+    args = hydrate_push_args_for_multi(args)
     nuisance = override_push_native_weights(nuisance, args)
     args.dataset_row_contracts = resolve_dataset_row_contracts(
         getattr(args, "dataset_row_contract", None), prep.datasets
@@ -58,6 +65,7 @@ def cmd_push_endpoint_multi(
     )
     logs = out_dir / "logs"
     logs.mkdir(parents=True, exist_ok=True)
+    (out_dir / "crystal_parameters.json").write_text(json.dumps(args.crystal_parameters, indent=2) + "\n")
     write_prep(out_dir / "push_prep.json", prep)
     write_datasets_csv(out_dir / "push_datasets.csv", prep, nuisance)
     policy = checkpoint.get("structure_dataset_policy")
@@ -76,6 +84,7 @@ def cmd_push_endpoint_multi(
             "cycles": int(args.shelxl_feedback_cycles),
             "datasets": [asdict(ds) for ds in prep.datasets],
             "nuisance_datasets": sorted(nuisance),
+            "crystal_parameters": args.crystal_parameters,
             "dataset_row_contracts": dict(args.dataset_row_contracts),
             "dataset_scale_specs": dict(args.dataset_scale_specs),
             "structure_dataset_policy_source": "immutable_row_contract" if row_contract_policy else "checkpoint",
@@ -106,6 +115,7 @@ def cmd_push_endpoint_multi(
         "start_model": str(start_model),
         "model": final_model,
         "structure_feedback": feedback,
+        "crystal_parameters": args.crystal_parameters,
         "dataset_row_contracts": dict(args.dataset_row_contracts),
         "dataset_scale_specs": dict(args.dataset_scale_specs),
         "structure_dataset_policy": dict(policy),
@@ -134,6 +144,11 @@ def cmd_push_endpoint(args: argparse.Namespace) -> int:
     start_model, prep_audit = prepare_push_endpoint_model(args, out_dir)
     if int(checkpoint_info.get("dataset_count") or 1) > 1:
         return cmd_push_endpoint_multi(args, checkpoint_info, start_model, prep_audit, python, out_dir)
+    if args.dataset_n_basis or args.dataset_thickness_nm:
+        raise SystemExit("--dataset-n-basis and --dataset-thickness-nm require a multi-dataset --checkpoint.")
+    args.n_basis = 108 if args.n_basis is None else args.n_basis
+    args.n_points = 20 if args.n_points is None else args.n_points
+    args.topup_d_min = 0.7 if args.topup_d_min is None else args.topup_d_min
     cmd = [
         python,
         str(engine_script("shelxl_feedback_loop.py")),

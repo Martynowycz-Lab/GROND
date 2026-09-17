@@ -243,12 +243,12 @@ def test_utility_commands_parse():
     )
     assert push.command == "push-endpoint"
     assert push.cycles == 3
-    assert push.n_basis == 108
-    assert push.n_points == 20
+    assert push.n_basis is None
+    assert push.n_points is None
     assert push.compute_backend == "scipy"
     assert push.row_plan_cache == "off"
     assert push.chunksize == 4
-    assert push.topup_d_min == 0.7
+    assert push.topup_d_min is None
     assert push.post_bloch_sigma_policy == "none"
     assert push.model_prep == "free-h-anis-no-restraints"
     assert push.set_ls_cycles == 1
@@ -296,7 +296,7 @@ def test_utility_commands_parse():
     assert push_checkpoint.compute_backend == "scipy"
     assert push_checkpoint.row_plan_cache == "off"
     assert push_checkpoint.chunksize == 4
-    assert push_checkpoint.topup_d_min == 0.7
+    assert push_checkpoint.topup_d_min is None
     assert push_checkpoint.post_bloch_sigma_policy == "none"
 
 

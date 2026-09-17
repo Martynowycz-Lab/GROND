@@ -114,6 +114,38 @@ GROND auto \
 
 Use `--fast` to check a new integration, indexing choice, or environment before starting the full calculation. Use plain `GROND auto` for the final high-support run. The middle-cost `--full-fast` profile keeps the automatic decision path but deliberately uses a smaller final calculation; treat it as an intermediate result.
 
+## Continue an H-free model with per-crystal settings
+
+Use `GROND refine` (an alias of `push-endpoint`) with the completed multi-crystal run's checkpoint and an H-free starting RES. Each crystal keeps its saved beam count and thickness parameters. The shared loop recalculates every crystal, merges the corrected observations, performs one SHELXL update, and repeats. It also recomputes predictions for the final model.
+
+```bash
+GROND refine \
+  --checkpoint /path/to/full_H/grond_continue_checkpoint.json \
+  --start-res /path/to/never_H.res \
+  --cycles 5 --workers 96 \
+  --out-dir /path/to/H_free_refinement
+```
+
+To set different values yourself, repeat `--dataset-n-basis NAME=N` and `--dataset-thickness-nm NAME=NM`. Names must match the checkpoint's `datasets[].name` exactly. Unspecified crystals retain their saved values. This example uses four crystals; the same syntax works for any number.
+
+```bash
+GROND refine \
+  --checkpoint /path/to/full_H/grond_continue_checkpoint.json \
+  --start-res /path/to/never_H.res \
+  --dataset-n-basis crystal_1=180 --dataset-thickness-nm crystal_1=120 \
+  --dataset-n-basis crystal_2=210 --dataset-thickness-nm crystal_2=150 \
+  --dataset-n-basis crystal_3=160 --dataset-thickness-nm crystal_3=90 \
+  --dataset-n-basis crystal_4=235 --dataset-thickness-nm crystal_4=100 \
+  --cycles 5 --workers 96 \
+  --out-dir /path/to/H_free_refinement
+```
+
+Thickness is entered in **nm** and stored internally in Å. The override changes the thickness center while retaining that crystal's saved distribution and gradient. Beam counts are positive integers of at least two and include the direct and target beams. They are limits: a reflection can use fewer eligible beams. `--n-basis N` overrides all crystals, and a named `--dataset-n-basis` takes precedence. `--n-points Q` overrides rocking quadrature for all crystals; otherwise their saved values are used.
+
+Add `--dry-run` to inspect the resolved values without launching the calculation. `crystal_parameters.json` and `push_endpoint_plan.json` show the per-crystal beam counts, thicknesses, sampling and override sources. Older checkpoints recover missing sampling settings from their source summaries; unavailable fields are listed as defaults. Missing beam counts require an explicit value. Misspelled names, duplicate overrides and invalid numbers produce an error before Bloch calculations start.
+
+Supply a genuinely H-free model and remove instructions that would regenerate H atoms. A full-H checkpoint provides a conditional H-omission comparison; it does not establish an independent never-H refinement history. These controls pin beam counts and thickness parameters, not beam identities: support beams can change when the structural model changes. Scale values are refitted during continuation. For exact observation membership, the existing `--dataset-row-contract NAME=/path/to/native_dyn_calc.csv` option must be supplied for every crystal; `--dataset-scale-spec` can likewise replay a specified compact scale topology. The checkpoint and its input files must remain accessible on the machine running GROND.
+
 ## Run the staged expert workflow
 
 The manual interface uses one state file and one short command per stage:

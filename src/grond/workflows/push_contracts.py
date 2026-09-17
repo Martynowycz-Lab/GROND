@@ -75,7 +75,7 @@ def hydrate_push_args_for_multi(args: argparse.Namespace) -> argparse.Namespace:
         ["run", "--out-dir", ".", "--hkl", "INTEGRATE.HKL", "--structure", "model.res"]
     )
     for key, value in vars(defaults).items():
-        if not hasattr(args, key):
+        if not hasattr(args, key) or getattr(args, key) is None:
             setattr(args, key, value)
     args.fast = False
     args.native_only = False

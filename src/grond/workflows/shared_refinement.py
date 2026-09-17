@@ -11,6 +11,7 @@ from grond.cli_support.execution import run_logged
 from grond.cli_support.values import try_read_json
 from grond.io.config import PrepConfig
 from grond.macromolecule import sha256_file
+from grond.workflows.crystal_parameters import crystal_arguments
 from grond.workflows.dataset_gates import policy_active_runs, require_policy_active_runs
 from grond.workflows.dataset_policy import write_policy_weighted_runs
 from grond.workflows.decision import safe_float, write_json
@@ -114,7 +115,8 @@ def run_multi_final_row_recompute(
     scale_contract_runs: dict[str, Path] = {}
     for ds in prep.datasets:
         run_dir = final_root / ds.name
-        n_basis = resolve_final_n_basis(prep, ds, args, python, logs, root, model, "final_row_recompute")
+        per_crystal = crystal_arguments(args, ds.name)
+        n_basis = resolve_final_n_basis(prep, ds, per_crystal, python, logs, root, model, "final_row_recompute")
         run_logged(
             native_stage_cmd(
                 python,
@@ -122,9 +124,9 @@ def run_multi_final_row_recompute(
                 model,
                 dataset_baseline_hkl(prep, ds),
                 run_dir,
-                args,
+                per_crystal,
                 n_basis=n_basis,
-                n_points=args.n_points,
+                n_points=per_crystal.n_points,
                 stage="final_row_recompute",
                 pinned=nuisance[ds.name],
                 make_maps=False,
@@ -203,6 +205,7 @@ def run_multi_shelxl_feedback_loop(
         "shelxl_iterations_per_cycle": int(getattr(args, "shelxl_feedback_shelxl_iterations", 1) or 1),
         "dataset_row_contracts": row_contract_provenance,
         "dataset_scale_specs": dict(scale_specs),
+        "crystal_parameters": getattr(args, "crystal_parameters", {}),
         "cycles": [],
     }
     if cycles_requested <= 0:
@@ -247,7 +250,8 @@ def run_multi_shelxl_feedback_loop(
         nuisance_revalidations: list[dict[str, object]] = []
         for ds in prep.datasets:
             run_dir = cycle_dir / ds.name
-            final_n_basis = resolve_final_n_basis(prep, ds, args, python, logs, root, current_model, cycle_label)
+            per_crystal = crystal_arguments(args, ds.name)
+            final_n_basis = resolve_final_n_basis(prep, ds, per_crystal, python, logs, root, current_model, cycle_label)
             run_logged(
                 native_stage_cmd(
                     python,
@@ -255,9 +259,9 @@ def run_multi_shelxl_feedback_loop(
                     current_model,
                     dataset_baseline_hkl(prep, ds),
                     run_dir,
-                    args,
+                    per_crystal,
                     n_basis=final_n_basis,
-                    n_points=args.n_points,
+                    n_points=per_crystal.n_points,
                     stage=cycle_label,
                     pinned=nuisance[ds.name],
                     make_maps=False,

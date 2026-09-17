@@ -208,7 +208,7 @@ def test_push_endpoint_dry_run_accepts_multi_continue_checkpoint(tmp_path):
     run_b = tmp_path / "runs" / "b"
     for run, thickness in [(run_a, 1000.0), (run_b, 1200.0)]:
         run.mkdir(parents=True)
-        (run / "summary.json").write_text(json.dumps({"best_native": {"nuisance": {"thickness_A": thickness}}}) + "\n")
+        (run / "summary.json").write_text(json.dumps({"config": {"n_basis": 24, "n_points": 20}, "best_native": {"nuisance": {"thickness_A": thickness}}}) + "\n")
     hkl_a = tmp_path / "a" / "INTEGRATE.HKL"
     hkl_b = tmp_path / "b" / "INTEGRATE.HKL"
     hkl_a.parent.mkdir()
