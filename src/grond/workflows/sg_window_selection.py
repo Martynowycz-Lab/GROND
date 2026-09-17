@@ -51,6 +51,9 @@ def run_sg_window_scout(
 ) -> dict:
     """Run a late, held-out scout over simple fixed Sg rocking-window widths."""
 
+    from grond.workflows.crystal_parameters import crystal_arguments
+
+    args = crystal_arguments(args, ds.name)
     mode = getattr(args, "sg_window_scout", "auto")
     if mode == "off" or getattr(args, "fast", False):
         return {"status": "disabled"}

@@ -39,7 +39,7 @@ def dataset_values(specifications: list[str], names: set[str], option: str, *, i
         name, raw = name.strip(), raw.strip()
         if not separator or name not in names:
             raise SystemExit(
-                f"{option}: expected DATASET=VALUE with a checkpoint dataset name; got {specification!r}. "
+                f"{option}: expected DATASET=VALUE with a dataset name; got {specification!r}. "
                 f"Available datasets: {', '.join(sorted(names))}"
             )
         if name in values:
@@ -159,10 +159,17 @@ def resolve_crystal_parameters(
 def crystal_arguments(args: argparse.Namespace, name: str) -> argparse.Namespace:
     """Copy shared options so one crystal cannot change another crystal's settings."""
 
-    settings = getattr(args, "crystal_parameters", {}).get(name, {}).get("prediction", {})
-    if not settings:
+    record = getattr(args, "crystal_parameters", {}).get(name, {})
+    settings = record.get("prediction", {})
+    if not record:
         return args
     resolved = copy.copy(args)
     for key, value in settings.items():
         setattr(resolved, key, value)
+    if record.get("fresh_auto"):
+        resolved.fixed_thickness = record.get("fixed_thickness", {})
+        resolved.fixed_n_basis = settings.get("n_basis")
+        resolved.fixed_n_points = settings.get("n_points")
+        if resolved.fixed_thickness:
+            resolved.continuous_thickness_polish = "off"
     return resolved

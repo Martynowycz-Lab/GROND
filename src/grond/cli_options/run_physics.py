@@ -7,6 +7,19 @@ import argparse
 from grond.cli_support.values import DEFAULT_MAX_SUPPORT_SG
 
 
+def add_crystal_overrides(ap: argparse.ArgumentParser) -> None:
+    """Use the same named controls for fresh runs and continuation."""
+
+    ap.add_argument(
+        "--dataset-n-basis", action="append", default=[], metavar="DATASET=N",
+        help="Fix this crystal's beam limit (integer >= 2). Repeat per crystal.",
+    )
+    ap.add_argument(
+        "--dataset-thickness-nm", action="append", default=[], metavar="DATASET=NM",
+        help="Fix this crystal's thickness center in nm. Repeat per crystal; other thickness parameters are unchanged.",
+    )
+
+
 def add_backend(ap: argparse.ArgumentParser) -> None:
     """Add backend options in the established order."""
 
@@ -104,6 +117,11 @@ def add_backend(ap: argparse.ArgumentParser) -> None:
 def add_basis(ap: argparse.ArgumentParser) -> None:
     """Add basis options in the established order."""
 
+    add_crystal_overrides(ap)
+    ap.add_argument(
+        "--crystal-parameters-from", default="", metavar="CHECKPOINT",
+        help="Fresh run: copy per-crystal beam/rocking settings and thickness distributions from a completed run's checkpoint. Scout indexing and fit other nuisance terms again; do not copy coordinates or transforms.",
+    )
     ap.add_argument(
         "--screen-n-basis", type=int, default=24, help="Basis size for initial nuisance/geometry screening."
     )

@@ -321,7 +321,8 @@ def test_readme_four_crystal_command_runs_as_documented(four_crystals, tmp_path)
     checkpoint.write_text(json.dumps({**four_crystals, "recommended_start_res": str(start)}))
     readme = (Path(__file__).resolve().parents[2] / "README.md").read_text()
     example = next(
-        block for block in re.findall(r"```bash\n(.*?)```", readme, re.S) if "--dataset-n-basis crystal_4=235" in block
+        block for block in re.findall(r"```bash\n(.*?)```", readme, re.S)
+        if "GROND refine" in block and "--dataset-n-basis crystal_4=235" in block
     )
     example = example.replace("/path/to/full_H/grond_continue_checkpoint.json", str(checkpoint))
     example = example.replace("/path/to/never_H.res", str(start))

@@ -9,6 +9,7 @@ from pathlib import Path
 from grond.cli_support.values import read_json
 from grond.io.config import DatasetSpec, PrepConfig
 from grond.paths import engine_script
+from grond.workflows.crystal_parameters import crystal_arguments
 from grond.workflows.decision import safe_label
 
 
@@ -57,6 +58,7 @@ def resolve_final_n_basis(
 
     from grond.cli_support.execution import run_logged
 
+    args = crystal_arguments(args, ds.name)
     if args.fast:
         return 20
     if int(args.n_basis) > 0:

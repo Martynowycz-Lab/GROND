@@ -24,6 +24,14 @@ def prep_from_args(args: argparse.Namespace) -> PrepConfig:
 
     if args.prep:
         prep = load_prep(Path(args.prep))
+        # A new solution may have a different setting. Use its model/HKLF4 pair
+        # for the baseline and indexing scout, not the old prep's pair.
+        if args.structure:
+            prep.structure = str(Path(args.structure).expanduser().resolve())
+        if args.baseline_hkl:
+            prep.baseline_hkl = str(Path(args.baseline_hkl).expanduser().resolve())
+            for ds in prep.datasets:
+                ds.baseline_hkl = prep.baseline_hkl
     else:
         prep_metadata = {}
         if args.xds_dir:

@@ -21,6 +21,7 @@ from grond.reports.progress import _quick_progress_finish_info
 from grond.reports.quick_stats import write_quick_stats
 from grond.reports.terminal import _format_terminal_finish_summary
 from grond.runtime import auto_chunksize, auto_worker_count
+from grond.workflows.auto_crystal_parameters import configure_auto_crystals
 from grond.workflows.checkpoints import write_continue_checkpoint
 from grond.workflows.conventional_baseline import run_fresh_conventional_baseline
 from grond.workflows.endpoint_selection import (
@@ -206,6 +207,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             "Leave the option at auto for the safe combined-endpoint workflow."
         )
     profile = apply_speed_profile(args, prep.structure)
+    configure_auto_crystals(prep, args)
     args.workers = auto_worker_count(args.workers, args.max_core_fraction)
     args.chunksize = auto_chunksize(args.chunksize, args.workers)
     original_structure = prep.structure
@@ -238,6 +240,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     write_prep(Path(args.out_dir) / "run_prep.json", prep)
     tools = external_tool_statuses(args)
     config = {
+        "crystal_parameters": getattr(args, "crystal_parameters", {}),
         "created": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "python": python,
         "tool_config": {

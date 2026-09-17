@@ -12,6 +12,7 @@ from grond.cli_support.values import read_json, try_read_json
 from grond.io.config import DatasetSpec, PrepConfig, write_datasets_csv
 from grond.io.structure_contract import absolute_structure_policy
 from grond.paths import engine_script
+from grond.workflows.crystal_parameters import crystal_arguments
 from grond.workflows.dataset_gates import (
     apply_dataset_policy_to_nuisance,
     policy_active_runs,
@@ -193,7 +194,7 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
             active_nui = best_nuisance(thick) or active_nui
             feature_records: list[dict] = [discrete_thickness_promotion_record(thick, dry_run=bool(args.dry_run))]
             continuous_seed = continuous_thickness_seed_nuisance(args, active_nui)
-            if continuous_thickness_enabled(args) and continuous_seed:
+            if continuous_thickness_enabled(crystal_arguments(args, ds.name)) and continuous_seed:
                 continuous_baseline_run = active_run
                 continuous = root / "runs" / ds.name / "multi_thickness_continuous"
                 run_logged(

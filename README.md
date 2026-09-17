@@ -114,6 +114,43 @@ GROND auto \
 
 Use `--fast` to check a new integration, indexing choice, or environment before starting the full calculation. Use plain `GROND auto` for the final high-support run. The middle-cost `--full-fast` profile keeps the automatic decision path but deliberately uses a smaller final calculation; treat it as an intermediate result.
 
+## Run an independently solved never-H model
+
+Solve and refine the merged conventional data without adding H atoms, then run **`GROND auto`** with that new RES/HKL pair. A fresh solution can have different indexing, so it needs a fresh transform scout for every crystal. `refine` / `push-endpoint` continues an existing alignment and is not the right starting point for this experiment.
+
+Reuse the original integration list and copy the known beam limits and thickness distributions from the completed full-H run:
+
+```bash
+GROND auto \
+  --prep /path/to/full_H/run_prep.json \
+  --structure /path/to/never_H.res \
+  --baseline-hkl /path/to/never_H.hkl \
+  --crystal-parameters-from /path/to/full_H/grond_continue_checkpoint.json \
+  --workers 96 \
+  --out-dir /path/to/never_H_GROND
+```
+
+`--structure` and `--baseline-hkl` replace the old prep's model and conventional reference. The checkpoint supplies each crystal's beam limit, rocking quadrature and support settings, and complete thickness distribution. These stay fixed through scouting, shared SHELXL feedback and final calculations. GROND checks that dataset names and integration-file contents match. It reads no coordinates, selected transforms, jitter values or scale values from the reference checkpoint. Indexing, frame offsets, jitter and other enabled nuisance terms are determined from the new model; compact scale selection and the normal publication endpoint workflow still run. Use a new output directory and leave transform scouting enabled.
+
+If you have the values but no reference checkpoint, use the same per-crystal flags with `auto`:
+
+```bash
+GROND auto \
+  --prep /path/to/crystals.json \
+  --structure /path/to/never_H.res \
+  --baseline-hkl /path/to/never_H.hkl \
+  --dataset-n-basis crystal_1=180 --dataset-thickness-nm crystal_1=120 \
+  --dataset-n-basis crystal_2=210 --dataset-thickness-nm crystal_2=150 \
+  --dataset-n-basis crystal_3=160 --dataset-thickness-nm crystal_3=90 \
+  --dataset-n-basis crystal_4=235 --dataset-thickness-nm crystal_4=100 \
+  --workers 96 \
+  --out-dir /path/to/never_H_GROND
+```
+
+Names must match the prep's datasets. Thickness is in **nm**. An explicit thickness fixes its center; other distribution parameters can still be fitted. The checkpoint route also fixes the distribution and is preferable for matched comparisons. Unspecified crystals follow normal auto selection. Named overrides can also amend values copied from a checkpoint. Copied sampling settings take precedence over global sampling options. Add `--dry-run` to inspect `crystal_parameters.json` and planned commands before calculation.
+
+Keep H atoms absent from the input model and remove instructions that would generate them, such as `HFIX`. Do not use `--h-omit` here: that option removes H from a model after refinement. For the paper, describe this as an independently solved H-free branch with thickness and beam settings fixed from the full-H reference. Beam limits do not freeze the identities of all support beams, and refitted jitter and scales can differ. Compare maps on common reflection support, resolution and grid, using the matching H-free model for each map.
+
 ## Continue an H-free model with per-crystal settings
 
 Use `GROND refine` (an alias of `push-endpoint`) with the completed multi-crystal run's checkpoint and an H-free starting RES. Each crystal keeps its saved beam count and thickness parameters. The shared loop recalculates every crystal, merges the corrected observations, performs one SHELXL update, and repeats. It also recomputes predictions for the final model.

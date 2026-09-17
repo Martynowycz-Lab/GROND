@@ -241,7 +241,12 @@ def transform_scout_records(
 ) -> list[dict]:
     """Run one transform-scout stage and return scored decision records."""
 
-    frozen_nuisance = transform_scout_nuisance(args)
+    from grond.workflows.crystal_parameters import crystal_arguments
+
+    args = crystal_arguments(args, ds.name)
+    n_basis = getattr(args, "fixed_n_basis", None) or n_basis
+    n_points = getattr(args, "fixed_n_points", None) or n_points
+    frozen_nuisance = {**transform_scout_nuisance(args), **getattr(args, "fixed_thickness", {})}
     frozen_nuisance_sha256 = hashlib.sha256(
         json.dumps(
             frozen_nuisance,

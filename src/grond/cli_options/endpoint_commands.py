@@ -10,6 +10,7 @@ from grond.runtime import auto_worker_count
 def register_push(sub: argparse._SubParsersAction) -> None:
     """Register push commands."""
 
+    from grond.cli_options.run_physics import add_crystal_overrides
     from grond.cli_support.tools import add_tool_config_args, default_shelxl_executable
     from grond.cli_support.values import FULL_Q_LAMBDA
     from grond.commands.push import cmd_push_endpoint
@@ -68,14 +69,7 @@ def register_push(sub: argparse._SubParsersAction) -> None:
     p_push.add_argument("--n-points", type=int, default=None, help="Override rocking samples for all continuation crystals; otherwise retain each saved count (single-dataset default: 20).")
     p_push.add_argument("--final-n-basis", type=int, default=0, help="Single-dataset final beam override; for multiple crystals use --dataset-n-basis or --n-basis.")
     p_push.add_argument("--final-n-points", type=int, default=20)
-    p_push.add_argument(
-        "--dataset-n-basis", action="append", default=[], metavar="DATASET=N",
-        help="Multi-dataset checkpoint: fix this crystal's beam count (integer >= 2). Repeat per crystal. Overrides --n-basis.",
-    )
-    p_push.add_argument(
-        "--dataset-thickness-nm", action="append", default=[], metavar="DATASET=NM",
-        help="Multi-dataset checkpoint: fix this crystal's thickness center in nm. Repeat per crystal. The saved thickness distribution is retained.",
-    )
+    add_crystal_overrides(p_push)
     p_push.add_argument("--shelxl", default=default_shelxl_executable())
     p_push.add_argument("--shelxl-iterations", type=int, default=1, help="SHELXL executable calls per macrocycle.")
     p_push.add_argument(

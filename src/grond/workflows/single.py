@@ -18,6 +18,7 @@ from grond.io.structure_contract import (
 )
 from grond.macromolecule import sha256_file
 from grond.paths import engine_script
+from grond.workflows.crystal_parameters import crystal_arguments
 from grond.workflows.decision import (
     apply_preflight,
     preflight_dataset,
@@ -226,6 +227,7 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
 
     root = Path(args.out_dir)
     ds0 = prep.datasets[0]
+    args = crystal_arguments(args, ds0.name)
     preflight = preflight_dataset(
         ds0,
         requested_min_peak=ds0.min_peak,
@@ -889,6 +891,7 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
 def run_single(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Path) -> dict:
     """Run either the automatic or fixed single-dataset workflow."""
 
+    args = crystal_arguments(args, prep.datasets[0].name)
     if args.auto_decide:
         return run_single_adaptive(prep, args, python, logs)
     ds = prep.datasets[0]

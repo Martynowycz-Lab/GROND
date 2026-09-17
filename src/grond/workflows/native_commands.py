@@ -10,6 +10,7 @@ from pathlib import Path
 from grond.cli_support.values import FULL_Q_LAMBDA
 from grond.io.config import DatasetSpec
 from grond.paths import engine_script
+from grond.workflows.crystal_parameters import crystal_arguments
 from grond.workflows.nuisance_policy import (
     effective_topup_d_min,
     grid_from_nuisance,
@@ -51,7 +52,11 @@ def native_stage_cmd(
     from grond.cli_support.tools import default_shelxl_executable
     from grond.io.structure_contract import is_shelx_model
 
-    pinned = pinned or {}
+    args = crystal_arguments(args, ds.name)
+    fixed_thickness = getattr(args, "fixed_thickness", {})
+    pinned = {**pinned, **fixed_thickness} if pinned else {}
+    n_basis = getattr(args, "fixed_n_basis", None) or n_basis
+    n_points = getattr(args, "fixed_n_points", None) or n_points
     fast = bool(args.fast)
     endpoint_ok = bool(endpoint and is_shelx_model(structure) and not args.native_only)
     lambda_grid = FULL_Q_LAMBDA if endpoint_ok else ""
@@ -283,6 +288,16 @@ def native_stage_cmd(
         "--hkl-float-format",
         "shelx_fixed",
     ]
+    # Apply these last: a thickness neighbourhood or feature scout must not
+    # reopen a parameter the caller explicitly fixed.
+    for field, option in (
+        ("thickness_A", "--thickness-grid"),
+        ("thickness_model", "--thickness-model-grid"),
+        ("thickness_grad_frac", "--thickness-grad-grid"),
+        ("thickness_sigma_frac", "--thickness-sigma-frac-grid"),
+    ):
+        if field in fixed_thickness:
+            cmd[cmd.index(option) + 1] = grid_from_nuisance(fixed_thickness, field, "")
     if strict_pinned_contract:
         cmd.extend(
             [
