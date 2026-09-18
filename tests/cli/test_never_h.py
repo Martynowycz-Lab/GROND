@@ -219,3 +219,29 @@ def test_screw_axis_origin_change_is_respected(reference):
     conversion = np.linalg.inv(report["fractional_matrix"]).T
     for hkl in [(1, 2, -3), (-2, 1, 4), (3, 0, 2)]:
         assert abs(fcalc_res(source, hkl)) == pytest.approx(abs(fcalc_res(aligned, conversion @ hkl)), rel=1e-11)
+
+
+def test_never_h_retries_npd_step_without_changing_data(reference, tmp_path):
+    from grond.commands.never_h import refine_step
+    from tests.refine.test_run_shelxl_baseline import _fake_shelxl
+
+    _, no_h = reference
+    work = tmp_path / "damped_step"
+    work.mkdir()
+    original = no_h.read_text()
+    (work / "model.ins").write_text(original)
+    (work / "model.hkl").write_text("unchanged reflection data\n")
+    executable = _fake_shelxl(tmp_path, npd=True)
+    script = executable.read_text()
+    # The undamped update fails; the same model with a smaller step succeeds.
+    insertion = "    if 'DAMP ' in Path(stem + '.ins').read_text():\n        p = Path(stem + '.lst')\n        p.write_text(p.read_text().replace('** NON POSITIVE DEFINITE **', '').replace('1  atoms NPD', '0  atoms NPD'))\n"
+    script = script.replace("raise SystemExit(returncode)", insertion + "raise SystemExit(returncode)")
+    executable.write_text(script)
+    health = refine_step(str(executable), work, 2)
+    assert health["safe_for_feedback"]
+    assert (work / "before_damping.ins").read_text() == original
+    assert (work / "model.hkl").read_text() == "unchanged reflection data\n"
+    assert "DAMP 100 15" in (work / "model.ins").read_text()
+    recovery = json.loads((work / "damping_recovery.json").read_text())
+    assert recovery["npd_recovery"]["accepted_damp"] == 100
+    assert len(recovery["npd_recovery"]["attempts"]) == 2

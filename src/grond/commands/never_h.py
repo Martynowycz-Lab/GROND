@@ -12,9 +12,10 @@ import time
 from pathlib import Path
 
 from grond.cli_support.tools import external_tool_statuses
-from grond.legacy.engine.native_row_regularize import shelx_res_health, write_endpoint_ins
+from grond.legacy.engine.native_row_regularize import shelx_res_health, shelxl_iteration_safe, write_endpoint_ins
 from grond.legacy.engine.shelx_hkl import write_fixed_width_hkl
 from grond.macromolecule import sha256_file
+from grond.refine.shelxl_iterations import recover_npd_shelxl_attempt
 from grond.runtime import auto_worker_count
 from grond.workflows.matched_prediction import predict_dataset
 from grond.workflows.matched_reference import (
@@ -41,6 +42,23 @@ def recorded_run(command, directory: Path, label: str) -> None:
             tail = "\n".join((directory / f"{label}.log").read_text(errors="replace").splitlines()[-18:])
             raise RuntimeError(f"SHELXL wrote no usable model despite exit code 0. {directory / (label + '.log')}\n{tail}")
     save_json(directory / f"{label}.timing.json", {"seconds": time.time() - started})
+
+
+def refine_step(shelxl: str, directory: Path, cycle: int) -> dict:
+    """Use the existing bounded step-size recovery if an update makes an ADP NPD."""
+    original = (directory / "model.ins").read_text()
+    recorded_run([shelxl, "model", "-t1"], directory, "shelxl")
+    health = shelx_res_health(directory / "model.res", directory / "model.lst")
+    if health.get("has_npd"):
+        (directory / "before_damping.ins").write_text(original)
+        _, stats = recover_npd_shelxl_attempt(
+            directory, "model", shelxl, iteration=cycle, base_ins_text=original,
+            initial_stats={"status": "adp_pathology", "returncode": 0, "res_health": health},
+        )
+        save_json(directory / "damping_recovery.json", {"command": [shelxl, "model"], **stats})
+        health = {**stats["res_health"], "safe_for_feedback": shelxl_iteration_safe(stats)}
+    require_no_hydrogen(directory / "model.res")
+    return health
 
 
 def _run(args, out: Path) -> int:
@@ -149,10 +167,8 @@ def _run(args, out: Path) -> int:
         write_fixed_width_hkl(hkl, merge_changed_predictions(reference, frozen, rows))
         write_endpoint_ins(current, directory / "model.ins", hkl_name="model.hkl", keep_exti=False, wght=(0.0, 0.0), ls_cycles=1)
         status(f"SHELXL cycle {cycle}")
-        recorded_run([shelxl, "model", "-t1"], directory, "shelxl")
+        health = refine_step(shelxl, directory, cycle)
         candidate = directory / "model.res"
-        require_no_hydrogen(candidate)
-        health = shelx_res_health(candidate, directory / "model.lst")
         if not health.get("safe_for_feedback"):
             warning = f"Stopped before adopting unsafe SHELXL model at cycle {cycle}; retained the previous model."
             save_json(directory / "rejected_model.json", health)
