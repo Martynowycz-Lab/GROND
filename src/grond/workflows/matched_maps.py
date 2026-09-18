@@ -14,6 +14,7 @@ import numpy as np
 from grond.bloch.model import fcalc_res, parse_model
 from grond.macromolecule import sha256_file
 from grond.maps import native_dynamic as native
+from grond.maps.ccp4 import read_ccp4_map
 from grond.regularize.multidataset import canonical_model_friedel
 from grond.workflows.finish_maps import _shelx2map_compatible_fcf, _write_finish_list6_ins
 from grond.workflows.matched_reference import save_json
@@ -74,7 +75,7 @@ def _native_fcf(row_tables, model_path, template, output):
 
 
 def _dense_map(source, destination, model, spacing):
-    raw = gemmi.read_ccp4_map(str(source))
+    raw = read_ccp4_map(source)
     raw.setup(float("nan"))
     values = np.asarray(raw.grid).copy()
     if not np.isfinite(values).all() or np.std(values) <= 0:
@@ -130,7 +131,9 @@ def build_matched_maps(conventional: Path, final: Path, out: Path, shelxl: str, 
                 rows = [row for row in rows if key(row[:3]) in common]
             loop.set_all_values([list(column) for column in zip(*rows, strict=True)])
             dmin = min(gemmi.UnitCell(*model["cell"]).calculate_d(tuple(map(int, row[:3]))) for row in rows)
-            doc.sole_block().set_pair("_reflns_d_resolution_high", str(dmin))
+            # Rows already define the exact support. Leave room for single-
+            # precision readers so the last reflection is not rounded out.
+            doc.sole_block().set_pair("_reflns_d_resolution_high", str(dmin * (1 - 1e-5)))
             selected = fcf.parent / f"{support}.fcf"
             doc.write_file(str(selected))
             for weight in (0, 1):
@@ -143,7 +146,7 @@ def build_matched_maps(conventional: Path, final: Path, out: Path, shelxl: str, 
                     stats = _dense_map(raw, output, model, spacing)
                     if name == "native_dynamical" and support == "full" and weight == 0 and kind == "fofc":
                         expected, _ = native._synthesize_map(native_coefficients, model, "fofc", spacing, 32_000_000)
-                        observed = gemmi.read_ccp4_map(str(output))
+                        observed = read_ccp4_map(output)
                         observed.setup(float("nan"))
                         actual = np.asarray(observed.grid)
                         if actual.shape != expected.shape:

@@ -93,3 +93,18 @@ def test_extended_ccp4_spacegroup_number_is_accepted(tmp_path):
     result = read_ccp4_map(path)
     result.setup(float("nan"))
     np.testing.assert_allclose(np.array(result.grid), expected, atol=1e-6)
+
+
+def test_matched_map_resampling_preserves_n_glide(tmp_path):
+    from grond.workflows.matched_maps import _dense_map
+
+    source, output = tmp_path / "partial.map", tmp_path / "dense.map"
+    partial_n_glide_map(source)
+    model = {"cell": (6, 8, 10, 90, 100, 90)}
+    _dense_map(source, output, model, 0.25)
+    result = read_ccp4_map(output)
+    result.setup(float("nan"))
+    values = np.array(result.grid)
+    x, y, z = np.meshgrid(*(np.arange(n) / n for n in values.shape), indexing="ij")
+    expected = np.cos(2 * np.pi * (x + z)) * np.cos(4 * np.pi * y)
+    np.testing.assert_allclose(values, expected, atol=1e-6)
