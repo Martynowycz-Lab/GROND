@@ -223,6 +223,23 @@ def write_endpoint_ins(
             continue
         if not keep_exti and upper.startswith("EXTI"):
             continue
+        if keep_exti and upper.startswith("EXTI") and "*" in stripped:
+            # Large electron extinction parameters overflow SHELXL's RES field.
+            # The parameter table has a wider field; never substitute zero.
+            listing = src_res.with_suffix(".lst")
+            values = []
+            if listing.is_file():
+                for record in listing.read_text(errors="replace").splitlines():
+                    if record.rstrip().endswith("EXTI") and record[:6].strip().isdigit():
+                        try:
+                            value = float(record[6:17])
+                        except ValueError:
+                            continue
+                        if math.isfinite(value):
+                            values.append(value)
+            if not values:
+                raise ValueError(f"Overflowed EXTI in {src_res}; supply its SHELXL listing with the refined parameter")
+            line = f"EXTI {values[-1]:.12g}"
         if upper.startswith("CELL "):
             line = normalize_shelx_cell_wavelength(line)
         line, forced_cycle = force_shelxl_cycle_count(line, cycle_count)

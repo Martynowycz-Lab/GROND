@@ -106,6 +106,8 @@ def test_baseline_runner_honors_explicit_shelxl_and_records_provenance(tmp_path:
     assert summary["shelxl"]["res_health"]["safe_for_feedback"] is True
     refinement_input = (out_dir / "temp_a.ins").read_text()
     assert "EXTI 0.001" in refinement_input
+    # Reopening the output must reproduce the same conventional model.
+    assert "EXTI 0.001" in (out_dir / "temp_a.res").read_text()
     assert "WGHT 0.12 0.34" in refinement_input
     assert "L.S. 100" not in refinement_input
     assert "L.S. 1" in refinement_input or "CGLS 1" in refinement_input
@@ -126,6 +128,19 @@ def test_baseline_runner_records_npd_as_unsafe_without_process_failure(tmp_path:
     assert summary["shelxl"]["npd_count"] == 1
     assert summary["shelxl"]["has_npd"] is True
     assert summary["shelxl"]["res_health"]["safe_for_feedback"] is False
+
+
+def test_extinction_overflow_uses_refined_listing_value(tmp_path: Path) -> None:
+    res, _ = _write_inputs(tmp_path)
+    res.write_text(res.read_text().replace("EXTI 0.001", "EXTI************"))
+    target = tmp_path / "reopen.ins"
+    with pytest.raises(ValueError, match="Overflowed EXTI"):
+        baseline.nrf.write_endpoint_ins(res, target, keep_exti=True)
+    res.with_suffix(".lst").write_text("     2775314.00000     9.99999     0.000   EXTI    \n")
+    baseline.nrf.write_endpoint_ins(res, target, keep_exti=True)
+    assert "EXTI 775314\n" in target.read_text()
+    baseline.nrf.write_endpoint_ins(res, target, keep_exti=False)
+    assert "EXTI" not in target.read_text()
 
 
 @pytest.mark.parametrize(

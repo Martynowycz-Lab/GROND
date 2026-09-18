@@ -569,7 +569,7 @@ def run_shelxl(work_dir: Path, stem: str, iterations: int = 1, wght_mode: str = 
         res = work_dir / f"{stem}.res"
         if i + 1 < n_iter and res.exists():
             active = (0.0, 0.0) if freeze_zero else _active_wght_from_stats(stats)
-            write_endpoint_ins(res, ins, hkl_name=f"{stem}.hkl", keep_exti=False, wght=active, ls_cycles=endpoint_ls_cycles)
+            write_endpoint_ins(res, ins, hkl_name=f"{stem}.hkl", keep_exti=True, wght=active, ls_cycles=endpoint_ls_cycles)
             if mode == "promote":
                 stats["next_wght"] = promote_recommended_wght(
                     ins,
@@ -595,7 +595,9 @@ def run_shelxl(work_dir: Path, stem: str, iterations: int = 1, wght_mode: str = 
             work_dir / f"{stem}.res",
             work_dir / f"{stem}.res",
             hkl_name=f"{stem}.hkl",
-            keep_exti=False,
+            # Keep the model that SHELXL actually refined. The initial input
+            # writer decides whether this branch uses extinction.
+            keep_exti=True,
             wght=active,
             ls_cycles=endpoint_ls_cycles,
         )
