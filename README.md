@@ -114,9 +114,36 @@ GROND auto \
 
 Use `--fast` to check a new integration, indexing choice, or environment before starting the full calculation. Use plain `GROND auto` for the final high-support run. The middle-cost `--full-fast` profile keeps the automatic decision path but deliberately uses a smaller final calculation; treat it as an intermediate result.
 
-## Run an independently solved never-H model
+## Matched never-H refinement and maps
 
-Solve and refine the merged conventional data without adding H atoms, then run **`GROND auto`** with that new RES/HKL pair. A fresh solution can have different indexing, so it needs a fresh transform scout for every crystal. `refine` / `push-endpoint` continues an existing alignment and is not the right starting point for this experiment.
+Solve and refine the conventional data without ever adding H atoms. Then give GROND that RES/HKL pair and the completed full-H run:
+
+```bash
+GROND never-h \
+  --reference-run /path/to/full_H \
+  --structure /path/to/never_H.res \
+  --baseline-hkl /path/to/never_H.hkl \
+  --workers 96 \
+  --out-dir /path/to/never_H_matched
+```
+
+GROND aligns the heavy-atom model to the reference setting and reindexes its conventional HKL. It changes the coordinate representation without copying atomic positions from the reference. Cell metrics, uncertainties and displacement tensors follow the setting change; molecules remain contiguous. Both branches use the reference electron scattering coefficients. The H-free model retains its own occupancies and structural restraints. The full-H hand is imposed for this paired experiment; this is not a new absolute-structure determination.
+
+The selected physical endpoint supplies the original observations, exact beam membership, thickness distribution, absorption, jitter, geometry, compact frame/detector scales, intercrystal scales and empirical uncertainty factors. Nothing in that set is refitted. GROND first checks that the full-H prediction and corrected HKL can be reproduced. Each subsequent cycle recalculates Bloch and Born intensities from the H-free model and runs one shared SHELXL step. Heavy-atom coordinates, ADPs and the SHELXL overall scale can refine. Corrected uncertainties propagate through the new intensity correction, while their empirical calibration factors remain fixed. There is no jitter fallback, new scale selection or substitution of a different endpoint.
+
+This comparison is conditional on parameters fitted with the full-H model, including its scales. It keeps H out of the new coordinate refinement but does not make the entire analysis H-blind. Retain independently fitted H-free runs as a complementary control.
+
+The default is five cycles. The final model is in `final/model.res`; its intensities and native calculations are recomputed for those exact coordinates. `maps/conventional`, `maps/grond_endpoint` and `maps/native_dynamical` contain matching model CIFs and weighted (`w1`) and unweighted (`w0`) Fo-Fc and 2Fo-Fc maps. Use the `common_` maps for side-by-side comparison; the `full_` maps retain each method's full support. Weighting means the `shelx2map -w` option, applied after coefficient calculation. Native maps use dynamically inferred amplitudes and H-free model phases.
+
+`RUN_MANIFEST.json`, `ALIGNMENT.json`, `MAP_MANIFEST.json` and individual command logs record the inputs, settings and outputs. H atoms and H-generating `HFIX` instructions cause an explicit error. An unreliable alignment or changed reference also stops the run. No H atoms are deleted from a previously refined model to manufacture a never-H input. Completed, unchanged cycles can resume by repeating the command; changed inputs or code require a new output directory.
+
+This command currently takes a multi-crystal combined reference and requires SHELXL and shelx2map. Add `--no-maps` for refinement alone, or `--dry-run` to inspect alignment and the saved settings first. If the full-H run moved between machines, repeat `--path-map OLD_PREFIX=NEW_PREFIX` to locate its recorded files. Fe and other compounds without an independently solved H-free input must wait for that input.
+
+## Fresh auto runs with selected crystal parameters fixed
+
+The following `auto` route fixes **only beams, sampling and thickness**. Absorption, jitter and scales can change. Use `never-h` above when the complete full-H reference must stay fixed.
+
+A fresh `auto` run can scout a new solution's indexing while retaining selected crystal parameters. This is useful for testing the fitted nuisance terms independently.
 
 Reuse the original integration list and copy the known beam limits and thickness distributions from the completed full-H run:
 

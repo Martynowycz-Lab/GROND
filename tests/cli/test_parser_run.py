@@ -32,6 +32,7 @@ EXPECTED_CLI_COMMANDS = {
     "init-config",
     "make-free-flags",
     "manual",
+    "never-h",
     "pets-evaluate",
     "prep",
     "protein-ls1",

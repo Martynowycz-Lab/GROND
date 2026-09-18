@@ -33,6 +33,7 @@ def configure_auto_crystals(prep: PrepConfig, args: argparse.Namespace) -> None:
         args.structure_update = "shelxl_feedback"
     records = {}
     if source:
+        print("INFO --crystal-parameters-from fixes beams, sampling and thickness only; absorption, jitter and scales can be refitted. Use GROND never-h for a fully fixed reference.", flush=True)
         if args.sg_window_scout != "off":
             raise SystemExit("--sg-window-scout must be off when copying fixed rocking settings from a reference checkpoint.")
         path = Path(source).expanduser().resolve()

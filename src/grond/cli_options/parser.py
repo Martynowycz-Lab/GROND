@@ -9,6 +9,7 @@ from .endpoint_commands import register_finish, register_push
 from .input_commands import register_inputs
 from .integration_commands import register_integration
 from .manual_commands import register_manual
+from .never_h import register_never_h
 from .parity_commands import register_parity
 from .protein_commands import register_protein
 from .run_commands import register_runs
@@ -35,6 +36,7 @@ def build_parser() -> argparse.ArgumentParser:
     register_thickness(sub)
     register_ls1(sub)
     register_push(sub)
+    register_never_h(sub)
     register_finish(sub)
     register_runtime(sub)
     return parser
