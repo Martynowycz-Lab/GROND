@@ -9,6 +9,20 @@ from grond.reports.values import _quick_number
 from grond.workflows.decision import safe_float
 
 
+def _gamma_thickness_detail(block: Mapping[str, object]) -> str:
+    """Shape, physical support and evaluator of a gamma thickness distribution (its mean is reported separately)."""
+
+    shape = safe_float(block.get("thickness_gamma_shape"), float("nan"))
+    low = safe_float(block.get("thickness_min_A"), float("nan"))
+    high = safe_float(block.get("thickness_max_A"), float("nan"))
+    parts = [f"gamma shape {shape:g}" if math.isfinite(shape) else "gamma"]
+    if math.isfinite(low) and math.isfinite(high):
+        parts.append(f"support {low / 10.0:g}-{high / 10.0:g} nm")
+    if block.get("thickness_evaluator"):
+        parts.append(f"evaluator {block.get('thickness_evaluator')}")
+    return ", ".join(parts)
+
+
 def _quick_thickness_text(
     nuisance: Mapping[str, object],
     metadata: Mapping[str, object] | None = None,
@@ -16,7 +30,7 @@ def _quick_thickness_text(
 ) -> str:
     """Describe effective thickness as a mean plus its distribution contract."""
 
-    per_dataset: list[tuple[str, float, float, str]] = []
+    per_dataset: list[tuple[str, float, float, str, str]] = []
     for contract in dataset_contracts or []:
         block = contract.get("nuisance") if isinstance(contract.get("nuisance"), Mapping) else {}
         thickness_a = safe_float(block.get("thickness_A"), float("nan"))
@@ -29,14 +43,15 @@ def _quick_thickness_text(
                 thickness_a,
                 grad,
                 str(block.get("thickness_model") or "single"),
+                _gamma_thickness_detail(block) if block.get("thickness_model") == "gamma" else "",
             )
         )
     if per_dataset:
         centers = [row[1] / 10.0 for row in per_dataset]
         details = []
-        for name, thickness_a, grad, model in per_dataset:
+        for name, thickness_a, grad, model, gamma in per_dataset:
             grad_text = f", g={grad:.3f}" if math.isfinite(grad) else ""
-            details.append(f"{name} {thickness_a / 10.0:.2f} nm ({model}{grad_text})")
+            details.append(f"{name} {thickness_a / 10.0:.2f} nm ({gamma or model + grad_text})")
         return (
             "per-dataset centers "
             + "; ".join(details)
@@ -52,6 +67,8 @@ def _quick_thickness_text(
         return "n/a"
     thickness_nm = thickness_a / 10.0
     model = str(nuisance.get("thickness_model") or meta.get("thickness_model") or "single")
+    if model == "gamma":
+        return f"{thickness_nm:.2f} nm mean ({thickness_a:.1f} A); {_gamma_thickness_detail(nuisance)}"
     if model == "uniform_gradient":
         grad = max(
             0.0,
@@ -102,6 +119,9 @@ def _quick_dataset_nuisance_table_lines(contracts: list[Mapping[str, object]]) -
             low = max(0.0, thickness_a * (1.0 - grad)) / 10.0
             high = max(0.0, thickness_a * (1.0 + grad)) / 10.0
             thickness_text = f"{thickness_a / 10.0:.2f} nm; support {low:.2f}-{high:.2f} nm"
+        elif math.isfinite(thickness_a) and model == "gamma":
+            thickness_text = f"{thickness_a / 10.0:.2f} nm mean; {_gamma_thickness_detail(nuisance)}"
+            grad = None  # a gamma distribution has no gradient (reported as n/a)
         elif math.isfinite(thickness_a):
             thickness_text = f"{thickness_a / 10.0:.2f} nm; {model}"
         else:

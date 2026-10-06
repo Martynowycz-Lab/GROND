@@ -27,6 +27,7 @@ PREDICTION_FIELDS = (
     "sg_window_frame_floor",
     "profile_quadrature",
     "profile_accumulation",
+    "mosaicity_points",
 )
 
 
@@ -61,6 +62,11 @@ def dataset_values(specifications: list[str], names: set[str], option: str, *, i
 
 
 def _saved_integer(value: object, name: str, field: str, minimum: int) -> int:
+    """Return a saved checkpoint setting as an int; exit when it is not an integer >= ``minimum``.
+
+    ``name`` (the dataset) and ``field`` (the setting) only label the error message.
+    """
+
     try:
         result = int(value)
         valid = not isinstance(value, bool) and float(value) == result and result >= minimum
@@ -164,6 +170,12 @@ def crystal_arguments(args: argparse.Namespace, name: str) -> argparse.Namespace
     if not record:
         return args
     resolved = copy.copy(args)
+    # Window-derived values of configure_auto_physics (n_points, screen_n_points, sg_window_max) apply to
+    # this crystal only and are never fixed: each stage still resolves its own screen or final Q.
+    # Explicit or reference prediction values take precedence.
+    for key, value in record.get("auto_physics", {}).items():
+        if key not in settings:
+            setattr(resolved, key, value)
     for key, value in settings.items():
         setattr(resolved, key, value)
     if record.get("fresh_auto"):

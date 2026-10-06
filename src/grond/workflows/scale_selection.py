@@ -16,6 +16,7 @@ from grond.workflows.dataset_policy import write_policy_weighted_runs
 from grond.workflows.decision import safe_float, safe_label, write_json
 from grond.workflows.report_commands import combine_cmd
 from grond.workflows.scale_contract_selector import select_multi_scale_contract
+from grond.workflows.scale_model_policy import resolved_multi_scale_contract_selection
 
 _SCALE_CONTRACT_MUTABLE_COLUMNS = {
     "dyn_scaled",
@@ -404,7 +405,7 @@ def run_multi_scale_contract_selection(
     Any incomplete provenance or failed gate leaves the full contract selected.
     """
 
-    mode = str(getattr(args, "multi_scale_contract_selection", "auto"))
+    mode, off_reason = resolved_multi_scale_contract_selection(args)
     selection_dir = root / "scale_contract_selection"
     started = time.perf_counter()
     thresholds = {
@@ -441,13 +442,14 @@ def run_multi_scale_contract_selection(
         selected_input: dict[str, Path],
         selected_publication: dict[str, Path],
     ) -> tuple[dict[str, Path], dict[str, Path], dict[str, object]]:
+        """Record the wall time and artifact directory, write the report, and return the selected runs and decision."""
         decision["wall_seconds"] = time.perf_counter() - started
         decision["artifact_dir"] = str(selection_dir.resolve())
         write_multi_scale_contract_report(selection_dir, decision)
         return selected_input, selected_publication, decision
 
     if mode == "off" or args.dry_run or len(full_runs) < 2:
-        decision["reason"] = "disabled_by_option" if mode == "off" else "dry_run_or_single_dataset"
+        decision["reason"] = (off_reason or "disabled_by_option") if mode == "off" else "dry_run_or_single_dataset"
         return finish(full_input, full_publication)
 
     endpoint_names = set(full_input)
@@ -532,7 +534,7 @@ def run_multi_scale_contract_selection(
     controls_root = root / "runs" / "combined_scale_contracts"
     full_combined = controls_root / "full"
     run_logged(
-        combine_cmd(python, full_input, final_model, full_combined, args),
+        combine_cmd(python, full_input, final_model, full_combined, args, final_outputs=False),
         logs,
         "combine_scale_contract_full",
         dry_run=False,
@@ -548,6 +550,7 @@ def run_multi_scale_contract_selection(
     selected_payloads: dict[str, tuple[dict[str, Path], dict[str, Path]]] = {}
 
     def reject_candidate(label: str, *, reason: str, stage: str, exc: Exception) -> None:
+        """Record a failed compact candidate and its evaluation, which keeps the full contract."""
         failure = {
             "failure_stage": stage,
             "error_type": type(exc).__name__,
@@ -587,7 +590,7 @@ def run_multi_scale_contract_selection(
         combined_dir = controls_root / label
         try:
             run_logged(
-                combine_cmd(python, candidate_input, final_model, combined_dir, args),
+                combine_cmd(python, candidate_input, final_model, combined_dir, args, final_outputs=False),
                 logs,
                 f"combine_scale_contract_{label}",
                 dry_run=False,

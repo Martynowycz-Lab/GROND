@@ -16,17 +16,12 @@ from __future__ import annotations
 import argparse
 import copy
 import csv
-import hashlib as hashlib
 import json
 import math
 import multiprocessing as multiprocessing
 import os
-import re as re
 import sys
-import tempfile as tempfile
 import time
-import zipfile as zipfile
-from dataclasses import dataclass as dataclass
 from pathlib import Path
 
 for _name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
@@ -36,12 +31,8 @@ if not __package__:
     # Direct legacy scripts still resolve the same installed/source package.
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
-import gemmi as gemmi
 import numpy as np
-from numpy.polynomial.hermite import hermgauss as hermgauss
-from numpy.polynomial.legendre import leggauss as leggauss
-from scipy.linalg import eig, eigh, expm
-from scipy.optimize import brentq as brentq
+from scipy.linalg import eig, expm
 from scipy.sparse.linalg import expm_multiply
 
 try:
@@ -49,6 +40,8 @@ try:
 except ImportError:  # Direct script execution from the legacy engine directory.
 
     def runtime_cache_dir(*parts: str) -> Path:
+        """Return the GROND cache directory ($GROND_CACHE_DIR or ~/.cache/grond) joined with parts."""
+
         override = os.environ.get("GROND_CACHE_DIR", "").strip()
         root = Path(override).expanduser() if override else Path.home() / ".cache" / "grond"
         return root.joinpath(*parts)
@@ -56,42 +49,27 @@ except ImportError:  # Direct script execution from the legacy engine directory.
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_HKL = Path("INTEGRATE.HKL")
-DEFAULT_XDS_ASCII = Path("XDS_ASCII.HKL")
 DEFAULT_RES = Path("model.res")
 
 
 from grond.bloch.backends import (
-    _auto_jax_batch_size as _auto_jax_batch_size,
-    _jax_backend_base as _jax_backend_base,
-    _jax_backend_uses_matrix_padding as _jax_backend_uses_matrix_padding,
     _jax_backend_uses_real_expm as _jax_backend_uses_real_expm,
     _jax_matrix_bucket_size as _jax_matrix_bucket_size,
     _jax_module_key as _jax_module_key,
     _jax_modules as _jax_modules,
     _jax_propagate_batch as _jax_propagate_batch,
-    _jax_real_dtype_name as _jax_real_dtype_name,
-    _jax_real_expm_column0_batch as _jax_real_expm_column0_batch,
-    _jax_real_expm_order as _jax_real_expm_order,
     _jax_real_expm_propagate_batch as _jax_real_expm_propagate_batch,
-    _jax_real_expm_scale_steps as _jax_real_expm_scale_steps,
-    _jax_real_expm_theta as _jax_real_expm_theta,
     _real_embedding_generator_batch as _real_embedding_generator_batch,
     _stack_square_matrices as _stack_square_matrices,
-    jax_bloch_available as jax_bloch_available,
     promoted_bethe_effective_hamiltonian as promoted_bethe_effective_hamiltonian,
-    safe_complex_inverse as safe_complex_inverse,
 )
 from grond.bloch.basis import (
     BasisMixin as BasisMixin,
 )
 from grond.bloch.cache import (
-    dense_ug_memory_limit_bytes as dense_ug_memory_limit_bytes,
     dense_ug_memory_plan as dense_ug_memory_plan,
     enforce_dense_ug_memory_limit as enforce_dense_ug_memory_limit,
-    load_validated_ug_cache as load_validated_ug_cache,
     row_plan_cache_validation_errors as row_plan_cache_validation_errors,
-    validate_ug_cube as validate_ug_cube,
-    write_ug_cache_atomic as write_ug_cache_atomic,
 )
 from grond.bloch.config import (
     Config as Config,
@@ -102,17 +80,9 @@ from grond.bloch.constants import (
     BETHE_BACKENDS as BETHE_BACKENDS,
     COMPUTE_BACKEND_HELP as COMPUTE_BACKEND_HELP,
     COMPUTE_BACKENDS as COMPUTE_BACKENDS,
-    DEFAULT_MAX_DENSE_UG_GIB as DEFAULT_MAX_DENSE_UG_GIB,
     DEFAULT_MAX_SUPPORT_SG as DEFAULT_MAX_SUPPORT_SG,
     DENSE_UG_BUILD_BYTES_PER_VOXEL as DENSE_UG_BUILD_BYTES_PER_VOXEL,
     DENSE_UG_CACHE_LOAD_BYTES_PER_VOXEL as DENSE_UG_CACHE_LOAD_BYTES_PER_VOXEL,
-    ELECTRON_COMPTON_WAVELENGTH_A as ELECTRON_COMPTON_WAVELENGTH_A,
-    JAX_BACKENDS as JAX_BACKENDS,
-    JAX_PADDED_BACKENDS as JAX_PADDED_BACKENDS,
-    JAX_REAL_EXPM_BACKENDS as JAX_REAL_EXPM_BACKENDS,
-    JAX_REAL_EXPM_PADDED_BACKENDS as JAX_REAL_EXPM_PADDED_BACKENDS,
-    ROW_PLAN_CACHE_SCHEMA as ROW_PLAN_CACHE_SCHEMA,
-    SITE_SYMMETRY_TOLERANCE_FRACTIONAL as SITE_SYMMETRY_TOLERANCE_FRACTIONAL,
     UG_CACHE_SCHEMA as UG_CACHE_SCHEMA,
 )
 from grond.bloch.errors import (
@@ -130,12 +100,10 @@ from grond.bloch.hamiltonian import (
 from grond.bloch.metrics import (
     effective_sigma as effective_sigma,
     evaluate_predictions as evaluate_predictions,
-    metrics as metrics,
     read_row_index_file as read_row_index_file,
     scale_by_groups as scale_by_groups,
 )
 from grond.bloch.model import (
-    SHELX_NON_ATOM_RECORDS as SHELX_NON_ATOM_RECORDS,
     alternate_hand_model as alternate_hand_model,
     atom_dw as atom_dw,
     atom_dw_array as atom_dw_array,
@@ -144,33 +112,20 @@ from grond.bloch.model import (
     cif_symmetry_records as cif_symmetry_records,
     fcalc_res as fcalc_res,
     fcalc_res_grid as fcalc_res_grid,
-    gemmi_op_record as gemmi_op_record,
     inv_d2_from_hkl_array as inv_d2_from_hkl_array,
-    is_shelx_q_peak as is_shelx_q_peak,
-    join_shelx_continuations as join_shelx_continuations,
-    lattice_translations_from_latt as lattice_translations_from_latt,
     loop_rows as loop_rows,
-    model_content_hash as model_content_hash,
     model_symmetry_ops as model_symmetry_ops,
     parse_cif as parse_cif,
     parse_model as parse_model,
     parse_res as parse_res,
-    parse_sfac as parse_sfac,
-    reciprocal_lengths as reciprocal_lengths,
     relativistic_gamma_from_wavelength as relativistic_gamma_from_wavelength,
-    sfac_value as sfac_value,
-    sfac_value_array as sfac_value_array,
-    shelx_parameter as shelx_parameter,
-    shelx_symmetry_records as shelx_symmetry_records,
     shelx_u_cart_matrix as shelx_u_cart_matrix,
-    shelx_u_matrix as shelx_u_matrix,
-    symmetry_ops_p212121 as symmetry_ops_p212121,
     unique_symmetry_mates as unique_symmetry_mates,
-    unique_symmetry_records as unique_symmetry_records,
 )
 from grond.bloch.numerics import (
     _rotation_matrix_axis_angle as _rotation_matrix_axis_angle,
     cell_from_real_matrix as cell_from_real_matrix,
+    hermitian_eigh as hermitian_eigh,
     load_geometry_path_contract as load_geometry_path_contract,
     parse_hkl_transform as parse_hkl_transform,
     rotation_matrix as rotation_matrix,
@@ -181,10 +136,6 @@ from grond.bloch.potential import (
 )
 from grond.bloch.prediction import (
     PredictionMixin as PredictionMixin,
-    _init_prediction_worker as _init_prediction_worker,
-    _ordered_prediction_attempt as _ordered_prediction_attempt,
-    _predict_row_cache_worker as _predict_row_cache_worker,
-    _predict_row_worker as _predict_row_worker,
 )
 from grond.bloch.profiles import (
     ProfileMixin as ProfileMixin,
@@ -196,20 +147,15 @@ from grond.bloch.row_plans import (
     RowPlanMixin as RowPlanMixin,
 )
 from grond.bloch.splits import (
-    _canonical_json_sha256 as _canonical_json_sha256,
-    _reciprocal_metric_from_cell as _reciprocal_metric_from_cell,
-    _symmetry_rotation_contract as _symmetry_rotation_contract,
     build_transform_split_contract as build_transform_split_contract,
     candidate_invariant_split_membership as candidate_invariant_split_membership,
-    load_transform_split_contract_masks as load_transform_split_contract_masks,
     metric_filter_signed_axis_transforms as metric_filter_signed_axis_transforms,
-    reflection_orbit_key as reflection_orbit_key,
     split_masks as split_masks,
     validate_transform_split_contract as validate_transform_split_contract,
 )
+from grond.bloch.thickness import gamma_cf_point as gamma_cf_point, uniform_grid_amplitudes as uniform_grid_amplitudes
 from grond.io.xds import (
     XDSData as XDSData,
-    rotation_matrix_from_header as rotation_matrix_from_header,
 )
 
 
@@ -233,13 +179,21 @@ class XDSBlochPort(
     def __init__(
         self, data: XDSData, res_model, cfg: Config, cache_dir: Path | None = None, res_hash: str | None = None
     ):
+        """Bind one reflection table, model and configuration, and build the shared Bloch state.
+
+        Loads or builds the Ug cube (skipped in sparse_active storage), the beam pool, the thickness
+        quadrature, the frame scale groups and the ZCAL range used by frame-dependent terms. A geometry-path
+        contract must carry the hash of the current HKL file.
+        """
+
         self.data = data
+        source_hashes = self.data.verify_source_files()
         self.model = copy.deepcopy(res_model)
         self.cfg = cfg
         self.geometry_path = load_geometry_path_contract(getattr(cfg, "geometry_path_file", ""))
         if self.geometry_path is not None:
             expected_hkl_hash = str(self.geometry_path.get("source_hkl_sha256", ""))
-            actual_hkl_hash = sha256(self.data.path)
+            actual_hkl_hash = source_hashes["hkl"]
             if not expected_hkl_hash:
                 raise ValueError("geometry path is missing its source HKL hash")
             if expected_hkl_hash != actual_hkl_hash:
@@ -304,13 +258,18 @@ class XDSBlochPort(
         return np.asarray(vals, dtype=np.complex128), np.asarray(coupling, dtype=np.complex128)
 
     @staticmethod
-    def _uniform_scalar_absorption_decomposition(H):
+    def _uniform_scalar_absorption_decomposition(H, rtol=None):
         """Return ``(Hermitian H0, mu)`` when ``H = H0 + i*mu*I`` exactly.
 
         A uniform imaginary potential commutes with the elastic Hamiltonian.
         Its wave-amplitude effect is the scalar ``exp(-2*pi*mu*t)`` and its
         intensity effect is ``exp(-4*pi*mu*t)``.  Recognizing this case avoids
         a general complex eigensolve without approximating the physics.
+
+        With ``rtol`` the anti-Hermitian part must equal ``i*mu*I`` within
+        ``rtol*max|H|`` (single-precision matrices round U(g) and U(-g)
+        independently) and the exact Hermitian part ``(H + H^H)/2`` is
+        returned, as in the reference ``split_uniform_absorption`` (tests/reference/reference_lib.py).
         """
 
         matrix = np.asarray(H, dtype=np.complex128)
@@ -319,6 +278,15 @@ class XDSBlochPort(
         diagonal_imaginary = np.imag(np.diag(matrix))
         if not np.all(np.isfinite(diagonal_imaginary)):
             return None
+        if rtol is not None:
+            anti = 0.5 * (matrix - matrix.conj().T)
+            mu_diag = np.imag(np.diag(anti))
+            mu = float(np.mean(mu_diag))
+            bound = float(rtol) * max(float(np.max(np.abs(matrix))), 1e-30)
+            off_diagonal = anti - np.diag(np.diag(anti))
+            if float(np.max(np.abs(off_diagonal), initial=0.0)) > bound or float(np.max(np.abs(mu_diag - mu))) > bound:
+                return None
+            return 0.5 * (matrix + matrix.conj().T), mu
         mu = float(np.mean(diagonal_imaginary))
         elastic = matrix.copy()
         elastic[np.diag_indices(len(elastic))] -= 1j * mu
@@ -347,9 +315,17 @@ class XDSBlochPort(
         return np.asarray(np.abs(np.sum(coupling[:, None] * phase, axis=0)) ** 2, dtype=float)
 
     def propagate_direct_to_target(self, H, thickness):
+        """Return the target-beam intensity after propagating the direct beam through one thickness.
+
+        Beam 0 is the direct beam and beam 1 the target; thickness is in Å and H in Å⁻¹. The configured
+        compute backend chooses the eigensolver, expm or JAX path.
+        """
+
         backend = str(getattr(self.cfg, "compute_backend", "scipy") or "scipy").lower()
         if backend in BETHE_BACKENDS:
             H = promoted_bethe_effective_hamiltonian(H, self.cfg)
+            if self.absorption_enabled():
+                validate_passive_absorption(H, mode=f"Bethe {self.cfg.bethe_variant} approximation")
             backend = "scipy"
         if backend in {"scipy", "numpy_scipy_cpu"}:
             if self.absorption_enabled():
@@ -357,12 +333,12 @@ class XDSBlochPort(
                 if uniform is None:
                     return float(self._nonhermitian_target_intensities(H, [thickness])[0])
                 elastic, mu = uniform
-                vals, vecs = eigh(elastic)
+                vals, vecs = hermitian_eigh(elastic)
                 coupling = vecs[1, :] * np.conj(vecs[0, :])
                 phase = np.exp(2j * np.pi * vals * thickness)
                 return float(abs(np.sum(coupling * phase)) ** 2 * math.exp(-4.0 * math.pi * mu * float(thickness)))
             else:
-                vals, vecs = eigh(H)
+                vals, vecs = hermitian_eigh(H)
                 coupling = vecs[1, :] * np.conj(vecs[0, :])
             phase = np.exp(2j * np.pi * vals * thickness)
             return abs(np.sum(coupling * phase)) ** 2
@@ -377,42 +353,62 @@ class XDSBlochPort(
             psi = expm_multiply((2j * np.pi * float(thickness)) * H, psi0)
             return float(abs(psi[1]) ** 2)
         if backend in ALL_JAX_BACKENDS:
-            if _jax_backend_uses_real_expm(backend):
-                vals = _jax_real_expm_propagate_batch(
-                    np.asarray(H, dtype=np.complex128)[None, :, :],
-                    np.asarray([float(thickness)], dtype=float),
-                    np.asarray([1.0], dtype=float),
-                    backend,
-                    int(getattr(self.cfg, "jax_batch_size", 0)),
-                )
-                return float(vals[0])
-            try:
-                _jax, jnp = _jax_modules(_jax_module_key(backend))
-                Hj = jnp.asarray(H, dtype=jnp.complex128)
-                if self.absorption_enabled():
-                    vals, vecs = jnp.linalg.eig(Hj)
-                    inv_vecs = jnp.linalg.inv(vecs)
-                    coupling = vecs[1, :] * inv_vecs[:, 0]
-                else:
-                    vals, vecs = jnp.linalg.eigh(Hj)
-                    coupling = vecs[1, :] * jnp.conj(vecs[0, :])
-                phase = jnp.exp((2j * np.pi * float(thickness)) * vals)
-                intensity = jnp.real(jnp.abs(jnp.sum(coupling * phase)) ** 2)
-                return float(np.asarray(intensity))
-            except Exception as exc:
-                raise NotImplementedError(
-                    f"compute_backend={backend!r} failed in the JAX Bloch eigensolver. "
-                    "This backend must match SciPy complex eig/eigh before it can be used "
-                    f"for GROND production runs. Error: {type(exc).__name__}: {exc}"
-                ) from exc
+            values = _jax_propagate_batch(
+                np.asarray(H, dtype=np.complex128)[None, :, :],
+                np.asarray([float(thickness)]), np.asarray([1.0]), backend,
+                self.absorption_enabled(), int(getattr(self.cfg, "jax_batch_size", 0)),
+            )
+            return float(values[0])
         raise NotImplementedError(f"unknown compute_backend={backend!r}; expected one of {COMPUTE_BACKEND_HELP}")
+
+    def propagate_direct_to_target_gamma_cf(self, H, cf):
+        """Exact untruncated gamma thickness average of both hands from one Hermitian eigensystem.
+
+        The gamma characteristic function replaces the thickness nodes (grond.bloch.thickness.gamma_cf_point).
+        It needs H = H0 + i*mu*I; any other absorptive potential is refused rather than approximated. H0 is the
+        exact Hermitian part (H + H^H)/2, as in tests/reference/reference_lib.py matrix_spectrum.
+        """
+
+        matrix = np.asarray(H, dtype=np.complex128)
+        mu = 0.0
+        if self.absorption_enabled():
+            uniform = self._uniform_scalar_absorption_decomposition(matrix, rtol=2e-6)
+            if uniform is None:
+                raise ValueError(
+                    "thickness_evaluator cf needs a uniform scalar absorptive potential H = H0 + i*mu*I; this "
+                    "Hamiltonian has a non-uniform or off-diagonal absorptive part. Use thickness_evaluator table"
+                )
+            elastic, mu = uniform
+        else:
+            elastic = 0.5 * (matrix + matrix.conj().T)
+        vals, vecs = hermitian_eigh(elastic)
+        coupling = vecs[1, :] * np.conj(vecs[0, :])
+        return gamma_cf_point(vals, coupling, cf["shape"], cf["theta"], alpha=4.0 * np.pi * float(mu))
+
+    def _uniform_table_intensities(self, vals, coupling, inverse=False):
+        """|amplitude|^2 at the table evaluator's uniform nodes by exact factorised phases; None for other nodes.
+
+        grond.bloch.thickness.uniform_grid_amplitudes equals the direct exp(2*pi*i*lam*t) sum to rounding and makes
+        the 4,951-node support table cost one small matrix product per profile point. The legacy quadrature and any
+        non-uniform node set keep the direct expression.
+        """
+
+        grid = self.thickness_uniform_grid()
+        if grid is None:
+            return None
+        return np.abs(uniform_grid_amplitudes(vals, coupling, *grid, inverse=inverse)[0]) ** 2
 
     def propagate_direct_to_target_thickness_average(self, H):
         """Propagate one Bloch matrix and average over the configured thickness quadrature."""
 
+        cf = self.thickness_cf_parameters()
+        if cf is not None:
+            return self.propagate_direct_to_target_gamma_cf(H, cf)[0]
         backend = str(getattr(self.cfg, "compute_backend", "scipy") or "scipy").lower()
         if backend in BETHE_BACKENDS:
             H = promoted_bethe_effective_hamiltonian(H, self.cfg)
+            if self.absorption_enabled():
+                validate_passive_absorption(H, mode=f"Bethe {self.cfg.bethe_variant} approximation")
             backend = "scipy"
         if backend in {"scipy", "numpy_scipy_cpu"}:
             if self.absorption_enabled():
@@ -421,17 +417,21 @@ class XDSBlochPort(
                     per_t = self._nonhermitian_target_intensities(H, self.thick)
                     return float(np.sum(self.thick_w * per_t))
                 elastic, mu = uniform
-                vals, vecs = eigh(elastic)
+                vals, vecs = hermitian_eigh(elastic)
                 coupling = vecs[1, :] * np.conj(vecs[0, :])
-                phase = np.exp((2j * np.pi) * vals[:, None] * self.thick[None, :])
-                per_t = np.abs(np.sum(coupling[:, None] * phase, axis=0)) ** 2
+                per_t = self._uniform_table_intensities(vals, coupling)
+                if per_t is None:
+                    phase = np.exp((2j * np.pi) * vals[:, None] * self.thick[None, :])
+                    per_t = np.abs(np.sum(coupling[:, None] * phase, axis=0)) ** 2
                 per_t *= np.exp(-4.0 * np.pi * mu * self.thick)
                 return float(np.sum(self.thick_w * per_t))
             else:
-                vals, vecs = eigh(H)
+                vals, vecs = hermitian_eigh(H)
                 coupling = vecs[1, :] * np.conj(vecs[0, :])
-            phase = np.exp((2j * np.pi) * vals[:, None] * self.thick[None, :])
-            per_t = np.abs(np.sum(coupling[:, None] * phase, axis=0)) ** 2
+            per_t = self._uniform_table_intensities(vals, coupling)
+            if per_t is None:
+                phase = np.exp((2j * np.pi) * vals[:, None] * self.thick[None, :])
+                per_t = np.abs(np.sum(coupling[:, None] * phase, axis=0)) ** 2
             return float(np.sum(self.thick_w * per_t))
         if backend in {"scipy_expm", "expm", "scipy_expm_multiply", "expm_multiply"}:
             psi0 = np.zeros(H.shape[0], dtype=np.complex128)
@@ -463,27 +463,45 @@ class XDSBlochPort(
         With a real incident direct-beam vector, propagation through ``H*`` at
         positive thickness has the same intensity as propagation through ``H``
         at negative thickness.  The two signs therefore share one Hermitian
-        eigendecomposition.  Absorptive optical potentials break this identity
-        and are rejected rather than silently approximated.
+        eigendecomposition.  A uniform absorptive potential ``H = H0 + i*mu*I``
+        keeps the identity exactly: the inverse hand is ``conj(H0) + i*mu*I``
+        and both hands carry the same scalar ``exp(-4*pi*mu*t)``.  Any other
+        absorptive potential is rejected rather than silently approximated.
         """
 
-        if self.absorption_enabled():
-            raise ValueError(
-                "paired inverse-hand propagation requires absorption_mode=none and zero "
-                "absorptive coefficients; run explicit coordinate-inverted branches when "
-                "absorption is active"
-            )
         backend = str(getattr(self.cfg, "compute_backend", "scipy") or "scipy").lower()
         if backend not in {"scipy", "numpy_scipy_cpu"}:
             raise NotImplementedError(
                 "paired inverse-hand propagation requires the full audited SciPy Hermitian "
                 "eigensolver; choose --compute-backend scipy"
             )
-        vals, vecs = eigh(np.asarray(H, dtype=np.complex128))
+        cf = self.thickness_cf_parameters()
+        if cf is not None:
+            return self.propagate_direct_to_target_gamma_cf(H, cf)
+        elastic = np.asarray(H, dtype=np.complex128)
+        mu = 0.0
+        if self.absorption_enabled():
+            # complex64 matrices: compare the anti-Hermitian part to i*mu*I at
+            # single-precision tolerance.
+            uniform = self._uniform_scalar_absorption_decomposition(elastic, rtol=2e-6)
+            if uniform is None:
+                raise ValueError(
+                    "paired inverse-hand propagation requires a uniform scalar absorptive potential "
+                    "H = H0 + i*mu*I; this Hamiltonian has a non-uniform or off-diagonal absorptive part. "
+                    "Run explicit coordinate-inverted branches for that absorption model"
+                )
+            elastic, mu = uniform
+        vals, vecs = hermitian_eigh(elastic)
         coupling = vecs[1, :] * np.conj(vecs[0, :])
-        phase = np.exp((2j * np.pi) * vals[:, None] * self.thick[None, :])
-        forward = np.abs(np.sum(coupling[:, None] * phase, axis=0)) ** 2
-        reverse = np.abs(np.sum(coupling[:, None] * np.conj(phase), axis=0)) ** 2
+        attenuation = np.exp(-4.0 * np.pi * mu * self.thick)
+        forward = self._uniform_table_intensities(vals, coupling)
+        if forward is not None:
+            forward = forward * attenuation
+            reverse = self._uniform_table_intensities(vals, coupling, inverse=True) * attenuation
+        else:
+            phase = np.exp((2j * np.pi) * vals[:, None] * self.thick[None, :])
+            forward = np.abs(np.sum(coupling[:, None] * phase, axis=0)) ** 2 * attenuation
+            reverse = np.abs(np.sum(coupling[:, None] * np.conj(phase), axis=0)) ** 2 * attenuation
         return (
             float(np.sum(self.thick_w * forward)),
             float(np.sum(self.thick_w * reverse)),
@@ -491,6 +509,8 @@ class XDSBlochPort(
 
 
 def main():
+    """Run the XDS Bloch forward model from the command line and write the summary JSON to --out."""
+
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--hkl", default=str(DEFAULT_HKL))
     ap.add_argument("--res", default=str(DEFAULT_RES))
@@ -552,9 +572,12 @@ def main():
     )
     ap.add_argument(
         "--mosaicity-mode",
-        choices=["none", "gaussian_omega", "gaussian_cone"],
+        choices=["none", "gaussian_omega", "gaussian_cone", "transverse_target"],
         default="none",
-        help="Optional projected one-axis or incoherent two-axis Gaussian mosaic convolution.",
+        help=(
+            "Optional projected one-axis or incoherent two-axis Gaussian mosaic convolution; transverse_target is the "
+            "re-centred transverse cone (requires --profile-coordinate target_sg)."
+        ),
     )
     ap.add_argument(
         "--mosaicity-sigma-deg",
@@ -631,12 +654,24 @@ def main():
     ap.add_argument("--thickness", type=float, default=1240.0)
     ap.add_argument(
         "--thickness-model",
-        choices=["single", "uniform_gradient", "gaussian", "gaussian_gradient"],
+        choices=["single", "uniform_gradient", "gaussian", "gaussian_gradient", "gamma"],
         default="uniform_gradient",
     )
     ap.add_argument("--thickness-grad-frac", type=float, default=0.25)
     ap.add_argument("--thickness-sigma-frac", type=float, default=0.0)
     ap.add_argument("--thickness-points", type=int, default=7)
+    ap.add_argument(
+        "--thickness-gamma-shape", type=float, default=1.0, help="Gamma thickness shape k (mean is --thickness)."
+    )
+    ap.add_argument(
+        "--thickness-evaluator",
+        choices=["quadrature", "table", "cf", "auto"],
+        default="quadrature",
+        help="quadrature: legacy nodes. table/cf/auto: support evaluators of grond.bloch.thickness.",
+    )
+    ap.add_argument("--thickness-min-nm", type=float, default=10.0, help="Support minimum for table/cf/auto (nm).")
+    ap.add_argument("--thickness-max-nm", type=float, default=1000.0, help="Support maximum for table/cf/auto (nm).")
+    ap.add_argument("--thickness-table-dt", type=float, default=2.0, help="Table step for table/auto (A).")
     ap.add_argument("--group-width-deg", type=float, default=3.0)
     ap.add_argument("--variance-a", type=float, default=0.0)
     ap.add_argument("--variance-b-corr", type=float, default=0.0)
@@ -768,9 +803,18 @@ def main():
     )
     ap.add_argument("--min-corr", type=float, default=-999.0)
     ap.add_argument("--max-resolution", type=float, default=0.0, help="Minimum d spacing in Angstrom; 0 disables.")
+    ap.add_argument(
+        "--double",
+        "--float64",
+        dest="double_precision",
+        action="store_true",
+        default=False,
+        help="Use exact complex128/float64 double precision (default: complex64 single precision).",
+    )
     args = ap.parse_args()
 
     cfg = Config(
+        double_precision=bool(args.double_precision),
         n_basis=args.n_basis,
         n_points=args.n_points,
         sg_window=args.sg_window,
@@ -806,6 +850,11 @@ def main():
         thickness_grad_frac=args.thickness_grad_frac,
         thickness_sigma_frac=args.thickness_sigma_frac,
         thickness_points=args.thickness_points,
+        thickness_gamma_shape=args.thickness_gamma_shape,
+        thickness_evaluator=args.thickness_evaluator,
+        thickness_min_A=10.0 * args.thickness_min_nm,
+        thickness_max_A=10.0 * args.thickness_max_nm,
+        thickness_table_dt_A=args.thickness_table_dt,
         group_width_deg=args.group_width_deg,
         variance_a=args.variance_a,
         variance_b_corr=args.variance_b_corr,
@@ -836,9 +885,8 @@ def main():
     data_all = XDSData(Path(args.hkl), hkl_transform=args.hkl_transform)
 
     if args.row_index_file:
-        row_indices = read_row_index_file(args.row_index_file)
-        indices = np.asarray(sorted(set(row_indices)), dtype=int)
-        indices = indices[(indices >= 0) & (indices < len(data_all.iobs))]
+        row_indices = read_row_index_file(args.row_index_file, row_count=len(data_all.iobs))
+        indices = np.asarray(row_indices, dtype=int)
     else:
         mask = np.isfinite(data_all.sigma) & (data_all.sigma > 0.0) & np.isfinite(data_all.zcal)
         if args.positive_only:

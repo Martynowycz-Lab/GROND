@@ -17,6 +17,8 @@ from grond.refine.native_output import update_res_coordinates
 
 
 def require_no_hydrogen(path: Path) -> dict:
+    """Parse a SHELX model and return it; raise when it has H/D atoms or an active HFIX instruction."""
+
     model = parse_model(path)
     hydrogens = [a["name"] for a in model["atoms"] if a["element"].upper() in {"H", "D"}]
     if hydrogens:
@@ -29,11 +31,15 @@ def require_no_hydrogen(path: Path) -> dict:
 
 
 def _metric(cell):
+    """Return the metric tensor G = O^T O of a unit cell (lengths in A, angles in degrees)."""
+
     orth = np.asarray(gemmi.UnitCell(*cell).orth.mat)
     return orth.T @ orth
 
 
 def transformed_cell(cell, matrix):
+    """Return the cell (a, b, c in A; alpha, beta, gamma in degrees) after a fractional basis change."""
+
     inverse = np.linalg.inv(matrix)
     metric = inverse.T @ _metric(cell) @ inverse
     lengths = np.sqrt(np.diag(metric))
@@ -55,6 +61,8 @@ def setting_matrices(source, reference):
 
 
 def _operations_match(source, reference, matrix, shift):
+    """Return whether the source symmetry operations, moved by ``matrix`` and ``shift``, are the reference's."""
+
     inverse = np.linalg.inv(matrix)
     expected = reference["symmetry_ops"]
     if len(source["symmetry_ops"]) != len(expected):
@@ -74,6 +82,7 @@ def align_heavy_model(source: dict, reference: dict) -> tuple[dict, dict]:
     left = source["atoms"]
     right = [a for a in reference["atoms"] if a["element"].upper() not in {"H", "D"}]
     def composition(atoms):
+        """Count atoms by element."""
         return Counter(a["element"].upper() for a in atoms)
     if composition(left) != composition(right):
         raise ValueError(f"Heavy-atom compositions differ: input {composition(left)}, reference {composition(right)}")
@@ -142,6 +151,12 @@ def align_heavy_model(source: dict, reference: dict) -> tuple[dict, dict]:
 
 
 def write_aligned_res(source: Path, reference: Path, destination: Path) -> dict:
+    """Write the H-free source model in the reference setting to ``destination``; return the alignment report.
+
+    CELL, ZERR (first-order propagated), LATT and SYMM follow the reference, and SFAC coefficients are the reference's
+    electron factors by element.
+    """
+
     reference_model = parse_model(reference)
     model, report = align_heavy_model(require_no_hydrogen(source), reference_model)
     destination.parent.mkdir(parents=True, exist_ok=True)

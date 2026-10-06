@@ -353,32 +353,41 @@ def _publication_model_endpoint_candidate(result: Mapping[str, object]) -> dict[
         "promotion_fields_required": True,
         "promotion_fields_ok": promotion_fields.get("passed") is True,
         "promotion_field_contract": promotion_fields,
-        "wght_mode": origin_endpoint.get("wght_mode"),
+        # combined summaries record the policy as endpoint_wght_mode and the run's own as shelxl.wght_mode
+        "wght_mode": origin_endpoint.get("wght_mode")
+        or origin_endpoint.get("endpoint_wght_mode")
+        or origin_shelxl.get("wght_mode"),
+        "wght_convergence": origin_shelxl.get("wght_convergence"),
     }
 
 
 def _multi_feedback_endpoint_candidates(
     result: Mapping[str, object],
     run_root: Path,
+    policy: str = "all",
 ) -> list[dict[str, object]]:
-    """Expose every healthy shared LS1 feedback cycle to the endpoint chooser.
+    """Expose shared SHELXL feedback cycles to the endpoint chooser.
 
-    The feedback loop is deliberately allowed to take several lagged LS1 steps,
-    but the last step is not guaranteed to be the best clean publication
-    endpoint.  Each adopted cycle already carries a hash-bound RES/HKL/LST and
-    modulation audit, so excluding intermediate cycles can silently discard a
-    substantially better result.  The ordinary publication gates and ranking
-    remain authoritative after these candidates are added.
+    ``kept`` (AUTO) offers only the cycle the loop kept (``kept_cycle``), the model that every row table, held-out
+    number and map of the run describes.  Ranking the other cycles by in-sample SHELXL R1 compares refinements
+    against differently corrected data and can publish an earlier, less refined model (for example cycle 2
+    chosen while the loop kept cycle 5).  Under ``all`` every adopted cycle is a candidate and the ordinary
+    publication gates and ranking decide.
     """
 
     if not result.get("combined"):
         return []
+    if policy not in {"kept", "all"}:
+        raise ValueError(f"unknown --publication-feedback-cycles {policy!r}")
     summary_path = run_root / "runs" / "shared_shelxl_feedback" / "multi_shelxl_feedback_loop_summary.json"
     summary = try_read_json(summary_path)
     raw_cycles = summary.get("cycles") if isinstance(summary.get("cycles"), list) else []
+    kept_cycle = _quick_int(summary.get("kept_cycle"))
     candidates: list[dict[str, object]] = []
     for raw_cycle in raw_cycles:
         if not isinstance(raw_cycle, Mapping) or not bool(raw_cycle.get("adopted_for_feedback", False)):
+            continue
+        if policy == "kept" and _quick_int(raw_cycle.get("cycle")) != kept_cycle:
             continue
         model_text = str(raw_cycle.get("output_model") or "").strip()
         combined_text = str(raw_cycle.get("combined") or "").strip()

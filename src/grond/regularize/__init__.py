@@ -1,1 +1,1 @@
-"""Regularization workflow namespace for structure and nuisance-parameter stages."""
+"""Regularization of the structure and nuisance-parameter stages."""

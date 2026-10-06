@@ -15,7 +15,12 @@ import csv
 import json
 import math
 import re
+import sys
 from pathlib import Path
+
+if not __package__:
+    # Direct legacy execution must import this checkout, not another installed GROND.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 import numpy as np
 from scipy.optimize import least_squares
@@ -28,6 +33,11 @@ from grond.legacy.engine.bloch_engine import (
 
 
 def _embedded_float(text: str, name: str, *, first: bool = False) -> float:
+    """Parse a named value such as ORGY= from an XDS header line; with first=True take the first token.
+
+    Raises when the value is missing or not finite.
+    """
+
     if first:
         value = str(text).split()[0]
     else:
@@ -42,6 +52,8 @@ def _embedded_float(text: str, name: str, *, first: bool = False) -> float:
 
 
 def detector_contract(data: XDSData) -> dict:
+    """Return the detector origin (px), distance and pixel size (mm), unit axes and beam axis from the XDS header."""
+
     header = data.header
     org = str(header.get("ORGX", ""))
     size = str(header.get("NX", ""))
@@ -65,6 +77,8 @@ def detector_contract(data: XDSData) -> dict:
 
 
 def _chebyshev_matrix(z: np.ndarray, center: float, half_range: float, degree: int) -> np.ndarray:
+    """Return the Chebyshev design matrix of z mapped onto [-1, 1] about center, clipped outside that range."""
+
     normalized = np.clip((np.asarray(z, dtype=float) - center) / half_range, -1.0, 1.0)
     return np.polynomial.chebyshev.chebvander(normalized, int(degree))
 
@@ -91,6 +105,8 @@ def _fit_chebyshev(
     max_abs: float,
     f_scale: float,
 ) -> np.ndarray:
+    """Fit bounded Chebyshev coefficients to values on fit_mask with a robust soft-L1 loss and return them."""
+
     degree = design.shape[1] - 1
     lower, upper = _coefficient_bounds(max_abs, degree)
     result = least_squares(
@@ -107,6 +123,12 @@ def _fit_chebyshev(
 
 
 def _project_xy(data: XDSData, detector: dict, g: np.ndarray) -> np.ndarray:
+    """Intersect the scattered-beam line s0 + g with the detector plane and return (x, y) in pixels.
+
+    NaN only when s0 + g is parallel to the plane; a beam pointing away from the detector still gets the coordinates
+    of the backward intersection.
+    """
+
     s1 = np.asarray(data.s0, dtype=float) + np.asarray(g, dtype=float)
     denominator = float(np.dot(s1, detector["beam_axis"]))
     if not math.isfinite(denominator) or abs(denominator) <= 1e-12:
@@ -123,6 +145,8 @@ def _project_xy(data: XDSData, detector: dict, g: np.ndarray) -> np.ndarray:
 
 
 def _row_g(data: XDSData, row_idx: int, corrected_z: float) -> np.ndarray:
+    """Return one row's reciprocal-lattice vector (Å⁻¹, lab frame) at the slew-corrected frame corrected_z."""
+
     omega = data.omega_from_z(float(corrected_z))
     a_matrix = data.A_for_omega(data.omega_from_z(float(data.zcal[row_idx])))
     theta = math.radians(float(omega))
@@ -148,6 +172,12 @@ def _centroid_linearization(
     *,
     derivative_step_deg: float = 1.0e-3,
 ) -> tuple[np.ndarray, np.ndarray]:
+    """Return predicted detector (x, y) per row after slew and its derivative with respect to two tilts.
+
+    The tilts are rotations about the two detector axes; the Jacobian is in pixels per degree, by finite
+    difference with step derivative_step_deg.
+    """
+
     base = np.zeros((len(indices), 2), dtype=float)
     jacobian = np.zeros((len(indices), 2, 2), dtype=float)
     axes = detector["axes"]
@@ -171,6 +201,11 @@ def _fit_tilt_coefficients(
     *,
     max_abs_tilt_deg: float,
 ) -> tuple[np.ndarray, np.ndarray]:
+    """Fit bounded Chebyshev coefficients of the two transverse tilts (degrees) to observed centroids.
+
+    Uses the linearized centroid model; returns the (tilt_x, tilt_y) coefficient arrays.
+    """
+
     degree = design.shape[1] - 1
     count = degree + 1
     lower_one, upper_one = _coefficient_bounds(max_abs_tilt_deg, degree)
@@ -178,6 +213,8 @@ def _fit_tilt_coefficients(
     upper = np.concatenate([upper_one, upper_one])
 
     def residual(coefficients):
+        """Return the centroid residuals (px) of the linearized model on fit_mask for one coefficient vector."""
+
         tilt_x = design @ coefficients[:count]
         tilt_y = design @ coefficients[count:]
         predicted = (
@@ -201,6 +238,8 @@ def _fit_tilt_coefficients(
 
 
 def _rms(values: np.ndarray) -> float:
+    """Return the root mean square of values, or NaN when there are none."""
+
     values = np.asarray(values, dtype=float)
     return float(np.sqrt(np.mean(values * values))) if values.size else float("nan")
 
@@ -216,6 +255,14 @@ def fit_geometry_path(
     max_abs_tilt_deg: float = 0.25,
     folds: int = 5,
 ) -> dict:
+    """Fit the scan path from XDS centroids, write its contract JSON and row CSV, and return the contract.
+
+    Slew (frames) and two transverse tilts (degrees) are Chebyshev polynomials in ZCAL. The median
+    ZOBS-ZCAL is removed first because a constant frame offset is a separate GROND nuisance; slew has the
+    opposite sign to the observed centroid shift. Contiguous-fold cross-validation scores the fit, and the
+    tilt path is kept only if it improves held-out centroid RMS by at least 1% without hitting a bound.
+    """
+
     if int(degree) < 2 or int(degree) > 5:
         raise ValueError("geometry-path degree must be 2 through 5 (3 through 6 coefficients)")
     if int(folds) < 3:
@@ -463,6 +510,8 @@ def fit_geometry_path(
 
 
 def main() -> int:
+    """Fit the geometry path from the command line, print its validation block and return 0."""
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--hkl", required=True)
     parser.add_argument("--out", required=True)

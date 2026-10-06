@@ -17,6 +17,60 @@ HKLF4_POSITIVE_WORKING_LIMIT = 90_000.0
 HKLF4_NEGATIVE_ABS_WORKING_LIMIT = 9_000.0
 
 
+def parse_hkl_observation_line(line: str) -> tuple[int, int, int, float, float]:
+    """Read a whitespace-separated or fixed-column observation, ignoring optional trailing columns.
+
+    Full eight-character observation fields can touch each other or the last index. Try a complete free-format
+    record first, then fixed columns; float-written integer indices are the final free-format fallback.
+    """
+
+    parts = line.split()
+    if len(parts) >= 5:
+        try:
+            return int(parts[0]), int(parts[1]), int(parts[2]), float(parts[3]), float(parts[4])
+        except (ValueError, OverflowError):
+            pass
+    if len(line.rstrip("\r\n")) >= 28:
+        try:
+            return int(line[:4]), int(line[4:8]), int(line[8:12]), float(line[12:20]), float(line[20:28])
+        except (ValueError, OverflowError):
+            pass
+    if len(parts) >= 5:
+        indices = [float(value) for value in parts[:3]]
+        if all(value.is_integer() for value in indices):
+            h, k, ell = (int(value) for value in indices)
+            return h, k, ell, float(parts[3]), float(parts[4])
+    raise ValueError("not a valid free-format or fixed-column HKL observation")
+
+
+def adaptive_observation_field(value: float) -> str:
+    """Most accurate decimal or exponential number that fits one eight-character HKLF field.
+
+    Keep an explicit decimal point, as required to avoid Fortran's implicit decimal placement. This opt-in
+    format preserves small observations beside large uncertainties without forcing a common scale reduction.
+    """
+
+    value = float(value)
+    if not math.isfinite(value):
+        raise ValueError("HKLF4 observations must be finite")
+    candidates = []
+    for digits in range(7):
+        fixed = f"{value:.{digits}f}"
+        if digits == 0:
+            fixed += "."
+        if len(fixed) <= 8 and (value == 0.0 or float(fixed) != 0.0):
+            candidates.append((abs(float(fixed) - value), 10.0**(-digits), fixed))
+        if digits:
+            mantissa, exponent = f"{value:.{digits}E}".split("E")
+            exponent = int(exponent)
+            scientific = f"{mantissa}E{exponent}"
+            if len(scientific) <= 8 and math.isfinite(float(scientific)) and (value == 0.0 or float(scientific) != 0.0):
+                candidates.append((abs(float(scientific) - value), 10.0**(exponent - digits), scientific))
+    if not candidates:
+        raise ValueError(f"HKLF4 field overflow for {value!r}")
+    return min(candidates)[2].rjust(8)
+
+
 def safe_fixed_width_factor(
     rows: Iterable[tuple[int, int, int, float, float]],
     *,
@@ -53,6 +107,8 @@ def format_fixed_width_row(
     ell: int,
     intensity: float,
     sigma: float,
+    *,
+    adaptive: bool = False,
 ) -> str:
     """Format one HKLF4 row and reject non-finite or overflowing fields."""
 
@@ -64,8 +120,8 @@ def format_fixed_width_row(
         f"{int(h):4d}",
         f"{int(k):4d}",
         f"{int(ell):4d}",
-        f"{intensity_value:8.2f}",
-        f"{sigma_value:8.2f}",
+        adaptive_observation_field(intensity_value) if adaptive else f"{intensity_value:8.2f}",
+        adaptive_observation_field(sigma_value) if adaptive else f"{sigma_value:8.2f}",
     )
     for field, width in zip(fields, (4, 4, 4, 8, 8), strict=True):
         if len(field) != width:
@@ -79,13 +135,31 @@ def format_fixed_width_row(
 def write_fixed_width_hkl(
     path: Path,
     rows: Iterable[tuple[int, int, int, float, float]],
+    *,
+    adaptive: bool = False,
 ) -> None:
     """Write a validated fixed-width HKLF4 reflection file."""
 
     with path.open("w") as handle:
         for row in rows:
-            handle.write(format_fixed_width_row(*row))
+            handle.write(format_fixed_width_row(*row, adaptive=adaptive))
         handle.write(format_fixed_width_row(0, 0, 0, 0.0, 0.0))
+
+
+def write_fixed_width_batch_hkl(
+    path: Path,
+    rows: Iterable[tuple[int, int, int, float, float]],
+    batches: Iterable[int],
+) -> None:
+    """Write an HKLF4 file with a batch number in columns 29-32 (SHELXL scales batch m > 1 by BASF(m-1))."""
+
+    with path.open("w") as handle:
+        for row, batch in zip(rows, batches, strict=True):
+            value = int(batch)
+            if not 1 <= value <= 9999:
+                raise ValueError(f"HKLF4 batch number must be 1..9999, got {batch!r}")
+            handle.write(format_fixed_width_row(*row).rstrip("\n") + f"{value:4d}\n")
+        handle.write(format_fixed_width_row(0, 0, 0, 0.0, 0.0).rstrip("\n") + f"{0:4d}\n")
 
 
 def _fixed_width_hklf4_records(path: Path) -> tuple[list[bytes], dict[str, object]]:
@@ -149,55 +223,16 @@ def audit_fixed_width_hklf4(path: Path) -> dict[str, object]:
     return audit
 
 
-def write_sign_paired_hklf4(source: Path, output: Path) -> dict[str, object]:
-    """Write the exact gauge partner by negating h,k,l only.
-
-    I, sigma(I), batch numbers, producer-specific trailing fields, line
-    endings, and the terminator payload are retained byte-for-byte.
-    """
-
-    lines, source_audit = _fixed_width_hklf4_records(source)
-    written: list[bytes] = []
-    for line_number, line in enumerate(lines, start=1):
-        body = line.rstrip(b"\r\n")
-        if not body:
-            written.append(line)
-            continue
-        h, k, ell = int(body[0:4]), int(body[4:8]), int(body[8:12])
-        if (h, k, ell) == (0, 0, 0):
-            written.append(line)
-            continue
-        index_bytes = f"{-h:4d}{-k:4d}{-ell:4d}".encode("ascii")
-        if len(index_bytes) != 12:
-            raise ValueError(
-                f"HKLF4 index overflow after sign pairing on row {line_number}: "
-                f"{(-h, -k, -ell)}"
-            )
-        written.append(index_bytes + line[12:])
-    output.write_bytes(b"".join(written))
-    output_audit = audit_fixed_width_hklf4(output)
-    if output_audit != source_audit:
-        raise ValueError(
-            "sign-paired HKLF4 failed the reflection-count/observation-payload preservation audit"
-        )
-    return {
-        "source": source_audit,
-        "output": output_audit,
-        "reflection_count_preserved": True,
-        "observation_payload_preserved": True,
-        "index_operation": "h,k,l -> -h,-k,-l",
-    }
-
-
 def audit_fixed_width_precision(path: Path) -> dict[str, object]:
     """Check the written observations, not the arbitrary units before export.
 
-    Each F8.2 field rounds by at most 0.005. Expressing that bound in sigma
-    units shows whether the printed precision matters to the observations.
+    Use each field's actual decimal/exponent precision (0.005 for ordinary F8.2).
+    Expressing that bound in sigma units shows whether printed precision matters.
     """
     try:
         lines, record = _fixed_width_hklf4_records(path)
         sigmas = []
+        bounds = []
         for line in lines:
             body = line.rstrip(b"\r\n")
             if not body or tuple(int(body[i:i + 4]) for i in (0, 4, 8)) == (0, 0, 0):
@@ -208,11 +243,16 @@ def audit_fixed_width_precision(path: Path) -> dict[str, object]:
             if sigma <= 0:
                 raise ValueError("written HKLF4 sigma is nonpositive; the observation has no valid weight")
             sigmas.append(sigma)
+            text = body[12:20].decode("ascii").strip().upper()
+            mantissa, _, exponent = text.partition("E")
+            decimals = len(mantissa.partition(".")[2]) if "." in mantissa else 2
+            quantum = 10.0 ** (int(exponent or 0) - decimals)
+            bounds.append(0.5 * quantum / sigma)
         if not sigmas:
             raise ValueError("written HKLF4 contains no reflections")
     except (OSError, ValueError) as exc:
         return {"status": "invalid", "path": str(path), "reason": str(exc)}
-    bounds = sorted(0.005 / sigma for sigma in sigmas)
+    bounds.sort()
     position = 0.95 * (len(bounds) - 1)
     lower = int(position)
     p95 = bounds[lower] + (position - lower) * (bounds[min(lower + 1, len(bounds) - 1)] - bounds[lower])
@@ -220,4 +260,4 @@ def audit_fixed_width_precision(path: Path) -> dict[str, object]:
             "observation_payload_sha256": record["observation_payload_sha256"],
             "minimum_sigma": min(sigmas), "rounding_bound_sigma_units_p95": p95,
             "rounding_bound_sigma_units_max": bounds[-1],
-            "definition": "F8.2 half-step 0.005 divided by each positive written sigma(I); a precision bound, not an uncertainty calibration"}
+            "definition": "Half of each written intensity field's last decimal/exponent unit divided by its positive sigma(I); a precision bound, not an uncertainty calibration"}

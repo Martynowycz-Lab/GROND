@@ -3,13 +3,74 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+import os
+from dataclasses import dataclass, field
 
 from grond.bloch.constants import COMPUTE_BACKENDS, DEFAULT_MAX_SUPPORT_SG, SITE_SYMMETRY_TOLERANCE_FRACTIONAL
+from grond.bloch.thickness import (
+    DEFAULT_TABLE_DT_A,
+    DEFAULT_THICKNESS_MAX_A,
+    DEFAULT_THICKNESS_MIN_A,
+    THICKNESS_EVALUATORS,
+    config_table_nodes,
+    config_thickness_contract,
+    resolved_config_evaluator,
+    validate_support,
+)
+
+
+def _default_double_precision() -> bool:
+    """Default numerical precision for the Bloch engine.
+
+    complex64 is the default. Its intensity error depends on the matrix,
+    thickness and propagation method; no universal accuracy bound is implied.
+    Set GROND_PRECISION=float64
+    (or "double") to make complex128 the default everywhere, e.g. for physics
+    audits and the unit-test suite. An explicit Config(double_precision=...)
+    always wins.
+    """
+
+    value = os.environ.get("GROND_PRECISION", "float32").strip().lower()
+    if value in {"float64", "double", "complex128", "fp64"}:
+        return True
+    if value in {"float32", "single", "complex64", "fp32", ""}:
+        return False
+    raise ValueError(f"GROND_PRECISION must be float32 or float64, got {value!r}")
+
+
+def resolve_double_precision(double_flag: bool | None = None) -> bool:
+    """Prediction precision of the row engines: complex128 if --double is given, else from GROND_PRECISION."""
+
+    return True if double_flag else _default_double_precision()
+
+
+def prediction_precision_record(double_flag: bool | None = None) -> dict:
+    """The resolved prediction precision (resolve_double_precision) and what set it, for the run summary.
+
+    hamiltonian_dtype is the dtype that double_precision selects for the Bloch matrices (bloch/hamiltonian.py,
+    bloch/row_cache.py).
+    """
+
+    env = os.environ.get("GROND_PRECISION")
+    double = resolve_double_precision(double_flag)
+    source = "--double" if double_flag else ("GROND_PRECISION" if env is not None and env.strip() else "default")
+    return {
+        "double_precision": double,
+        "hamiltonian_dtype": "complex128" if double else "complex64",
+        "source": source,
+        "double_flag": bool(double_flag),
+        "GROND_PRECISION": env,
+    }
 
 
 @dataclass
 class Config:
+    """Forward-model settings of the Bloch engine, validated when the object is created.
+
+    Lengths are in Å (thickness_*_A, topup_d_min, ug_d_min), excitation-error widths S_g in Å⁻¹ (sg_window*,
+    max_support_sg), angles in degrees and frame_offset in frames. double_precision defaults from GROND_PRECISION.
+    """
+
     n_basis: int = 20
     n_points: int = 20
     sg_window: float = 0.006
@@ -74,8 +135,19 @@ class Config:
     row_plan_cache: str = "off"
     ug_storage_mode: str = "auto"
     paired_inverse_hand: bool = False
+    double_precision: bool = field(default_factory=_default_double_precision)
+    # Physical thickness distributions on a support (grond.bloch.thickness). The default "quadrature" keeps the
+    # legacy node quadrature of the legacy thickness models; "table", "cf" and "auto" evaluate uniform_gradient or
+    # gamma (mean thickness_A, shape thickness_gamma_shape) on [thickness_min_A, thickness_max_A].
+    thickness_gamma_shape: float = 1.0
+    thickness_evaluator: str = "quadrature"
+    thickness_min_A: float = DEFAULT_THICKNESS_MIN_A
+    thickness_max_A: float = DEFAULT_THICKNESS_MAX_A
+    thickness_table_dt_A: float = DEFAULT_TABLE_DT_A
 
     def __post_init__(self):
+        """Raise ValueError for an out-of-range value or an unsupported combination of modes; fields are not changed."""
+
         integer_minima = {
             "n_basis": (self.n_basis, 2),
             "n_points": (self.n_points, 1),
@@ -153,6 +225,14 @@ class Config:
                 "mosaicity_sigma_deg so candidate widths share one enclosing beam basis"
             )
         if (
+            str(self.mosaicity_mode).lower() == "transverse_target"
+            and str(self.profile_coordinate).lower() != "target_sg"
+        ):
+            raise ValueError(
+                "transverse_target re-centres every mosaic block on the target's excitation errors and "
+                "requires profile_coordinate=target_sg"
+            )
+        if (
             str(self.mosaicity_mode).lower() == "gaussian_cone"
             and str(self.profile_coordinate).lower() != "direct_angle"
         ):
@@ -169,7 +249,7 @@ class Config:
             "sg_jitter_mode": (self.sg_jitter_mode, {"none", "gaussian", "student_t"}),
             "mosaicity_mode": (
                 self.mosaicity_mode,
-                {"none", "gaussian_omega", "gaussian_cone"},
+                {"none", "gaussian_omega", "gaussian_cone", "transverse_target"},
             ),
             "profile_coordinate": (
                 self.profile_coordinate,
@@ -186,8 +266,9 @@ class Config:
             "profile_accumulation": (self.profile_accumulation, {"sum", "mean"}),
             "thickness_model": (
                 self.thickness_model,
-                {"single", "uniform_gradient", "gaussian", "gaussian_gradient"},
+                {"single", "uniform_gradient", "gaussian", "gaussian_gradient", "gamma"},
             ),
+            "thickness_evaluator": (self.thickness_evaluator, set(THICKNESS_EVALUATORS)),
             "absorption_mode": (
                 self.absorption_mode,
                 {
@@ -229,6 +310,18 @@ class Config:
             )
         if self.thickness_grad_frac > 1.0:
             raise ValueError("thickness_grad_frac must not exceed 1")
+        if not math.isfinite(float(self.thickness_gamma_shape)) or float(self.thickness_gamma_shape) <= 0.0:
+            raise ValueError("thickness_gamma_shape must be finite and positive")
+        if str(self.thickness_evaluator).lower() != "quadrature":
+            validate_support(self.thickness_min_A, self.thickness_max_A, self.thickness_table_dt_A)
+        resolved_thickness = resolved_config_evaluator(self)
+        if resolved_thickness == "table":
+            config_table_nodes(self)  # fails closed when the distribution has no mass on the support
+        if resolved_thickness == "cf" and str(self.compute_backend).lower() not in {"scipy", "numpy_scipy_cpu"}:
+            raise ValueError(
+                "thickness_evaluator cf (exact gamma average) needs the Hermitian eigensystem of the SciPy backend; "
+                "choose --compute-backend scipy or thickness_evaluator table"
+            )
         if not math.isfinite(float(self.sg_jitter_student_df)) or self.sg_jitter_student_df <= 1.0:
             raise ValueError("sg_jitter_student_df must be greater than 1")
         if not 0.0 < float(self.free_fraction) < 1.0:
@@ -238,17 +331,29 @@ class Config:
         if not (math.isnan(float(self.dose_b_ref_frame)) or math.isfinite(float(self.dose_b_ref_frame))):
             raise ValueError("dose_b_ref_frame must be finite or NaN")
         if bool(self.paired_inverse_hand):
-            absorptive_values = (
-                self.absorption_mu,
+            # The exact pair holds for H = H0 + i*mu*I only: a uniform diagonal
+            # loss (mean/midgley modes add i*mu to every beam) and no
+            # off-diagonal, |g|- or angle-dependent absorptive terms.
+            nonuniform_values = (
                 self.absorption_frac,
                 self.absorption_mu_g2,
                 self.absorption_mu_theta2,
                 self.absorption_tds_b,
             )
-            if str(self.absorption_mode).lower() != "none" or any(
-                abs(float(value)) > 0.0 for value in absorptive_values
+            mode = str(self.absorption_mode).lower()
+            uniform_mode = mode in {"mean", "midgley_like", "midgley"}
+            if (
+                (mode != "none" and not uniform_mode)
+                or any(abs(float(value)) > 0.0 for value in nonuniform_values)
+                or (mode == "none" and abs(float(self.absorption_mu)) > 0.0)
+                or not math.isfinite(float(self.absorption_mu))
+                or float(self.absorption_mu) < 0.0
             ):
-                raise ValueError("paired_inverse_hand requires absorption_mode=none and zero absorptive coefficients")
+                raise ValueError(
+                    "paired_inverse_hand requires absorption_mode=none, or a uniform absorption mode "
+                    "(mean, midgley_like, midgley) with absorption_mu >= 0 and zero absorption_frac, "
+                    "absorption_mu_g2, absorption_mu_theta2 and absorption_tds_b"
+                )
             if str(self.compute_backend).lower() not in {"scipy", "numpy_scipy_cpu"}:
                 raise ValueError("paired_inverse_hand currently requires the full SciPy Hermitian backend")
 
@@ -256,14 +361,13 @@ class Config:
 def frozen_kernel_contract(cfg: Config | None = None):
     """Machine-readable record of the audited Bloch convention.
 
-    This is intentionally descriptive rather than configurable.  The XDS raw
-    dynrow work should test observation contracts, not silently mutate the
-    production Bloch kernel.
+    This is intentionally descriptive rather than configurable: work on
+    observation contracts must not silently mutate the production Bloch kernel.
     """
     convention = str(getattr(cfg, "matrix_convention", "j_minus_i") if cfg is not None else "j_minus_i")
     offdiag_expr = "U(h_j - h_i) / (2*k)" if convention == "j_minus_i" else "U(h_i - h_j) / (2*k)"
     offdiag_sign = "basis[j] - basis[i]" if convention == "j_minus_i" else "basis[i] - basis[j]"
-    return {
+    contract = {
         "name": "audited_signed_row_simple_hermitian",
         "structure_factors": {
             "internal_occupancy": "physical site occupancy; parsed SHELX SOF multiplied by the site-symmetry order; coreCIF occupancy unchanged",
@@ -309,7 +413,8 @@ def frozen_kernel_contract(cfg: Config | None = None):
                 else {
                     "enabled": bool(getattr(cfg, "paired_inverse_hand", False)),
                     "method": "I_inverse(t)=I_original(-t) with one elastic Hermitian eigensystem",
-                    "absorption_allowed": False,
+                    # uniform absorption H = H0 + i*mu*I splits exactly: eigh(H0) and exp(-4*pi*mu*t) for both hands
+                    "absorption_allowed": "uniform_scalar_only",
                 }
             ),
             "absorption": "optional non-Hermitian optical-potential diagnostics; default none. Modes are mean, beam_dependent, offdiag_fraction, offdiag_tds, and midgley_like.",
@@ -337,3 +442,7 @@ def frozen_kernel_contract(cfg: Config | None = None):
             "p222_canonicalization": False,
         },
     }
+    if cfg is not None and str(getattr(cfg, "thickness_evaluator", "quadrature")).lower() != "quadrature":
+        # Recorded only for the support evaluators, so legacy contracts are unchanged.
+        contract["thickness_distribution"] = config_thickness_contract(cfg)
+    return contract

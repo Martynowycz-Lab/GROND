@@ -38,6 +38,8 @@ DEFAULT_ROW_TABLE = Path("native_dyn_calc.csv")
 
 
 def read_rows(path: Path) -> list[dict[str, str]]:
+    """Read a CSV file into a list of row dicts; raise if it has no rows."""
+
     with path.open() as f:
         rows = list(csv.DictReader(f))
     if not rows:
@@ -46,6 +48,8 @@ def read_rows(path: Path) -> list[dict[str, str]]:
 
 
 def write_csv(path: Path, rows: list[dict]) -> None:
+    """Write rows to a CSV file with the union of their keys, in first-seen order, as header."""
+
     if not rows:
         path.write_text("")
         return
@@ -63,6 +67,8 @@ def write_csv(path: Path, rows: list[dict]) -> None:
 
 
 def fcol(rows: list[dict[str, str]], name: str, default: float = float("nan")) -> np.ndarray:
+    """Return one column as a float array, with default for missing or unparsable cells."""
+
     vals = []
     for r in rows:
         try:
@@ -73,6 +79,8 @@ def fcol(rows: list[dict[str, str]], name: str, default: float = float("nan")) -
 
 
 def icol(rows: list[dict[str, str]], name: str, default: int = -1) -> np.ndarray:
+    """Return one column as an int array, with default for missing or unparsable cells."""
+
     vals = []
     for r in rows:
         try:
@@ -83,25 +91,35 @@ def icol(rows: list[dict[str, str]], name: str, default: int = -1) -> np.ndarray
 
 
 def scol(rows: list[dict[str, str]], name: str, default: str = "") -> np.ndarray:
+    """Return one column as a string array, with default for missing cells."""
+
     return np.asarray([str(r.get(name, default)) for r in rows])
 
 
 def pct(x: float) -> float:
+    """Return a fraction as a percentage, or NaN if it is not finite."""
+
     return 100.0 * float(x) if np.isfinite(x) else float("nan")
 
 
 def stable_signed_hkl_bucket(h: int, k: int, l: int, mod: int) -> int:
+    """Return a stable bucket in [0, mod) for one signed HKL, from its SHA-1 hash."""
+
     digest = hashlib.sha1(f"{h},{k},{l}".encode("ascii")).digest()
     return int.from_bytes(digest[:8], "little", signed=False) % int(mod)
 
 
 def gaussian_rbf(values: np.ndarray, centers: np.ndarray, width: float) -> np.ndarray:
+    """Return Gaussian radial-basis columns of values at centers with a common width."""
+
     width = max(float(width), 1e-6)
     return np.exp(-0.5 * ((values[:, None] - centers[None, :]) / width) ** 2)
 
 
 @dataclass
 class FeatureMatrix:
+    """Standardized correction design matrix with feature names, ridge penalties and train-row means and SDs."""
+
     X: np.ndarray
     names: list[str]
     penalties: np.ndarray
@@ -110,6 +128,8 @@ class FeatureMatrix:
 
 
 def add_feature(cols: list[np.ndarray], names: list[str], penalties: list[float], name: str, values, penalty: float) -> None:
+    """Append one named one-dimensional feature column and its ridge penalty to the parallel lists."""
+
     vals = np.asarray(values, dtype=float)
     if vals.ndim != 1:
         raise ValueError(f"feature {name} is not one-dimensional")
@@ -119,6 +139,8 @@ def add_feature(cols: list[np.ndarray], names: list[str], penalties: list[float]
 
 
 def existing_first(rows: list[dict[str, str]], candidates: Iterable[str]) -> str | None:
+    """Return the first candidate column name present in the rows, or None."""
+
     if not rows:
         return None
     keys = set(rows[0].keys())
@@ -129,6 +151,11 @@ def existing_first(rows: list[dict[str, str]], candidates: Iterable[str]) -> str
 
 
 def optional_feature(rows: list[dict[str, str]], candidates: Iterable[str]) -> tuple[str | None, np.ndarray | None]:
+    """Return (column name, values) for the first present candidate column, or (None, None).
+
+    A column with fewer than max(20, 1% of rows) finite values counts as absent.
+    """
+
     name = existing_first(rows, candidates)
     if name is None:
         return None, None
@@ -321,6 +348,11 @@ def fit_weighted_ridge(
     penalties: np.ndarray,
     alpha_factor: float,
 ) -> tuple[np.ndarray, float, int]:
+    """Solve a weighted ridge regression on fit_mask and return (coefficients, ridge lambda, fit rows).
+
+    Each feature's penalty is scaled by alpha_factor times the median penalized diagonal of X'WX.
+    """
+
     m = fit_mask & np.isfinite(y) & np.all(np.isfinite(X), axis=1) & np.isfinite(weights) & (weights > 0)
     nfit = int(np.count_nonzero(m))
     if X.shape[1] == 0:
@@ -343,6 +375,8 @@ def fit_weighted_ridge(
 
 
 def metric_block(obs, sig, pred, mask, a, b) -> dict:
+    """Return native metrics plus median and 10th/90th-percentile residual/sigma for the rows in mask."""
+
     m = np.asarray(mask, dtype=bool) & np.isfinite(obs) & np.isfinite(sig) & np.isfinite(pred)
     out = native_metrics(obs, sig, pred, m, a, b, n_params=0)
     if np.count_nonzero(m):
@@ -374,6 +408,14 @@ def choose_masks(
     holdout_value: int,
     frame_width: float,
 ) -> dict[str, np.ndarray]:
+    """Return the all, work and free masks and the free weak, strong and high-resolution subsets.
+
+    mode picks the held-out rows: the table's split column, a signed-HKL hash bucket, a frame bucket
+    (frame_mod) or a contiguous frame quantile block (frame_block). Fewer than 20 held-out rows falls back
+    to signed-HKL bucket 0 of 10. Weak and strong are I/sigma quartiles; high resolution is the top 1/d²
+    quartile (extreme: top decile).
+    """
+
     valid = np.isfinite(obs) & np.isfinite(sig) & (sig > 0) & np.isfinite(d) & (d > 0)
     h = icol(rows, "h")
     k = icol(rows, "k")
@@ -427,6 +469,8 @@ def choose_masks(
 
 
 def blocks_for_prediction(obs, sig, pred, masks, a, b) -> dict[str, dict]:
+    """Return metric_block for one prediction on every mask."""
+
     return {name: metric_block(obs, sig, pred, mask, a, b) for name, mask in masks.items()}
 
 
@@ -442,6 +486,11 @@ def fit_log_multiplicative(
     alpha: float,
     fit_clip: float,
 ) -> tuple[np.ndarray, dict]:
+    """Fit the log-multiplicative correction on training rows and return (coefficients, fit info).
+
+    The target is log((Iobs - additive)/Ibase), clipped to ±fit_clip, on rows where both are positive.
+    """
+
     usable_obs = obs - additive
     fit = train & (usable_obs > 0) & (pred_base > 0) & np.isfinite(usable_obs) & np.isfinite(pred_base)
     y = np.zeros(len(obs), dtype=float)
@@ -459,18 +508,24 @@ def fit_additive(
     penalties: np.ndarray,
     alpha: float,
 ) -> tuple[np.ndarray, dict]:
+    """Fit the additive correction to Iobs - pred on training rows and return (coefficients, fit info)."""
+
     residual = obs - pred
     beta, ridge_lambda, nfit = fit_weighted_ridge(X, residual, weights, train, penalties, alpha)
     return beta, {"n_fit": nfit, "ridge_lambda": ridge_lambda}
 
 
 def safe_exp_log_correction(X: np.ndarray, beta: np.ndarray, clip: float) -> np.ndarray:
+    """Return the log-multiplicative correction X @ beta clipped to ±clip; zeros without features."""
+
     if beta.size == 0 or X.shape[1] == 0:
         return np.zeros(X.shape[0], dtype=float)
     return np.clip(X @ beta, -abs(clip), abs(clip))
 
 
 def correction_stats(values: np.ndarray) -> dict[str, float]:
+    """Return the 5th percentile, median and 95th percentile of the finite correction values."""
+
     finite = values[np.isfinite(values)]
     if len(finite) == 0:
         return {"p05": float("nan"), "median": float("nan"), "p95": float("nan")}
@@ -482,6 +537,8 @@ def correction_stats(values: np.ndarray) -> dict[str, float]:
 
 
 def apply_bias_clip(additive: np.ndarray, sig: np.ndarray, clip_sigma: float) -> np.ndarray:
+    """Clip the additive correction to ±clip_sigma sigma; unchanged when clip_sigma is not positive."""
+
     if not np.isfinite(clip_sigma) or clip_sigma <= 0:
         return additive
     return np.clip(additive, -float(clip_sigma) * sig, float(clip_sigma) * sig)
@@ -499,6 +556,8 @@ def evaluate_trial(
     additive: np.ndarray | None = None,
     fit_info: dict | None = None,
 ) -> dict:
+    """Return one trial record: its name, fit info, metrics on every mask and correction statistics."""
+
     log_mult = np.zeros(len(obs), dtype=float) if log_mult is None else log_mult
     additive = np.zeros(len(obs), dtype=float) if additive is None else additive
     return {
@@ -511,6 +570,12 @@ def evaluate_trial(
 
 
 def selection_score(trial: dict, baseline: dict) -> float:
+    """Return the held-out score of one trial against the baseline; lower is better.
+
+    Rewards lower free wR2 and less weak high-resolution bias and scatter, and penalizes extra strong-row
+    scatter.
+    """
+
     blocks = trial["metrics"]
     base_blocks = baseline["metrics"]
     wh = blocks["free_weak_highres"]
@@ -532,6 +597,8 @@ def selection_score(trial: dict, baseline: dict) -> float:
 
 
 def flatten_metric_row(trial: dict, baseline: dict) -> dict:
+    """Flatten one trial into a CSV row of its score, split metrics and correction statistics."""
+
     m = trial["metrics"]
     row = {
         "model": trial["name"],
@@ -563,6 +630,12 @@ def flatten_metric_row(trial: dict, baseline: dict) -> dict:
 
 
 def fit_models(args, rows, obs, sig, pred0, masks, X_mult: FeatureMatrix, X_add: FeatureMatrix, wght_a: float, wght_b: float):
+    """Fit every correction trial on work rows and return the list, baseline first.
+
+    Trials are multiplicative-only and additive-only over each alpha, then both parts per (multiplicative,
+    additive) alpha pair, fitted once in sequence and once alternately.
+    """
+
     train = masks["work"] & np.isfinite(pred0) & np.isfinite(obs) & np.isfinite(sig) & (sig > 0)
     base_weights = shelx_weights(obs, sig, pred0, wght_a, wght_b)
     trials = []
@@ -701,6 +774,8 @@ def fit_models(args, rows, obs, sig, pred0, masks, X_mult: FeatureMatrix, X_add:
 
 
 def parse_grid(text: str) -> list[float]:
+    """Parse a comma-separated numeric grid into floats; raise if it is empty."""
+
     vals = []
     for item in str(text).split(","):
         item = item.strip()
@@ -713,6 +788,11 @@ def parse_grid(text: str) -> list[float]:
 
 
 def reconstruct_best_prediction(args, best_name, rows, obs, sig, pred0, masks, X_mult: FeatureMatrix, X_add: FeatureMatrix, wght_a, wght_b):
+    """Refit the named best trial; return its prediction, log_mult, additive and both coefficient vectors.
+
+    The trial name encodes its kind and alphas; raises if the name cannot be parsed.
+    """
+
     train = masks["work"] & np.isfinite(pred0) & np.isfinite(obs) & np.isfinite(sig) & (sig > 0)
     base_weights = shelx_weights(obs, sig, pred0, wght_a, wght_b)
     logm = np.zeros(len(obs), dtype=float)
@@ -757,6 +837,8 @@ def reconstruct_best_prediction(args, best_name, rows, obs, sig, pred0, masks, X
 
 
 def report_lines(args, row_table: Path, rows, masks, baseline, best, trials_sorted) -> list[str]:
+    """Return the REPORT.md lines: settings, the leading trials, the held-out gate and its verdict."""
+
     best_by_free = min(trials_sorted, key=lambda t: t["metrics"]["free"]["wR2_all"])
     best_by_all = min(trials_sorted, key=lambda t: t["metrics"]["all"]["wR2_all"])
     b = baseline["metrics"]
@@ -835,6 +917,11 @@ def report_lines(args, row_table: Path, rows, masks, baseline, best, trials_sort
 
 
 def main() -> None:
+    """Fit and score the two-part observation-correction trials on held-out rows.
+
+    Writes the trial, corrected-row and coefficient CSVs, summary.json and REPORT.md to --out-dir.
+    """
+
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--row-table", default=str(DEFAULT_ROW_TABLE))
     ap.add_argument("--hkl", default=str(DEFAULT_HKL))

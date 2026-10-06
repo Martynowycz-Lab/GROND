@@ -1,1 +1,0 @@
-"""GROND cli regression tests."""

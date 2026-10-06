@@ -116,11 +116,19 @@ except ImportError:  # pragma: no cover - direct script execution
 
 
 def parse_specs(text: str) -> list[str]:
+    """Split the comma-separated scale specs, defaulting to ['baseline']."""
+
     specs = [part.strip() for part in str(text).split(",") if part.strip()]
     return specs or ["baseline"]
 
 
 def parse_spec_token(spec: str, group_width_deg: float) -> dict[str, object]:
+    """Parse one scale spec into a contract record: baseline, adaptive:N, window:DEG or stride:N.
+
+    The optional :detB suffix sets the detector grid (default 8); a window in degrees becomes a group stride
+    through the source group width.
+    """
+
     token = str(spec).strip()
     lower = token.lower()
     if lower == "baseline":
@@ -158,7 +166,22 @@ def parse_spec_token(spec: str, group_width_deg: float) -> dict[str, object]:
     raise ValueError(f"Unknown scale spec {spec!r}; use baseline, adaptive:N:det8, window:DEG:det8, or stride:N:det8")
 
 
+def refuse_compact_specs_for_pspline(summary: dict, specs: list[dict[str, object]]) -> None:
+    """A P-spline row table has no per-frame scale contract to compress; only ``baseline`` replays it."""
+
+    scale_model = ((summary.get("best_native") or {}).get("scale_model") or {})
+    compact = [str(spec["name"]) for spec in specs if spec["kind"] != "baseline"]
+    if str(scale_model.get("kind") or "per-frame") == "pspline" and compact:
+        raise SystemExit(
+            "source row table uses --scale-model pspline; compact per-frame/window scale specs "
+            f"{', '.join(compact)} would replace that scale model. Replay only 'baseline', or rerun the "
+            "native stages with --scale-model per-frame."
+        )
+
+
 def write_active_wght(ins_path: Path, a: float, b: float) -> None:
+    """Set WGHT a b in an INS file, replacing the first WGHT or inserting it before FVAR (else at the top)."""
+
     lines = ins_path.read_text(errors="replace").splitlines()
     wght_line = f"WGHT      {float(a):.4f}      {float(b):.4f}"
     for i, line in enumerate(lines):
@@ -176,6 +199,8 @@ def write_active_wght(ins_path: Path, a: float, b: float) -> None:
 
 
 def active_wght_from_stats(stats: dict) -> tuple[float, float] | None:
+    """Return the finite active WGHT (a, b) from SHELXL statistics, or None."""
+
     try:
         a = float(stats["active_wght_a"])
         b = float(stats.get("active_wght_b", 0.0))
@@ -186,7 +211,16 @@ def active_wght_from_stats(stats: dict) -> tuple[float, float] | None:
     return a, b
 
 
-def run_shelxl_replay(work_dir: Path, stem: str, executable: str, iterations: int, wght_mode: str) -> dict:
+def run_shelxl_replay(
+    work_dir: Path, stem: str, executable: str, iterations: int, wght_mode: str, keep_damp: bool = False
+) -> dict:
+    """Run up to iterations SHELXL passes on one replay endpoint; return the last safe pass and its health.
+
+    Modes ending in zero start from WGHT 0 0; freeze- modes keep the WGHT between passes and the others
+    promote SHELXL's recommended WGHT. An NPD pass goes through NPD recovery; the loop stops at the first
+    unsafe pass.
+    """
+
     history = []
     last_safe = None
     last_stdout = ""
@@ -232,7 +266,7 @@ def run_shelxl_replay(work_dir: Path, stem: str, executable: str, iterations: in
         last_safe["stats"] = dict(stats)
         res = work_dir / f"{stem}.res"
         if i + 1 < n_iter and res.exists():
-            write_endpoint_ins(res, ins, hkl_name=f"{stem}.hkl", keep_exti=False)
+            write_endpoint_ins(res, ins, hkl_name=f"{stem}.hkl", keep_exti=False, keep_damp=keep_damp)
             if freeze:
                 if zero:
                     write_active_wght(ins, 0.0, 0.0)
@@ -262,7 +296,7 @@ def run_shelxl_replay(work_dir: Path, stem: str, executable: str, iterations: in
             final["status"], final["invalid_res_reason"] = rejection
         else:
             active = (0.0, 0.0) if zero else active_wght_from_stats(final)
-            write_endpoint_ins(res, res, hkl_name=f"{stem}.hkl", keep_exti=False, wght=active)
+            write_endpoint_ins(res, res, hkl_name=f"{stem}.hkl", keep_exti=False, wght=active, keep_damp=keep_damp)
             final["res_normalized_for_reopen"] = True
             final["res_health"] = shelx_res_health(res, lst)
             if not final["res_health"].get("ok"):
@@ -306,7 +340,14 @@ def endpoint_from_row_table(
     shelxl: str,
     shelxl_iterations: int,
     wght_mode: str,
+    keep_damp: bool = False,
 ) -> dict:
+    """Write the corrected endpoint of one replayed row table, run SHELXL and return its manifest.
+
+    I_corr = Iobs / (dyn_scaled/born_raw)**lambda_q, with the optional median-Iobs rescale, the fixed-width
+    safety factor and the optional uniform_z_rms sigma calibration.
+    """
+
     out_dir.mkdir(parents=True, exist_ok=True)
     h = col(rows, "h").astype(int)
     k = col(rows, "k").astype(int)
@@ -357,8 +398,10 @@ def endpoint_from_row_table(
             post_bloch_sigma = {"policy": "uniform_z_rms", "status": "failed", "error": f"{type(exc).__name__}: {exc}"}
     write_hkl(out_dir / "dyn_scale_replay.hkl", rows_merged, hkl_format)
     write_hkl(out_dir / "dyn_scale_replay_unmerged.hkl", rows_unmerged, hkl_format)
-    write_endpoint_ins(res_path, out_dir / "dyn_scale_replay.ins", hkl_name="dyn_scale_replay.hkl", keep_exti=False)
-    shelxl_stats = run_shelxl_replay(out_dir, "dyn_scale_replay", shelxl, shelxl_iterations, wght_mode)
+    write_endpoint_ins(
+        res_path, out_dir / "dyn_scale_replay.ins", hkl_name="dyn_scale_replay.hkl", keep_exti=False, keep_damp=keep_damp
+    )
+    shelxl_stats = run_shelxl_replay(out_dir, "dyn_scale_replay", shelxl, shelxl_iterations, wght_mode, keep_damp)
     endpoint_res = out_dir / "dyn_scale_replay.res"
     endpoint_hkl = out_dir / "dyn_scale_replay.hkl"
     endpoint_lst = out_dir / "dyn_scale_replay.lst"
@@ -410,6 +453,11 @@ def build_replay_rows(
     detector_max_field_log_rms: float = 0.10,
     detector_independent_calibration: bool = False,
 ) -> tuple[list[dict[str, object]], dict]:
+    """Refit one scale contract on the frozen rows; return (rows with replayed scales, candidate record).
+
+    The baseline spec keeps the source dyn_scaled and born_scaled.
+    """
+
     obs = col(rows, "target_I")
     sig = col(rows, "sigma_eff")
     raw_dyn = col(rows, "dyn_raw")
@@ -574,6 +622,8 @@ def build_replay_rows(
 
 
 def _finite_float(value, default: float = float("nan")) -> float:
+    """Convert value to a finite float, or return default."""
+
     try:
         out = float(value)
     except (TypeError, ValueError):
@@ -582,6 +632,8 @@ def _finite_float(value, default: float = float("nan")) -> float:
 
 
 def _percent_or_blank(value) -> str:
+    """Format a fraction as a percentage with two decimals, or '' if it is not finite."""
+
     val = _finite_float(value)
     if not math.isfinite(val):
         return ""
@@ -626,6 +678,8 @@ def choose_publication_endpoint(
         }
 
     def detector_reference_eligible(row: dict[str, object]) -> bool:
+        """Return whether a row's detector field may act as the low-R or best-free reference."""
+
         detector_bins = int(_finite_float(row.get("detector_bins"), 0.0))
         eligible = bool(row.get("detector_policy_eligible", detector_bins <= 1))
         if detector_bins >= 8 and not bool(detector_independent_calibration):
@@ -835,6 +889,8 @@ def choose_publication_endpoint(
 
 
 def write_publication_report(path: Path, selection: dict[str, object], rows_out: list[dict[str, object]], elapsed_s: float) -> None:
+    """Write the endpoint calibration report: the publication endpoint, the low-R diagnostic and every replay."""
+
     selected = selection.get("publication_endpoint") or {}
     low_r = selection.get("low_r_diagnostic") or {}
     best_free = selection.get("best_heldout_row") or {}
@@ -945,6 +1001,11 @@ def write_publication_report(path: Path, selection: dict[str, object], rows_out:
 
 
 def main() -> None:
+    """Replay each scale contract through a corrected-HKL endpoint and SHELXL and choose the publication one.
+
+    Writes one run per spec, scale_contract_endpoint_replay.csv, summary.json and REPORT.md to --out-dir.
+    """
+
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--row-table", required=True)
     ap.add_argument("--summary", default="")
@@ -974,6 +1035,7 @@ def main() -> None:
     ap.add_argument("--post-bloch-sigma-max-scale", type=float, default=4.0)
     ap.add_argument("--shelxl", default="shelxl")
     ap.add_argument("--shelxl-iterations", type=int, default=5)
+    ap.add_argument("--keep-damp", action="store_true", help="Legacy: carry an active DAMP instruction into later calls and the written RES. Default strips it.")
     ap.add_argument("--wght-modes", default="promote,freeze-zero")
     ap.add_argument("--publication-goof-min", type=float, default=0.85)
     ap.add_argument("--publication-goof-max", type=float, default=1.15)
@@ -1025,6 +1087,7 @@ def main() -> None:
     out.mkdir(parents=True, exist_ok=True)
     group_width_deg = infer_group_width_deg(summary)
     specs = [parse_spec_token(spec, group_width_deg) for spec in parse_specs(args.specs)]
+    refuse_compact_specs_for_pspline(summary, specs)
     masks = split_masks(rows)
     fit_split = args.fit_split or str((summary.get("best_native") or {}).get("scale_fit_split") or "all")
     if fit_split not in masks:
@@ -1114,6 +1177,7 @@ def main() -> None:
                 shelxl=args.shelxl,
                 shelxl_iterations=args.shelxl_iterations,
                 wght_mode=wght_mode,
+                keep_damp=bool(args.keep_damp),
             )
             fail_if_shelxl_became_unavailable(
                 [manifest],

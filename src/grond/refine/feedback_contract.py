@@ -207,12 +207,6 @@ def selected_metrics(summary: dict) -> dict:
     }
 
 
-def append_arg(cmd: list[str], name: str, value) -> None:
-    """Append a command-line argument pair."""
-
-    cmd.extend([name, str(value)])
-
-
 def feedback_prediction_cache_dir(run_dir: Path) -> Path:
     """Return the hash-validated cache shared by all cycles in one feedback run."""
 

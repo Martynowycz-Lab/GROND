@@ -53,6 +53,9 @@ def cmd_finish(args: argparse.Namespace) -> int:
             endpoint_calibration_goof_min=safe_float(endpoint_config.get("goof_min"), 0.85),
             endpoint_calibration_goof_max=safe_float(endpoint_config.get("goof_max"), 1.15),
             publication_allow_npd=bool(chooser_config.get("allow_npd", False)),
+            publication_feedback_cycles=str(
+                getattr(args, "publication_feedback_cycles", None) or chooser_config.get("feedback_cycles") or "kept"
+            ),
         )
         result["publication_endpoint_chooser"] = run_publication_endpoint_chooser(prep, result, chooser_args)
     quick = write_quick_stats(prep, result, argparse.Namespace(out_dir=str(run_dir)))

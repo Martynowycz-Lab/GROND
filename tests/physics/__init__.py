@@ -1,1 +1,0 @@
-"""GROND physics regression tests."""

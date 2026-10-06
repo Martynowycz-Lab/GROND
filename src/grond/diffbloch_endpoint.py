@@ -18,11 +18,13 @@ from typing import Any
 import gemmi
 import numpy as np
 
-from .legacy.engine.bloch_engine import cif_number, loop_rows, parse_res, shelx_u_cart_matrix
-from .legacy.engine.native_structure_update import update_res_coordinates
+from .bloch.model import cif_number, loop_rows, parse_res, shelx_u_cart_matrix
+from .refine.native_output import update_res_coordinates
 
 
 def _cif_cell(block: gemmi.cif.Block) -> tuple[float, float, float, float, float, float]:
+    """Return the six cell constants (a, b, c in A; alpha, beta, gamma in degrees) of a CIF block."""
+
     tags = (
         "_cell_length_a",
         "_cell_length_b",
@@ -38,6 +40,12 @@ def _cif_cell(block: gemmi.cif.Block) -> tuple[float, float, float, float, float
 
 
 def _cif_atoms(path: Path) -> tuple[tuple[float, ...], dict[str, dict[str, Any]]]:
+    """Read the cell and atom sites of a diffBloch CIF, keyed by atom label.
+
+    Each atom holds fractional x, y, z, occupancy and either the six anisotropic U values
+    (``adp_type`` ``anis``) or ``uiso`` (``iso``).
+    """
+
     block = gemmi.cif.read_file(str(path)).sole_block()
     cell = _cif_cell(block)
     _aniso_tags, aniso_rows = loop_rows(block, "_atom_site_aniso_label")
@@ -147,6 +155,11 @@ def materialize_diffbloch_res(
         for key in ("x", "y", "z"):
             atom[key] = float(refined[key])
         transferred_adp = False
+        riding_hydrogen = (
+            str(atom.get("element", "")).upper() == "H"
+            and bool(atom.get("raw_adp"))
+            and float(atom["raw_adp"][0]) < 0.0
+        )
         if atom.get("adp_type") == "anis" and refined.get("adp_type") == "anis":
             for key in ("u11", "u22", "u33", "u12", "u13", "u23"):
                 atom[key] = float(refined[key])
@@ -157,7 +170,7 @@ def materialize_diffbloch_res(
         elif (
             atom.get("adp_type") == "iso"
             and refined.get("adp_type") == "iso"
-            and str(atom.get("element", "")).upper() != "H"
+            and not riding_hydrogen
         ):
             atom["uiso"] = float(refined["uiso"])
             transferred_adp = True
@@ -197,7 +210,7 @@ def materialize_diffbloch_res(
             for atom in source["atoms"]
             if str(atom.get("element", "")).upper() == "H" and str(atom["name"]) not in cif_atoms
         ),
-        "hydrogen_adp_policy": "preserve source SHELX Uiso/multiplier and AFIX instructions",
+        "hydrogen_adp_policy": "transfer matched free-H Uiso; preserve source riding multipliers and AFIX instructions",
         "heavy_atom_rms_shift_A": float(math.sqrt(np.mean(np.square(heavy)))) if heavy else 0.0,
         "heavy_atom_max_shift_A": float(max(heavy)) if heavy else 0.0,
         "npd_atoms": sorted(npd_atoms),

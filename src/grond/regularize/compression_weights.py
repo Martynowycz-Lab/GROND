@@ -1,4 +1,8 @@
-"""Frozen-prediction scale objectives and fits. Keep the historical objective definitions distinct: publication-style row factors and native fitting residuals have different weights."""
+"""Frozen-prediction scale objectives and fits.
+
+Publication-style row factors and native fitting residuals have different weights, so their objective
+definitions are kept separate.
+"""
 
 from __future__ import annotations
 
@@ -13,6 +17,8 @@ from grond.legacy.engine.detector_scale_regularization import (
 
 
 def safe_float(value, default=float("nan")) -> float:
+    """Return value as a float, or default when it cannot be converted."""
+
     try:
         return float(value)
     except (TypeError, ValueError):
@@ -20,6 +26,8 @@ def safe_float(value, default=float("nan")) -> float:
 
 
 def col(rows: list[dict[str, str]], name: str, default=float("nan")) -> np.ndarray:
+    """Return one column of the row table as a float array, with default for missing or non-numeric values."""
+
     return np.asarray([safe_float(r.get(name, default), default) for r in rows], dtype=float)
 
 
@@ -42,6 +50,12 @@ def jana_adjusted_observations(obs: np.ndarray, sigma: np.ndarray) -> tuple[np.n
 
 
 def row_sqrt_weights(obs: np.ndarray, sigma: np.ndarray, instability_u: float) -> np.ndarray:
+    """Return the row/MR least-squares weights w**2 of each intensity residual.
+
+    1/w is the sigma of sqrt(Iobs), sigma / (2 sqrt(Iobs)), with instability_u * sqrt(Iobs) added in quadrature.
+    Weak rows (Iobs < 0.01 sigma) count as Iobs = 0 and use 5 sqrt(sigma) as that sigma.
+    """
+
     obs_adjusted, weak = jana_adjusted_observations(obs, sigma)
     sqrt_obs = np.sqrt(np.maximum(obs_adjusted, 0.0))
     sigma_sqrt = sigma / np.maximum(2.0 * sqrt_obs, 1e-30)
@@ -53,6 +67,8 @@ def row_sqrt_weights(obs: np.ndarray, sigma: np.ndarray, instability_u: float) -
 
 
 def shelx_weights(obs: np.ndarray, sig: np.ndarray, pred: np.ndarray, a: float, b: float) -> np.ndarray:
+    """Return SHELXL WGHT weights 1 / (sigma^2 + (a P)^2 + b P), with P = (max(Iobs, 0) + 2 max(Icalc, 0)) / 3."""
+
     p = (np.maximum(obs, 0.0) + 2.0 * np.maximum(pred, 0.0)) / 3.0
     return 1.0 / np.maximum(sig * sig + (float(a) * p) ** 2 + float(b) * p, 1e-30)
 
@@ -66,6 +82,11 @@ def objective_weights(
     native_wght_b: float,
     instability_u: float,
 ) -> np.ndarray:
+    """Return the scale-fit weights of one objective: sigma, native or row_mr.
+
+    sigma is 1/sigma^2, native the SHELXL WGHT a, b weights and row_mr the row_sqrt_weights.
+    """
+
     if objective == "sigma":
         return 1.0 / np.maximum(sig * sig, 1e-30)
     if objective == "native":
@@ -76,6 +97,8 @@ def objective_weights(
 
 
 def solve_scale(x: np.ndarray, y: np.ndarray, weight: np.ndarray) -> float:
+    """Return the weighted least-squares scale k minimizing sum weight (y - k x)^2, clipped at 0."""
+
     return max(float(np.sum(weight * x * y) / max(np.sum(weight * x * x), 1e-30)), 0.0)
 
 
@@ -140,6 +163,12 @@ def fit_group_scales(
     instability_u: float,
     n_iter: int = 8,
 ) -> tuple[np.ndarray, dict[str, float]]:
+    """Fit one scale per frame group on the fit_mask rows and apply it to every finite prediction of the group.
+
+    Returns (scaled predictions, {group: scale}). Weights start at 1/sigma^2 and are recomputed for the objective
+    for up to n_iter passes. A group with fewer than two fit rows takes the global scale.
+    """
+
     scaled = np.full_like(raw, np.nan, dtype=float)
     scales: dict[str, float] = {}
     good0 = fit_mask & np.isfinite(obs) & np.isfinite(sig) & np.isfinite(raw) & (sig > 0) & (raw > 0)
@@ -198,6 +227,13 @@ def fit_group_detector_scales(
     detector_smoothness: float = 0.10,
     detector_min_rows: int = 20,
 ) -> tuple[np.ndarray, dict[str, float], dict[str, float]]:
+    """Fit frame-group scales times a regularized square detector field by alternating updates on the fit_mask rows.
+
+    Returns (scaled predictions, {group: frame scale}, {tile: detector scale}). The detector field is
+    ridge-regularized toward 1 and spatially smoothed; after each pass it is divided by its median and the frame
+    scales absorb that factor.
+    """
+
     scaled = np.full_like(raw, np.nan, dtype=float)
     good = fit_mask & np.isfinite(obs) & np.isfinite(sig) & np.isfinite(raw) & (sig > 0) & (raw > 0) & np.isfinite(groups) & np.isfinite(det_bins)
     unique_groups = np.asarray(sorted(set(groups[np.isfinite(groups)].astype(int))), dtype=int)
@@ -272,6 +308,13 @@ def fit_group_detector_scales(
 
 
 def row_mr_metrics(obs: np.ndarray, sig: np.ndarray, pred: np.ndarray, mask: np.ndarray, instability_u: float, observed_sigma_cut: float) -> dict:
+    """Return JANA-style unmerged row statistics of pred on the masked rows: Nall, Nobs, Robs, Rall, wRall.
+
+    R values are fractions. Robs and Rall are amplitude R factors on sqrt(I); observed rows have Iobs >
+    observed_sigma_cut * sigma. Weak rows (Iobs < 0.01 sigma) count as Iobs = 0. wRall is on intensities with the
+    row_sqrt_weights error model.
+    """
+
     m = mask & np.isfinite(obs) & np.isfinite(sig) & np.isfinite(pred) & (sig > 0)
     obs_m = obs[m]
     sig_m = sig[m]
@@ -287,6 +330,8 @@ def row_mr_metrics(obs: np.ndarray, sig: np.ndarray, pred: np.ndarray, mask: np.
     observed = obs_original > float(observed_sigma_cut) * sig_m
 
     def r_factor(local_mask: np.ndarray) -> float:
+        """Return sum |Fobs - Fcalc| / sum Fobs over the local_mask rows, NaN when there are none."""
+
         if not np.any(local_mask):
             return float("nan")
         return float(np.sum(np.abs(fobs[local_mask] - fcalc[local_mask])) / max(np.sum(fobs[local_mask]), 1e-30))
@@ -303,6 +348,12 @@ def row_mr_metrics(obs: np.ndarray, sig: np.ndarray, pred: np.ndarray, mask: np.
 
 
 def native_metrics(obs: np.ndarray, sig: np.ndarray, pred: np.ndarray, mask: np.ndarray, wght_a: float, wght_b: float, n_params: int = 0) -> dict:
+    """Return SHELXL-style statistics of pred on the masked rows: R1_all, R1_gt, wR2_all, GooF and chi2.
+
+    R values are fractions; R1 is on sqrt(I) (R1_gt: Iobs > 2 sigma), wR2 on I with SHELXL WGHT weights. dof = n -
+    n_params, at least 1.
+    """
+
     m = mask & np.isfinite(obs) & np.isfinite(sig) & np.isfinite(pred) & (sig > 0)
     obs_m = obs[m]
     sig_m = sig[m]
@@ -314,6 +365,8 @@ def native_metrics(obs: np.ndarray, sig: np.ndarray, pred: np.ndarray, mask: np.
     fpred = np.sqrt(np.maximum(pred_m, 0.0))
 
     def r1(local_mask: np.ndarray) -> float:
+        """Return sum |Fobs - Fcalc| / sum Fobs over the local_mask rows, NaN when there are none."""
+
         if not np.any(local_mask):
             return float("nan")
         return float(np.sum(np.abs(fobs[local_mask] - fpred[local_mask])) / max(np.sum(fobs[local_mask]), 1e-30))

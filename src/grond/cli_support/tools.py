@@ -33,7 +33,7 @@ def has_runtime_deps(python: str) -> bool:
 
 
 def choose_python(explicit: str = "") -> str:
-    """Choose the Python interpreter used for vendored worker scripts."""
+    """Choose the Python interpreter used for the engine worker scripts."""
 
     candidates = [explicit] if explicit else []
     candidates += [sys.executable, shutil.which("python3") or "python3", shutil.which("python") or "python"]
@@ -107,7 +107,7 @@ def apply_tool_config(args: argparse.Namespace) -> None:
                 aliases=("shelxl", "shelxl2019"),
             )
         if status.get("available") and status.get("resolved"):
-            # Workers execute from the vendored engine directory, not from the
+            # Workers execute from the engine directory, not from the
             # user's launch directory.  Freeze the preflight resolution now so
             # relative paths and PATH aliases keep the exact same meaning.
             args.shelxl = str(status["resolved"])

@@ -25,6 +25,22 @@ if not __package__:
 
 import numpy as np
 
+from grond.refine.shelx_input import ABSOLUTE_HKL_KAPPA, parse_basf_values, requests_acta
+from grond.refine.shelxl_iterations import (
+    NPD_RECOVERY_METHODS,
+    WGHT_CONVERGE_DEFAULT_MAX_CALLS,
+    WGHT_MODES,
+    endpoint_call_converged,
+    endpoint_initial_wght as endpoint_initial_wght,
+    recover_npd_attempt,
+    shelxl_model_restraint_audit,
+    shelxl_shift_converged,
+    wght_agreement,
+    wght_call_limit,
+    wght_convergence_summary,
+    wght_promotes,
+)
+from grond.refine.zero_cycle import active_wght_line
 from grond.regularize.arguments_combination import build_parser as build_combination_parser
 from grond.regularize.multidataset import (
     apply_hkl_weight as apply_hkl_weight,
@@ -33,11 +49,8 @@ from grond.regularize.multidataset import (
     audit_combined_endpoint_modulation as audit_combined_endpoint_modulation,
     canonical_model_friedel as canonical_model_friedel,
     canonical_model_symmetry as canonical_model_symmetry,
-    canonical_p222_friedel as canonical_p222_friedel,
-    d_spacing_from_model as d_spacing_from_model,
     endpoint_key_function as endpoint_key_function,
     endpoint_rows_and_corrections_from_native as endpoint_rows_and_corrections_from_native,
-    endpoint_rows_from_native as endpoint_rows_from_native,
     estimate_overlap_scales as estimate_overlap_scales,
     file_provenance as file_provenance,
     filter_hkl_rows_by_resolution as filter_hkl_rows_by_resolution,
@@ -46,23 +59,20 @@ from grond.regularize.multidataset import (
     merge_hkl_rows as merge_hkl_rows,
     metrics as metrics,
     native_metrics_by_split as native_metrics_by_split,
-    reciprocal_equivalent_keys as reciprocal_equivalent_keys,
     safe_float as safe_float,
     scale_contract_provenance as scale_contract_provenance,
     scale_hkl_rows as scale_hkl_rows,
     selected_native_wght as selected_native_wght,
-    shelx_weights as shelx_weights,
     split_metrics as split_metrics,
 )
+from grond.validation.endpoint_free import record_endpoint_reproduction, score_model_on_work_and_free
 
 try:  # Package import.
     from .bloch_engine import parse_model, sha256
-    from .endpoint_modulation import modulation_manifest_fields as modulation_manifest_fields
     from .native_row_regularize import (
         fail_if_shelxl_became_unavailable,
         parse_shelx_wght_terms,
         recommended_wght_from_stats,
-        recover_npd_shelxl_attempt,
         require_endpoint_shelxl,
         run_one_shelxl_attempt,
         select_last_safe_shelxl_iteration,
@@ -72,15 +82,26 @@ try:  # Package import.
         write_active_wght,
         write_endpoint_ins,
     )
-    from .post_bloch_sigma import fit_uniform_z_rms_sigma_scale, scale_row_sigmas
-    from .shelx_hkl import safe_fixed_width_factor, write_fixed_width_hkl
+    from .post_bloch_sigma import (
+        apply_error_model_sigma,
+        fit_error_model_sigma,
+        fit_uniform_z_rms_sigma_scale,
+        rms_z_against_model,
+        scale_row_sigmas,
+    )
+    from .shelx_hkl import (
+        format_fixed_width_row,
+        parse_hkl_observation_line,
+        safe_fixed_width_factor,
+        write_fixed_width_batch_hkl,
+        write_fixed_width_hkl,
+    )
 except ImportError:  # Direct script execution from this directory.
     from bloch_engine import parse_model, sha256
     from native_row_regularize import (
         fail_if_shelxl_became_unavailable,
         parse_shelx_wght_terms,
         recommended_wght_from_stats,
-        recover_npd_shelxl_attempt,
         require_endpoint_shelxl,
         run_one_shelxl_attempt,
         select_last_safe_shelxl_iteration,
@@ -90,15 +111,35 @@ except ImportError:  # Direct script execution from this directory.
         write_active_wght,
         write_endpoint_ins,
     )
-    from post_bloch_sigma import fit_uniform_z_rms_sigma_scale, scale_row_sigmas
-    from shelx_hkl import safe_fixed_width_factor, write_fixed_width_hkl
+    from post_bloch_sigma import (
+        apply_error_model_sigma,
+        fit_error_model_sigma,
+        fit_uniform_z_rms_sigma_scale,
+        rms_z_against_model,
+        scale_row_sigmas,
+    )
+    from shelx_hkl import (
+        format_fixed_width_row,
+        parse_hkl_observation_line,
+        safe_fixed_width_factor,
+        write_fixed_width_batch_hkl,
+        write_fixed_width_hkl,
+    )
 
 
 def read_json(path: Path) -> dict:
+    """Read a JSON file, or return an empty dict if it does not exist."""
+
     return json.loads(path.read_text()) if path.exists() else {}
 
 
 def read_rows(run_dir: Path, name: str) -> list[dict]:
+    """Read one run's native_dyn_calc.csv, labelling every row with its dataset and filling contract defaults.
+
+    A missing target_mode comes from the run's config; role, row and endpoint weights default to primary and
+    1.0; sigma_eff is reset to sigma_eff_original when that is positive.
+    """
+
     path = run_dir / "native_dyn_calc.csv"
     if not path.exists():
         raise FileNotFoundError(path)
@@ -125,21 +166,15 @@ def read_rows(run_dir: Path, name: str) -> list[dict]:
 
 
 def read_hkl(path: Path):
+    """Read (h, k, l, I, sigma) rows from a free-format or fixed-width HKL file, without the 0 0 0 terminator."""
+
     rows = []
     if not path.exists():
         return rows
     for line in path.read_text(errors="replace").splitlines():
         if not line.strip():
             continue
-        parts = line.split()
-        if len(parts) >= 5:
-            h, k, ell = int(parts[0]), int(parts[1]), int(parts[2])
-            intensity = safe_float(parts[3])
-            sig = safe_float(parts[4])
-        else:
-            h, k, ell = int(line[:4]), int(line[4:8]), int(line[8:12])
-            intensity = safe_float(line[12:20])
-            sig = safe_float(line[20:28])
+        h, k, ell, intensity, sig = parse_hkl_observation_line(line)
         if h == k == ell == 0:
             continue
         rows.append((h, k, ell, intensity, sig))
@@ -147,6 +182,8 @@ def read_hkl(path: Path):
 
 
 def write_hkl(path: Path, rows):
+    """Write rows as a validated fixed-width HKLF 4 file."""
+
     write_fixed_width_hkl(path, rows)
 
 
@@ -186,6 +223,34 @@ def calibrate_dataset_endpoint_rows(
         }
 
 
+def error_model_rows_by_dataset(
+    rows_by_dataset: dict[str, list[tuple]],
+    model,
+    free_rows_by_dataset: dict[str, list[tuple]],
+    weight_by_name: dict[str, float],
+    *,
+    weighted: bool,
+) -> tuple[dict[str, list[tuple]], dict[str, dict]]:
+    """Fit each crystal's error model on its own work rows against ``model``; ``weighted`` applies the policy weight."""
+
+    calibrated: dict[str, list[tuple]] = {}
+    metas: dict[str, dict] = {}
+    for name, rows_for_dataset in rows_by_dataset.items():
+        if not rows_for_dataset:
+            calibrated[name] = rows_for_dataset
+            metas[name] = {"policy": "error_model", "status": "skipped_no_rows"}
+            continue
+        rows, meta = fit_error_model_sigma(
+            rows_for_dataset,
+            model,
+            free_rows=free_rows_by_dataset.get(name, []),
+            label=f"dataset {name}",
+        )
+        calibrated[name] = apply_hkl_weight(rows, weight_by_name.get(name, 1.0)) if weighted else rows
+        metas[name] = meta
+    return calibrated, metas
+
+
 def write_no_exti_ins(
     src_res: Path,
     dst_ins: Path,
@@ -193,11 +258,90 @@ def write_no_exti_ins(
     *,
     wght: tuple[float, float] | None = None,
     ls_cycles: int = 1,
+    keep_damp: bool = False,
+    osf: float | None = None,
+    **native_outputs,
 ):
-    write_endpoint_ins(src_res, dst_ins, hkl_name=hkl_name, keep_exti=False, wght=wght, ls_cycles=ls_cycles)
+    """Write a no-EXTI endpoint input; ``native_outputs`` are the write_endpoint_ins SHELXL-native options."""
+
+    write_endpoint_ins(
+        src_res,
+        dst_ins,
+        hkl_name=hkl_name,
+        keep_exti=False,
+        wght=wght,
+        ls_cycles=ls_cycles,
+        keep_damp=keep_damp,
+        osf=osf,
+        **native_outputs,
+    )
+
+
+def parse_zerr_esds(text: str) -> list[float] | None:
+    """Six comma-separated cell e.s.d.s from --zerr-esds, or None when empty (keep the model's ZERR)."""
+
+    if not str(text or "").strip():
+        return None
+    values = [float(value) for value in str(text).split(",")]
+    if len(values) != 6 or not all(math.isfinite(value) and value >= 0.0 for value in values):
+        raise ValueError(f"--zerr-esds needs six finite nonnegative values a,b,c,alpha,beta,gamma, got {text!r}")
+    return values
+
+
+def endpoint_native_outputs(args, *, final: bool = True) -> dict:
+    """write_endpoint_ins options of the SHELXL-native outputs requested on the command line."""
+
+    out: dict = {}
+    zerr = parse_zerr_esds(getattr(args, "zerr_esds", ""))
+    if zerr is not None:
+        out["zerr_esds"] = zerr
+    if bool(getattr(args, "strip_q_peaks", False)):
+        out["strip_q_peaks"] = True
+    if int(getattr(args, "endpoint_list_code", 0) or 0) > 0:
+        out["list_code"] = int(args.endpoint_list_code)
+    if final and bool(getattr(args, "acta", False)):
+        out["acta"] = True
+    return out
+
+
+def refined_basf(res_path: Path, lst_path: Path) -> dict:
+    """BASF values of a refined .res and their e.s.d.s from the last L.S. cycle of the listing."""
+
+    # SHELXL writes seven values per BASF record, so a run with more than eight crystals has several records.
+    values = parse_basf_values(res_path.read_text(errors="replace")) if res_path.exists() else []
+    esds: dict[int, float] = {}
+    if lst_path.exists():
+        pattern = re.compile(r"^\s*\d+\s+([-\d.]+)\s+([-\d.]+)\s+[-\d.]+\s+BASF\s+(\d+)", flags=re.M)
+        for match in pattern.finditer(lst_path.read_text(errors="replace")):
+            esds[int(match.group(3))] = float(match.group(2))
+    return {"values": values, "esds": [esds.get(i + 1) for i in range(len(values))]}
+
+
+def basf_sanity(start: list[float], refined: dict, *, low: float = 0.2, high: float = 5.0) -> dict:
+    """A refined batch scale should be finite, positive, well determined and within [low, high]."""
+
+    values = refined.get("values") or []
+    esds = refined.get("esds") or []
+    problems = []
+    if len(values) != len(start):
+        problems.append(f"{len(values)} refined BASF values for {len(start)} extra crystals")
+    for index, value in enumerate(values):
+        esd = esds[index] if index < len(esds) else None
+        if not (math.isfinite(value) and low <= value <= high):
+            problems.append(f"BASF {index + 1} = {value:g} outside [{low:g}, {high:g}]")
+        if esd is None or not math.isfinite(float(esd)) or float(esd) <= 0.0:
+            problems.append(f"BASF {index + 1} has no positive e.s.d. in the listing")
+        elif abs(value) < 3.0 * float(esd):
+            problems.append(f"BASF {index + 1} = {value:g} is not determined (e.s.d. {float(esd):g})")
+    return {"ok": not problems, "problems": problems, "bounds": [low, high]}
 
 
 def parse_lst(path: Path):
+    """Parse the active WGHT, wR2, GooF, R1 and unique/suppressed counts from a SHELXL LST file.
+
+    status is "missing" without the file and "no_regularization_stats" without a wR2 line.
+    """
+
     out = {"status": "missing", "lst": str(path)}
     if not path.exists():
         return out
@@ -229,25 +373,13 @@ def parse_lst(path: Path):
     return out
 
 
-def parse_recommended_wght(lst_path: Path) -> tuple[float, float] | None:
-    if not lst_path.exists():
-        return None
-    text = lst_path.read_text(errors="replace")
-    matches = []
-    for line in text.splitlines():
-        upper = line.upper()
-        if "RECOMMENDED WEIGHTING SCHEME" not in upper or "WGHT" not in upper:
-            continue
-        terms = parse_shelx_wght_terms(line[upper.find("WGHT") :])
-        if terms:
-            matches.append(terms)
-    if not matches:
-        return None
-    terms = matches[-1]
-    return terms[0], terms[1] if len(terms) >= 2 else 0.0
-
-
 def promote_recommended_wght(ins_path: Path, recommended: tuple[float, float] | None) -> dict:
+    """Write the recommended WGHT into the INS file and return what was set.
+
+    Replaces the first WGHT or inserts one before FVAR, else before END or at the end; lines after END are
+    dropped.
+    """
+
     if recommended is None or not ins_path.exists():
         return {"promoted": False}
     a, b = recommended
@@ -279,6 +411,8 @@ def promote_recommended_wght(ins_path: Path, recommended: tuple[float, float] | 
 
 
 def _active_wght_from_stats(stats: dict) -> tuple[float, float] | None:
+    """Return the finite active WGHT (a, b) from SHELXL statistics, or None."""
+
     try:
         a = float(stats["active_wght_a"])
         b = float(stats.get("active_wght_b", 0.0))
@@ -297,7 +431,22 @@ def run_shelxl(
     *,
     wght_mode: str = "freeze-zero",
     endpoint_ls_cycles: int = 1,
+    convergence_shift_esd: float = 0.0,
+    npd_recovery: str = "damp",
+    keep_damp: bool = False,
+    wght_converge_max_calls: int = WGHT_CONVERGE_DEFAULT_MAX_CALLS,
+    allow_basf: bool = False,
 ):
+    """Run up to ``iterations`` SHELXL calls of ``endpoint_ls_cycles`` L.S. cycles on one fixed HKL.
+
+    With ``convergence_shift_esd`` > 0 the calls stop once the last L.S. cycle has |max shift/esd| below it
+    (AUTO: 15 calls of L.S. 10, tolerance 0.01), so each macro-cycle hands a converged model to the next
+    Bloch calculation instead of one least-squares step.  ``wght_mode="converge"`` makes up to
+    ``wght_converge_max_calls`` calls from WGHT 0 0, promoting SHELXL's suggested WGHT, and stops only once the
+    applied and suggested weights agree as well.  ``allow_basf`` keeps the batch-scale BASF instructions of
+    the unmerged multi-crystal endpoint.
+    """
+
     exe = shelxl or shutil.which("shelxl") or shutil.which("shelxl2019") or ""
     if not exe:
         return {"status": "missing_shelxl", "executable": ""}
@@ -306,12 +455,19 @@ def run_shelxl(
     history = []
     last_safe = None
     last_stdout = ""
-    n_iter = max(1, int(iterations))
-    n_ls = max(1, int(endpoint_ls_cycles))
     mode = str(wght_mode or "freeze-zero")
+    n_iter = wght_call_limit(mode, iterations, wght_converge_max_calls)
+    n_ls = max(1, int(endpoint_ls_cycles))
+    tolerance = float(convergence_shift_esd or 0.0)
     freeze_zero = mode == "freeze-zero"
-    if mode not in {"inherit", "freeze-zero", "promote"}:
+    if mode not in WGHT_MODES:
         return {"returncode": None, "status": "invalid_wght_mode", "wght_mode": mode}
+    if mode == "converge" and not tolerance > 0.0:
+        return {"returncode": None, "status": "invalid_converge_tolerance", "wght_mode": mode}
+    if npd_recovery not in NPD_RECOVERY_METHODS:
+        return {"returncode": None, "status": "invalid_npd_recovery", "npd_recovery": str(npd_recovery)}
+    # An endpoint written with ACTA keeps it on every call, so the CIF is SHELXL's CIF of the kept .res.
+    acta = requests_acta(work / f"{stem}.ins")
     for i in range(n_iter):
         if freeze_zero:
             write_active_wght(work / f"{stem}.ins", 0.0, 0.0)
@@ -326,13 +482,14 @@ def run_shelxl(
         )
         last_stdout = proc.stdout
         if str(stats.get("status", "")) == "adp_pathology" and base_ins_text:
-            recovered_proc, stats = recover_npd_shelxl_attempt(
+            recovered_proc, stats = recover_npd_attempt(
                 work,
                 stem,
                 exe,
                 iteration=i + 1,
                 base_ins_text=base_ins_text,
                 initial_stats=stats,
+                method=npd_recovery,
             )
             if recovered_proc is not None:
                 last_stdout = recovered_proc.stdout
@@ -343,7 +500,11 @@ def run_shelxl(
         stats["safe_snapshot_res"] = last_safe["res"]
         stats["safe_snapshot_lst"] = last_safe["lst"]
         stats["safe_snapshot_fcf"] = last_safe["fcf"]
+        stats["shift_esd_converged"] = shelxl_shift_converged(stats, tolerance)
+        stats["wght_agreement"] = wght_agreement(stats)
         last_safe["stats"] = dict(stats)
+        if endpoint_call_converged(stats, mode, tolerance):
+            break
         res = work / f"{stem}.res"
         if i + 1 < n_iter and res.exists():
             active = (0.0, 0.0) if freeze_zero else _active_wght_from_stats(stats)
@@ -354,8 +515,11 @@ def run_shelxl(
                 keep_exti=False,
                 wght=active,
                 ls_cycles=n_ls,
+                keep_damp=keep_damp,
+                allow_basf=allow_basf,
+                acta=acta,
             )
-            if mode == "promote":
+            if wght_promotes(mode):
                 stats["next_wght"] = promote_recommended_wght(
                     work / f"{stem}.ins",
                     recommended_wght_from_stats(stats),
@@ -379,6 +543,9 @@ def run_shelxl(
             keep_exti=False,
             wght=active,
             ls_cycles=n_ls,
+            keep_damp=keep_damp,
+            allow_basf=allow_basf,
+            acta=acta,
         )
         final["res_normalized_for_reopen"] = True
         final["res_health"] = shelx_res_health(work / f"{stem}.res", work / f"{stem}.lst")
@@ -392,6 +559,17 @@ def run_shelxl(
     final["iterations_completed"] = len(history)
     final["endpoint_ls_cycles"] = n_ls
     final["wght_mode"] = mode
+    final["convergence_shift_esd"] = tolerance
+    final["converged"] = bool(shelxl_iteration_safe(final) and endpoint_call_converged(final, mode, tolerance))
+    final["wght_convergence"] = wght_convergence_summary(
+        history, final, mode=mode, max_calls=n_iter, shift_tolerance=tolerance
+    )
+    final["npd_recovery_method"] = str(npd_recovery)
+    final["keep_damp"] = bool(keep_damp)
+    if acta:
+        cif = work / f"{stem}.cif"
+        final["acta_cif"] = str(cif) if cif.is_file() else ""
+    final.update(shelxl_model_restraint_audit(work / f"{stem}.res"))
     final["iteration_history"] = history
     pathology = final.get("res_health") or {}
     final["npd_count"] = int(pathology.get("npd_count", 0) or 0)
@@ -418,10 +596,17 @@ def require_combined_endpoint_shelxl(
 
 
 def endpoint_lam_dir(run: Path, lam: str) -> Path:
+    """Return a run's endpoint directory for one lambda, e.g. endpoint_lam_1p0."""
+
     return run / f"endpoint_lam_{lam.replace('.', 'p')}"
 
 
 def endpoint_hkl_path(run: Path, lam: str) -> Path:
+    """Return a run's corrected endpoint HKL for lambda, preferring the unmerged file.
+
+    Searches the plain and the B/noexti endpoint directories; returns the default path if none exists.
+    """
+
     lam_tag = str(lam).replace(".", "p")
     candidate_dirs = [
         endpoint_lam_dir(run, lam),
@@ -436,7 +621,460 @@ def endpoint_hkl_path(run: Path, lam: str) -> Path:
     return endpoint_lam_dir(run, lam) / "dyn_nuisance_corrected_unmerged.hkl"
 
 
+def run_unmerged_batch_endpoint(
+    out: Path,
+    args,
+    rows_by_dataset: dict[str, list[tuple]],
+    corrections_by_dataset: dict[str, np.ndarray | None],
+    post_bloch_sigma: dict,
+    shelxl_executable: str,
+    endpoint_key_for,
+) -> dict:
+    """Unmerged multi-crystal SHELXL endpoint: every corrected work row, batch = crystal index, MERG 0, BASF.
+
+    The rows are those of the merged endpoint before the inter-dataset scale and the merge: the same
+    per-crystal sigma policy and dataset weight (and the combined post-Bloch factor when that is active).
+    SHELXL refines one batch scale per extra crystal (BASF, relative to crystal 1 on the OSF), starting
+    from the overlap estimate of the relative intensity scale, with the same weighting policy.
+    """
+
+    names = [name for name, rows in rows_by_dataset.items() if rows]
+    if len(names) < 2:
+        return {"status": "skipped_fewer_than_two_crystals", "datasets": names}
+    stem = "multi_dyn_unmerged"
+    ep_dir = out / f"combined_unmerged_endpoint_lam_{args.endpoint_lambda.replace('.', 'p')}"
+    ep_dir.mkdir(exist_ok=True)
+    sigma_scale = 1.0
+    if str(post_bloch_sigma.get("status", "")).startswith("ok"):
+        sigma_scale = float(post_bloch_sigma["sigma_scale"])
+    rows: list[tuple] = []
+    batches: list[int] = []
+    batch_of: dict[str, int] = {}
+    for batch, name in enumerate(names, start=1):
+        dataset_rows = scale_row_sigmas(rows_by_dataset[name], sigma_scale) if sigma_scale != 1.0 else rows_by_dataset[name]
+        rows.extend(dataset_rows)
+        batches.extend([batch] * len(dataset_rows))
+        batch_of[name] = batch
+    hkl_safe_factor = safe_fixed_width_factor(rows)
+    if hkl_safe_factor < 1.0:
+        rows = [(h, k, ell, intensity * hkl_safe_factor, sig * hkl_safe_factor) for h, k, ell, intensity, sig in rows]
+    overlap = estimate_overlap_scales({name: rows_by_dataset[name] for name in names}, canonicalizer=endpoint_key_for)
+    scales = overlap.get("scales") or {}
+    reference = safe_float(scales.get(names[0], 1.0), 1.0)
+    basf_start = []
+    for name in names[1:]:
+        relative = reference / safe_float(scales.get(name, 1.0), 1.0)
+        # I_j = BASF_j * I_1 on a common model: the overlap scales multiply I_j onto crystal 1.
+        basf_start.append(float(relative) if math.isfinite(relative) and relative > 0.0 else 1.0)
+    write_fixed_width_batch_hkl(ep_dir / f"{stem}.hkl", rows, batches)
+    kappa_effective = ABSOLUTE_HKL_KAPPA * hkl_safe_factor
+    osf = math.sqrt(kappa_effective) if args.rescale == "absolute" else None
+    write_no_exti_ins(
+        Path(args.res),
+        ep_dir / f"{stem}.ins",
+        f"{stem}.hkl",
+        wght=endpoint_initial_wght(args.endpoint_wght_mode),
+        ls_cycles=args.endpoint_ls_cycles,
+        keep_damp=bool(args.keep_damp),
+        osf=osf,
+        basf=basf_start,
+        merg=0,
+        **endpoint_native_outputs(args),
+    )
+    shelxl = run_shelxl(
+        ep_dir,
+        stem,
+        shelxl_executable,
+        iterations=args.shelxl_iterations,
+        wght_mode=args.endpoint_wght_mode,
+        endpoint_ls_cycles=args.endpoint_ls_cycles,
+        convergence_shift_esd=args.shelxl_convergence_shift_esd,
+        npd_recovery=args.shelxl_npd_recovery,
+        keep_damp=bool(args.keep_damp),
+        wght_converge_max_calls=args.wght_converge_max_calls,
+        allow_basf=True,
+    )
+    fail_if_shelxl_became_unavailable([{"shelxl": shelxl}], context="unmerged multi-crystal endpoint refinement")
+    res, lst, hkl = ep_dir / f"{stem}.res", ep_dir / f"{stem}.lst", ep_dir / f"{stem}.hkl"
+    basf = refined_basf(res, lst)
+    modulation, _per_dataset = audit_combined_endpoint_modulation(
+        {name: corrections_by_dataset.get(name) for name in names},
+        {name: 1.0 for name in names},
+        endpoint_source=args.endpoint_source,
+    )
+    return {
+        "status": "ok" if str(shelxl.get("status", "")) == "ok" else str(shelxl.get("status", "")),
+        "merge": "unmerged_batch",
+        "definition": (
+            "every corrected work row unmerged (MERG 0, Friedel opposites kept), HKLF 4 batch number = crystal "
+            "index in columns 29-32, one refined BASF per extra crystal (scale of batch m relative to batch 1)"
+        ),
+        "lambda_q": args.endpoint_lambda,
+        "endpoint_b": 0.0,
+        "keep_exti": False,
+        "rows": len(rows),
+        "batches": batch_of,
+        "hkl_safe_factor": float(hkl_safe_factor),
+        **modulation,
+        "sigma_policy": {"dataset": args.dataset_sigma_policy, "post_bloch_sigma_scale": sigma_scale},
+        "basf_start": basf_start,
+        "basf_start_source": "overlap estimate of the relative intensity scale (estimate_overlap_scales)",
+        "basf": basf,
+        "basf_sanity": basf_sanity(basf_start, basf),
+        "endpoint_wght_mode": args.endpoint_wght_mode,
+        "intensity_scale": {
+            "mode": args.rescale,
+            "kappa_effective": kappa_effective if args.rescale == "absolute" else None,
+            "osf_reset": osf,
+        },
+        "shelxl": shelxl,
+        "artifacts": {
+            "directory": str(ep_dir.resolve()),
+            "res": str(res.resolve()),
+            "lst": str(lst.resolve()),
+            "hkl": str(hkl.resolve()),
+            "res_sha256": sha256(res) if res.exists() else "",
+            "lst_sha256": sha256(lst) if lst.exists() else "",
+            "hkl_sha256": sha256(hkl) if hkl.exists() else "",
+        },
+    }
+
+
+FREE_VALIDATION_DIR = "free_validation"
+
+
+def free_validation_rows_by_dataset(
+    free_inputs: dict[str, dict],
+    args,
+    model,
+    *,
+    dataset_sigma: dict[str, dict],
+    sigma_model,
+    weight_by_name: dict[str, float],
+) -> tuple[dict[str, list[tuple]], dict[str, dict]]:
+    """Corrected free rows of every crystal, built exactly like its work rows; nothing is fitted on them.
+
+    Same final-model q, kappa scale and q-exclusion rule (the work rows' divisor median is the reference), the
+    per-crystal sigma policy as fitted on the work rows (error model: K, k, u against ``sigma_model``; uniform_z_rms:
+    the crystal's sigma factor) and the same dataset weight.  Returns the rows before the inter-dataset scale.
+    """
+
+    rows_by_dataset: dict[str, list[tuple]] = {}
+    audit: dict[str, dict] = {}
+    for name, item in free_inputs.items():
+        correction: dict = {}
+        rows, _corrections = endpoint_rows_and_corrections_from_native(
+            item["rows"],
+            float(args.endpoint_lambda),
+            q_policy=args.endpoint_q_policy,
+            rescale=args.rescale,
+            model=model if args.rescale == "absolute" else None,
+            audit=correction,
+            reference=item["work_correction"],
+        )
+        record: dict = {
+            "input_free_rows": len(item["rows"]),
+            "corrected_rows": len(rows),
+            "correction": correction,
+            "sigma_policy": args.dataset_sigma_policy,
+        }
+        meta = dataset_sigma.get(name) or {}
+        if args.dataset_sigma_policy == "error_model":
+            if str(meta.get("status", "")) != "ok":
+                record["reason"] = f"no fitted error model for this crystal (status {meta.get('status')!r})"
+                rows = []
+            elif rows:
+                rows, record["scoring"] = apply_error_model_sigma(rows, sigma_model, meta)
+        elif args.dataset_sigma_policy == "uniform_z_rms" and str(meta.get("status", "")).startswith("ok"):
+            rows = scale_row_sigmas(rows, float(meta["sigma_scale"]))
+            record["sigma_scale"] = float(meta["sigma_scale"])
+            if rows and math.isfinite(safe_float(meta.get("model_intensity_scale"))):
+                record["scoring"] = rms_z_against_model(rows, model, float(meta["model_intensity_scale"]))
+        weight = float(weight_by_name.get(name, 1.0))
+        rows = apply_hkl_weight(rows, weight)
+        record["endpoint_weight_applied_to_sigma"] = weight
+        record["rows"] = len(rows)
+        rows_by_dataset[name] = rows
+        audit[name] = record
+    return rows_by_dataset, audit
+
+
+def fixed_width_hkl_indices(path: Path) -> list[tuple[int, int, int]]:
+    """h, k, l of every reflection of a fixed-format HKLF 4 file (columns 1-12) before the 0 0 0 terminator."""
+
+    out = []
+    for line in Path(path).read_text(errors="replace").splitlines():
+        if len(line) < 12 or not line[:12].strip():
+            continue
+        hkl = (int(line[0:4]), int(line[4:8]), int(line[8:12]))
+        if hkl == (0, 0, 0):
+            break
+        out.append(hkl)
+    return out
+
+
+FREE_RMS_Z_DEFINITION = (
+    "RMS of z = (I - K Fc^2) / sigma over the corrected free rows of every crystal, with that crystal's work-fitted "
+    "sigma model and its K (per-crystal error model or uniform factor; before the dataset weight and the merge)"
+)
+
+
+def _pooled_free_rms_z(audit: dict[str, dict]) -> float | None:
+    """Return the row-weighted RMS of the per-crystal free RMS(z), or None without scored rows."""
+
+    total, count = 0.0, 0
+    for record in audit.values():
+        scoring = record.get("scoring") or {}
+        n, rms = int(scoring.get("rows", 0) or 0), safe_float(scoring.get("rms_z"))
+        if n and math.isfinite(rms):
+            total += n * rms * rms
+            count += n
+    return math.sqrt(total / count) if count else None
+
+
+def _fixed_width_rows(rows: list[tuple], factor: float) -> tuple[list[tuple], float | None]:
+    """Rows times the endpoint's HKL factor; an extra factor below 1 when a row would still overflow F8.2."""
+
+    scaled = [(h, k, ell, intensity * factor, sig * factor) for h, k, ell, intensity, sig in rows]
+    extra = safe_fixed_width_factor(scaled) if scaled else 1.0
+    if extra >= 1.0:
+        return scaled, None
+    return [(h, k, ell, intensity * extra, sig * extra) for h, k, ell, intensity, sig in scaled], extra
+
+
+def _hkl_lines(rows: list[tuple]) -> list[str]:
+    """Format rows as fixed-width HKLF 4 lines without newlines."""
+
+    return [format_fixed_width_row(*row).rstrip("\n") for row in rows]
+
+
+def merged_endpoint_free_validation(
+    ep_dir: Path,
+    *,
+    free_rows_by_dataset: dict[str, list[tuple]],
+    free_audit: dict[str, dict],
+    interdataset_scales: dict[str, float],
+    merge_sigma_policy: str,
+    merge_key,
+    post_bloch_sigma: dict,
+    hkl_safe_factor: float,
+    merged_work_rows: list[tuple],
+    refined_res: Path,
+    work_hkl: Path,
+    endpoint_shelxl: dict,
+    shelxl_executable: str,
+    wght_line: str | None = None,
+) -> dict:
+    """free_validation of the merged combined endpoint: the free rows merged like the work rows, scored at L.S. 0.
+
+    ``wght_line`` replaces the model's active WGHT in the scoring run (None keeps the .res's own, which a refinement
+    of this engine writes as the WGHT its last call applied).
+    """
+
+    unmerged: list[tuple] = []
+    for name, rows in free_rows_by_dataset.items():
+        unmerged.extend(scale_hkl_rows(rows, safe_float(interdataset_scales.get(name, 1.0), float("nan"))))
+    record: dict = {
+        "endpoint": "merged",
+        "free_rows": {"per_dataset": free_audit, "unmerged_rows": len(unmerged)},
+        "free_rms_z": _pooled_free_rms_z(free_audit),
+        "free_rms_z_definition": FREE_RMS_Z_DEFINITION,
+    }
+    if not unmerged:
+        return {**record, "status": "skipped_no_free_rows"}
+    merged, merge_meta = merge_hkl_rows(unmerged, merge_sigma_policy, canonicalizer=merge_key)
+    if str(post_bloch_sigma.get("status", "")).startswith("ok"):
+        merged = scale_row_sigmas(merged, float(post_bloch_sigma["sigma_scale"]))
+        record["post_bloch_sigma_scale"] = float(post_bloch_sigma["sigma_scale"])
+    work_keys = {(int(h), int(k), int(ell)) for h, k, ell, _i, _s in merged_work_rows}
+    free_keys = {(int(h), int(k), int(ell)) for h, k, ell, _i, _s in merged}
+    rows, extra = _fixed_width_rows(merged, float(hkl_safe_factor))
+    directory = ep_dir / FREE_VALIDATION_DIR
+    directory.mkdir(parents=True, exist_ok=True)
+    write_hkl(directory / "free.hkl", rows)
+    record["free_rows"].update(
+        {
+            "merged_rows": len(merged),
+            "merge_sigma": merge_meta,
+            "merge_key_classes_also_in_work_hkl": len(free_keys & work_keys),
+            "hkl_safe_factor": float(hkl_safe_factor),
+            "extra_hkl_factor": extra,
+        }
+    )
+    scored = score_model_on_work_and_free(
+        directory, res=refined_res, work_hkl=work_hkl, free_lines=_hkl_lines(rows), shelxl=shelxl_executable,
+        work_rescale=extra, wght_line=wght_line,
+    )
+    record_endpoint_reproduction(scored, endpoint_shelxl)
+    if record["free_rows"]["merge_key_classes_also_in_work_hkl"]:
+        scored["status"] = "free_reflections_overlap_work"
+    artifacts = {
+        "directory": str(directory.resolve()),
+        "free_hkl": str((directory / "free.hkl").resolve()),
+        "free_hkl_sha256": sha256(directory / "free.hkl"),
+        "validation_hkl": str((directory / "validation.hkl").resolve()),
+    }
+    return {**record, **scored, "artifacts": artifacts}
+
+
+def unmerged_endpoint_free_validation(
+    unmerged_endpoint: dict,
+    *,
+    free_rows_by_dataset: dict[str, list[tuple]],
+    free_audit: dict[str, dict],
+    post_bloch_sigma: dict,
+    merge_key,
+    shelxl_executable: str,
+) -> dict:
+    """free_validation of the unmerged batch endpoint: every free row, batch = crystal, scored with BASF fixed.
+
+    free_unmerged.hkl carries the batch numbers.  In the scoring run a free row of batch m > 1 is flagged -1 and put on
+    batch 1's scale by dividing I and sigma by the refined BASF(m - 1), SHELXL's own correction of batch m's Fo^2
+    (its .fcf and R1 show Fo^2 / BASF).
+    """
+
+    artifacts = unmerged_endpoint.get("artifacts") or {}
+    batches = {str(name): int(batch) for name, batch in (unmerged_endpoint.get("batches") or {}).items()}
+    basf = [float(value) for value in ((unmerged_endpoint.get("basf") or {}).get("values") or [])]
+    sigma_scale = float(post_bloch_sigma["sigma_scale"]) if str(post_bloch_sigma.get("status", "")).startswith("ok") else 1.0
+    rows: list[tuple] = []
+    row_batches: list[int] = []
+    for name, dataset_rows in free_rows_by_dataset.items():
+        if name not in batches:
+            continue
+        scaled = scale_row_sigmas(dataset_rows, sigma_scale) if sigma_scale != 1.0 else dataset_rows
+        rows.extend(scaled)
+        row_batches.extend([batches[name]] * len(scaled))
+    record: dict = {
+        "endpoint": "unmerged_batch",
+        "free_rows": {"per_dataset": free_audit, "unmerged_rows": len(rows), "batches": batches, "basf": basf},
+        "free_rms_z": _pooled_free_rms_z(free_audit),
+        "free_rms_z_definition": FREE_RMS_Z_DEFINITION,
+    }
+    if not rows:
+        return {**record, "status": "skipped_no_free_rows"}
+    if max(row_batches) - 1 > len(basf):
+        return {**record, "status": "failed", "error": f"{len(basf)} refined BASF values for batches {sorted(set(row_batches))}"}
+    work_hkl = Path(str(artifacts.get("hkl") or ""))
+    work_keys = {merge_key(*hkl) for hkl in fixed_width_hkl_indices(work_hkl)}
+    free_keys = {merge_key(int(h), int(k), int(ell)) for h, k, ell, _i, _s in rows}
+    factor = float(unmerged_endpoint.get("hkl_safe_factor", 1.0))
+    written = [(h, k, ell, intensity * factor, sig * factor) for h, k, ell, intensity, sig in rows]
+    directory = Path(str(artifacts.get("directory"))) / FREE_VALIDATION_DIR
+    directory.mkdir(parents=True, exist_ok=True)
+    on_batch1 = [
+        (h, k, ell, intensity / (basf[batch - 2] if batch > 1 else 1.0), sig / (basf[batch - 2] if batch > 1 else 1.0))
+        for (h, k, ell, intensity, sig), batch in zip(rows, row_batches, strict=True)
+    ]
+    scaled_batch1, extra = _fixed_width_rows(on_batch1, factor)
+    if extra is not None:
+        written = [(h, k, ell, intensity * extra, sig * extra) for h, k, ell, intensity, sig in written]
+    write_fixed_width_batch_hkl(directory / "free_unmerged.hkl", written, row_batches)
+    record["free_rows"].update(
+        {
+            "merge_key_classes_also_in_work_hkl": len(free_keys & work_keys),
+            "hkl_safe_factor": factor,
+            "extra_hkl_factor": extra,
+            "batch_scale_in_scoring_run": "I and sigma of batch m > 1 divided by BASF(m - 1); flagged -1",
+        }
+    )
+    scored = score_model_on_work_and_free(
+        directory, res=Path(str(artifacts.get("res"))), work_hkl=work_hkl, free_lines=_hkl_lines(scaled_batch1),
+        shelxl=shelxl_executable, work_rescale=extra, stem="validation_unmerged",
+    )
+    record_endpoint_reproduction(scored, unmerged_endpoint.get("shelxl") or {})
+    if record["free_rows"]["merge_key_classes_also_in_work_hkl"]:
+        scored["status"] = "free_reflections_overlap_work"
+    artifacts_out = {
+        "directory": str(directory.resolve()),
+        "free_hkl": str((directory / "free_unmerged.hkl").resolve()),
+        "free_hkl_sha256": sha256(directory / "free_unmerged.hkl"),
+        "validation_hkl": str((directory / "validation_unmerged.hkl").resolve()),
+    }
+    return {**record, **scored, "artifacts": artifacts_out}
+
+
+def free_validation_report_line(label: str, block: dict) -> str:
+    """One REPORT.md line of an endpoint's held-out validation (reporting only)."""
+
+    if not isinstance(block.get("free"), dict):
+        return f"Held-out SHELXL validation ({label}, reporting only): status `{block.get('status')}` {block.get('error', '')}".rstrip() + "."
+
+    def text(record: dict) -> str:
+        """Format one SHELXL record as N, R1gt, R1all, wR2 and GooF."""
+
+        return (
+            f"N {record.get('N_all')}, R1gt {100 * safe_float(record.get('R1_gt')):.2f}%, R1all "
+            f"{100 * safe_float(record.get('R1_all')):.2f}%, wR2 {100 * safe_float(record.get('wR2_all')):.2f}%, GooF "
+            f"{safe_float(record.get('GooF')):.3f}"
+        )
+
+    return (
+        f"Held-out SHELXL validation ({label}, L.S. 0, reporting only): status `{block.get('status')}`; free "
+        f"{text(block['free'])}; work {text(block['work'])}."
+    )
+
+
+def _free_validation_failure(exc: Exception) -> dict:
+    """Return the reporting-only record of a held-out validation that failed."""
+
+    return {"status": "failed", "error": f"{type(exc).__name__}: {exc}", "role": "reporting only"}
+
+
+SCORE_ONLY_STATISTICS = ("status", "R1_gt", "R1_all", "wR2_all", "GooF", "N_gt", "N_all", "active_wght_a", "active_wght_b")
+
+
+def score_only_inputs(scored_res: Path, rebuilt_hkl: Path) -> dict:
+    """What a ``--score-res`` score needs, checked: the model's own HKL is the rebuilt one, and its applied WGHT.
+
+    The model's HKL, listing and .res sit together (``multi_dyn_corrected.{res,hkl,lst}``).  The applied WGHT is the
+    one the model's last refinement call applied: the WGHT instruction its listing echoes.  This engine writes the same
+    WGHT into the kept .res before END (SHELXL's suggestion for a next call goes after END), so the .res line is used and
+    must agree with the listing.  Status ``ok`` only when the rebuilt HKL has the same bytes as the model's HKL, the
+    listing has complete statistics and the two WGHTs agree.
+    """
+
+    scored_res, rebuilt_hkl = Path(scored_res), Path(rebuilt_hkl)
+    scored_hkl, scored_lst = scored_res.with_suffix(".hkl"), scored_res.with_suffix(".lst")
+    record: dict = {
+        "scored_res": str(scored_res.resolve()),
+        "scored_res_sha256": sha256(scored_res),
+        "scored_hkl": str(scored_hkl.resolve()),
+        "scored_hkl_sha256": sha256(scored_hkl) if scored_hkl.is_file() else "",
+        "scored_lst": str(scored_lst.resolve()),
+        "scored_lst_sha256": sha256(scored_lst) if scored_lst.is_file() else "",
+        "rebuilt_hkl": str(rebuilt_hkl.resolve()),
+        "rebuilt_hkl_sha256": sha256(rebuilt_hkl),
+    }
+    record["work_hkl_bytes_same"] = bool(record["scored_hkl_sha256"]) and record["scored_hkl_sha256"] == record["rebuilt_hkl_sha256"]
+    listing = parse_lst(scored_lst)
+    record["listing_statistics"] = {key: listing.get(key) for key in SCORE_ONLY_STATISTICS}
+    wght = active_wght_line(scored_res.read_text(errors="replace"))
+    res_terms = parse_shelx_wght_terms(wght or "") if wght else []
+    applied = listing.get("active_wght_terms") or []
+    record["wght"] = wght
+    record["wght_applied_in_listing"] = list(applied)
+    record["wght_same"] = bool(res_terms) and bool(applied) and all(
+        abs(float(x) - float(y)) <= 5e-5 for x, y in zip((list(res_terms) + [0.0])[:2], (list(applied) + [0.0])[:2], strict=True)
+    )
+    if not record["work_hkl_bytes_same"]:
+        record["status"] = "work_hkl_not_reproduced"
+    elif listing.get("status") != "ok" or listing.get("R1_all") is None or listing.get("N_all") is None:
+        record["status"] = f"scored_model_listing_{listing.get('status')}"
+    elif not record["wght_same"]:
+        record["status"] = "applied_wght_not_determined"
+    else:
+        record["status"] = "ok"
+    return record
+
+
 def main():
+    """Concatenate the per-dataset native row tables and write the combined endpoint and report.
+
+    Reports joint native metrics, writes the combined HKL and SHELXL endpoint, combined_summary.json and
+    REPORT.md to --out-dir.
+    """
+
     started_monotonic = time.perf_counter()
     ap = build_combination_parser(
         description=__doc__,
@@ -454,6 +1092,51 @@ def main():
     # Native endpoint directories use ``str(float(lambda))``.  Canonicalizing
     # here keeps values such as ``1`` and ``1.0`` on one artifact identity.
     args.endpoint_lambda = str(endpoint_lambda_value)
+    if args.dataset_sigma_policy == "error_model" and args.endpoint_include_free_rows:
+        ap.error(
+            "--dataset-sigma-policy error_model is fitted on work rows only and needs --no-endpoint-include-free-rows "
+            "(free rows in the HKL would enter the fit); use uniform_z_rms with the legacy free-row HKL"
+        )
+    if args.dataset_sigma_policy == "error_model" and args.endpoint_source != "native":
+        ap.error("--dataset-sigma-policy error_model needs --endpoint-source native (row splits and the current model)")
+    if args.dataset_sigma_policy == "error_model" and args.post_bloch_sigma_policy != "none":
+        ap.error(
+            "--dataset-sigma-policy error_model already sets per-crystal sigmas; use --post-bloch-sigma-policy none "
+            "(a second uniform rescale of the merged HKL would undo the relative weights)"
+        )
+    free_validation = str(getattr(args, "endpoint_free_validation", "off")) == "on"
+    if free_validation and args.endpoint_include_free_rows:
+        ap.error(
+            "--endpoint-free-validation on needs --no-endpoint-include-free-rows (with the free rows in the refinement "
+            "HKL nothing is held out)"
+        )
+    if free_validation and args.endpoint_source != "native":
+        ap.error("--endpoint-free-validation on needs --endpoint-source native (free rows are corrected from the row tables)")
+    if args.endpoint_wght_mode == "converge" and not float(args.shelxl_convergence_shift_esd or 0.0) > 0.0:
+        ap.error("--endpoint-wght-mode converge needs --shelxl-convergence-shift-esd > 0 (AUTO 0.01)")
+    try:
+        parse_zerr_esds(args.zerr_esds)
+    except ValueError as exc:
+        ap.error(str(exc))
+    score_res = str(getattr(args, "score_res", "") or "").strip()
+    score_pass = int(getattr(args, "score_error_model_pass", 1) or 1)
+    score_sigma_model = str(getattr(args, "score_sigma_model", "") or "").strip()
+    if score_res:
+        refit_passes = 1 + (max(0, int(args.error_model_refits)) if args.dataset_sigma_policy == "error_model" else 0)
+        if not free_validation:
+            ap.error("--score-res needs --endpoint-free-validation on (it only scores)")
+        if args.unmerged_endpoint:
+            ap.error("--score-res scores the merged endpoint only; drop --unmerged-endpoint")
+        if not Path(score_res).is_file():
+            ap.error(f"--score-res: no file {score_res}")
+        if not 1 <= score_pass <= refit_passes:
+            ap.error(f"--score-error-model-pass {score_pass}: this command's error model has passes 1..{refit_passes}")
+        if (score_pass > 1) != bool(score_sigma_model):
+            ap.error("--score-sigma-model is the fitted model of a kept pass above 1, and only of such a pass")
+        if score_sigma_model and not Path(score_sigma_model).is_file():
+            ap.error(f"--score-sigma-model: no file {score_sigma_model}")
+    elif score_sigma_model or score_pass != 1:
+        ap.error("--score-error-model-pass and --score-sigma-model need --score-res")
 
     structure_path = Path(args.res)
     model = parse_model(structure_path)
@@ -467,6 +1150,8 @@ def main():
     endpoint_corrections_by_dataset: dict[str, np.ndarray | None] = {}
     endpoint_weight_by_name: dict[str, float] = {}
     dataset_sigma_by_name: dict[str, dict] = {}
+    free_endpoint_rows_by_dataset: dict[str, list[tuple]] = {}
+    free_validation_inputs: dict[str, dict] = {}
     per_dataset_wght: dict[str, dict[str, float]] = {}
     for item in args.run:
         if "=" not in item:
@@ -502,6 +1187,14 @@ def main():
             if str(r.get("dataset_role", "primary")) != "exclude"
             and endpoint_weight > 0.0
         ]
+        free_rows_excluded = 0
+        free_input_rows = [r for r in endpoint_input_rows if str(r.get("split", "work")) == "free"]
+        if not args.endpoint_include_free_rows:
+            # Free rows stay in the row tables and joint metrics (predicted and scored every cycle) but are
+            # never refined against, so SHELXL-side and row-side R_free stay honest.
+            kept_rows = [r for r in endpoint_input_rows if str(r.get("split", "work")) == "work"]
+            free_rows_excluded = len(endpoint_input_rows) - len(kept_rows)
+            endpoint_input_rows = kept_rows
         source_best_native = summary.get("best_native", {})
         if not isinstance(source_best_native, dict):
             source_best_native = {}
@@ -547,6 +1240,7 @@ def main():
                 "rows": len(rows),
                 "native_rows": len(native_rows),
                 "endpoint_rows": len(endpoint_input_rows),
+                "endpoint_free_rows_excluded": free_rows_excluded,
                 "dataset_role": role,
                 "raw_row_weight": raw_weight,
                 "endpoint_weight": endpoint_weight,
@@ -596,14 +1290,51 @@ def main():
             endpoint_rows_by_dataset[name] = hkl_rows
             endpoint_corrections_by_dataset[name] = None
         else:
+            correction_audit: dict = {}
             endpoint_rows, endpoint_corrections = endpoint_rows_and_corrections_from_native(
                 endpoint_input_rows,
                 float(args.endpoint_lambda),
+                q_policy=args.endpoint_q_policy,
+                rescale=args.rescale,
+                model=model if args.rescale == "absolute" else None,
+                audit=correction_audit,
             )
+            dataset_summaries[-1]["endpoint_correction"] = correction_audit
             endpoint_rows_by_dataset[name] = endpoint_rows
             endpoint_corrections_by_dataset[name] = endpoint_corrections
+            if free_validation:
+                free_validation_inputs[name] = {"rows": free_input_rows, "work_correction": dict(correction_audit)}
+            if args.dataset_sigma_policy == "error_model" and free_input_rows:
+                # Corrected free rows (their own q-ratio median) are scored by the fitted error model and
+                # reported; they are never fitted and never written to an HKL.
+                free_endpoint_rows_by_dataset[name], _free_corrections = endpoint_rows_and_corrections_from_native(
+                    free_input_rows,
+                    float(args.endpoint_lambda),
+                    q_policy=args.endpoint_q_policy,
+                    rescale=args.rescale,
+                    model=model if args.rescale == "absolute" else None,
+                )
         dataset_sigma_by_name[name] = {"policy": args.dataset_sigma_policy, "status": "not_requested"}
 
+    uncalibrated_rows_by_dataset = dict(endpoint_rows_by_dataset)
+    policy_weight_by_name = dict(endpoint_weight_by_name)
+    if args.dataset_sigma_policy == "error_model" and getattr(args, "error_model_dataset_weight", "apply") == "off":
+        # The error model already weights each crystal by its own misfit; a fractional policy weight on top would
+        # count that crystal's error twice.  Weight 0 (excluded) crystals never reach this point with rows.
+        endpoint_weight_by_name = {name: (1.0 if weight > 0.0 else weight) for name, weight in endpoint_weight_by_name.items()}
+    for item in dataset_summaries:
+        applied = endpoint_weight_by_name.get(item["name"], item.get("endpoint_weight"))
+        item["endpoint_weight_applied_to_shelxl_sigma"] = applied
+        item["endpoint_weight_policy"] = (
+            "error_model_only"
+            if args.dataset_sigma_policy == "error_model" and getattr(args, "error_model_dataset_weight", "apply") == "off"
+            else "policy_weight_applied"
+        )
+        item["endpoint_weight_from_dataset_policy"] = policy_weight_by_name.get(item["name"], item.get("endpoint_weight"))
+    if args.dataset_sigma_policy == "error_model":
+        endpoint_rows_by_dataset, dataset_sigma_by_name = error_model_rows_by_dataset(
+            uncalibrated_rows_by_dataset, model, free_endpoint_rows_by_dataset, endpoint_weight_by_name, weighted=False
+        )
     if args.dataset_sigma_policy == "uniform_z_rms":
         for name, rows_for_dataset in list(endpoint_rows_by_dataset.items()):
             calibrated, sigma_meta = calibrate_dataset_endpoint_rows(
@@ -627,6 +1358,9 @@ def main():
     wght_a = 0.126534 if args.wght_a is None else float(args.wght_a)
     wght_b = 0.0 if args.wght_b is None else float(args.wght_b)
     endpoint_key_for = endpoint_key_function(args.endpoint_merge_key, symmetry_ops)
+    if args.rescale == "absolute" and args.endpoint_source == "hkl":
+        raise ValueError("--rescale absolute needs --endpoint-source native (row predictions and the current model)")
+    interdataset_scale_diagnostic: dict = {}
     if args.interdataset_scale == "overlap":
         interdataset_scale = estimate_overlap_scales(endpoint_rows_by_dataset, canonicalizer=endpoint_key_for)
     else:
@@ -635,6 +1369,9 @@ def main():
             "overlap_counts": {name: 0 for name in endpoint_rows_by_dataset},
             "scales": {name: 1.0 for name in endpoint_rows_by_dataset},
         }
+        if args.rescale == "absolute" and len(endpoint_rows_by_dataset) > 1:
+            # Every crystal is already on kappa*|F|^2; the overlap estimate is reported, not applied (expected ~1).
+            interdataset_scale_diagnostic = estimate_overlap_scales(endpoint_rows_by_dataset, canonicalizer=endpoint_key_for)
     endpoint_rows = []
     for name, rows_for_dataset in endpoint_rows_by_dataset.items():
         dataset_scale = safe_float(interdataset_scale["scales"].get(name, 1.0), float("nan"))
@@ -666,6 +1403,7 @@ def main():
     merge_sigma = {"policy": args.merge_sigma_policy, "status": "skipped_no_endpoint_rows"}
     shelxl = {}
     endpoint_artifacts: dict[str, object] = {}
+    score_only: dict[str, object] = {}
     endpoint_shelxl = require_combined_endpoint_shelxl(
         args.shelxl,
         endpoint_rows_available=bool(endpoint_rows),
@@ -692,52 +1430,252 @@ def main():
                     "status": "failed",
                     "error": f"{type(exc).__name__}: {exc}",
                 }
-        hkl_safe_factor = min(safe_fixed_width_factor(endpoint_rows), safe_fixed_width_factor(merged_endpoint))
-        if hkl_safe_factor < 1.0:
-            endpoint_rows = [
-                (h, k, ell, intensity * hkl_safe_factor, sig * hkl_safe_factor)
-                for h, k, ell, intensity, sig in endpoint_rows
-            ]
-            merged_endpoint = [
-                (h, k, ell, intensity * hkl_safe_factor, sig * hkl_safe_factor)
-                for h, k, ell, intensity, sig in merged_endpoint
-            ]
-        ep_dir = out / f"combined_endpoint_lam_{args.endpoint_lambda.replace('.', 'p')}"
-        ep_dir.mkdir(exist_ok=True)
+        n_over_f8_2 = sum(1 for _h, _k, _l, intensity, _sig in merged_endpoint if intensity > 99999.0)
+        tag = args.endpoint_lambda.replace(".", "p")
         hkl_name = "multi_dyn_corrected.hkl"
-        write_hkl(ep_dir / hkl_name, merged_endpoint)
-        initial_wght = (0.0, 0.0) if args.endpoint_wght_mode == "freeze-zero" else None
-        write_no_exti_ins(
-            Path(args.res),
-            ep_dir / "multi_dyn_corrected.ins",
-            hkl_name,
-            wght=initial_wght,
-            ls_cycles=args.endpoint_ls_cycles,
-        )
-        shelxl = run_shelxl(
-            ep_dir,
-            "multi_dyn_corrected",
+        refits = max(0, int(args.error_model_refits)) if args.dataset_sigma_policy == "error_model" else 0
+
+        def write_pass_hkl(ep_dir: Path, merged_rows, unmerged_rows):
+            """Write one merged endpoint HKL (fixed-width safe); returns (hkl factor, merged rows, unmerged rows)."""
+
+            safe_factor = min(safe_fixed_width_factor(unmerged_rows), safe_fixed_width_factor(merged_rows))
+            if safe_factor < 1.0:
+                unmerged_rows = [
+                    (h, k, ell, intensity * safe_factor, sig * safe_factor) for h, k, ell, intensity, sig in unmerged_rows
+                ]
+                merged_rows = [
+                    (h, k, ell, intensity * safe_factor, sig * safe_factor) for h, k, ell, intensity, sig in merged_rows
+                ]
+            ep_dir.mkdir(exist_ok=True)
+            write_hkl(ep_dir / hkl_name, merged_rows)
+            return safe_factor, merged_rows, unmerged_rows
+
+        def refine_pass(ep_dir: Path, merged_rows, unmerged_rows, start_model: Path):
+            """Write one merged endpoint from ``start_model`` and refine it; returns (shelxl, hkl factor, rows)."""
+
+            safe_factor, merged_rows, unmerged_rows = write_pass_hkl(ep_dir, merged_rows, unmerged_rows)
+            # Absolute scale: Fo^2 = kappa_eff*|F|^2 with kappa_eff = kappa*hkl_safe_factor, so the OSF restarts at
+            # sqrt(kappa_eff) for every handoff instead of chasing a per-cycle median factor.
+            pass_osf = math.sqrt(ABSOLUTE_HKL_KAPPA * safe_factor) if args.rescale == "absolute" else None
+            write_no_exti_ins(
+                start_model,
+                ep_dir / "multi_dyn_corrected.ins",
+                hkl_name,
+                wght=endpoint_initial_wght(args.endpoint_wght_mode),
+                ls_cycles=args.endpoint_ls_cycles,
+                keep_damp=bool(args.keep_damp),
+                osf=pass_osf,
+                **endpoint_native_outputs(args),
+            )
+            result = run_shelxl(
+                ep_dir,
+                "multi_dyn_corrected",
+                endpoint_shelxl,
+                iterations=args.shelxl_iterations,
+                wght_mode=args.endpoint_wght_mode,
+                endpoint_ls_cycles=args.endpoint_ls_cycles,
+                convergence_shift_esd=args.shelxl_convergence_shift_esd,
+                npd_recovery=args.shelxl_npd_recovery,
+                keep_damp=bool(args.keep_damp),
+                wght_converge_max_calls=args.wght_converge_max_calls,
+            )
+            fail_if_shelxl_became_unavailable(
+                [{"shelxl": result}],
+                context="combined corrected-HKL endpoint refinement",
+            )
+            return result, safe_factor, merged_rows, unmerged_rows
+
+        def refit_pass_state(pass_index: int, sigma_model_path: Path) -> dict:
+            """Rows of error-model pass ``pass_index`` > 1: every crystal refitted against ``sigma_model_path``."""
+
+            rows_by_dataset, sigma_by_name = error_model_rows_by_dataset(
+                uncalibrated_rows_by_dataset,
+                parse_model(sigma_model_path),
+                free_endpoint_rows_by_dataset,
+                endpoint_weight_by_name,
+                weighted=True,
+            )
+            pass_rows = []
+            for name, rows_for_dataset in rows_by_dataset.items():
+                dataset_scale = safe_float(interdataset_scale["scales"].get(name, 1.0), float("nan"))
+                pass_rows.extend(scale_hkl_rows(rows_for_dataset, dataset_scale))
+            pass_merged, pass_merge_sigma = merge_hkl_rows(pass_rows, args.merge_sigma_policy, canonicalizer=endpoint_key_for)
+            pass_merge_sigma["status"] = "ok"
+            return {
+                "pass": pass_index,
+                "rows_by_dataset": rows_by_dataset,
+                "rows": pass_rows,
+                "merged": pass_merged,
+                "merge_sigma": pass_merge_sigma,
+                "sigma": sigma_by_name,
+                "start": sigma_model_path,
+            }
+
+        start_model_path = Path(args.res)
+        error_model_passes: list[dict] = []
+        if score_res:
+            # Validation only: the rows of the pass the scored endpoint kept, rebuilt without refining anything (a
+            # kept pass above 1 was fitted against the previous pass's refined model, which the run recorded).
+            if score_pass > 1:
+                kept = refit_pass_state(score_pass, Path(score_sigma_model))
+                endpoint_rows_by_dataset = kept["rows_by_dataset"]
+                endpoint_rows = kept["rows"]
+                merged_endpoint = kept["merged"]
+                merge_sigma = kept["merge_sigma"]
+                dataset_sigma_by_name = kept["sigma"]
+                start_model_path = kept["start"]
+            ep_dir = out / f"combined_endpoint_lam_{tag}"
+            hkl_safe_factor, merged_endpoint, endpoint_rows = write_pass_hkl(ep_dir, merged_endpoint, endpoint_rows)
+            endpoint_res = Path(score_res)
+            endpoint_lst = endpoint_res.with_suffix(".lst")
+            endpoint_hkl = ep_dir / hkl_name
+            score_only = score_only_inputs(endpoint_res, endpoint_hkl)
+            score_only.update({"error_model_pass": score_pass, "sigma_model": str(start_model_path)})
+            endpoint_artifacts = {
+                "directory": str(ep_dir.resolve()),
+                "res": score_only["scored_res"],
+                "lst": score_only["scored_lst"],
+                "hkl": str(endpoint_hkl.resolve()),
+                "res_sha256": score_only["scored_res_sha256"],
+                "lst_sha256": score_only["scored_lst_sha256"],
+                "hkl_sha256": score_only["rebuilt_hkl_sha256"],
+            }
+        if refits > 0 and not score_res:
+            # Error-model passes: pass 1 fits every crystal against the entering model; each refit fits against the
+            # model SHELXL refined in the previous pass (work rows only; the corrected intensities are unchanged)
+            # and refines again from it.  Each pass has its own directory.  A pass that ends unsafe (NPD) stops the
+            # refits and the last clean pass is kept, as the macro-cycles keep their last clean model.  The kept
+            # pass is then written and refined again as the canonical endpoint (the same rows and start model).
+            state = {
+                "pass": 1,
+                "rows_by_dataset": endpoint_rows_by_dataset,
+                "rows": endpoint_rows,
+                "merged": merged_endpoint,
+                "merge_sigma": merge_sigma,
+                "sigma": dataset_sigma_by_name,
+                "start": start_model_path,
+            }
+            first_state, kept = state, None
+            for pass_index in range(1, refits + 2):
+                if pass_index > 1:
+                    state = refit_pass_state(pass_index, start_model_path)
+                pass_dir = out / f"combined_endpoint_lam_{tag}_error_model_pass{pass_index}"
+                pass_shelxl, _factor, _merged, _rows = refine_pass(pass_dir, state["merged"], state["rows"], state["start"])
+                record = {
+                    "pass": pass_index,
+                    "directory": str(pass_dir.resolve()),
+                    "sigma_model": str(state["start"]),
+                    "start_model": str(state["start"]),
+                    "error_model": {
+                        name: {key: meta.get(key) for key in ("k", "u", "model_intensity_scale", "work_rms_z_after", "free_rms_z_after")}
+                        for name, meta in state["sigma"].items()
+                    },
+                    "shelxl": {key: pass_shelxl.get(key) for key in ("status", "R1_gt", "R1_all", "wR2_all", "GooF", "active_wght_a", "active_wght_b", "recommended_wght_a", "recommended_wght_b", "npd_atoms")},
+                    "kept": False,
+                }
+                error_model_passes.append(record)
+                refined_res = pass_dir / "multi_dyn_corrected.res"
+                if str(pass_shelxl.get("status", "")) != "ok" or not refined_res.exists():
+                    record["reason"] = f"SHELXL status {pass_shelxl.get('status')!r}: refits stop, the last clean pass is kept"
+                    break
+                kept = state
+                start_model_path = refined_res
+            if kept is None:
+                # Not even pass 1 was clean: the canonical endpoint repeats pass 1 and reports its status.
+                kept = first_state
+            error_model_passes[kept["pass"] - 1]["kept"] = True
+            endpoint_rows_by_dataset = kept["rows_by_dataset"]
+            endpoint_rows = kept["rows"]
+            merged_endpoint = kept["merged"]
+            merge_sigma = kept["merge_sigma"]
+            dataset_sigma_by_name = kept["sigma"]
+            start_model_path = kept["start"]
+        if not score_res:
+            ep_dir = out / f"combined_endpoint_lam_{tag}"
+            shelxl, hkl_safe_factor, merged_endpoint, endpoint_rows = refine_pass(
+                ep_dir, merged_endpoint, endpoint_rows, start_model_path
+            )
+            endpoint_res = ep_dir / "multi_dyn_corrected.res"
+            endpoint_lst = ep_dir / "multi_dyn_corrected.lst"
+            endpoint_hkl = ep_dir / hkl_name
+            endpoint_artifacts = {
+                "directory": str(ep_dir.resolve()),
+                "res": str(endpoint_res.resolve()),
+                "lst": str(endpoint_lst.resolve()),
+                "hkl": str(endpoint_hkl.resolve()),
+                "res_sha256": sha256(endpoint_res) if endpoint_res.exists() else "",
+                "lst_sha256": sha256(endpoint_lst) if endpoint_lst.exists() else "",
+                "hkl_sha256": sha256(endpoint_hkl) if endpoint_hkl.exists() else "",
+            }
+
+    free_validation_rows: dict[str, list[tuple]] = {}
+    free_validation_audit: dict[str, dict] = {}
+    merged_free_validation: dict = {}
+    if free_validation and endpoint_rows:
+        try:
+            # The error model of the kept pass was fitted against its start model (the entering model for pass 1).
+            free_validation_rows, free_validation_audit = free_validation_rows_by_dataset(
+                free_validation_inputs,
+                args,
+                model,
+                dataset_sigma=dataset_sigma_by_name,
+                sigma_model=parse_model(start_model_path) if args.dataset_sigma_policy == "error_model" else model,
+                weight_by_name=endpoint_weight_by_name,
+            )
+            if score_res and score_only.get("status") != "ok":
+                # the scored model's own HKL is not the one rebuilt here (or its applied WGHT is unknown): not scored
+                merged_free_validation = {"status": str(score_only.get("status"))}
+            elif not score_res and (str(shelxl.get("status", "")) != "ok" or not endpoint_res.exists()):
+                merged_free_validation = {"status": f"skipped_endpoint_status_{shelxl.get('status')}"}
+            else:
+                merged_free_validation = merged_endpoint_free_validation(
+                    ep_dir,
+                    free_rows_by_dataset=free_validation_rows,
+                    free_audit=free_validation_audit,
+                    interdataset_scales=interdataset_scale["scales"],
+                    merge_sigma_policy=args.merge_sigma_policy,
+                    merge_key=endpoint_key_for,
+                    post_bloch_sigma=post_bloch_sigma,
+                    hkl_safe_factor=hkl_safe_factor,
+                    merged_work_rows=merged_endpoint,
+                    refined_res=endpoint_res,
+                    work_hkl=endpoint_hkl,
+                    endpoint_shelxl=score_only["listing_statistics"] if score_res else shelxl,
+                    shelxl_executable=endpoint_shelxl,
+                    wght_line=score_only["wght"] if score_res else None,
+                )
+            merged_free_validation["sigma_model"] = str(start_model_path)
+        except Exception as exc:  # reporting only: a failed validation never fails the endpoint
+            merged_free_validation = _free_validation_failure(exc)
+
+    unmerged_endpoint: dict = {"status": "not_requested"}
+    if args.unmerged_endpoint and endpoint_rows:
+        unmerged_endpoint = run_unmerged_batch_endpoint(
+            out,
+            args,
+            endpoint_rows_by_dataset,
+            endpoint_corrections_by_dataset,
+            post_bloch_sigma,
             endpoint_shelxl,
-            iterations=args.shelxl_iterations,
-            wght_mode=args.endpoint_wght_mode,
-            endpoint_ls_cycles=args.endpoint_ls_cycles,
+            endpoint_key_for,
         )
-        fail_if_shelxl_became_unavailable(
-            [{"shelxl": shelxl}],
-            context="combined corrected-HKL endpoint refinement",
-        )
-        endpoint_res = ep_dir / "multi_dyn_corrected.res"
-        endpoint_lst = ep_dir / "multi_dyn_corrected.lst"
-        endpoint_hkl = ep_dir / hkl_name
-        endpoint_artifacts = {
-            "directory": str(ep_dir.resolve()),
-            "res": str(endpoint_res.resolve()),
-            "lst": str(endpoint_lst.resolve()),
-            "hkl": str(endpoint_hkl.resolve()),
-            "res_sha256": sha256(endpoint_res) if endpoint_res.exists() else "",
-            "lst_sha256": sha256(endpoint_lst) if endpoint_lst.exists() else "",
-            "hkl_sha256": sha256(endpoint_hkl) if endpoint_hkl.exists() else "",
-        }
+        if free_validation:
+            try:
+                if str(unmerged_endpoint.get("status", "")) != "ok":
+                    unmerged_endpoint["free_validation"] = {
+                        "status": f"skipped_endpoint_status_{unmerged_endpoint.get('status')}"
+                    }
+                else:
+                    unmerged_endpoint["free_validation"] = unmerged_endpoint_free_validation(
+                        unmerged_endpoint,
+                        free_rows_by_dataset=free_validation_rows,
+                        free_audit=free_validation_audit,
+                        post_bloch_sigma=post_bloch_sigma,
+                        merge_key=endpoint_key_for,
+                        shelxl_executable=endpoint_shelxl,
+                    )
+            except Exception as exc:  # reporting only
+                unmerged_endpoint["free_validation"] = _free_validation_failure(exc)
 
     endpoint_resolution = hkl_resolution_stats(merged_endpoint, model)
     resolution_filters = [dataset["resolution_filter"] for dataset in dataset_summaries]
@@ -816,14 +1754,47 @@ def main():
             **combined_modulation,
             "per_dataset_modulation": per_dataset_modulation,
             "dataset_sigma": dataset_sigma_by_name,
+            "error_model_passes": error_model_passes if endpoint_rows else [],
+            "error_model_refits": int(args.error_model_refits) if args.dataset_sigma_policy == "error_model" else 0,
             "merge_sigma": merge_sigma,
             "post_bloch_sigma": post_bloch_sigma if endpoint_rows else {"policy": args.post_bloch_sigma_policy, "status": "skipped_no_endpoint_rows"},
             "shelxl": shelxl,
             "artifacts": endpoint_artifacts,
             "endpoint_wght_mode": args.endpoint_wght_mode,
+            "endpoint_initial_wght": list(endpoint_initial_wght(args.endpoint_wght_mode) or []),
             "endpoint_ls_cycles": max(1, int(args.endpoint_ls_cycles)),
+            "shelxl_convergence_shift_esd": float(args.shelxl_convergence_shift_esd),
+            "shelxl_npd_recovery": args.shelxl_npd_recovery,
+            "keep_damp": bool(args.keep_damp),
+            "free_rows": {
+                "policy": "include" if args.endpoint_include_free_rows else "exclude",
+                # read by reports/heldout.py (leak flag for the SHELXL HKL)
+                "free_rows_in_hkl": bool(args.endpoint_include_free_rows),
+                "hkl_split": "all" if args.endpoint_include_free_rows else "work",
+                "n_excluded": int(sum(int(ds.get("endpoint_free_rows_excluded", 0)) for ds in dataset_summaries)),
+            },
+            "q_policy": args.endpoint_q_policy,
+            "n_excluded_q_rows": int(
+                sum(int((ds.get("endpoint_correction") or {}).get("n_excluded_q_rows", 0)) for ds in dataset_summaries)
+            ),
+            "intensity_scale": {
+                "mode": args.rescale,
+                "kappa": ABSOLUTE_HKL_KAPPA if args.rescale == "absolute" else None,
+                "kappa_effective": (ABSOLUTE_HKL_KAPPA * hkl_safe_factor) if (endpoint_rows and args.rescale == "absolute") else None,
+                "osf_reset": math.sqrt(ABSOLUTE_HKL_KAPPA * hkl_safe_factor) if (endpoint_rows and args.rescale == "absolute") else None,
+                "n_rows_over_f8_2_at_kappa": int(n_over_f8_2) if endpoint_rows else 0,
+            },
+            "interdataset_scale_diagnostic": interdataset_scale_diagnostic,
         },
+        "combined_unmerged_endpoint": unmerged_endpoint,
     }
+    if free_validation:
+        # only under --endpoint-free-validation on, so the legacy summary keeps its exact shape
+        result["combined_endpoint"]["free_validation"] = merged_free_validation or {"status": "skipped_no_endpoint_rows"}
+    if score_res:
+        # validation only: nothing was refined; "shelxl" stays empty and "artifacts" names the scored model
+        result["combined_endpoint"]["mode"] = "score_only"
+        result["combined_endpoint"]["score_only"] = score_only or {"status": "skipped_no_endpoint_rows"}
     (out / "combined_summary.json").write_text(json.dumps(result, indent=2, allow_nan=True) + "\n")
     lines = [
         "# Multi-Crystal Native Nuisance Combination",
@@ -848,7 +1819,13 @@ def main():
         lines.append(
             f"| {ds['name']} | {ds['dataset_role']} | {resolution_filter.get('kept_rows', 0)}/{resolution_filter.get('input_rows', 0)} | "
             f"`{scale_contract.get('model', 'unknown')}` | {scale_contract.get('parameter_count', 'n/a')} | "
-            f"{safe_float(ds.get('raw_row_weight')):.3f}/{safe_float(ds.get('endpoint_weight')):.3f} | "
+            f"{safe_float(ds.get('raw_row_weight')):.3f}/{safe_float(ds.get('endpoint_weight')):.3f}"
+            + (
+                f" (SHELXL {safe_float(ds.get('endpoint_weight_applied_to_shelxl_sigma')):.3f})"
+                if ds.get("endpoint_weight_policy") == "error_model_only"
+                else ""
+            )
+            + " | "
             f"{ds['native_rows']}/{ds['endpoint_rows']} | {ds['unique_signed_hkl']} | {ds['unique_symmetry_friedel']} | "
             f"{safe_float(bstats.get('median')):.0f}/{safe_float(bstats.get('p95')):.0f}/{safe_float(bstats.get('max')):.0f} | "
             f"{100*safe_float(dyn.get('R1_all')):.2f} | {100*safe_float(dyn.get('wR2_all')):.2f} | "
@@ -871,7 +1848,18 @@ def main():
             "",
         ]
     )
-    if shelxl:
+    if score_res and score_only:
+        lines.append(
+            f"Validation only (`--score-res`): nothing was refined. The merged endpoint HKL was rebuilt with this "
+            f"command's recipe (error-model pass `{score_only.get('error_model_pass')}`, sigma model "
+            f"`{score_only.get('sigma_model')}`) and the refined model `{score_only.get('scored_res')}` was scored at "
+            f"L.S. 0 with WGHT `{score_only.get('wght')}`. Rebuilt HKL identical to the model's own HKL: "
+            f"`{score_only.get('work_hkl_bytes_same')}`; status `{score_only.get('status')}`."
+        )
+        block = result["combined_endpoint"].get("free_validation")
+        if isinstance(block, dict):
+            lines.append(free_validation_report_line("merged", block))
+    elif shelxl:
         scale_bits = ", ".join(f"{name}={safe_float(scale):.3g}" for name, scale in sorted(interdataset_scale.get("scales", {}).items()))
         lines.append(f"Inter-dataset endpoint scaling: `{args.interdataset_scale}`. Scale factors: {scale_bits or 'n/a'}.")
         if args.dataset_sigma_policy == "uniform_z_rms":
@@ -893,6 +1881,13 @@ def main():
             "so the shared SHELXL LS step sees one corrected observation per selected merge key."
         )
         lines.append(
+            f"Corrected-intensity scale `{args.rescale}`; q policy `{args.endpoint_q_policy}` "
+            f"(`{result['combined_endpoint']['n_excluded_q_rows']}` rows excluded); free rows "
+            f"`{result['combined_endpoint']['free_rows']['policy']}` (`{result['combined_endpoint']['free_rows']['n_excluded']}` excluded); "
+            f"NPD recovery `{args.shelxl_npd_recovery}`; SHELXL calls stop at |max shift/esd| < "
+            f"`{float(args.shelxl_convergence_shift_esd):g}` (converged `{shelxl.get('converged')}`)."
+        )
+        lines.append(
             f"Shared endpoint SHELXL policy: `{args.endpoint_wght_mode}` weights and `L.S./CGLS {max(1, int(args.endpoint_ls_cycles))}`. "
             f"Active WGHT reported by SHELXL: `{safe_float(shelxl.get('active_wght_a')):.4f}` "
             f"`{safe_float(shelxl.get('active_wght_b')):.4f}`."
@@ -901,6 +1896,36 @@ def main():
         lines.append(
             f"Lambda `{args.endpoint_lambda}` merged `{len(endpoint_rows)}` unmerged endpoint rows to `{len(merged_endpoint)}` corrected endpoint rows. SHELXL status `{shelxl.get('status')}`; `R1gt={100*safe_float(shelxl.get('R1_gt')):.2f}%`, `R1all={100*safe_float(shelxl.get('R1_all')):.2f}%`, `wR2all={100*safe_float(shelxl.get('wR2_all')):.2f}%`, `GooF={safe_float(shelxl.get('GooF')):.3f}`."
         )
+        wght_record = shelxl.get("wght_convergence") or {}
+        if wght_record:
+            lines.append(
+                f"SHELXL weights `{wght_record.get('status')}` after `{wght_record.get('calls_made')}` calls: applied "
+                f"`{wght_record.get('final_applied')}`, suggested `{wght_record.get('final_suggested')}`."
+            )
+        if args.dataset_sigma_policy == "error_model":
+            for name, meta in sorted(dataset_sigma_by_name.items()):
+                lines.append(
+                    f"Error model `{name}`: k `{safe_float(meta.get('k')):.3f}`, u `{safe_float(meta.get('u')):.4f}`, "
+                    f"work RMS(z) raw/after `{safe_float(meta.get('work_rms_z_raw')):.2f}`/"
+                    f"`{safe_float(meta.get('work_rms_z_after')):.3f}`, free RMS(z) after "
+                    f"`{safe_float(meta.get('free_rms_z_after')):.3f}` over `{meta.get('free_rows', 0)}` free rows."
+                )
+        if unmerged_endpoint.get("shelxl"):
+            unmerged_shelxl = unmerged_endpoint["shelxl"]
+            lines.append(
+                f"Unmerged batch endpoint (MERG 0, batches {unmerged_endpoint.get('batches')}): status "
+                f"`{unmerged_shelxl.get('status')}`; `R1gt={100*safe_float(unmerged_shelxl.get('R1_gt')):.2f}%`, "
+                f"`R1all={100*safe_float(unmerged_shelxl.get('R1_all')):.2f}%`, "
+                f"`wR2all={100*safe_float(unmerged_shelxl.get('wR2_all')):.2f}%`, "
+                f"`GooF={safe_float(unmerged_shelxl.get('GooF')):.3f}`; BASF start "
+                f"`{unmerged_endpoint.get('basf_start')}` refined `{(unmerged_endpoint.get('basf') or {}).get('values')}`."
+            )
+        for label, block in (
+            ("merged", result["combined_endpoint"].get("free_validation")),
+            ("unmerged", unmerged_endpoint.get("free_validation")),
+        ):
+            if isinstance(block, dict):
+                lines.append(free_validation_report_line(label, block))
         sig_meta = result["combined_endpoint"].get("post_bloch_sigma") or {}
         if sig_meta.get("policy") == "uniform_z_rms":
             lines.append(

@@ -1,9 +1,8 @@
+"""Registry of the model-update endpoints (SHELXL and others) that can refine against GROND's corrected HKL."""
+
 from __future__ import annotations
 
-import shlex
 from dataclasses import asdict, dataclass
-from pathlib import Path
-from string import Formatter
 from typing import Any
 
 from grond.io.tool_config import tool_statuses
@@ -147,38 +146,3 @@ def endpoint_report(config: dict[str, Any] | None = None) -> dict[str, Any]:
         "endpoints": rows,
         "configured_endpoint_blocks": sorted(blocks.keys()),
     }
-
-
-def render_custom_command(
-    template: str,
-    *,
-    model: str | Path,
-    reflections: str | Path,
-    out_dir: str | Path,
-    cycles: int = 1,
-    extra: dict[str, Any] | None = None,
-) -> list[str]:
-    """Render a configured custom endpoint command into an argv list.
-
-    The template can use `{model}`, `{reflections}`, `{out_dir}`, `{cycles}`,
-    and any key supplied in `extra`.  The result is split with shell-like
-    quoting so a config file can contain either a simple executable or a command
-    with flags.  GROND does not assume what the external tool is; it only checks
-    that the command can be rendered and that the declared output model exists
-    when a workflow chooses to run that adapter.
-    """
-
-    values: dict[str, Any] = {
-        "model": str(model),
-        "reflections": str(reflections),
-        "out_dir": str(out_dir),
-        "cycles": int(cycles),
-    }
-    values.update(extra or {})
-    allowed = set(values)
-    requested = {field_name for _, field_name, _, _ in Formatter().parse(template) if field_name}
-    unknown = requested - allowed
-    if unknown:
-        raise ValueError("unknown custom endpoint template field(s): " + ", ".join(sorted(unknown)))
-    rendered = template.format(**values)
-    return shlex.split(rendered)

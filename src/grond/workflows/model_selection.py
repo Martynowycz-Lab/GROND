@@ -129,8 +129,8 @@ def resolve_structure_update_strategy(args: argparse.Namespace, *, multi_dataset
     The SHELXL feedback loop is the preferred default whenever a
     SHELXL executable is available because it reaches the same high-N/Q
     row-space endpoint as finite-difference dynamical gradients at a small
-    fraction of the wall time.  Multi-dataset runs use the same lagged LS1
-    idea as single-dataset runs: per-dataset Bloch rows are merged into one
+    fraction of the wall time.  Multi-dataset runs alternate in the same way
+    as single-dataset runs: per-dataset Bloch rows are merged into one
     corrected endpoint HKL, one shared SHELXL update is run, and the updated
     shared model is sent back through every dataset.
     """

@@ -1,1 +1,1 @@
-"""Row-space diagnostics and endpoint-promotion workflow namespace."""
+"""Row-space diagnostics: endpoint promotion checks and resolution limits."""

@@ -10,13 +10,16 @@ import math
 import multiprocessing
 import os
 import time
+from pathlib import Path
 
 import numpy as np
 
 from grond.bloch.backends import (
+    _auto_jax_batch_size,
+    _jax_backend_uses_real_expm,
+    _jax_devices,
+    _jax_host_buffer_bytes,
     _jax_matrix_bucket_size,
-    _jax_module_key,
-    _jax_modules,
     _jax_propagate_batch,
     _stack_square_matrices,
 )
@@ -27,6 +30,7 @@ from grond.bloch.errors import (
     MissingObservedCentroidError,
     NonPassiveAbsorptionError,
 )
+from grond.bloch.numerics import sha256, validate_row_indices
 
 # Another process context cannot repair missing observations or invalid physics.
 _NON_RETRYABLE_ERRORS = (
@@ -39,21 +43,40 @@ _NON_RETRYABLE_ERRORS = (
 _WORKER_PORT = None
 
 
+def _pool_context_names():
+    """Return process start methods to try in order: forkserver and spawn on macOS, fork first elsewhere."""
+
+    import platform
+
+    if platform.system() == "Darwin":
+        return ["forkserver", "spawn"]
+    # Linux fork shares the initialized port/cache state copy-on-write;
+    # forkserver is a safe fallback but is much slower for high-worker
+    # repeated Bloch predictions on large servers.
+    return ["fork", "forkserver", "spawn"]
+
+
 def _init_prediction_worker(port):
+    """Pool initializer: keep the port as this worker process's prediction port."""
+
     global _WORKER_PORT
     _WORKER_PORT = port
 
 
-def _predict_row_worker(idx):
+def _predict_row_worker(row_index):
+    """Return (row index, row_prediction) from the worker's port; RuntimeError before initialization."""
+
     if _WORKER_PORT is None:
         raise RuntimeError("prediction worker was not initialized")
-    return int(idx), _WORKER_PORT.row_prediction(int(idx))
+    return int(row_index), _WORKER_PORT.row_prediction(int(row_index))
 
 
-def _predict_row_cache_worker(pos):
+def _predict_row_cache_worker(row_position):
+    """Return the prediction of position ``row_position`` in the worker port's active row-plan cache."""
+
     if _WORKER_PORT is None:
         raise RuntimeError("prediction worker was not initialized")
-    return _WORKER_PORT.row_prediction_from_active_cache(int(pos))
+    return _WORKER_PORT.row_prediction_from_active_cache(int(row_position))
 
 
 def _ordered_prediction_attempt(indices, attempt_results):
@@ -67,21 +90,21 @@ def _ordered_prediction_attempt(indices, attempt_results):
     """
 
     requested = np.asarray(indices, dtype=int)
-    position = {int(idx): int(pos) for pos, idx in enumerate(requested)}
-    if len(position) != len(requested):
+    position_by_row_index = {int(row_index): int(row_position) for row_position, row_index in enumerate(requested)}
+    if len(position_by_row_index) != len(requested):
         raise ValueError("prediction row indices must be unique")
     ordered = [None] * len(requested)
-    for idx, result in attempt_results:
-        idx = int(idx)
-        pos = position.get(idx)
-        if pos is None:
-            raise RuntimeError(f"prediction returned unexpected row index {idx}")
-        if ordered[pos] is not None:
-            raise RuntimeError(f"prediction returned duplicate row index {idx}")
-        ordered[pos] = result
-    missing = [int(requested[pos]) for pos, result in enumerate(ordered) if result is None]
+    for row_index, result in attempt_results:
+        row_index = int(row_index)
+        row_position = position_by_row_index.get(row_index)
+        if row_position is None:
+            raise RuntimeError(f"prediction returned unexpected row index {row_index}")
+        if ordered[row_position] is not None:
+            raise RuntimeError(f"prediction returned duplicate row index {row_index}")
+        ordered[row_position] = result
+    missing = [int(requested[row_position]) for row_position, result in enumerate(ordered) if result is None]
     if missing:
-        preview = ", ".join(str(idx) for idx in missing[:8])
+        preview = ", ".join(str(row_index) for row_index in missing[:8])
         raise RuntimeError(
             f"prediction attempt returned {len(requested) - len(missing)}/{len(requested)} rows; "
             f"missing row indices: {preview}"
@@ -92,89 +115,116 @@ def _ordered_prediction_attempt(indices, attempt_results):
 class PredictionMixin:
     """One cohesive part of XDSBlochPort; initialized by the public facade."""
 
-    def predict_rows_jax_batched(self, indices, chunksize=8):
-        """Predict rows by batching Bloch eigensolvers through JAX."""
+    def _verify_prediction_sources(self):
+        """Refuse source replacement before calculation or publication of its result."""
 
-        t0_all = time.perf_counter()
-        indices = np.asarray(indices, dtype=int)
+        verify = getattr(self.data, "verify_source_files", None)
+        if verify is not None:
+            verify()
+        geometry = getattr(self, "geometry_path", None)
+        if geometry is not None and sha256(Path(geometry["path"])) != geometry["sha256"]:
+            raise ValueError("loaded geometry path changed after reading; reload the Bloch port")
+
+    def _predict_jax_plan_block(self, plans, backend, buffer_bytes):
+        """Evaluate a compact row-plan block through bounded dense matrix batches."""
+
+        matrix_bucket = _jax_matrix_bucket_size(self.cfg, backend)
+        jobs_by_size = {}
+        for row_position, plan in enumerate(plans):
+            matrices = plan["_dyn_matrices"]
+            common_size = matrices.shape[1] if hasattr(matrices, "storage_nbytes") else None
+            for profile_position in range(len(matrices)):
+                size = int(common_size if common_size is not None else matrices[profile_position].shape[0])
+                if matrix_bucket > 0:
+                    size = int(math.ceil(size / matrix_bucket) * matrix_bucket)
+                # Store locations, not dense matrices. ProfileHamiltonians materializes only the requested batch.
+                jobs_by_size.setdefault(size, []).append((row_position, profile_position))
+        values_by_row = [np.zeros(len(plan["_dyn_matrices"])) for plan in plans]
+        devices = _jax_devices(backend)
+        if _jax_backend_uses_real_expm(backend):
+            devices = devices[:1]
+        configured_batch = int(getattr(self.cfg, "jax_batch_size", 0))
+        absorption = self.absorption_enabled()
+        diagnostics = {"matrices": 0, "propagation_seconds": 0.0, "max_input_batch_bytes": 0}
+        verbose = str(os.environ.get("GROND_JAX_VERBOSE", "")).lower() in {"1", "true", "yes", "on"}
+        for size, jobs in sorted(jobs_by_size.items()):
+            capacity = buffer_bytes // (16 * size * size)
+            if capacity < 1:
+                raise MemoryError(f"one {size} by {size} JAX matrix exceeds GROND_JAX_HOST_BUFFER_GIB")
+            preferred = configured_batch if configured_batch > 0 else _auto_jax_batch_size(size, len(devices))
+            count = max(1, min(preferred, capacity))
+            if count >= len(devices):
+                count = max(len(devices), (count // len(devices)) * len(devices))
+            for start in range(0, len(jobs), count):
+                batch_jobs = jobs[start:start + count]
+                matrices = (plans[row]["_dyn_matrices"][profile] for row, profile in batch_jobs)
+                batch = _stack_square_matrices(matrices, pad_to=size, count=len(batch_jobs))
+                started = time.perf_counter()
+                values = _jax_propagate_batch(batch, self.thick, self.thick_w, backend, absorption, count)
+                seconds = time.perf_counter() - started
+                diagnostics["matrices"] += len(batch_jobs)
+                diagnostics["propagation_seconds"] += seconds
+                diagnostics["max_input_batch_bytes"] = max(diagnostics["max_input_batch_bytes"], batch.nbytes)
+                for value, (row, profile) in zip(values, batch_jobs, strict=True):
+                    values_by_row[row][profile] = float(value)
+                if verbose:
+                    print(f"JAX Bloch size={size} matrices={len(batch_jobs)} devices={min(len(devices), len(batch_jobs))} "
+                          f"host_batch_MiB={batch.nbytes / 2**20:.2f} wall={seconds:.2f}s", flush=True)
+                del batch, values
+        return [self.finish_row_prediction_plan(plan, values) for plan, values in zip(plans, values_by_row, strict=True)], diagnostics
+
+    def predict_rows_jax_batched(self, indices, chunksize=8):
+        """Predict every requested row with bounded plan and dense-input buffers."""
+
+        started = time.perf_counter()
+        indices = validate_row_indices(indices, row_count=len(self.data.iobs))
+        self._verify_prediction_sources()
         n_basis = int(getattr(self.cfg, "n_basis", 20))
         row_block_size = 256 if n_basis >= 128 else (384 if n_basis >= 80 else 512)
-        if len(indices) > row_block_size:
-            chunks = []
-            for start in range(0, len(indices), row_block_size):
-                block = indices[start : start + row_block_size]
-                print(
-                    f"JAX row block {start + 1}-{start + len(block)} of {len(indices)}",
-                    flush=True,
-                )
-                chunks.append(self.predict_rows_jax_batched(block, chunksize=chunksize))
-            out = self.merge_prediction_chunks(chunks)
-            out["seconds"] = time.perf_counter() - t0_all
-            return out
-        plans = []
-        jobs_by_size = {}
+        buffer_limit = _jax_host_buffer_bytes()
         backend = str(getattr(self.cfg, "compute_backend", "jax") or "jax")
-        matrix_bucket = _jax_matrix_bucket_size(self.cfg, backend)
-        t0_plan = time.perf_counter()
-        for pos, idx in enumerate(indices):
-            plan = self.row_prediction_plan(int(idx))
+        _jax_devices(backend)  # Refuse unavailable platforms before building expensive row plans.
+        plans, results = [], []
+        retained_bytes = 0
+        diagnostics = {"host_buffer_limit_bytes": buffer_limit, "peak_plan_array_bytes": 0,
+                       "max_input_batch_bytes": 0, "matrices": 0, "propagation_seconds": 0.0}
+
+        def flush():
+            nonlocal retained_bytes
+            completed, block = self._predict_jax_plan_block(plans, backend, buffer_limit)
+            results.extend(completed)
+            diagnostics["matrices"] += block["matrices"]
+            diagnostics["propagation_seconds"] += block["propagation_seconds"]
+            diagnostics["max_input_batch_bytes"] = max(diagnostics["max_input_batch_bytes"], block["max_input_batch_bytes"])
+            plans.clear()
+            retained_bytes = 0
+            print(f"predicted {len(results)}/{len(indices)} JAX rows", flush=True)
+
+        for row_index in indices:
+            plan = self.row_prediction_plan(int(row_index))
+            matrices = plan["_dyn_matrices"]
+            storage = (matrices.storage_nbytes if hasattr(matrices, "storage_nbytes")
+                       else sum(np.asarray(matrix).nbytes for matrix in matrices))
+            storage += sum(value.nbytes for key, value in plan.items()
+                           if key != "_dyn_matrices" and isinstance(value, np.ndarray))
+            if storage > buffer_limit:
+                raise MemoryError(f"row {row_index}: profile plan needs {storage / 2**20:.1f} MiB, "
+                                  "above GROND_JAX_HOST_BUFFER_GIB; increase it only with sufficient memory")
+            if plans and (retained_bytes + storage > buffer_limit or len(plans) >= row_block_size):
+                flush()
             plans.append(plan)
-            for profile_pos, H in enumerate(plan["_dyn_matrices"]):
-                n = int(H.shape[0])
-                if matrix_bucket > 0:
-                    n = int(math.ceil(n / matrix_bucket) * matrix_bucket)
-                jobs_by_size.setdefault(n, []).append((pos, profile_pos, H))
-            if (pos + 1) % 500 == 0 or pos + 1 == len(indices):
-                elapsed = time.perf_counter() - t0_plan
-                rate = (pos + 1) / max(elapsed, 1e-12)
-                eta = (len(indices) - (pos + 1)) / max(rate, 1e-12)
-                print(
-                    f"prepared {pos + 1}/{len(indices)} rows for JAX | rate={rate:.2f}/s | ETA={eta / 60:.1f}m",
-                    flush=True,
-                )
-        dyn_profile_vals = [np.zeros(len(p["_dyn_matrices"]), dtype=float) for p in plans]
-        batch_size = int(getattr(self.cfg, "jax_batch_size", 0))
-        absorption = self.absorption_enabled()
-        total_matrices = 0
-        total_eig_seconds = 0.0
-        verbose_jax = str(os.environ.get("GROND_JAX_VERBOSE", "")).strip().lower() in {"1", "true", "yes", "on"}
-        for n in sorted(jobs_by_size):
-            jobs = jobs_by_size[n]
-            if matrix_bucket > 0:
-                H_batch = _stack_square_matrices((j[2] for j in jobs), pad_to=n)
-            else:
-                H_batch = np.stack([j[2] for j in jobs], axis=0)
-            t0 = time.perf_counter()
-            vals = _jax_propagate_batch(H_batch, self.thick, self.thick_w, backend, absorption, batch_size)
-            elapsed = time.perf_counter() - t0
-            total_matrices += len(jobs)
-            total_eig_seconds += elapsed
-            rate = len(jobs) / max(elapsed, 1e-12)
-            if verbose_jax:
-                print(
-                    f"JAX Bloch size={n} matrices={len(jobs)} devices={len(_jax_modules(_jax_module_key(backend))[0].devices())} "
-                    f"matrix_bucket={matrix_bucket} rate={rate:.2f}/s wall={elapsed:.2f}s",
-                    flush=True,
-                )
-            for val, (row_pos, profile_pos, _H) in zip(vals, jobs, strict=True):
-                dyn_profile_vals[row_pos][profile_pos] = float(val)
-        if total_matrices:
-            print(
-                f"JAX Bloch matrices={total_matrices} groups={len(jobs_by_size)} "
-                f"matrix_bucket={matrix_bucket} eig_wall={total_eig_seconds:.2f}s "
-                f"matrix_rate={total_matrices / max(total_eig_seconds, 1e-12):.2f}/s",
-                flush=True,
-            )
-        results = [self.finish_row_prediction_plan(plan, dyn_profile_vals[pos]) for pos, plan in enumerate(plans)]
-        out = self.pack_prediction_results(indices, results)
-        elapsed = time.perf_counter() - t0_all
-        out["seconds"] = elapsed
-        print(
-            f"predicted {len(indices)}/{len(indices)} rows | "
-            f"wall={elapsed:.2f}s | rate={len(indices) / max(elapsed, 1e-12):.2f}/s",
-            flush=True,
-        )
-        return out
+            retained_bytes += storage
+            diagnostics["peak_plan_array_bytes"] = max(diagnostics["peak_plan_array_bytes"], retained_bytes)
+        if plans:
+            flush()
+        self.jax_prediction_diagnostics = diagnostics
+        self._verify_prediction_sources()
+        output = self.pack_prediction_results(indices, results)
+        output["seconds"] = time.perf_counter() - started
+        print(f"JAX Bloch matrices={diagnostics['matrices']} plan_buffer_MiB={diagnostics['peak_plan_array_bytes'] / 2**20:.2f} "
+              f"max_input_batch_MiB={diagnostics['max_input_batch_bytes'] / 2**20:.2f} "
+              f"wall={output['seconds']:.2f}s", flush=True)
+        return output
 
     def predict_rows_with_row_cache(self, indices, workers=1, chunksize=8):
         """Predict rows from an immutable row-geometry cache.
@@ -186,7 +236,8 @@ class PredictionMixin:
         structure changes.
         """
 
-        indices = np.asarray(indices, dtype=int)
+        indices = validate_row_indices(indices, row_count=len(self.data.iobs))
+        self._verify_prediction_sources()
         t0 = time.perf_counter()
         cache = self.load_or_build_row_plan_cache(indices)
         if cache is None:
@@ -197,28 +248,20 @@ class PredictionMixin:
         self._active_row_plan_cache = cache
         self._active_unique_ug = unique_ug
 
-        def pool_context_names():
-            import platform
-
-            if platform.system() == "Darwin":
-                return ["forkserver", "spawn"]
-            # Linux fork shares the initialized port/cache state copy-on-write;
-            # forkserver is a safe fallback but is much slower for high-worker
-            # repeated Bloch predictions on large servers.
-            return ["fork", "forkserver", "spawn"]
-
         results = [None] * len(indices)
         parallel_errors: list[str] = []
 
         def commit_attempt(attempt_results):
+            """Check one complete attempt and copy its rows into ``results`` in the order of ``indices``."""
+
             ordered = _ordered_prediction_attempt(indices, attempt_results)
-            for pos, r in enumerate(ordered):
-                results[pos] = r
+            for row_position, r in enumerate(ordered):
+                results[row_position] = r
 
         try:
             if int(workers) > 1 and len(indices) > 1:
                 ran_parallel = False
-                for context_name in pool_context_names():
+                for context_name in _pool_context_names():
                     try:
                         ctx = multiprocessing.get_context(context_name)
                     except Exception as exc:
@@ -254,16 +297,17 @@ class PredictionMixin:
                             flush=True,
                         )
                     attempt_results = [
-                        self.row_prediction_from_cache(cache, pos, unique_ug) for pos in range(len(indices))
+                        self.row_prediction_from_cache(cache, row_position, unique_ug) for row_position in range(len(indices))
                     ]
                     commit_attempt(attempt_results)
             else:
-                attempt_results = [self.row_prediction_from_cache(cache, pos, unique_ug) for pos in range(len(indices))]
+                attempt_results = [self.row_prediction_from_cache(cache, row_position, unique_ug) for row_position in range(len(indices))]
                 commit_attempt(attempt_results)
         finally:
             self._active_row_plan_cache = None
             self._active_unique_ug = None
 
+        self._verify_prediction_sources()
         out = self.pack_prediction_results(indices, results)
         elapsed = time.perf_counter() - t0
         out["seconds"] = elapsed
@@ -279,6 +323,8 @@ class PredictionMixin:
         return out
 
     def merge_prediction_chunks(self, chunks):
+        """Merge packed chunks key by key: arrays concatenated, support HKL lists joined, ``seconds`` summed."""
+
         if not chunks:
             return self.pack_prediction_results(np.zeros(0, dtype=int), [])
         out = {}
@@ -299,6 +345,12 @@ class PredictionMixin:
         return out
 
     def pack_prediction_results(self, indices, results):
+        """Pack per-row prediction dicts into one dict of arrays, in the order of ``indices``.
+
+        Each row also gets a 64-bit hash of its support HKLs. ``dyn_inverse`` is kept only when every row has it, and
+        ``seconds`` is 0.0 for the caller to fill.
+        """
+
         indices = np.asarray(indices, dtype=int)
         dyn = np.zeros(len(indices), dtype=float)
         include_inverse = bool(results) and all(
@@ -328,44 +380,46 @@ class PredictionMixin:
         sg_profile_same_branch_continuation_used = np.zeros(len(indices), dtype=bool)
         sg_profile_same_branch_continuation_segments = np.ones(len(indices), dtype=int)
         support_hkls = [None] * len(indices)
-        position = {int(idx): int(pos) for pos, idx in enumerate(indices)}
+        position_by_row_index = {int(row_index): int(row_position) for row_position, row_index in enumerate(indices)}
 
-        def accept_result(idx, r):
-            n = position[int(idx)]
-            dyn[n] = r["dyn"]
+        def accept_result(row_index, r):
+            """Copy one row's result into the packed arrays at that row's position."""
+
+            row_position = position_by_row_index[int(row_index)]
+            dyn[row_position] = r["dyn"]
             if dyn_inverse is not None:
-                dyn_inverse[n] = r["dyn_inverse"]
-            born[n] = r["born"]
-            basis_size[n] = r["basis_size"]
+                dyn_inverse[row_position] = r["dyn_inverse"]
+            born[row_position] = r["born"]
+            basis_size[row_position] = r["basis_size"]
             support_array = np.asarray(r["support_hkls"], dtype=np.int32)
-            basis_support_hash64[n] = int.from_bytes(
+            basis_support_hash64[row_position] = int.from_bytes(
                 hashlib.sha256(support_array.tobytes(order="C")).digest()[:8],
                 byteorder="big",
                 signed=False,
             )
-            sg_resid[n] = r["max_sg_solve_residual"]
-            center_sg[n] = r["center_sg_inv_A"]
-            omega_bragg[n] = r["omega_bragg_deg"]
-            omega_delta[n] = r["omega_bragg_minus_center_deg"]
-            omega_bragg_root_available[n] = bool(r.get("omega_bragg_root_available", np.isfinite(r["omega_bragg_deg"])))
-            sg_window[n] = r["sg_window_inv_A"]
-            sg_domega[n] = r["sg_dSg_domega_inv_A_per_deg"]
-            sg_dframe[n] = r["sg_dSg_dframe_inv_A"]
-            sg_window_raw[n] = r["sg_window_raw_inv_A"]
-            sg_window_half_frames[n] = r["sg_window_half_frames"]
-            sg_window_clipped[n] = bool(r["sg_window_clipped"])
-            sg_jitter_sigma[n] = r["sg_jitter_sigma_inv_A"]
-            sg_jitter_d_inv[n] = r["sg_jitter_d_inv_A"]
-            sg_jitter_frame_fraction[n] = r["sg_jitter_frame_fraction"]
-            sg_jitter_kernel_points[n] = int(r["sg_jitter_kernel_points"])
-            sg_profile_points_total[n] = int(r["sg_profile_points_total"])
-            sg_profile_weight_sum[n] = float(r["sg_profile_weight_sum"])
-            sg_profile_same_branch_continuation_used[n] = bool(r["sg_profile_same_branch_continuation_used"])
-            sg_profile_same_branch_continuation_segments[n] = int(r["sg_profile_same_branch_continuation_segments"])
-            support_hkls[n] = r["support_hkls"]
+            sg_resid[row_position] = r["max_sg_solve_residual"]
+            center_sg[row_position] = r["center_sg_inv_A"]
+            omega_bragg[row_position] = r["omega_bragg_deg"]
+            omega_delta[row_position] = r["omega_bragg_minus_center_deg"]
+            omega_bragg_root_available[row_position] = bool(r.get("omega_bragg_root_available", np.isfinite(r["omega_bragg_deg"])))
+            sg_window[row_position] = r["sg_window_inv_A"]
+            sg_domega[row_position] = r["sg_dSg_domega_inv_A_per_deg"]
+            sg_dframe[row_position] = r["sg_dSg_dframe_inv_A"]
+            sg_window_raw[row_position] = r["sg_window_raw_inv_A"]
+            sg_window_half_frames[row_position] = r["sg_window_half_frames"]
+            sg_window_clipped[row_position] = bool(r["sg_window_clipped"])
+            sg_jitter_sigma[row_position] = r["sg_jitter_sigma_inv_A"]
+            sg_jitter_d_inv[row_position] = r["sg_jitter_d_inv_A"]
+            sg_jitter_frame_fraction[row_position] = r["sg_jitter_frame_fraction"]
+            sg_jitter_kernel_points[row_position] = int(r["sg_jitter_kernel_points"])
+            sg_profile_points_total[row_position] = int(r["sg_profile_points_total"])
+            sg_profile_weight_sum[row_position] = float(r["sg_profile_weight_sum"])
+            sg_profile_same_branch_continuation_used[row_position] = bool(r["sg_profile_same_branch_continuation_used"])
+            sg_profile_same_branch_continuation_segments[row_position] = int(r["sg_profile_same_branch_continuation_segments"])
+            support_hkls[row_position] = r["support_hkls"]
 
-        for idx, r in zip(indices, results, strict=True):
-            accept_result(int(idx), r)
+        for row_index, r in zip(indices, results, strict=True):
+            accept_result(int(row_index), r)
 
         packed = {
             "indices": indices,
@@ -400,9 +454,17 @@ class PredictionMixin:
         return packed
 
     def predict_rows(self, indices=None, workers=1, chunksize=8):
+        """Predict dynamical and kinematical intensities of ``indices`` (all rows by default) and return them packed.
+
+        The backend chooses the row-plan cache or batched JAX. Otherwise rows run in a process pool (start methods
+        tried in turn, then serially); an attempt counts only when it returns every row, and physical errors are
+        raised rather than retried.
+        """
+
         if indices is None:
             indices = np.arange(len(self.data.iobs))
-        indices = np.asarray(indices, dtype=int)
+        indices = validate_row_indices(indices, row_count=len(self.data.iobs))
+        self._verify_prediction_sources()
         backend = str(getattr(self.cfg, "compute_backend", "scipy") or "scipy").lower()
         if self.row_plan_cache_mode() != "off" and backend not in ALL_JAX_BACKENDS:
             return self.predict_rows_with_row_cache(indices, workers=workers, chunksize=chunksize)
@@ -414,19 +476,9 @@ class PredictionMixin:
             return self.predict_rows_jax_batched(indices, chunksize=chunksize)
         t0 = time.perf_counter()
 
-        def pool_context_names():
-            import platform
-
-            if platform.system() == "Darwin":
-                return ["forkserver", "spawn"]
-            # Linux fork shares the initialized port/cache state copy-on-write;
-            # forkserver is a safe fallback but is much slower for high-worker
-            # repeated Bloch predictions on large servers.
-            return ["fork", "forkserver", "spawn"]
-
         results = None
         if int(workers) > 1 and len(indices) > 1:
-            for context_name in pool_context_names():
+            for context_name in _pool_context_names():
                 try:
                     ctx = multiprocessing.get_context(context_name)
                 except Exception:
@@ -451,8 +503,9 @@ class PredictionMixin:
                 except Exception:
                     continue
         if results is None:
-            serial_attempt = [(int(idx), self.row_prediction(int(idx))) for idx in indices]
+            serial_attempt = [(int(row_index), self.row_prediction(int(row_index))) for row_index in indices]
             results = _ordered_prediction_attempt(indices, serial_attempt)
+        self._verify_prediction_sources()
         out = self.pack_prediction_results(indices, results)
         elapsed = time.perf_counter() - t0
         out["seconds"] = elapsed

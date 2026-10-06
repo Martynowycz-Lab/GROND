@@ -1,4 +1,4 @@
-"""Build the public command grammar in its established display order."""
+"""Register the input commands: prep, init-config, row-template, row-validate, sfac-check, audit-hydrogen-omit."""
 
 from __future__ import annotations
 

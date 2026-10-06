@@ -33,6 +33,8 @@ def _quick_parse_wght_terms(line: str) -> list[float]:
 
 
 def _quick_iter_recommended_wght_terms(text: str):
+    """Yield the WGHT terms of every recommended weighting scheme line of a SHELXL listing, in order."""
+
     for line in text.splitlines():
         upper = line.upper()
         if "RECOMMENDED WEIGHTING SCHEME" not in upper or "WGHT" not in upper:

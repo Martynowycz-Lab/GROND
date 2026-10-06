@@ -1,41 +1,32 @@
 # Limitations
 
-GROND is alpha research software. It is useful for our current electron-diffraction workflows, but it should not yet be treated as a turnkey replacement for mature commercial or long-established crystallographic packages.
+GROND is research software. It writes its decisions, tables and logs so that every result can be checked, but an automatic choice is not guaranteed to be right for every data set. Inspect the output, especially when the data are weak, incomplete, poorly integrated, strongly damaged or very thick.
 
-The package is intentionally transparent: it writes row tables, decision files, logs, endpoint summaries, and publication-style reports so users can audit what happened. That transparency does not mean every automatic choice is optimal for every dataset. Users should inspect the output, especially when the data are weak, incomplete, misindexed, poorly integrated, unusually thick, strongly damaged, or outside the small-molecule and peptide-sized cases used during development.
+## Scope
 
-## Scientific Scope
+GROND is written for small-molecule and peptide electron-diffraction data that start from XDS or DIALS integrated intensities and a solved structure. It does not integrate images and does not replace XDS, DIALS, SHELXL or Olex2. The macromolecular interface (`grond export-mtz`, `grond protein-ls1`) is experimental.
 
-GROND is currently aimed at small-molecule and peptide-sized electron-diffraction datasets that start from XDS- or DIALS-style integrated intensities plus a solved structure model. It is not yet a general macromolecular modeling package, a raw detector processing suite, a replacement for XDS or DIALS integration, or a guaranteed publication endpoint without crystallographic judgment.
+For DIALS data GROND reads the summation intensities and keeps the DIALS variances (`--sigma-mode raw`); a detector-gain model is available with `--sigma-mode detector_gain`. Check `dials_bridge_summary.json` for row counts, partiality and dropped flags.
 
-The DIALS bridge is newer than the XDS route. It preserves signed rows and scan-varying orientation from `integrated.refl`/`integrated.expt`, drops severe DIALS integration-quality flags by default, and applies an auditable detector-gain sigma policy for electron-diffraction rows. It should still be cross-checked on standards before replacing a known-good XDS workflow in production. In particular, inspect `dials_bridge_summary.json` for row counts, partiality behavior, sigma policy, dropped flags, and excitation-error validation.
+## The model is an approximation
 
-The automatic workflow includes physically motivated checks for transform alignment, hand, thickness, nuisance terms, scale compression, resolution limits, and endpoint reporting. These checks are heuristics around explicit models, not proofs that the final result is uniquely correct. A good GROND result should still agree with chemical sense, geometry, maps, independent data quality indicators, and any appropriate control analyses.
+- The correction freezes the dynamical-to-kinematic ratio during each SHELXL refinement and recalculates it afterwards. The refined model is therefore close to, but not the same as, the result of a full dynamical refinement, and the standard uncertainties reported by SHELXL do not include the uncertainty of the correction.
+- The fitted thickness distribution, mosaic spread and damage term are effective parameters of the calculation, not measurements of the crystal.
+- Absorption is off by default. Twinning, disorder and solvent masks are not modelled; HKLF 5, TWIN, BASF and SWAT are not supported.
+- By default an observation uses at most 500 beams. Large or strongly coupled cells need a convergence check and, if necessary, a higher limit (`--final-basis-max`, `--nested-n-basis`).
 
-Absolute configuration has an unavoidable sign-calibration boundary. An improper HKL transform and coordinate inversion are gauge-equivalent, so a search that mixes determinant signs cannot identify a named hand. GROND keeps automatic transform selection proper-only and defers hand until the final coordinates and nuisance contracts are fixed. The elastic inverse is then evaluated with the exact negative-thickness identity on matched rows without rescouting nuisance terms. A proper transform still does not prove that a detector, acquisition convention, indexing program, and import path preserve the desired external sign. Without a reserved known crystal processed through the same setup, the defensible output is a conditional inversion preference. The current final-elastic `auto` artifact is not yet accepted by the older `create-parity-calibration` replay command, so named sign calibration must remain externally documented for now. A calibrant cannot also be counted as validation under another name or reintegration, and reprocessing the same crystal through two backends does not create two independent validation samples.
+Residuals can come from integration, background, detector effects, geometry, partiality, scaling, indexing or the structure itself. GROND can point to some of these, but more beams do not repair bad observations.
 
-The staged `grond manual` interface is a simplified expert decomposition, not an exact manual form of every automatic policy. It checks transforms, thickness, a conservative pre-feedback hand, shared feedback, scale sensitivity, and maps. It does not apply the complete dataset policy, final post-feedback hand selector, resolution/endpoint calibration, or compact-scale promotion. The automatic workflow remains the production path.
+## Hand
 
-The built-in `--h-omit on` branch is a single-dataset retrospective sensitivity control made by stripping H from a model that has already contained H. It is not prospective hydrogen discovery and is rejected explicitly for multi-dataset auto. A defensible prospective experiment starts from and refines a separate model that has never contained hydrogen atoms.
+The held-out hand test states whether the data prefer the supplied coordinates or their inverse. It does not name an absolute configuration: that also requires the sense of the rotation axis and of the whole processing chain, which GROND cannot check. A crystal of known configuration processed the same way is needed to fix the sign.
 
-## Numerical And Modeling Limits
+## `grond manual`
 
-The production Bloch calculations use the portable NumPy/SciPy CPU path. Experimental accelerator backends may exist, but they must pass parity checks before being trusted for production. Runtime can still be substantial for high beam counts, high quadrature, many datasets, or large structures.
+`grond manual` is a simpler, stage-by-stage version of the calculation for inspection. It has no leak-free start and no cross-validated choice of mosaic spread and damage, its hand stage uses the all-observation statistic, and it makes one SHELXL cycle per round. Use `grond auto` for reported results.
 
-The current model is still an approximation. Important residuals may come from integration errors, background modeling, detector effects, absorption, radiation damage, geometry, partiality, thickness variation, bad scaling, twinning or indexing ambiguity, disorder, or a structural model that needs chemical intervention. GROND can diagnose many of these effects, but it cannot make bad observations physically correct by adding more beams.
+## Validation
 
-## External Tools
+Validate GROND on known structures before trusting it on new chemistry, microscopes, detectors or integration strategies. A result that lowers one R factor while degrading the maps, displacement parameters or the held-out statistics should not be accepted.
 
-Native row-level Bloch calculations are Python-first. Corrected-HKL endpoint polishing and map production can call external programs such as SHELXL and `shelx2map` through documented command-line interfaces. Those programs are not bundled with GROND and are not part of this license. Use `GROND init-config` and `GROND doctor` to make these dependencies explicit on each machine.
-
-## Validation Status
-
-GROND should be validated on local standards before being trusted on new chemistry, new microscopes, new detectors, new integration strategies, or new resolution regimes. The repository documentation and run outputs should report both favorable and unfavorable metrics. A result that improves one residual while degrading maps, ADPs, held-out statistics, chemistry, or scale-parameter discipline should be treated as diagnostic rather than automatically promotable.
-
-## No Endorsement
-
-GROND is an independent research software project and is not endorsed by, certified by, or affiliated with any external crystallographic software project, company, or maintainer group. Comparisons to external packages are scientific context and interoperability notes only.
-
-## User Responsibility
-
-Users are responsible for checking license compatibility of any external programs they call, verifying that their input data may be processed and shared, preserving enough provenance to reproduce results, and reporting limitations honestly in reports and publications. GROND is provided without warranty under the MIT License.
+GROND is provided without warranty under the MIT License. External programs such as SHELXL are not bundled and have their own licenses.

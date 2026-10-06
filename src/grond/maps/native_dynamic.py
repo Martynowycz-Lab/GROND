@@ -48,6 +48,8 @@ class NativeDynamicMapOptions:
 
 
 def _read_rows(path: Path) -> list[dict[str, str]]:
+    """Return the rows of a CSV file as dicts."""
+
     with Path(path).open(newline="") as handle:
         return list(csv.DictReader(handle))
 
@@ -171,6 +173,8 @@ def _read_labeled_rows(
 
 
 def _as_float(row: Mapping[str, object], key: str, default: float = float("nan")) -> float:
+    """Return ``row[key]`` as a float, or ``default`` when it is missing or not numeric."""
+
     try:
         return float(row.get(key, default))
     except (TypeError, ValueError):
@@ -178,6 +182,8 @@ def _as_float(row: Mapping[str, object], key: str, default: float = float("nan")
 
 
 def _as_int(row: Mapping[str, object], key: str, default: int = 0) -> int:
+    """Return ``row[key]`` as an int (through float), or ``default`` when it is missing or not numeric."""
+
     try:
         return int(float(row.get(key, default)))
     except (TypeError, ValueError):
@@ -185,6 +191,8 @@ def _as_int(row: Mapping[str, object], key: str, default: int = 0) -> int:
 
 
 def _required_row_columns(rows: Sequence[Mapping[str, str]]) -> list[str]:
+    """Return the required map columns that the row table lacks (checked on its first row)."""
+
     if not rows:
         return ["<non-empty row table>"]
     required = {"h", "k", "l", "target_I", "sigma_eff", "dyn_scaled"}
@@ -195,6 +203,11 @@ def _model_wavelength_A(model_path: Path) -> float:
     """Extract a SHELX/CIF wavelength when possible, else use 200 keV default."""
 
     def normalized(value: float) -> float:
+        """Return an electron wavelength in Å, or the 200 keV default for implausible values.
+
+        Non-positive values, the SHELX placeholder 1.0 and anything >= 0.1 Å (X-ray-like) are implausible.
+        """
+
         if not math.isfinite(float(value)) or float(value) <= 0.0:
             return DEFAULT_ELECTRON_WAVELENGTH_A
         if abs(float(value) - 1.0) < 1e-6:
@@ -238,6 +251,12 @@ def _next_fastish_size(value: int) -> int:
 
 
 def _grid_shape(cell: Sequence[float], hkls: np.ndarray, spacing_A: float) -> tuple[int, int, int]:
+    """Return an FFT-friendly map grid (nx, ny, nz) for the cell.
+
+    Each axis has at least cell length / spacing_A points (spacing floored at 0.05 Å), at least 2*max|h| + 3 points and
+    at least 4.
+    """
+
     lengths = [float(cell[0]), float(cell[1]), float(cell[2])]
     max_abs = np.max(np.abs(hkls), axis=0) if len(hkls) else np.zeros(3, dtype=int)
     dims = []
@@ -282,6 +301,8 @@ def _canonical_model_symmetry_hkl(
     hkl: tuple[int, int, int],
     symmetry_ops: Sequence[Mapping[str, object]],
 ) -> tuple[int, int, int]:
+    """Return the smallest index of a signed HKL's model-symmetry orbit (Friedel mates stay separate)."""
+
     return min(_symmetry_equivalent_hkls(hkl, symmetry_ops))
 
 
@@ -289,6 +310,8 @@ def _friedel_orbit_summary(
     keys: Sequence[tuple[int, int, int]],
     symmetry_ops: Sequence[Mapping[str, object]],
 ) -> dict[str, int]:
+    """Count merged orbits whose Friedel opposite is another present orbit, the same orbit, or absent."""
+
     key_set = set(keys)
     visited: set[tuple[int, int, int]] = set()
     independent_pairs = 0
@@ -319,6 +342,13 @@ def _merge_native_amplitudes(
     model: Mapping[str, object],
     options: NativeDynamicMapOptions,
 ) -> tuple[list[dict[str, object]], dict[str, object]]:
+    """Turn valid rows into dynamical amplitudes merged per model-symmetry orbit; return (coefficients, summary).
+
+    |F_obs,row| = |Fc| sqrt(I_obs / I_dyn_scaled) with sigma_F = |Fc| sigma / (2 sqrt(I_obs I_dyn_scaled)); rows merge
+    with inverse-variance weights and take the model phase. Rows need positive target_I, sigma_eff, dyn_scaled and |Fc|,
+    I/sigma >= min_i_over_sigma and d >= d_min_A (Å). Friedel opposites stay separate.
+    """
+
     if not rows:
         return [], {
             "input_rows": 0,
@@ -492,6 +522,8 @@ def _merge_native_amplitudes(
 
 
 def _coefficient_amplitude(row: Mapping[str, object], kind: str, fc_abs: float) -> tuple[float, float]:
+    """Return (amplitude, sigma) of a map coefficient: Fo, Fo - |Fc| or 2Fo - |Fc| for kind fo, fofc or 2fofc."""
+
     fobs = float(row["F_dyn_obs"])
     sigf = max(float(row["sigF_dyn_obs"]), 1e-30)
     if kind == "fo":
@@ -634,6 +666,12 @@ def _synthesize_map(
     spacing_A: float,
     max_grid_points: int,
 ) -> tuple[np.ndarray, dict[str, object]]:
+    """Fourier-transform one kind of coefficient to a real map; return (float32 grid, metadata).
+
+    rho(x) = sum_h C(h) exp(-2*pi*i h.x) / V (V the cell volume in Å³), after symmetry expansion and projection onto
+    C(-h) = conj(C(h)). Raises ValueError when the grid exceeds ``max_grid_points``.
+    """
+
     direct, coefficient_meta = _prepare_real_map_coefficients(coefficients, model, kind)
     hkls = np.asarray(list(direct), dtype=int)
     shape = _grid_shape(model["cell"], hkls, spacing_A)
@@ -670,6 +708,8 @@ def _synthesize_map(
 
 
 def _write_ccp4(path: Path, data: np.ndarray, model: Mapping[str, object]) -> None:
+    """Write a real map grid as a P1 CCP4 file on the model cell."""
+
     grid = gemmi.FloatGrid(int(data.shape[0]), int(data.shape[1]), int(data.shape[2]))
     grid.set_unit_cell(gemmi.UnitCell(*model["cell"]))
     grid.spacegroup = gemmi.find_spacegroup_by_name("P 1")
@@ -682,6 +722,8 @@ def _write_ccp4(path: Path, data: np.ndarray, model: Mapping[str, object]) -> No
 
 
 def _write_coefficients_csv(path: Path, coefficients: Sequence[Mapping[str, object]]) -> None:
+    """Write the merged map coefficients as CSV with a fixed column order."""
+
     fieldnames = [
         "h",
         "k",
@@ -720,6 +762,8 @@ def _write_coefficients_csv(path: Path, coefficients: Sequence[Mapping[str, obje
 
 
 def _write_coefficients_hkl(path: Path, coefficients: Sequence[Mapping[str, object]]) -> None:
+    """Write the merged map coefficients as a whitespace-separated text table with a commented header."""
+
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w") as handle:
         handle.write("# GROND native row-level dynamical Fourier coefficients\n")
@@ -740,6 +784,8 @@ def _write_coefficients_hkl(path: Path, coefficients: Sequence[Mapping[str, obje
 
 
 def _cif_token(value: object) -> str:
+    """Return a CIF value token: ``?`` for None or non-finite, 8 significant digits for a float, else quoted text."""
+
     if value is None:
         return "?"
     if isinstance(value, float):
@@ -755,6 +801,8 @@ def _cif_token(value: object) -> str:
 
 
 def _fraction_text(value: float) -> str:
+    """Return a symmetry translation as ``+n/d`` (d in 1, 2, 3, 4, 6, 8, 12), empty for zero, else ``+decimal``."""
+
     value = float(value) % 1.0
     for den in (1, 2, 3, 4, 6, 8, 12):
         num = round(value * den)
@@ -766,6 +814,8 @@ def _fraction_text(value: float) -> str:
 
 
 def _op_triplet(record: Mapping[str, object]) -> str:
+    """Return a symmetry record {rot, trans} as a triplet such as ``-x,y+1/2,-z``."""
+
     rot = np.asarray(record.get("rot", np.eye(3)), dtype=float)
     trans = np.asarray(record.get("trans", np.zeros(3)), dtype=float)
     axes = ("x", "y", "z")
@@ -797,6 +847,8 @@ def _write_dynamic_cif(
     maps: Mapping[str, object],
     wavelength_A: float,
 ) -> None:
+    """Write the native dynamical CIF: cell, symmetry, scattering factors, atoms, sources, maps and coefficients."""
+
     operations = [gemmi.Op(_op_triplet(op)) for op in model.get("symmetry_ops", [])]
     spacegroup = gemmi.find_spacegroup_by_ops(gemmi.GroupOps(operations)) if operations else None
     cell = [float(v) for v in model["cell"]]

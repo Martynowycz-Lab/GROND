@@ -1,3 +1,11 @@
+"""Portable GROND row tables: a CSV of signed observations plus a JSON geometry sidecar.
+
+Each row needs h, k, l, Iobs and sigma_Iobs, and a frame or rotation angle. The sidecar
+(schema ``grond-row-v1``) declares the wavelength, beam, rotation axis, scan origin, cell
+and orientation matrix. A validated table can be written as an XDS-like INTEGRATE.HKL
+directory for the engine.
+"""
+
 from __future__ import annotations
 
 import csv
@@ -49,6 +57,8 @@ class RowContractSummary:
 
 
 def _as_float(value: Any, *, field: str, row_number: int) -> float:
+    """Parse a row field as a float (blank gives NaN); raise ValueError naming the row and field otherwise."""
+
     text = str(value).strip()
     if text == "":
         return float("nan")
@@ -59,6 +69,8 @@ def _as_float(value: Any, *, field: str, row_number: int) -> float:
 
 
 def _as_int(value: Any, *, field: str, row_number: int) -> int:
+    """Parse a required row field as an integer Miller index; raise ValueError naming the row and field otherwise."""
+
     text = str(value).strip()
     if text == "":
         raise ValueError(f"row {row_number}: required integer field {field!r} is blank")
@@ -129,6 +141,12 @@ def load_row_metadata(path: str | Path) -> dict[str, Any]:
 
 
 def _matrix_from_metadata(metadata: dict[str, Any]) -> np.ndarray:
+    """Return the reciprocal orientation matrix A (1/A) from the geometry sidecar.
+
+    Uses ``reciprocal_A_matrix`` when given, else the inverse transpose of
+    ``real_space_axes_A`` (real axes as columns).
+    """
+
     geometry = metadata.get("geometry") or {}
     if "reciprocal_A_matrix" in geometry:
         mat = np.asarray(geometry["reciprocal_A_matrix"], dtype=float)
@@ -148,6 +166,8 @@ def _matrix_from_metadata(metadata: dict[str, Any]) -> np.ndarray:
 
 
 def _real_space_axes_from_metadata(metadata: dict[str, Any]) -> np.ndarray:
+    """Return the real-space axes (A, as columns) from the sidecar, or derive them from A."""
+
     geometry = metadata.get("geometry") or {}
     if "real_space_axes_A" in geometry:
         real = np.asarray(geometry["real_space_axes_A"], dtype=float)
@@ -173,6 +193,12 @@ def _rotation_matrix_from_metadata(geometry: dict[str, Any], key: str) -> np.nda
 
 
 def _required_geometry(metadata: dict[str, Any]) -> dict[str, Any]:
+    """Check the sidecar's schema version, dataset ID and geometry block; return the geometry.
+
+    The orientation matrix must agree with the unit cell, and optional scan-point matrices
+    and fixed/setting rotations must be valid.
+    """
+
     schema_version = str(metadata.get("schema_version", "")).strip()
     if schema_version != GROND_ROW_SCHEMA_VERSION:
         raise ValueError(f"row metadata schema_version must be {GROND_ROW_SCHEMA_VERSION!r}")
@@ -255,6 +281,8 @@ def _required_geometry(metadata: dict[str, Any]) -> dict[str, Any]:
 def validate_row_contract(rows: list[dict[str, Any]], metadata: dict[str, Any]) -> RowContractSummary:
     """Validate that rows and metadata contain the minimum information GROND needs."""
 
+    if not rows:
+        raise ValueError("no observation rows supplied")
     geometry = _required_geometry(metadata)
     warnings: list[str] = []
     finite_rows = 0
@@ -264,6 +292,7 @@ def validate_row_contract(rows: list[dict[str, Any]], metadata: dict[str, Any]) 
     dataset_ids = sorted({str(row.get("dataset_id") or metadata.get("dataset_id") or "dataset") for row in rows})
 
     for index, row in enumerate(rows, start=1):
+        row = _normalized_row(row, index)
         if all(math.isfinite(float(row[field])) for field in ("Iobs", "sigma_Iobs")):
             finite_rows += 1
         if math.isfinite(float(row["sigma_Iobs"])) and float(row["sigma_Iobs"]) > 0:
@@ -411,13 +440,17 @@ def write_template(rows_path: str | Path, metadata_path: str | Path, *, overwrit
 
 
 def _row_frame(row: dict[str, Any], geometry: dict[str, Any]) -> float:
+    """Return a row's frame number, converting the goniometer angle ``alpha_deg`` (degrees) with the scan
+    origin and oscillation range when no frame is given.
+    """
+
     if "frame" in row and math.isfinite(float(row["frame"])):
         return float(row["frame"])
-    alpha = float(row["alpha_deg"])
+    omega_deg = float(row["alpha_deg"])
     osc = float(geometry["oscillation_range_deg"])
     if abs(osc) < 1e-12:
         raise ValueError("cannot convert alpha_deg to frame because oscillation_range_deg is zero")
-    return float(geometry["starting_frame"]) + (alpha - float(geometry["starting_angle_deg"])) / osc
+    return float(geometry["starting_frame"]) + (omega_deg - float(geometry["starting_angle_deg"])) / osc
 
 
 def write_xds_compatibility_dir(
@@ -429,6 +462,7 @@ def write_xds_compatibility_dir(
 ) -> Path:
     """Write an XDS-like compatibility directory consumed by the current engine."""
 
+    rows = [_normalized_row(row, index) for index, row in enumerate(rows, start=1)]
     summary = validate_row_contract(rows, metadata)
     if summary.finite_rows != len(rows):
         raise ValueError(
@@ -525,10 +559,12 @@ def write_xds_compatibility_dir(
                 0.0,
                 iseg,
             ]
+            # Explicit separators prevent large fields from running together;
+            # 17 significant digits preserve finite binary64 observations/sigmas.
             handle.write(
-                f"{values[0]:5d}{values[1]:5d}{values[2]:5d}"
-                + "".join(f"{float(v):14.5f}" for v in values[3:20])
-                + f"{values[20]:5d}\n"
+                " ".join(str(v) for v in values[:3]) + " "
+                + " ".join(f"{float(v):.17g}" for v in values[3:20])
+                + f" {values[20]}\n"
             )
 
     manifest = {

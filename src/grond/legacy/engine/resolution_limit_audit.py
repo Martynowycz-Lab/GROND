@@ -317,6 +317,11 @@ def write_report(path: Path, title: str, payload: dict) -> None:
 
 
 def main() -> None:
+    """Build resolution shells from the row tables and promote strict and exploratory cutoffs.
+
+    Writes resolution_shells.csv, summary.json and REPORT.md to --out-dir.
+    """
+
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--run", action="append", default=[], help="Dataset run as name=/path/to/native_nuisance_run.")
     ap.add_argument("--row-table", action="append", default=[], help="Row table as name=/path/to/native_dyn_calc.csv.")

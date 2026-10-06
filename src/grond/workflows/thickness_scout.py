@@ -186,6 +186,7 @@ def _write_thickness_scout_report(out_dir: Path, summary: dict[str, object]) -> 
     warnings = list(summary.get("warnings", []))
 
     def pct(value: object) -> str:
+        """Format a fraction as a percentage with two decimals; ``n/a`` when not finite."""
         try:
             v = float(value)
         except (TypeError, ValueError):
@@ -195,6 +196,7 @@ def _write_thickness_scout_report(out_dir: Path, summary: dict[str, object]) -> 
         return f"{100.0 * v:.2f}%"
 
     def num(value: object, digits: int = 3) -> str:
+        """Format a number with ``digits`` decimals; ``n/a`` when not finite."""
         try:
             v = float(value)
         except (TypeError, ValueError):

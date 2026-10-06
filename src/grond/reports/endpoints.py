@@ -37,6 +37,8 @@ def _normalize_publication_endpoint_block(endpoint: Mapping[str, object], *, sel
     canonical_lst = canonical.get("lst") if isinstance(canonical.get("lst"), Mapping) else {}
 
     def first_text(*keys: str) -> str:
+        """Return the first non-empty endpoint field among keys as text, or an empty string."""
+
         for key in keys:
             value = endpoint.get(key)
             if value:
@@ -44,6 +46,8 @@ def _normalize_publication_endpoint_block(endpoint: Mapping[str, object], *, sel
         return ""
 
     def first_number(*keys: str) -> object:
+        """Return the first non-None value among keys, in the endpoint and then its SHELXL block; None if none."""
+
         for key in keys:
             if key in endpoint and endpoint.get(key) is not None:
                 return endpoint.get(key)
@@ -269,6 +273,8 @@ def _quick_endpoint_file_block(publication_endpoint: Mapping[str, object], final
     final_endpoint_stem = final_model.stem if final_model else ""
 
     def existing(path: Path | None) -> str:
+        """Return path as text when the file exists, else an empty string."""
+
         return str(path) if path is not None and path.exists() else ""
 
     return {

@@ -1,3 +1,9 @@
+"""Dataset policy for multi-crystal runs: primary, downweighted, completeness-only or excluded roles.
+
+Each crystal's role comes from its row quality and coverage. The policy reports (JSON, CSV, Markdown) and the
+policy-weighted run copies are written here too.
+"""
+
 from __future__ import annotations
 
 import csv
@@ -104,10 +110,31 @@ def simple_metrics(rows: list[dict]) -> dict:
     return {"R1_all": r1, "wR2_all": wr2, "CC": cc, "n": len(obs)}
 
 
-def summary_metrics(summary: Mapping, rows: list[dict]) -> dict:
-    """Extract the best available all-row dynamic metrics for one dataset."""
+POLICY_SELECTION_ROWS = ("all", "work")
 
-    dyn = (((summary.get("best_native") or {}).get("metrics") or {}).get("all") or {}).get("dyn") or {}
+
+def summary_metrics(summary: Mapping, rows: list[dict], selection_rows: str = "all") -> dict:
+    """Extract the best available dynamic metrics for one dataset.
+
+    selection_rows="all" reads the all-row block (work plus free rows);
+    selection_rows="work" reads the work-row block and, in the row-table fallback, only split == work
+    rows, so the held-out free rows never inform dataset roles or weights.
+    """
+
+    if selection_rows not in POLICY_SELECTION_ROWS:
+        raise ValueError(f"unknown dataset-policy selection rows {selection_rows!r}")
+    block = "work" if selection_rows == "work" else "all"
+    dyn = (((summary.get("best_native") or {}).get("metrics") or {}).get(block) or {}).get("dyn") or {}
+    if selection_rows == "work":
+        labels = [str(row.get("split", "")).strip().lower() for row in rows]
+        unlabelled = sum(label not in {"work", "free"} for label in labels)
+        if unlabelled:
+            # Without the label the work-row fallback would score no rows and silently demote the crystal.
+            raise ValueError(
+                f"work-row dataset policy needs a work/free split label on every row table row; "
+                f"{unlabelled} of {len(rows)} rows have none"
+            )
+        rows = [row for row, label in zip(rows, labels, strict=True) if label == "work"]
     fallback = simple_metrics(rows)
     return {
         "R1_all": safe_float(dyn.get("R1_all"), fallback["R1_all"]),
@@ -117,15 +144,18 @@ def summary_metrics(summary: Mapping, rows: list[dict]) -> dict:
     }
 
 
-def collect_dataset_stats(runs: Mapping[str, Path]) -> list[dict]:
-    """Collect quality and coverage statistics from final or scout run directories."""
+def collect_dataset_stats(runs: Mapping[str, Path], selection_rows: str = "all") -> list[dict]:
+    """Collect quality and coverage statistics from final or scout run directories.
+
+    Row counts and HKL coverage count every row; the quality metrics read ``selection_rows``.
+    """
 
     stats: list[dict] = []
     for name, run_dir in runs.items():
         run = Path(run_dir)
         rows = read_row_table(run / "native_dyn_calc.csv", name)
         summary = read_json(run / "summary.json")
-        metrics = summary_metrics(summary, rows)
+        metrics = summary_metrics(summary, rows, selection_rows)
         keys = {key for row in rows if (key := hkl_key(row)) is not None}
         dvals = [safe_float(row.get("d_A")) for row in rows]
         finite_d = [d for d in dvals if math.isfinite(d) and d > 0]
@@ -330,10 +360,13 @@ def decide_dataset_policy(
     }
 
 
-def build_dataset_policy(runs: Mapping[str, Path], **kwargs) -> dict:
-    """Collect run statistics and return a policy payload."""
+def build_dataset_policy(runs: Mapping[str, Path], *, selection_rows: str = "all", **kwargs) -> dict:
+    """Collect run statistics and return a policy payload recording the rows behind its quality metrics."""
 
-    return decide_dataset_policy(collect_dataset_stats(runs), **kwargs)
+    policy = decide_dataset_policy(collect_dataset_stats(runs, selection_rows), **kwargs)
+    policy["selection_rows"] = selection_rows
+    policy["free_rows_in_selection"] = selection_rows != "work"
+    return policy
 
 
 def write_policy_artifacts(policy: Mapping, out_dir: Path) -> dict:
@@ -373,6 +406,11 @@ def write_policy_artifacts(policy: Mapping, out_dir: Path) -> dict:
         "",
         "This gate decides which crystals should carry raw-row regularization weights and which should only add endpoint completeness. Downweighting is implemented as sigma inflation, so marginal datasets contribute less to weighted residuals without being silently deleted.",
         "",
+        *(
+            ["Quality metrics (R, wR, CC) are computed on work rows only; the held-out free rows do not inform roles or weights.", ""]
+            if policy.get("selection_rows") == "work"
+            else []
+        ),
         "| dataset | action | raw weight | endpoint weight | rows | unique HKL | unique gain | row R(I)all | row wR(I)all | CC | reason |",
         "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|",
     ]

@@ -16,6 +16,8 @@ from grond.paths import PACKAGE_ROOT
 
 
 def _command_text(command: list[str]) -> str:
+    """Return a command as one shell-quoted line."""
+
     return shlex.join(command)
 
 
@@ -29,6 +31,13 @@ def _manual_stream_line(line: str, *, verbose: bool) -> bool:
 
 
 def _run_stage_command(command: list[str], *, verbose: bool = False) -> dict[str, object]:
+    """Run one child command, log all of its output and echo the concise lines; return its run record.
+
+    The log goes to ``<out-dir>/manual_<child>.log`` (appended on a rerun) and a WAIT heartbeat is printed every
+    GROND_MANUAL_HEARTBEAT_SECONDS (default 30 s). The child's cache is ``<out-dir>/../cache``. A non-zero return code
+    raises RuntimeError with the last 20 log lines.
+    """
+
     started = time.perf_counter()
     env = dict(os.environ)
     package_src = str(PACKAGE_ROOT.parent)
@@ -70,6 +79,7 @@ def _run_stage_command(command: list[str], *, verbose: bool = False) -> dict[str
         output_queue: queue.Queue[str | None] = queue.Queue()
 
         def read_output() -> None:
+            """Move the child's output lines onto the queue, then a None end marker."""
             assert process.stdout is not None
             for line in process.stdout:
                 output_queue.put(line)
@@ -114,9 +124,12 @@ def _run_stage_command(command: list[str], *, verbose: bool = False) -> dict[str
 
 
 def _command_elapsed(command: Mapping[str, object]) -> float | None:
+    """Return the summed ``elapsed_seconds`` of a recorded command and its nested commands, or None."""
+
     elapsed_values: list[float] = []
 
     def collect(value: object) -> None:
+        """Add a mapping's ``elapsed_seconds``, or else search its values for nested ones."""
         if not isinstance(value, Mapping):
             return
         if value.get("elapsed_seconds") is not None:
@@ -130,11 +143,15 @@ def _command_elapsed(command: Mapping[str, object]) -> float | None:
 
 
 def _child_base(args) -> list[str]:
+    """Return the ``python -m grond.cli`` prefix of a child command (``--python`` or this interpreter)."""
+
     python = str(getattr(args, "python", "") or sys.executable)
     return [python, "-m", "grond.cli"]
 
 
 def _tool_args(args) -> list[str]:
+    """Return the ``--config`` and ``--allow-missing-tools`` options passed on to child commands."""
+
     out: list[str] = []
     config = str(getattr(args, "config", "") or "").strip()
     if config:
@@ -145,4 +162,6 @@ def _tool_args(args) -> list[str]:
 
 
 def _verbose_child_output(args) -> bool:
+    """Return whether every child output line is echoed (``--verbose-child-output``)."""
+
     return bool(getattr(args, "verbose_child_output", False))

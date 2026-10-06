@@ -34,6 +34,8 @@ else:  # pragma: no cover - direct script execution
 
 
 def read_rows(path: Path) -> list[dict[str, str]]:
+    """Read a CSV file into a list of row dicts; raise if it has no rows."""
+
     with path.open() as f:
         rows = list(csv.DictReader(f))
     if not rows:
@@ -42,6 +44,8 @@ def read_rows(path: Path) -> list[dict[str, str]]:
 
 
 def fcol(rows: list[dict[str, str]], name: str, default: float = float("nan")) -> np.ndarray:
+    """Return one column as a float array, with default for missing or unparsable cells."""
+
     out = []
     for r in rows:
         try:
@@ -52,6 +56,8 @@ def fcol(rows: list[dict[str, str]], name: str, default: float = float("nan")) -
 
 
 def icol(rows: list[dict[str, str]], name: str, default: int = -1) -> np.ndarray:
+    """Return one column as an int array, with default for missing or unparsable cells."""
+
     out = []
     for r in rows:
         try:
@@ -62,10 +68,14 @@ def icol(rows: list[dict[str, str]], name: str, default: int = -1) -> np.ndarray
 
 
 def scol(rows: list[dict[str, str]], name: str, default: str = "") -> np.ndarray:
+    """Return one column as a string array, with default for missing cells."""
+
     return np.asarray([str(r.get(name, default)) for r in rows])
 
 
 def add_zcal(rows: list[dict[str, str]], hkl_path: Path) -> np.ndarray:
+    """Return each row's XDS ZCAL (frames) looked up by row_index; NaN where the index is invalid."""
+
     data = XDSData(hkl_path)
     row_index = icol(rows, "row_index")
     z = np.full(len(rows), np.nan, dtype=float)
@@ -76,6 +86,11 @@ def add_zcal(rows: list[dict[str, str]], hkl_path: Path) -> np.ndarray:
 
 
 def weighted_lstsq(X: np.ndarray, y: np.ndarray, w: np.ndarray, mask: np.ndarray) -> dict:
+    """Fit y on X by weighted least squares over mask and return coefficients, standard errors and variance.
+
+    Returns {"ok": False, "n": ...} when there are no more than n_features + 2 usable rows.
+    """
+
     m = mask & np.isfinite(y) & np.isfinite(w) & (w > 0) & np.all(np.isfinite(X), axis=1)
     if np.count_nonzero(m) <= X.shape[1] + 2:
         return {"ok": False, "n": int(np.count_nonzero(m))}
@@ -93,6 +108,8 @@ def weighted_lstsq(X: np.ndarray, y: np.ndarray, w: np.ndarray, mask: np.ndarray
 
 
 def quantile_mask(values: np.ndarray, qlo: float, qhi: float) -> np.ndarray:
+    """Return a mask of finite values between the qlo and qhi percentiles, inclusive."""
+
     finite = np.isfinite(values)
     lo = np.nanpercentile(values[finite], qlo)
     hi = np.nanpercentile(values[finite], qhi)
@@ -100,6 +117,8 @@ def quantile_mask(values: np.ndarray, qlo: float, qhi: float) -> np.ndarray:
 
 
 def bin_summary(name: str, mask: np.ndarray, y: np.ndarray, zres: np.ndarray) -> dict:
+    """Return the row count and median log(Iobs/Icalc) and residual/sigma statistics of one bin."""
+
     m = mask & np.isfinite(y)
     if np.count_nonzero(m) == 0:
         return {"bin": name, "n": 0}
@@ -114,6 +133,8 @@ def bin_summary(name: str, mask: np.ndarray, y: np.ndarray, zres: np.ndarray) ->
 
 
 def write_csv(path: Path, rows: list[dict]) -> None:
+    """Write rows to a CSV file with the first row's keys as header; an empty list writes an empty file."""
+
     if not rows:
         path.write_text("")
         return
@@ -124,6 +145,11 @@ def write_csv(path: Path, rows: list[dict]) -> None:
 
 
 def main() -> None:
+    """Fit the frame-by-resolution log-residual model and decide whether a dose-B grid is supported.
+
+    Writes the fit and bin CSVs, summary.json and REPORT.md to --out-dir.
+    """
+
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--row-table", required=True)
     ap.add_argument("--hkl", default=str(DEFAULT_HKL))
@@ -179,6 +205,8 @@ def main() -> None:
     free_fit = weighted_lstsq(X, y, w, free)
 
     def fit_record(label: str, fit: dict) -> dict:
+        """Flatten one fit into coefficients, SEs, z values and the implied dose B (Å² per frame and in total)."""
+
         if not fit.get("ok"):
             return {"split": label, "ok": False, "n": fit.get("n", 0)}
         beta = fit["beta"]

@@ -2,12 +2,10 @@
 
 Dense SciPy remains the reference. These alternatives are retained for explicit
 agreement tests, not selected because a device or library happens to exist.
-The documented 370 benchmark found expm_multiply slower (24.90 versus 6.44 s),
-and small adaptive matrices gave no end-to-end Bethe speed benefit. Those
-results do not justify either backend as the default. The real-embedded Metal
-path uses float32 and doubles the matrix dimension; faster device arithmetic
-is not proof of accurate row intensities. See docs/PERFORMANCE.md for the
-bounded contracts and required whole-workflow parity checks."""
+In our tests expm_multiply was slower than dense diagonalisation, and small
+adaptive matrices gave no end-to-end Bethe speed benefit, so neither is the
+default. The real-embedded Metal path uses float32 and doubles the matrix
+dimension; faster device arithmetic is not proof of accurate row intensities."""
 
 from __future__ import annotations
 
@@ -74,12 +72,6 @@ def _jax_modules(backend: str):
         return _JAX_MODULES[key]
     os.environ.setdefault("JAX_ENABLE_X64", "True")
     os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
-    if key == "jax_cpu":
-        os.environ.setdefault("JAX_PLATFORMS", "cpu")
-    elif key == "jax_mps":
-        os.environ.setdefault("JAX_PLATFORMS", "mps")
-    elif key in {"jax_cuda", "jax_gpu"}:
-        os.environ.setdefault("JAX_PLATFORMS", "cuda")
     try:
         import jax
 
@@ -93,26 +85,64 @@ def _jax_modules(backend: str):
     return _JAX_MODULES[key]
 
 
+def _jax_devices(backend: str):
+    """Resolve the requested platform explicitly; an earlier CPU import must not masquerade as an accelerator."""
+
+    key = _jax_backend_base(backend)
+    platforms = {"jax": None, "jax_cpu": "cpu", "jax_cuda": "cuda", "jax_mps": "METAL"}
+    if key not in platforms:
+        raise NotImplementedError(f"unknown JAX backend {backend!r}")
+    jax, _jnp = _jax_modules(key)
+    try:
+        devices = tuple(jax.devices(platforms[key]))
+    except Exception as error:
+        raise NotImplementedError(f"compute_backend={backend!r}: requested platform is unavailable: {error}") from error
+    if not devices:
+        raise NotImplementedError(f"compute_backend={backend!r} found no requested devices")
+    return devices
+
+
 def _jax_module_key(backend: str) -> str:
+    """Return the JAX module-cache key of a backend name, which is its base JAX backend."""
+
     return _jax_backend_base(backend)
 
 
-def _stack_square_matrices(matrices, pad_to: int | None = None) -> np.ndarray:
-    """Stack square complex matrices, padding smaller matrices with zero beams."""
+def _jax_host_buffer_bytes() -> int:
+    """Limit each retained-plan and dense-input buffer; numerical-library workspaces are additional."""
 
-    matrices = list(matrices)
-    if not matrices:
-        return np.zeros((0, 0, 0), dtype=np.complex128)
-    sizes = [int(np.asarray(H).shape[0]) for H in matrices]
-    n = int(pad_to or max(sizes))
-    out = np.zeros((len(matrices), n, n), dtype=np.complex128)
+    gib = float(os.environ.get("GROND_JAX_HOST_BUFFER_GIB", "0.25"))
+    if not math.isfinite(gib) or gib <= 0:
+        raise ValueError("GROND_JAX_HOST_BUFFER_GIB must be positive and finite")
+    return max(1, int(gib * 2**30))
+
+
+def _stack_square_matrices(matrices, pad_to: int | None = None, *, count: int | None = None) -> np.ndarray:
+    """Stack square matrices with zero-beam padding; count and pad_to permit bounded generator consumption."""
+
+    if count is None:
+        matrices = list(matrices)
+        if not matrices:
+            return np.zeros((0, 0, 0), dtype=np.complex128)
+        count = len(matrices)
+        pad_to = int(pad_to or max(np.asarray(H).shape[0] for H in matrices))
+    elif pad_to is None:
+        raise ValueError("a streaming matrix count requires pad_to")
+    n = int(pad_to)
+    out = np.zeros((int(count), n, n), dtype=np.complex128)
+    written = 0
     for i, H in enumerate(matrices):
+        if i >= count:
+            raise ValueError("more matrices than the declared count")
         H = np.asarray(H, dtype=np.complex128)
         if H.ndim != 2 or H.shape[0] != H.shape[1]:
             raise ValueError(f"expected square matrix, got shape {H.shape}")
         if H.shape[0] > n:
             raise ValueError(f"matrix dimension {H.shape[0]} exceeds requested pad_to={n}")
         out[i, : H.shape[0], : H.shape[1]] = H
+        written += 1
+    if written != count:
+        raise ValueError("fewer matrices than the declared count")
     return out
 
 
@@ -195,9 +225,7 @@ def _jax_real_expm_column0_batch(real_batch, backend: str, scale_steps: int, ord
 
     key = _jax_module_key(backend)
     jax, jnp = _jax_modules(key)
-    devices = tuple(jax.devices())
-    if not devices:
-        raise NotImplementedError(f"compute_backend={backend!r} found no JAX devices")
+    devices = _jax_devices(backend)
     real_batch = np.asarray(real_batch)
     if real_batch.ndim != 3 or real_batch.shape[1] != real_batch.shape[2]:
         raise ValueError(f"expected a stack of square real matrices, got shape {real_batch.shape}")
@@ -215,6 +243,12 @@ def _jax_real_expm_column0_batch(real_batch, backend: str, scale_steps: int, ord
         inv_scale = dtype(1.0 / float(2 ** int(scale_steps)))
 
         def _eval(Rs):
+            """Return |psi_target|^2 per matrix from the real 2n x 2n embedding of i*2*pi*H*t.
+
+            exp is a Taylor series of degree ``order`` after dividing by 2**scale_steps, then squared scale_steps times.
+            Rows 1 and n + 1 of column 0 are the real and imaginary target amplitudes for a unit direct beam.
+            """
+
             A = Rs * inv_scale
             eye = jnp.eye(n2, dtype=dtype)
             term = jnp.broadcast_to(eye, Rs.shape)
@@ -237,7 +271,11 @@ def _jax_real_expm_column0_batch(real_batch, backend: str, scale_steps: int, ord
     out = np.zeros(n_real, dtype=float)
     for start in range(0, n_real, chunk):
         sub = real_batch[start : start + chunk]
-        vals = np.asarray(fn(jnp.asarray(sub, dtype=jnp.float32 if dtype_name == "float32" else jnp.float64)))
+        # Committed input placement also selects the JIT device; avoid first creating a float64 array on Metal
+        # merely because Metal happens to be the process default while this request explicitly selects CPU.
+        vals = np.asarray(fn(jax.device_put(sub, devices[0])))
+        if not np.all(np.isfinite(vals)):
+            raise NotImplementedError("JAX real-expm returned non-finite intensities; use the SciPy reference")
         out[start : start + len(sub)] = vals[: len(sub)]
     return out
 
@@ -273,19 +311,20 @@ def _jax_propagate_batch(H_batch, thick, thick_w, backend: str, absorption: bool
 
     key = _jax_module_key(backend)
     jax, jnp = _jax_modules(key)
-    devices = tuple(jax.devices())
-    if not devices:
-        raise NotImplementedError(f"compute_backend={backend!r} found no JAX devices")
+    devices = _jax_devices(backend)
     H_batch = np.asarray(H_batch, dtype=np.complex128)
     if H_batch.ndim != 3 or H_batch.shape[1] != H_batch.shape[2]:
         raise ValueError(f"expected a stack of square matrices, got shape {H_batch.shape}")
     n_real = int(H_batch.shape[0])
     if n_real == 0:
         return np.zeros(0, dtype=float)
+    device_limit = int(batch_size) if int(batch_size or 0) > 0 else len(devices)
+    devices = devices[:min(len(devices), n_real, device_limit)]
     n_devices = len(devices)
     n = int(H_batch.shape[1])
     chunk = int(batch_size) if int(batch_size or 0) > 0 else _auto_jax_batch_size(n, n_devices)
-    chunk = max(n_devices, int(math.ceil(chunk / n_devices)) * n_devices)
+    chunk = max(n_devices, (chunk // n_devices) * n_devices)
+    chunk = min(chunk, int(math.ceil(n_real / n_devices)) * n_devices)
     per_device = max(1, chunk // n_devices)
     cache_key = (key, bool(absorption), n, len(thick), n_devices, per_device, tuple(str(d) for d in devices))
 
@@ -293,16 +332,33 @@ def _jax_propagate_batch(H_batch, thick, thick_w, backend: str, absorption: bool
         if absorption:
 
             def _eval_shard(Hs, tvals, wvals):
+                """Return thickness-weighted target intensities for a shard of absorbing (non-Hermitian) Hamiltonians.
+
+                Uses eig and an explicit inverse, with t in Å:
+                psi_target(t) = sum_j V[1, j] V^-1[j, 0] exp(2*pi*i*lambda_j*t).
+                """
+
                 vals, vecs = jnp.linalg.eig(Hs)
                 inv_vecs = jnp.linalg.inv(vecs)
+                condition = jnp.linalg.cond(vecs)
+                reconstruction = (vecs * vals[:, None, :]) @ inv_vecs
+                relative_error = jnp.linalg.norm(reconstruction - Hs, axis=(-2, -1)) / jnp.maximum(
+                    jnp.linalg.norm(Hs, axis=(-2, -1)), jnp.finfo(jnp.float64).eps
+                )
+                stable = jnp.isfinite(condition) & (condition <= 1e10) & jnp.isfinite(relative_error) & (relative_error <= 1e-8)
                 coupling = vecs[:, 1, :] * inv_vecs[:, :, 0]
                 phase = jnp.exp((2j * jnp.pi) * vals[:, :, None] * tvals[None, None, :])
                 amp = jnp.sum(coupling[:, :, None] * phase, axis=1)
                 per_t = jnp.real(jnp.abs(amp) ** 2)
-                return jnp.sum(per_t * wvals[None, :], axis=1)
+                return jnp.where(stable, jnp.sum(per_t * wvals[None, :], axis=1), jnp.nan)
         else:
 
             def _eval_shard(Hs, tvals, wvals):
+                """Return thickness-weighted target intensities for a shard of Hermitian Hamiltonians.
+
+                Uses eigh: psi_target(t) = sum_j V[1, j] conj(V[0, j]) exp(2*pi*i*lambda_j*t), t in Å.
+                """
+
                 vals, vecs = jnp.linalg.eigh(Hs)
                 coupling = vecs[:, 1, :] * jnp.conj(vecs[:, 0, :])
                 phase = jnp.exp((2j * jnp.pi) * vals[:, :, None] * tvals[None, None, :])
@@ -313,8 +369,8 @@ def _jax_propagate_batch(H_batch, thick, thick_w, backend: str, absorption: bool
         _JAX_PROPAGATORS[cache_key] = jax.pmap(_eval_shard, in_axes=(0, None, None), devices=devices)
 
     fn = _JAX_PROPAGATORS[cache_key]
-    tvals = jnp.asarray(np.asarray(thick, dtype=float), dtype=jnp.float64)
-    wvals = jnp.asarray(np.asarray(thick_w, dtype=float), dtype=jnp.float64)
+    tvals = np.asarray(thick, dtype=np.float64)
+    wvals = np.asarray(thick_w, dtype=np.float64)
     out = np.zeros(n_real, dtype=float)
     for start in range(0, n_real, chunk):
         sub = H_batch[start : start + chunk]
@@ -322,52 +378,25 @@ def _jax_propagate_batch(H_batch, thick, thick_w, backend: str, absorption: bool
         if pad:
             sub = np.concatenate([sub, np.repeat(sub[-1:, :, :], pad, axis=0)], axis=0)
         shard = sub.reshape(n_devices, per_device, n, n)
-        vals = np.asarray(fn(jnp.asarray(shard, dtype=jnp.complex128), tvals, wvals)).reshape(-1)
+        # pmap owns placement across its explicit devices; host arrays avoid using the process default first.
+        vals = np.asarray(fn(shard, tvals, wvals)).reshape(-1)
+        if not np.all(np.isfinite(vals)):
+            raise NotImplementedError("JAX eigensystem is ill-conditioned or non-finite; use the SciPy reference")
         out[start : start + min(chunk, n_real - start)] = vals[: min(chunk, n_real - start)]
     return out
 
 
-def jax_bloch_available(backend: str = "jax") -> dict:
-    """Return whether JAX can run the complex eigensolvers needed by GROND."""
-
-    out = {"backend": backend, "available": False}
-    try:
-        jax, jnp = _jax_modules(backend)
-        out["default_backend"] = str(jax.default_backend())
-        out["devices"] = [str(d) for d in jax.devices()]
-        if _jax_backend_uses_real_expm(backend):
-            H = np.eye(4, dtype=np.complex128)
-            H[0, 1] = 0.001 + 0.002j
-            H[1, 0] = np.conj(H[0, 1])
-            vals = _jax_real_expm_propagate_batch(
-                H[None, :, :],
-                np.asarray([100.0], dtype=float),
-                np.asarray([1.0], dtype=float),
-                backend,
-                batch_size=1,
-            )
-            out["available"] = True
-            out["real_expm_dtype"] = _jax_real_dtype_name(backend)
-            out["real_expm_test"] = float(vals[0])
-            return out
-        H = jnp.asarray(np.eye(4, dtype=np.complex128) + (0.01 + 0.02j) * np.ones((4, 4), dtype=np.complex128))
-        Hh = H + jnp.conj(H.T)
-        vals_h, _ = jnp.linalg.eigh(Hh)
-        vals, _ = jnp.linalg.eig(H)
-        vals_h.block_until_ready()
-        vals.block_until_ready()
-        out["available"] = True
-        out["eig_dtype"] = str(vals.dtype)
-        out["eigh_dtype"] = str(vals_h.dtype)
-    except Exception as exc:
-        out["error"] = f"{type(exc).__name__}: {str(exc)[:500]}"
-    return out
-
-
 def safe_complex_inverse(values: np.ndarray, eps: float) -> np.ndarray:
-    """Return a reciprocal with bounded near-zero denominators."""
+    """Return 1/z with magnitude bounded by 1/eps and the reciprocal's complex phase.
+
+    At exactly zero, use the positive real bound. Non-finite values are errors, not small denominators.
+    """
 
     values = np.asarray(values, dtype=np.complex128)
+    if not math.isfinite(float(eps)) or float(eps) <= 0.0:
+        raise ValueError("the inverse denominator bound must be positive finite")
+    if not np.all(np.isfinite(values)):
+        raise ValueError("inverse denominators must be finite")
     out = np.empty_like(values)
     mag = np.abs(values)
     ok = mag >= float(eps)
@@ -376,7 +405,7 @@ def safe_complex_inverse(values: np.ndarray, eps: float) -> np.ndarray:
         small = values[~ok]
         phase = np.ones(len(small), dtype=np.complex128)
         nonzero = np.abs(small) > 0.0
-        phase[nonzero] = small[nonzero] / np.abs(small[nonzero])
+        phase[nonzero] = np.conj(small[nonzero]) / np.abs(small[nonzero])
         out[~ok] = phase / float(eps)
     return out
 

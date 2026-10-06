@@ -36,20 +36,16 @@ from scipy.optimize import least_squares
 
 from grond.refine.arguments_native import build_parser as build_native_update_parser
 from grond.refine.geometry_restraints import (
-    COVALENT_RADII_A as COVALENT_RADII_A,
     adp_similarity_residuals as adp_similarity_residuals,
     atom_distance_A as atom_distance_A,
     bond_restraint_residuals as bond_restraint_residuals,
     build_start_restraints as build_start_restraints,
-    cart_delta as cart_delta,
     frac_delta_min_image as frac_delta_min_image,
-    frac_xyz as frac_xyz,
     write_cctbx_restraint_view as write_cctbx_restraint_view,
     write_restraints_csv as write_restraints_csv,
 )
 from grond.refine.native_objective import (
     apply_row_resolution_to_prediction as apply_row_resolution_to_prediction,
-    apply_scale_contract as apply_scale_contract,
     choose_objective_rows as choose_objective_rows,
     fit_scale_contract as fit_scale_contract,
     residual_vector as residual_vector,
@@ -57,7 +53,6 @@ from grond.refine.native_objective import (
     validation_score as validation_score,
 )
 from grond.refine.native_output import (
-    format_native_value as format_native_value,
     update_res_coordinates as update_res_coordinates,
     write_model_delta_csv as write_model_delta_csv,
     write_objective_rows as write_objective_rows,
@@ -65,14 +60,12 @@ from grond.refine.native_output import (
 )
 from grond.refine.parameters import (
     absolute_finite_difference_jacobian as absolute_finite_difference_jacobian,
-    atom_is_refinable as atom_is_refinable,
     atom_ueq as atom_ueq,
     model_from_vector as model_from_vector,
     parameter_absolute_steps as parameter_absolute_steps,
     parameter_bounds as parameter_bounds,
     parameter_layout as parameter_layout,
     parameter_prior as parameter_prior,
-    set_atom_ueq as set_atom_ueq,
     special_position_coordinate_policy as special_position_coordinate_policy,
 )
 
@@ -86,7 +79,6 @@ if __package__:
         parse_model,
         sha256,
         shelx_u_cart_matrix,
-        split_masks,
     )
     from .native_row_regularize import (
         DEFAULT_BASELINE_HKL,
@@ -114,7 +106,6 @@ else:  # pragma: no cover - direct script execution
         parse_model,
         sha256,
         shelx_u_cart_matrix,
-        split_masks,
     )
     from native_row_regularize import (
         DEFAULT_BASELINE_HKL,
@@ -138,6 +129,8 @@ class EarlyStopOptimization(Exception):
     """Stop a structure block after a real plateau while preserving its best vector."""
 
     def __init__(self, reason: str, x, metric: float, eval_no: int):
+        """Record the stop reason and the best parameter vector, metric and evaluation number."""
+
         super().__init__(reason)
         self.reason = reason
         self.x = np.asarray(x, dtype=float).copy()
@@ -204,6 +197,8 @@ def make_early_stop_result(exc: EarlyStopOptimization, eval_count: int):
 
 
 def inspect_cctbx_bridge(src: Path, out_dir: Path):
+    """Parse the model with the cctbx SHELX refinement-model reader and return what it found, or the error."""
+
     view = out_dir / "cctbx_restraint_view.res"
     status = {"available": False, "parsed": False, "view": str(view)}
     try:
@@ -234,6 +229,8 @@ class CctbxRiguEvaluator:
     """Evaluate cctbx/SHELX RIGU residuals for the current native model."""
 
     def __init__(self, src: Path, out_dir: Path):
+        """Parse the model's RIGU restraints with cctbx and keep base sites and ADPs; record any error in status."""
+
         self.view = out_dir / "cctbx_restraint_view.res"
         self.status = {"available": False, "parsed": False, "view": str(self.view), "rigu_count": 0}
         try:
@@ -283,9 +280,16 @@ class CctbxRiguEvaluator:
 
     @property
     def count(self) -> int:
+        """Number of RIGU restraint proxies found; 0 when cctbx parsing failed."""
+
         return int(self.status.get("rigu_count") or 0)
 
     def residuals(self, model):
+        """Return the square roots of the cctbx RIGU residuals for model; empty without RIGU restraints.
+
+        Atoms missing from model keep their base site and ADP.
+        """
+
         if not self.status.get("parsed") or self._rigu_proxies is None or self.count <= 0:
             return np.zeros(0, dtype=float)
         atom_by_name = {a["name"]: a for a in model["atoms"]}
@@ -319,6 +323,8 @@ class CctbxRiguEvaluator:
 
 
 def prediction_for_model(data, model, cfg, indices, cache_root: Path, model_tag: str, workers: int, chunksize: int):
+    """Predict native Bloch rows for a moving model without the persistent prediction cache."""
+
     # Do not use the persistent prediction cache for moving models.  The Ug cube
     # cache is still content-addressed by model hash inside XDSBlochPort.
     port = XDSBlochPort(data, model, cfg, cache_dir=cache_root / "ug", res_hash=model_tag)
@@ -326,6 +332,8 @@ def prediction_for_model(data, model, cfg, indices, cache_root: Path, model_tag:
 
 
 def evaluate_model(data, model, cfg, target, sig, indices, masks, fit_indices, wght_a, wght_b, cache_root, tag, workers, chunksize, detector_scale_bins: int = 0, row_resolution_b: float = 0.0):
+    """Predict and scale rows for model and return native metrics per split, the scale count and arrays."""
+
     pred = prediction_for_model(data, model, cfg, indices, cache_root, tag, workers, chunksize)
     full, dyn_scaled, scales, groups, scale_count = scaled_prediction(data, target, sig, pred, cfg, fit_indices, wght_a, wght_b, detector_scale_bins=detector_scale_bins, row_resolution_b=row_resolution_b)
     out = {"splits": {}, "scale_count": int(scale_count), "prediction_seconds": float(pred.get("seconds", 0.0))}
@@ -337,6 +345,11 @@ def evaluate_model(data, model, cfg, target, sig, indices, masks, fit_indices, w
 
 
 def main():
+    """Refine coordinates and ADPs block by block against the native row target.
+
+    Writes the accepted model, deltas, trace, summary.json and REPORT.md to --out-dir.
+    """
+
     ap = build_native_update_parser(
         description=__doc__,
         default_hkl=DEFAULT_HKL,
@@ -359,12 +372,20 @@ def main():
         base_model = alternate_hand_model(base_model)
     target, base_sig = target_arrays(data, args.target_mode)
     target_indices = row_selection(data, target, not args.include_nonpositive, args.min_d_spacing, args.min_peak, 0, args.geometry_percentile)
-    masks = split_masks(
-        data.hkl,
-        args.free_fraction,
-        args.split_seed,
-        symmetry_ops=base_model.get("symmetry_ops"),
+    from grond.bloch.splits import resolve_split_masks
+
+    masks, excluded_rows, _split_contract, _split_scheme = resolve_split_masks(
+        data,
+        base_model,
+        split_contract=str(getattr(args, "split_contract", "") or ""),
+        free_fraction=args.free_fraction,
+        split_seed=args.split_seed,
+        split_scheme=str(getattr(args, "split_scheme", "legacy")),
+        split_salt=str(getattr(args, "split_salt", "")),
+        exclude_orbits_json=str(getattr(args, "exclude_orbits_json", "") or ""),
     )
+    # Excluded (lockbox) orbits leave the row set before any fit.
+    target_indices = np.asarray([i for i in target_indices if not excluded_rows[int(i)]], dtype=int)
     selected_mask = np.zeros(len(target), dtype=bool)
     selected_mask[target_indices] = True
     masks = {k: v & selected_mask for k, v in masks.items()}
@@ -533,6 +554,12 @@ def main():
             has_xyz_params=has_xyz_params,
             has_adp_params=has_adp_params,
         ):
+            """Return the stacked data, prior and restraint residuals for parameter vector x and log the call.
+
+            Raises EarlyStopOptimization with the best vector so far once the early-stop metric has plateaued.
+            The last residual vector is cached for the Jacobian.
+            """
+
             eval_counter["n"] += 1
             model = model_from_vector(current_model, params, x)
             pred = prediction_for_model(data, model, objective_cfg, objective_indices, cache_root, f"{block_tag}_moving", args.workers, args.chunksize)
@@ -606,6 +633,8 @@ def main():
             return total
 
         def jacobian(x):
+            """Return the finite-difference Jacobian at x, reusing the cached residuals when x matches."""
+
             cached = residual_cache.get("value")
             cached_x = residual_cache.get("x")
             if cached_x is None or not np.array_equal(np.asarray(cached_x, dtype=float), np.asarray(x, dtype=float)):

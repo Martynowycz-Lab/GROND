@@ -22,6 +22,11 @@ from grond.workflows.model_alignment import require_no_hydrogen
 
 
 def coordinate_cif(model_path: Path, destination: Path) -> None:
+    """Write a coordinates-only CIF of a SHELX model for viewing it with its maps.
+
+    It is the dynamical-map CIF without its map items; the wavelength (A) comes from the model's CELL line.
+    """
+
     model = parse_model(model_path)
     wavelength = next(float(line.split()[1]) for line in model_path.read_text().splitlines() if line.strip().upper().startswith("CELL "))
     native._write_dynamic_cif(destination, model=model, model_path=model_path, row_tables=[], coefficients=[],
@@ -38,6 +43,8 @@ def coordinate_cif(model_path: Path, destination: Path) -> None:
 
 
 def _fcf_rows(path):
+    """Read a CIF FCF file; return the document, its reflection loop and the loop rows as lists of strings."""
+
     document = gemmi.cif.read_file(str(path))
     loop = document.sole_block().find_loop("_refln_index_h").get_loop()
     rows = [list(loop.values[i:i + loop.width()]) for i in range(0, len(loop.values), loop.width())]
@@ -45,6 +52,12 @@ def _fcf_rows(path):
 
 
 def _native_fcf(row_tables, model_path, template, output):
+    """Write an FCF of native dynamical amplitudes with the layout of ``template``; return the native coefficients.
+
+    Fo is the merged native amplitude, sigma(F) the inverse-variance combination over symmetry and Friedel mates, Fc and
+    the phase come from ``model_path``. A JSON file next to ``output`` records the merge.
+    """
+
     rows, _ = native._read_labeled_rows([(p.parent.name, p) for p in row_tables])
     model = parse_model(model_path)
     coefficients, metadata = native._merge_native_amplitudes(rows, model, native.NativeDynamicMapOptions())
@@ -75,6 +88,8 @@ def _native_fcf(row_tables, model_path, template, output):
 
 
 def _dense_map(source, destination, model, spacing):
+    """Resample a CCP4 map onto a grid of about ``spacing`` A by Fourier padding; write it and return its statistics."""
+
     raw = read_ccp4_map(source)
     raw.setup(float("nan"))
     values = np.asarray(raw.grid).copy()
@@ -94,6 +109,13 @@ def _dense_map(source, destination, model, spacing):
 
 
 def build_matched_maps(conventional: Path, final: Path, out: Path, shelxl: str, maptool: str, run, spacing: float) -> dict:
+    """Make conventional, GROND-endpoint and native dynamical maps on full and common reflection support.
+
+    Each family gets shelx2map Fo-Fc and 2Fo-Fc maps at -w 0 and -w 1, resampled to ``spacing`` A. The native w0 Fo-Fc
+    map must correlate >= 0.999 with a direct Fourier synthesis. Writes MAP_MANIFEST.json, MAPS.csv, COMMON_SUPPORT.json
+    and README.md in ``out``; ``run`` executes each external command.
+    """
+
     out.mkdir(parents=True, exist_ok=True)
     fcfs, models = {}, {}
     for name, source in (("conventional", conventional), ("grond_endpoint", final)):
@@ -116,6 +138,7 @@ def build_matched_maps(conventional: Path, final: Path, out: Path, shelxl: str, 
     models["native_dynamical"] = directory / "model.res"
     reference = parse_model(models["native_dynamical"])
     def key(hkl):
+        """Return the symmetry- and Friedel-canonical reflection key of an (h, k, l)."""
         return canonical_model_friedel(*map(int, hkl), reference["symmetry_ops"])
     sets = {name: {key(row[:3]) for row in _fcf_rows(path)[2]} for name, path in fcfs.items()}
     common = set.intersection(*sets.values())

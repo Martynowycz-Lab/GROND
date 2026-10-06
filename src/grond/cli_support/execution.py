@@ -17,7 +17,7 @@ from grond.progress import ProgressState, format_seconds
 from grond.runtime import apply_thread_limits, auto_worker_count
 from grond.workflows.conventional_baseline import _publication_baseline_hkl
 from grond.workflows.decision import expand_transform_candidates, safe_float, safe_label
-from grond.workflows.nuisance_policy import feature_is_enabled
+from grond.workflows.nuisance_policy import FEATURE_GATE_FAMILIES, feature_is_enabled
 from grond.workflows.thickness_materialization import continuous_thickness_enabled
 
 _PROGRESS: ProgressState | None = None
@@ -149,10 +149,13 @@ def _estimated_resolution_steps(args: argparse.Namespace) -> int:
 def _estimated_sg_window_scout_steps(args: argparse.Namespace) -> int:
     """Estimate late-stage rocking-window scout commands."""
 
+    from grond.workflows.sg_window_selection import scout_widths
+
     mode = getattr(args, "sg_window_scout", "auto")
     if mode == "off" or getattr(args, "fast", False):
         return 0
-    return len(parse_numeric_grid(getattr(args, "sg_window_scout_grid", "")))
+    grid = parse_numeric_grid(getattr(args, "sg_window_scout_grid", ""))
+    return len(scout_widths(grid, float(getattr(args, "sg_window", 0.004))))
 
 
 def estimate_run_steps(prep: PrepConfig, args: argparse.Namespace) -> int:
@@ -175,6 +178,9 @@ def estimate_run_steps(prep: PrepConfig, args: argparse.Namespace) -> int:
             # Two label-symmetric nuisance-grid evaluations followed by two
             # singleton evidence replays at the selected common nuisance.
             total += 4
+            if str(getattr(args, "hand_decision_stage", "final")) == "early":
+                # Early held-out hand pair and its paired-row diagnostic after the screen.
+                total += 2
         if not getattr(args, "fast", False):
             total += 1
             if continuous_thickness_enabled(args):
@@ -184,7 +190,7 @@ def estimate_run_steps(prep: PrepConfig, args: argparse.Namespace) -> int:
                 total += 2
             total += sum(
                 1
-                for family in ("row_resolution", "absorption", "sg_jitter", "sigma_error", "dose")
+                for family in FEATURE_GATE_FAMILIES
                 if feature_is_enabled(args, family)
             )
             if getattr(args, "mode", "auto") in {"regularize", "auto"}:
@@ -207,6 +213,8 @@ def estimate_run_steps(prep: PrepConfig, args: argparse.Namespace) -> int:
             total += 1 + 2 * len(prep.datasets)
         total += 2
         total += _estimated_resolution_steps(args)
+    if str(getattr(args, "final_polish", "off") or "off") != "off":
+        total += 1
     return max(total, 1)
 
 

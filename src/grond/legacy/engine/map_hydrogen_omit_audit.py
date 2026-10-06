@@ -19,6 +19,11 @@ from pathlib import Path
 import gemmi
 import numpy as np
 
+if not __package__:
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+
 from grond.maps.ccp4 import read_ccp4_map
 
 if __package__:
@@ -28,6 +33,8 @@ else:  # pragma: no cover - direct script execution
 
 
 def parse_map_specs(specs: list[str]) -> list[tuple[str, Path]]:
+    """Parse name=path map arguments into (name, path) pairs; a bare path is named after its folder."""
+
     out = []
     for spec in specs:
         if "=" in spec:
@@ -42,6 +49,8 @@ def parse_map_specs(specs: list[str]) -> list[tuple[str, Path]]:
 
 
 def read_map(path: Path):
+    """Read a CCP4 map expanded to the full cell (gaps as NaN) and return its grid and a float64 array."""
+
     m = read_ccp4_map(path)
     m.setup(float("nan"))
     grid = m.grid
@@ -50,11 +59,15 @@ def read_map(path: Path):
 
 
 def frac_to_cart(cell: gemmi.UnitCell, frac) -> np.ndarray:
+    """Convert fractional coordinates to Cartesian Å in cell."""
+
     p = cell.orthogonalize(gemmi.Fractional(float(frac[0]), float(frac[1]), float(frac[2])))
     return np.asarray([p.x, p.y, p.z], dtype=float)
 
 
 def periodic_distance_A(cell: gemmi.UnitCell, frac_a, frac_b) -> float:
+    """Return the shortest periodic distance (Å) between two fractional positions."""
+
     d = np.asarray(frac_a, dtype=float) - np.asarray(frac_b, dtype=float)
     d -= np.round(d)
     p = cell.orthogonalize(gemmi.Fractional(float(d[0]), float(d[1]), float(d[2])))
@@ -62,6 +75,8 @@ def periodic_distance_A(cell: gemmi.UnitCell, frac_a, frac_b) -> float:
 
 
 def hydrogen_sites(ref_model: dict) -> list[dict]:
+    """Return name, fractional and Cartesian position of every hydrogen in the reference model."""
+
     cell = gemmi.UnitCell(*[float(v) for v in ref_model["cell"]])
     sites = []
     for atom in ref_model["atoms"]:
@@ -73,6 +88,8 @@ def hydrogen_sites(ref_model: dict) -> list[dict]:
 
 
 def nearest_grid_value(arr: np.ndarray, frac) -> float:
+    """Return the map value at the grid sample nearest to a fractional position."""
+
     shape = np.asarray(arr.shape, dtype=int)
     # CCP4/Gemmi grid samples lie at fractional coordinates ijk/shape, not at
     # cell centres.  Round to the nearest periodic sample rather than taking
@@ -82,6 +99,8 @@ def nearest_grid_value(arr: np.ndarray, frac) -> float:
 
 
 def grid_points_near(arr: np.ndarray, cell: gemmi.UnitCell, frac, radius_A: float):
+    """Yield (i, j, k, fractional position, distance Å) for grid samples within radius_A of frac."""
+
     shape = np.asarray(arr.shape, dtype=int)
     frac = np.asarray(frac, dtype=float)
     # Conservative index half-width from the shortest cell dimension.
@@ -99,6 +118,12 @@ def grid_points_near(arr: np.ndarray, cell: gemmi.UnitCell, frac, radius_A: floa
 
 
 def audit_map(name: str, path: Path, sites: list[dict], ref_cell: gemmi.UnitCell, radius_A: float):
+    """Sample one map at every reference H site and return per-site rows and a peak z-score summary.
+
+    z is relative to the whole-map mean and standard deviation; the local peak is the highest z within
+    radius_A (Å) of a site. Raises if the map cell differs from the reference by over 1% in length or 1°.
+    """
+
     grid, arr = read_map(path)
     cell = grid.unit_cell
     ref_lengths = np.asarray([ref_cell.a, ref_cell.b, ref_cell.c], dtype=float)
@@ -180,6 +205,8 @@ def audit_map(name: str, path: Path, sites: list[dict], ref_cell: gemmi.UnitCell
 
 
 def write_csv(path: Path, rows: list[dict]) -> None:
+    """Write rows to a CSV file with the first row's keys as header; an empty list writes an empty file."""
+
     if not rows:
         path.write_text("")
         return
@@ -191,6 +218,8 @@ def write_csv(path: Path, rows: list[dict]) -> None:
 
 
 def main() -> None:
+    """Audit each --map at the reference hydrogen sites and write the peaks CSV, summary.json and REPORT.md."""
+
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--reference-res", required=True, help="Full-H model used only for expected H positions.")
     ap.add_argument("--map", action="append", default=[], help="name=/path/to/fofc.map. May be repeated.")

@@ -36,7 +36,7 @@ def cmd_init_config(args: argparse.Namespace) -> int:
 def cmd_manual(args: argparse.Namespace) -> int:
     """Run one stateful, inspectable manual-workflow stage."""
 
-    from grond.manual_workflow import run_manual_stage
+    from grond.manual.entrypoint import run_manual_stage
 
     if bool(getattr(args, "skip", False)) and args.stage == "hand":
         args.choice = "skip"

@@ -22,7 +22,7 @@ import math
 import os
 import sys
 import time
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 if not __package__:
@@ -34,12 +34,9 @@ from scipy.optimize import minimize, minimize_scalar
 
 from grond.regularize.arguments_thickness import build_parser as build_thickness_parser
 from grond.regularize.thickness_response import (
-    PACKED_PROPAGATION_CHUNK as PACKED_PROPAGATION_CHUNK,
     PHYSICAL_GRAD_MAX as PHYSICAL_GRAD_MAX,
     PHYSICAL_GRAD_MIN as PHYSICAL_GRAD_MIN,
     ResponseRecords as ResponseRecords,
-    _reduce_packed_profiles as _reduce_packed_profiles,
-    born_from_spec as born_from_spec,
     build_base_config as build_base_config,
     dyn_from_spec as dyn_from_spec,
     estimated_packed_response_bytes as estimated_packed_response_bytes,
@@ -49,7 +46,6 @@ from grond.regularize.thickness_response import (
     metric_value as metric_value,
     pack_response_records as pack_response_records,
     predict_candidates_from_response as predict_candidates_from_response,
-    predict_from_packed_response as predict_from_packed_response,
     predict_from_response as predict_from_response,
     predict_from_response_scalar as predict_from_response_scalar,
     propagation_spec as propagation_spec,
@@ -60,18 +56,22 @@ from grond.regularize.thickness_response import (
 
 if __package__:
     from . import native_row_regularize as nrf
-    from .bloch_engine import DEFAULT_MAX_SUPPORT_SG, Config, XDSBlochPort, XDSData, parse_model, sha256, split_masks
+    from .bloch_engine import DEFAULT_MAX_SUPPORT_SG, Config, XDSBlochPort, XDSData, parse_model, sha256
 else:  # pragma: no cover - direct script execution
     import native_row_regularize as nrf
-    from bloch_engine import DEFAULT_MAX_SUPPORT_SG, Config, XDSBlochPort, XDSData, parse_model, sha256, split_masks
+    from bloch_engine import DEFAULT_MAX_SUPPORT_SG, Config, XDSBlochPort, XDSData, parse_model, sha256
 
 
 DEFAULT_HKL = Path("INTEGRATE.HKL")
 DEFAULT_RES = Path("model.res")
 
 
-def selected_indices(data: XDSData, target: np.ndarray, args) -> np.ndarray:
-    """Choose either all eligible rows or the strongest eligible subset."""
+def selected_indices(data: XDSData, target: np.ndarray, args, excluded=None) -> np.ndarray:
+    """Choose either all eligible rows or the strongest eligible subset.
+
+    Rows in ``excluded`` (held-out orbit exclusion) are dropped before the
+    strongest-subset ranking so they never occupy a selection slot.
+    """
 
     idx = nrf.row_selection(
         data,
@@ -82,6 +82,8 @@ def selected_indices(data: XDSData, target: np.ndarray, args) -> np.ndarray:
         max_rows=0,
         geometry_percentile=float(args.geometry_percentile),
     )
+    if excluded is not None:
+        idx = np.asarray([i for i in idx if not excluded[int(i)]], dtype=int)
     if int(args.strong_rows) > 0 and len(idx) > int(args.strong_rows):
         sig = np.asarray(data.sigma, dtype=float)
         score = np.asarray(target, dtype=float) / np.maximum(sig, 1e-12)
@@ -170,6 +172,11 @@ def build_response_cache(
 
 
 def make_nuisance(args, t0: float, grad: float) -> nrf.Nuisance:
+    """Return the native nuisance for thickness t0 (Å) and gradient fraction grad, other terms from args.
+
+    Raises when (t0, grad) is outside the physical thickness domain.
+    """
+
     require_physical_thickness_candidate(t0, grad)
     return nrf.Nuisance(
         thickness_A=float(t0),
@@ -190,7 +197,63 @@ def make_nuisance(args, t0: float, grad: float) -> nrf.Nuisance:
     )
 
 
+def free_wr2_veto_on(args) -> bool:
+    """Only ``--max-free-wr2-loss +inf`` switches the free-wR2 veto off (-inf still vetoes every candidate)."""
+
+    limit = float(args.max_free_wr2_loss)
+    return not (math.isinf(limit) and limit > 0.0)
+
+
+def promotion_threshold_errors(args) -> list[str]:
+    """Promotion thresholds that are NaN; a NaN comparison would silently switch its veto off."""
+
+    return [
+        option
+        for option, value in (
+            ("--min-promotion-gain", args.min_promotion_gain),
+            ("--max-free-wr2-loss", args.max_free_wr2_loss),
+            ("--max-all-r1-loss", args.max_all_r1_loss),
+        )
+        if math.isnan(float(value))
+    ]
+
+
+def promotion_vetoes(name: str, gain: float, ev: dict, baseline_ev: dict, args) -> dict:
+    """Promotion record of one evaluated candidate against the grid baseline.
+
+    ``--promotion-score-rows all`` (default) vetoes on the all-row R1 loss;
+    ``work`` vetoes on the work-row R1 loss.  ``--max-free-wr2-loss inf`` switches the free-wR2 veto
+    off, so under work the promotion reads no free row.  All three losses are recorded.
+    """
+
+    r1_rows = "work" if str(args.promotion_score_rows) == "work" else "all"
+    free_veto = free_wr2_veto_on(args)
+    free_loss = float(ev["metrics"]["free"]["dyn"]["wR2_all"] - baseline_ev["metrics"]["free"]["dyn"]["wR2_all"])
+    all_r1_loss = float(ev["metrics"]["all"]["dyn"]["R1_all"] - baseline_ev["metrics"]["all"]["dyn"]["R1_all"])
+    work_r1_loss = float(ev["metrics"]["work"]["dyn"]["R1_all"] - baseline_ev["metrics"]["work"]["dyn"]["R1_all"])
+    reasons = []
+    if name != "baseline" and gain < float(args.min_promotion_gain):
+        reasons.append("gain_below_minimum")
+    if free_veto and free_loss > float(args.max_free_wr2_loss):
+        reasons.append("free_wR2_loss")
+    if (work_r1_loss if r1_rows == "work" else all_r1_loss) > float(args.max_all_r1_loss):
+        reasons.append(f"{r1_rows}_R1_loss")
+    return {
+        "strategy": name,
+        "gain": gain,
+        "free_wR2_loss": free_loss,
+        "all_R1_loss": all_r1_loss,
+        "work_R1_loss": work_r1_loss,
+        "reasons": reasons,
+    }
+
+
 def main() -> int:
+    """Search thickness and gradient continuously from cached eigensystems and return 0.
+
+    Writes the trial CSV, summary.json, best_native_fit.json and REPORT.md to --out-dir.
+    """
+
     ap = build_thickness_parser(
         description=__doc__,
         default_hkl=DEFAULT_HKL,
@@ -229,6 +292,11 @@ def main() -> int:
         ap.error("continuous-thickness grid steps must be positive")
     if int(args.powell_maxiter) <= 0:
         ap.error("continuous-thickness Powell iterations must be positive")
+    if promotion_threshold_errors(args):
+        ap.error(
+            "continuous-thickness promotion thresholds must not be NaN (use --max-free-wr2-loss inf to switch "
+            "the free-wR2 veto off): " + ", ".join(promotion_threshold_errors(args))
+        )
     start_reasons = thickness_candidate_domain_reasons(
         float(args.start_thickness),
         float(args.start_grad),
@@ -249,19 +317,31 @@ def main() -> int:
 
     data = XDSData(Path(args.hkl), hkl_transform=args.hkl_transform)
     target, base_sig = nrf.target_arrays(data, args.target_mode)
-    indices = selected_indices(data, target, args)
     model = parse_model(Path(args.res))
-    masks_all = split_masks(
-        data.hkl,
-        float(args.free_fraction),
-        int(args.split_seed),
-        symmetry_ops=model.get("symmetry_ops"),
+    from grond.bloch.splits import resolve_split_masks
+
+    masks_all, excluded_rows, split_contract_summary, split_scheme_summary = resolve_split_masks(
+        data,
+        model,
+        split_contract=str(getattr(args, "split_contract", "") or ""),
+        free_fraction=float(args.free_fraction),
+        split_seed=int(args.split_seed),
+        split_scheme=str(getattr(args, "split_scheme", "legacy")),
+        split_salt=str(getattr(args, "split_salt", "")),
+        exclude_orbits_json=str(getattr(args, "exclude_orbits_json", "") or ""),
     )
+    indices = selected_indices(data, target, args, excluded=excluded_rows if np.any(excluded_rows) else None)
     selected = np.zeros(len(target), dtype=bool)
     selected[indices] = True
     masks = {k: v & selected for k, v in masks_all.items()}
     cfg = build_base_config(args)
     wght_a, wght_b = nrf.parse_wght(Path(args.res))
+    scale_model = nrf.scale_model_from_args(args)
+    scale_orbit_keys = None
+    if scale_model.kind == "pspline":
+        scale_orbit_keys = np.full(len(target), "", dtype=object)
+        scale_orbit_keys[indices] = nrf.heldout.orbit_keys(data.hkl[indices], model.get("symmetry_ops"), include_friedel=True)
+    scale_state = {"model": scale_model, "pinned_from_baseline": None}
     print(
         f"selected {len(indices)} rows for continuous thickness polish | "
         f"N={args.n_basis} Q={args.n_points} start={args.start_thickness:.1f} A grad={args.start_grad:.3f}",
@@ -282,6 +362,12 @@ def main() -> int:
     eval_history: list[dict] = []
 
     def evaluate(t0: float, grad: float, label: str = "eval") -> tuple[float, dict]:
+        """Score one (thickness Å, gradient) candidate and append it to the trial history.
+
+        Returns (objective, native evaluation). A candidate outside the search bounds returns 1e9 and an empty
+        evaluation.
+        """
+
         if thickness_candidate_domain_reasons(
             t0,
             grad,
@@ -304,6 +390,8 @@ def main() -> int:
             wght_a,
             wght_b,
             scale_fit_split=str(args.scale_fit_split),
+            scale_model=scale_state["model"],
+            orbit_keys=scale_orbit_keys,
         )
         val = metric_value(ev, str(args.selection_metric))
         row = {
@@ -325,6 +413,13 @@ def main() -> int:
     # 1. Baseline at the grid-promoted point.
     baseline_val, baseline_ev = evaluate(float(args.start_thickness), float(args.start_grad), "baseline")
     print(f"baseline objective={baseline_val:.6f}", flush=True)
+    if scale_model.kind == "pspline":
+        # Hold the inner-CV choice made at the start point fixed so the thickness objective stays smooth.
+        chosen = baseline_ev["scale_model"]
+        scale_state["pinned_from_baseline"] = {"n_basis": int(chosen["n_basis"]), "lambda": float(chosen["lambda"])}
+        scale_state["model"] = replace(
+            scale_model, n_basis_grid=(int(chosen["n_basis"]),), lambda_grid=(float(chosen["lambda"]),)
+        )
 
     # 2. Local scalar bounded regularization of thickness at fixed gradient.
     t0 = float(args.start_thickness)
@@ -392,6 +487,8 @@ def main() -> int:
             wght_a,
             wght_b,
             scale_fit_split=str(args.scale_fit_split),
+            scale_model=scale_state["model"],
+            orbit_keys=scale_orbit_keys,
         )
         val = metric_value(ev, str(args.selection_metric))
         eval_history.append(
@@ -464,8 +561,10 @@ def main() -> int:
         ("guard_grid", grid_best[0], grid_best[1], grid_best[2], grid_best[3]),
         ("powell", powell_val, powell_t, powell_g, powell_ev),
     ]
-    baseline_free = float(baseline_ev["metrics"]["free"]["dyn"]["wR2_all"])
-    baseline_r1 = float(baseline_ev["metrics"]["all"]["dyn"]["R1_all"])
+    # Under --promotion-score-rows work the R1 veto reads work rows; with --max-free-wr2-loss inf the free
+    # veto is off and the promotion reads no free row.
+    r1_rows = "work" if str(args.promotion_score_rows) == "work" else "all"
+    free_veto = free_wr2_veto_on(args)
     eligible = []
     rejected = []
     for name, val, tv, gv, ev in candidates:
@@ -488,27 +587,13 @@ def main() -> int:
                     "gain": None,
                     "free_wR2_loss": None,
                     "all_R1_loss": None,
+                    "work_R1_loss": None,
                     "reasons": list(dict.fromkeys(reasons)),
                 }
             )
             continue
-        gain = float(baseline_val - val)
-        free_loss = float(ev["metrics"]["free"]["dyn"]["wR2_all"] - baseline_free)
-        all_r1_loss = float(ev["metrics"]["all"]["dyn"]["R1_all"] - baseline_r1)
-        reasons = []
-        if name != "baseline" and gain < float(args.min_promotion_gain):
-            reasons.append("gain_below_minimum")
-        if free_loss > float(args.max_free_wr2_loss):
-            reasons.append("free_wR2_loss")
-        if all_r1_loss > float(args.max_all_r1_loss):
-            reasons.append("all_R1_loss")
-        rec = {
-            "strategy": name,
-            "gain": gain,
-            "free_wR2_loss": free_loss,
-            "all_R1_loss": all_r1_loss,
-            "reasons": reasons,
-        }
+        rec = promotion_vetoes(name, float(baseline_val - val), ev, baseline_ev, args)
+        reasons = rec["reasons"]
         if reasons:
             rejected.append(rec)
         else:
@@ -519,6 +604,7 @@ def main() -> int:
             "gain": 0.0,
             "free_wR2_loss": 0.0,
             "all_R1_loss": 0.0,
+            "work_R1_loss": 0.0,
             "reasons": [],
         })]
     best_label, best_val, best_t, best_g, best_ev, best_decision = min(eligible, key=lambda x: x[1])
@@ -575,12 +661,15 @@ def main() -> int:
             "sigma_c_peak": float(args.sigma_c_peak),
             "selection_metric": str(args.selection_metric),
             "scale_fit_split": str(args.scale_fit_split),
+            "scale_model": {**scale_model.to_dict(), "pinned_from_baseline": scale_state["pinned_from_baseline"]},
             "target_mode": str(args.target_mode),
         },
         "row_selection": {
             "eligible_rows": int(len(indices)),
             "strong_rows": int(args.strong_rows),
             "max_rows": int(args.max_rows),
+            "split_scheme": split_scheme_summary,
+            "transform_hand_split_contract": split_contract_summary,
         },
         "timings": {
             "response_cache_seconds": float(cache_seconds),
@@ -643,6 +732,14 @@ def main() -> int:
             "min_promotion_gain": float(args.min_promotion_gain),
             "max_free_wR2_loss": float(args.max_free_wr2_loss),
             "max_all_R1_loss": float(args.max_all_r1_loss),
+            "selection_rows": r1_rows,
+            "free_veto": free_veto,
+            "free_rows_in_selection": bool(
+                r1_rows != "work"
+                or free_veto
+                or str(args.selection_metric) != "work_wR2"
+                or str(args.scale_fit_split) != "work"
+            ),
         },
         "best_native": best_native,
     }
@@ -674,7 +771,14 @@ def main() -> int:
         [
             "",
             f"Selected result: `{best_label}` at `{best_t:.3f} A` (`{best_t / 10.0:.3f} nm`) with gradient `{best_g:.4f}`.",
-            f"Promotion gate: gain `{best_decision['gain']:.6f}`, free-wR2 loss `{best_decision['free_wR2_loss']:.6f}`, all-R1 loss `{best_decision['all_R1_loss']:.6f}`.",
+            f"Promotion gate: gain `{best_decision['gain']:.6f}`, free-wR2 loss `{best_decision['free_wR2_loss']:.6f}`, all-R1 loss `{best_decision['all_R1_loss']:.6f}`."
+            + (
+                f" Work-row R1 loss `{best_decision['work_R1_loss']:.6f}` (work-row R1 veto"
+                + ("" if free_veto else "; free-wR2 veto off")
+                + ")."
+                if r1_rows == "work"
+                else ""
+            ),
             f"Thickness identifiability: `{summary['thickness_identifiability']['status']}`; absolute half-width `{summary['thickness_identifiability']['absolute_half_width_A']:.3f} A`.",
             *(f"Warning: {warning}." for warning in summary["thickness_identifiability"]["warnings"]),
             "",

@@ -41,7 +41,8 @@ COMPUTE_BACKENDS = [
 
 COMPUTE_BACKEND_HELP = ", ".join(COMPUTE_BACKENDS)
 
-ROW_PLAN_CACHE_SCHEMA = 6
+# Version 8 binds the parsed input snapshots and rejects source replacement.
+ROW_PLAN_CACHE_SCHEMA = 8
 
 UG_CACHE_SCHEMA = 4
 

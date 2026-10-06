@@ -51,6 +51,12 @@ def _stable_detector_split_masks(
 
 
 def _field_agreement(left: dict[str, float], right: dict[str, float]) -> dict[str, float]:
+    """Compare two detector fields on their shared tiles: correlation and RMS difference of the log scales.
+
+    With no shared tile the result is NaN and inf. With two tiles or fewer, or a flat field, the correlation is 1
+    when the log RMS is at most 0.02, else 0.
+    """
+
     keys = sorted(set(left) & set(right), key=int)
     if not keys:
         return {"correlation": float("nan"), "log_rms": float("inf")}
@@ -125,6 +131,11 @@ def detector_scale_policy_diagnostics(
     )
 
     def fit(raw: np.ndarray, mask: np.ndarray, use_detector: bool):
+        """Fit frame scales on the mask rows, adding the detector field when use_detector.
+
+        Returns (scaled predictions, frame scales, detector field); the field is empty without the detector.
+        """
+
         if not use_detector:
             scaled, frame = fit_group_scales(
                 obs,
@@ -272,6 +283,11 @@ def detector_scale_policy_diagnostics(
 
 
 def metric_delta(candidate: dict, baseline: dict) -> dict:
+    """Return candidate minus baseline for the row R factors and the native R1_gt, R1_all and wR2_all.
+
+    Row R factors are compared on all rows and on the work and free rows.
+    """
+
     out = {}
     for key in ("Robs", "Rall", "wRall"):
         out[key] = safe_float(candidate.get(key)) - safe_float(baseline.get(key))
@@ -289,10 +305,18 @@ def metric_delta(candidate: dict, baseline: dict) -> dict:
 
 
 def within_tolerance(delta: dict, metrics: tuple[str, ...], tolerance: float) -> bool:
+    """Return True when every named delta is finite and at most tolerance."""
+
     return all(np.isfinite(safe_float(delta.get(m))) and safe_float(delta.get(m)) <= float(tolerance) for m in metrics)
 
 
 def candidate_row(candidate: dict) -> dict[str, object]:
+    """Flatten one scale-compression candidate into a row of the candidate CSV.
+
+    The row holds its settings, parameter counts, metrics, deltas against the baseline, information criteria and
+    detector-policy status.
+    """
+
     delta = candidate["delta_vs_baseline"]
     native = candidate["native"]
     info = candidate.get("information", {})

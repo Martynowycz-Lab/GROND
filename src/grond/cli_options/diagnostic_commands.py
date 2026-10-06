@@ -1,4 +1,4 @@
-"""Build the public command grammar in its established display order."""
+"""Register the post-run diagnostics: forensics, scale-polish, scale-replay, calibrate-endpoint, target-ablation."""
 
 from __future__ import annotations
 

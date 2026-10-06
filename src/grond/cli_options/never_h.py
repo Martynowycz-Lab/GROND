@@ -1,6 +1,8 @@
 """One command for a strict paired H-free refinement and map export."""
 
 def register_never_h(sub):
+    """Register ``grond never-h`` and its options."""
+
     from grond.cli_support.tools import add_tool_config_args, default_shelxl_executable
     from grond.commands.never_h import cmd_never_h
 
@@ -16,5 +18,8 @@ def register_never_h(sub):
     parser.add_argument("--no-maps", dest="maps", action="store_false", default=True)
     parser.add_argument("--map-grid-spacing", type=float, default=0.1, help="Common map grid spacing in Angstroms.")
     parser.add_argument("--dry-run", action="store_true")
+    from .endpoint_commands import add_model_box_args
+
+    add_model_box_args(parser)
     add_tool_config_args(parser)
     parser.set_defaults(func=cmd_never_h)

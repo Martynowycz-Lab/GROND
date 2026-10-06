@@ -16,7 +16,7 @@ from grond.paths import LEGACY_ROOT, PACKAGE_ROOT, engine_script
 
 
 def cmd_validate(args: argparse.Namespace) -> int:
-    """CLI entrypoint that compile-checks the vendored Python engine."""
+    """Compile-check the engine scripts and report the external tools found."""
 
     python = choose_python(args.python)
     scripts = [
@@ -29,12 +29,8 @@ def cmd_validate(args: argparse.Namespace) -> int:
         engine_script("premerge_rfactor_audit.py"),
         engine_script("native_two_part_observation_correction.py"),
         engine_script("native_observation_polish_endpoint.py"),
-        engine_script("native_additive_bias_audit.py"),
         engine_script("native_dose_damage_audit.py"),
         engine_script("native_sigma_replicate_audit.py"),
-        engine_script("run_raw_cbf_bloch_trial.py"),
-        engine_script("build_dynrows_xds.py"),
-        engine_script("dynrow_contract.py"),
         engine_script("support_basis_scan.py"),
         engine_script("ls1_validation_suite.py"),
         engine_script("native_structure_update.py"),
@@ -186,7 +182,7 @@ def cmd_validate_ls1(args: argparse.Namespace) -> int:
 
 
 def cmd_compile(args: argparse.Namespace) -> int:
-    """CLI entrypoint that compile-checks package and vendored Python modules."""
+    """Compile-check the package and its engine modules."""
 
     root = PACKAGE_ROOT.parent
     python = choose_python(args.python)

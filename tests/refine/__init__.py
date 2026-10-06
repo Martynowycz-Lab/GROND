@@ -1,1 +1,0 @@
-"""GROND refine regression tests."""

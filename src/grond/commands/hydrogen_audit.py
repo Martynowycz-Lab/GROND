@@ -67,6 +67,7 @@ def cmd_audit_hydrogen_omit(args: argparse.Namespace) -> int:
         def normalized_symmetry(
             model: Mapping[str, object],
         ) -> tuple[int, tuple[tuple[tuple[float, ...], tuple[float, ...]], ...]]:
+            """Return a model's LATT code and its sorted symmetry operations, rounded, translations reduced modulo 1."""
             latt = int(model.get("shelx_latt", 0) or 0)
             operations = model.get("symmetry_ops")
             operations = operations if isinstance(operations, (list, tuple)) else []
@@ -101,6 +102,7 @@ def cmd_audit_hydrogen_omit(args: argparse.Namespace) -> int:
             )
 
         def non_h_sites(model: Mapping[str, object]) -> dict[str, tuple[str, tuple[float, float, float]]]:
+            """Return each non-H atom's element and fractional position by label; raise on a blank or repeated label."""
             sites: dict[str, tuple[str, tuple[float, float, float]]] = {}
             for atom in model.get("atoms", []):
                 if not isinstance(atom, Mapping):

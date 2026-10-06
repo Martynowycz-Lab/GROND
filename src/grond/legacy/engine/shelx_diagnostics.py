@@ -16,6 +16,8 @@ def parse_shelx_lst_metrics(path: Path) -> dict[str, object]:
     }
 
     def decimals(value: str) -> int:
+        """Return the number of decimals printed in a numeric string."""
+
         return len(value.partition(".")[2]) if "." in value else 0
     if not path.exists():
         return out

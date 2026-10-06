@@ -42,18 +42,11 @@ from grond.refine.arguments_multidataset import build_parser as build_multi_upda
 from grond.refine.datasets import (
     DatasetState as DatasetState,
     build_dataset_state as build_dataset_state,
-    choose_objective_rows as choose_objective_rows,
     compact_eval as compact_eval,
     evaluate_state as evaluate_state,
     fit_frozen_scale_contract as fit_frozen_scale_contract,
-    parse_bool as parse_bool,
-    parse_float as parse_float,
-    parse_int as parse_int,
-    parse_text as parse_text,
-    predict_state as predict_state,
     read_datasets_csv as read_datasets_csv,
     score_eval as score_eval,
-    stable_name_seed as stable_name_seed,
     state_residual_vector as state_residual_vector,
     write_dataset_rows as write_dataset_rows,
 )
@@ -115,13 +108,15 @@ else:  # pragma: no cover - direct script execution
     )
 
 
-from grond.legacy.engine.bloch_engine import Config as Config, XDSData as XDSData
+from grond.legacy.engine.bloch_engine import Config as Config
 
 
 class EarlyStopOptimization(Exception):
     """Stop a structure block after a real plateau while preserving its best vector."""
 
     def __init__(self, reason: str, x, metric: float, eval_no: int):
+        """Record the stop reason and the best parameter vector, metric and evaluation number."""
+
         super().__init__(reason)
         self.reason = reason
         self.x = np.asarray(x, dtype=float).copy()
@@ -162,6 +157,11 @@ def make_early_stop_result(exc: EarlyStopOptimization, eval_count: int):
 
 # Keep the public evaluation dispatcher here so documented legacy hooks remain local.
 def evaluate_all(states: list[DatasetState], model, cache_root: Path, tag: str, workers: int, chunksize: int):
+    """Evaluate the model on every dataset and return per-dataset results and pooled split metrics.
+
+    The all, work and free metrics pool every dataset's rows, each with its own WGHT.
+    """
+
     per_dataset = [evaluate_state(s, model, cache_root, tag, workers, chunksize) for s in states]
     joint = {"datasets": per_dataset, "splits": {}}
     for split in ("all", "work", "free"):
@@ -192,6 +192,12 @@ def evaluate_all(states: list[DatasetState], model, cache_root: Path, tag: str, 
 
 
 def main():
+    """Refine one shared model against every dataset's native residuals, block by block.
+
+    Writes the dataset rows, restraints, accepted model, model deltas, trace, summary.json, per-dataset
+    metrics and REPORT.md to --out-dir.
+    """
+
     ap = build_multi_update_parser(
         description=__doc__,
         max_support_sg=DEFAULT_MAX_SUPPORT_SG,
@@ -225,6 +231,12 @@ def main():
     cctbx_rigu = CctbxRiguEvaluator(res_path, out) if args.restraints == "cctbx_rigu" else None
     cctbx_bridge = cctbx_rigu.status if cctbx_rigu is not None else inspect_cctbx_bridge(res_path, out)
     restraint_count = int(cctbx_rigu.count) if cctbx_rigu is not None else int(len(restraints))
+    if cctbx_rigu is not None:
+        if not cctbx_bridge.get("parsed"):
+            reason = cctbx_bridge.get("error") or "the restraint model could not be parsed"
+            raise ValueError(f"requested cctbx_rigu restraints are unavailable: {reason}")
+        if restraint_count == 0:
+            raise ValueError("requested cctbx_rigu restraints, but the model defines no RIGU terms")
 
     current_model = copy.deepcopy(base_model)
     start_eval = evaluate_all(states, current_model, cache_root, "start", args.workers, args.chunksize)
@@ -272,6 +284,12 @@ def main():
         }
 
         def residuals(x, *, params=params, x0=x0, block_tag=block_tag, block_no=block_no, block_mode=block_mode, current_model=current_model, has_xyz=has_xyz, has_adp=has_adp):
+            """Return the stacked data, prior and restraint residuals for parameter vector x and log the call.
+
+            Raises EarlyStopOptimization with the best vector so far once the early-stop metric has plateaued.
+            The last residual vector is cached for the Jacobian.
+            """
+
             eval_counter["n"] += 1
             model = model_from_vector(current_model, params, x)
             parts = []
@@ -338,6 +356,8 @@ def main():
             return total
 
         def jacobian(x):
+            """Return the finite-difference Jacobian at x, reusing the cached residuals when x matches."""
+
             cached = residual_cache.get("value")
             cached_x = residual_cache.get("x")
             if cached_x is None or not np.array_equal(np.asarray(cached_x, dtype=float), np.asarray(x, dtype=float)):

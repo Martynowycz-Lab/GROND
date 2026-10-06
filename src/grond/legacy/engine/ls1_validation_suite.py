@@ -353,12 +353,16 @@ def report_markdown(result: dict) -> str:
     """Render a human-readable validation report."""
 
     def pct(value) -> str:
+        """Format a fraction as a percentage with two decimals, or 'nan' if it is not numeric."""
+
         try:
             return f"{100.0 * float(value):.2f}"
         except (TypeError, ValueError):
             return "nan"
 
     def num(value) -> str:
+        """Format a number with three decimals, or 'nan' if it is not numeric."""
+
         try:
             return f"{float(value):.3f}"
         except (TypeError, ValueError):
@@ -424,6 +428,11 @@ def report_markdown(result: dict) -> str:
 
 
 def main() -> None:
+    """Run the updated-q LS1 loop, its native controls and the optional native polish.
+
+    Writes ls1_validation_summary.json and LS1_VALIDATION_REPORT.md to --out-dir.
+    """
+
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--source-summary", required=True, help="Existing native_row_regularize summary whose nuisance values should be pinned.")
     ap.add_argument("--start-res", required=True, help="Initial structure for updated-q cycle 1.")

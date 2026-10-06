@@ -48,6 +48,8 @@ else:  # pragma: no cover - direct script execution
 
 
 def read_rows(path: Path) -> list[dict[str, str]]:
+    """Read a CSV file into a list of row dicts; raise if it has no rows."""
+
     with path.open() as f:
         rows = list(csv.DictReader(f))
     if not rows:
@@ -56,6 +58,8 @@ def read_rows(path: Path) -> list[dict[str, str]]:
 
 
 def fcol(rows: list[dict[str, str]], name: str, default: float = float("nan")) -> np.ndarray:
+    """Return one column as a float array, with default for missing or unparsable cells."""
+
     vals = []
     for r in rows:
         try:
@@ -66,6 +70,8 @@ def fcol(rows: list[dict[str, str]], name: str, default: float = float("nan")) -
 
 
 def icol(rows: list[dict[str, str]], name: str, default: int = -1) -> np.ndarray:
+    """Return one column as an int array, with default for missing or unparsable cells."""
+
     vals = []
     for r in rows:
         try:
@@ -76,18 +82,24 @@ def icol(rows: list[dict[str, str]], name: str, default: int = -1) -> np.ndarray
 
 
 def p222_canonical(h: int, k: int, l: int) -> tuple[int, int, int]:
+    """Return the smallest of the four P222 rotation mates of (h, k, l); Friedel mates stay separate."""
+
     # Proper orthorhombic rotations only. Friedel mates are intentionally not merged.
     mates = [(h, k, l), (h, -k, -l), (-h, k, -l), (-h, -k, l)]
     return min(mates)
 
 
 def stable_group_split(key: tuple[int, int, int], holdout_fraction: float, seed: int) -> bool:
+    """Return whether an equivalence group is held out, from a seeded SHA-256 hash of its key."""
+
     text = f"{seed}:{key[0]}:{key[1]}:{key[2]}".encode()
     val = int(hashlib.sha256(text).hexdigest()[:12], 16) / float(16**12)
     return val < float(holdout_fraction)
 
 
 def add_xds_metadata(rows: list[dict[str, str]], hkl_path: Path) -> dict[str, np.ndarray]:
+    """Return XDS calculated and observed centroids, RLP, PEAK and CORR per row; NaN for invalid row_index."""
+
     data = XDSData(hkl_path)
     row_index = icol(rows, "row_index")
     n = len(rows)
@@ -108,6 +120,12 @@ def add_xds_metadata(rows: list[dict[str, str]], hkl_path: Path) -> dict[str, np
 
 
 def build_variance_features(rows: list[dict[str, str]], pred: np.ndarray, hkl_path: Path) -> tuple[np.ndarray, list[str]]:
+    """Return the variance-model feature matrix and feature names for each row.
+
+    Features are a constant, |Iobs|, Iobs² and Idyn², and squared intensity-scaled proxies: CORR and PEAK
+    defects, centroid offsets, detector radius, RLP ratio and 1/d².
+    """
+
     obs = fcol(rows, "target_I")
     d = fcol(rows, "d_A")
     rlp = fcol(rows, "rlp")
@@ -150,6 +168,12 @@ def build_variance_features(rows: list[dict[str, str]], pred: np.ndarray, hkl_pa
 
 
 def fit_nonnegative_variance(X: np.ndarray, y: np.ndarray, mask: np.ndarray, ridge_alpha: float) -> tuple[np.ndarray, np.ndarray]:
+    """Fit nonnegative variance coefficients to scatter targets on mask; return (coefficients, scales).
+
+    Columns are scaled by their median absolute value and optionally ridge-augmented; if NNLS fails, a
+    clipped least-squares solution is used.
+    """
+
     m = mask & np.isfinite(y) & np.all(np.isfinite(X), axis=1)
     if np.count_nonzero(m) < 10:
         raise ValueError("not enough training rows for variance fit")
@@ -173,6 +197,12 @@ def fit_nonnegative_variance(X: np.ndarray, y: np.ndarray, mask: np.ndarray, rid
 
 
 def group_scatter_targets(obs: np.ndarray, pred: np.ndarray, hkls: np.ndarray, min_multiplicity: int, holdout_fraction: float, seed: int):
+    """Return per-row replicate scatter around each P222 group mean, with train and test group masks.
+
+    Scatter is the squared deviation of the residual from its group mean times n/(n-1). Groups with fewer
+    than min_multiplicity finite rows are unused; held-out groups come from stable_group_split.
+    """
+
     keys = [p222_canonical(int(h), int(k), int(l)) for h, k, l in hkls]
     by_key: dict[tuple[int, int, int], list[int]] = {}
     for i, key in enumerate(keys):
@@ -215,6 +245,8 @@ def group_scatter_targets(obs: np.ndarray, pred: np.ndarray, hkls: np.ndarray, m
 
 
 def metric_summary(obs: np.ndarray, sig: np.ndarray, pred: np.ndarray, mask: np.ndarray) -> dict:
+    """Return native metrics (unit weights) plus z-score summaries of (Iobs - Icalc)/sigma in mask."""
+
     out = native_metrics(obs, sig, pred, mask, 0.0, 0.0, n_params=0)
     m = mask & np.isfinite(obs) & np.isfinite(sig) & (sig > 0) & np.isfinite(pred)
     if np.count_nonzero(m):
@@ -236,6 +268,11 @@ def metric_summary(obs: np.ndarray, sig: np.ndarray, pred: np.ndarray, mask: np.
 
 
 def choose_masks(obs: np.ndarray, sig: np.ndarray, d: np.ndarray, scatter_masks: dict) -> dict[str, np.ndarray]:
+    """Return the all, scatter train and test masks and the test weak, strong and high-resolution subsets.
+
+    Weak and strong are the lower and upper I/sigma quartiles; high resolution is the top 1/d² quartile.
+    """
+
     valid = np.isfinite(obs) & np.isfinite(sig) & (sig > 0) & np.isfinite(d)
     isigi = obs / np.maximum(sig, 1e-12)
     inv_d2 = 1.0 / np.maximum(d, 1e-12) ** 2
@@ -256,6 +293,8 @@ def choose_masks(obs: np.ndarray, sig: np.ndarray, d: np.ndarray, scatter_masks:
 
 
 def write_csv(path: Path, rows: list[dict]) -> None:
+    """Write rows to a CSV file with the first row's keys as header; an empty list writes an empty file."""
+
     if not rows:
         path.write_text("")
         return
@@ -266,10 +305,17 @@ def write_csv(path: Path, rows: list[dict]) -> None:
 
 
 def pct(x: float) -> float:
+    """Return a fraction as a percentage, or NaN if it is not finite."""
+
     return 100.0 * float(x) if np.isfinite(x) else float("nan")
 
 
 def main() -> None:
+    """Fit the replicate-scatter sigma model on training groups and score it on held-out groups.
+
+    Writes the coefficient and calibrated-row CSVs, summary.json and REPORT.md to --out-dir.
+    """
+
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--row-table", required=True)
     ap.add_argument("--hkl", default=str(DEFAULT_HKL))

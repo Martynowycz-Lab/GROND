@@ -1,3 +1,9 @@
+"""Probe a Python interpreter for GROND's runtime packages and Bloch eigensolvers.
+
+Each probe runs as a subprocess of the chosen interpreter and prints one JSON report, so a
+broken or foreign environment cannot crash the calling process.
+"""
+
 from __future__ import annotations
 
 import json

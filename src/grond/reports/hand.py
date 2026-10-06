@@ -257,12 +257,31 @@ def _quick_multi_hand_evidence_lines(
     pooled = _quick_final_elastic_hand_aggregate(payload)
     pooled_zkp = _quick_final_elastic_hand_zkp(payload)
     final_elastic = bool(pooled)
+    # The recorded rule decides the wording: under heldout-orbit-sign the all-row values are diagnostics only.
+    # A skipped check (centrosymmetric model, hand control off) decided nothing and keeps the all-row wording.
+    heldout_rule = bool(
+        str(payload.get("decision_evidence") or "") == "heldout-orbit-sign"
+        and not str(payload.get("status") or "").startswith("skipped")
+    )
     lines = [
-        "## Final Hand Evidence",
+        "## Final Hand Evidence"
+        + (" (all-row diagnostics; the held-out orbit rule decided)" if final_elastic and heldout_rule else ""),
         "",
         (
             "The final elastic negative-thickness comparison uses each crystal's exact frozen rows, nuisance, scales, "
-            "N/Q, jitter, and proper transform, with absorption disabled only for the Hermitian hand identity. "
+            "N/Q, jitter, and proper transform"
+            + (
+                ", with a uniform absorptive potential kept in the exact pair. "
+                if payload.get("absorption_policy") == "uniform_absorption_kept_exact_pair"
+                else ", with absorption disabled only for the Hermitian hand identity. "
+            )
+            + "The hand was decided by the pooled held-out orbit-sign rule (see the held-out validation section); "
+            "the all-row Klar--Palatinus adjusted Z and t-style values below are diagnostics only and each crystal "
+            "remains visible separately. Displayed ZKP and t-style values are oriented so positive favors the final "
+            "retained hand; the t-style values are not normal Z scores."
+            if final_elastic and heldout_rule
+            else "The final elastic negative-thickness comparison uses each crystal's exact frozen rows, nuisance, "
+            "scales, N/Q, jitter, and proper transform, with absorption disabled only for the Hermitian hand identity. "
             "The combined all-row Klar--Palatinus adjusted Z is the hand-selection statistic; held-out Z is a "
             "warning diagnostic and each crystal remains visible separately. Displayed ZKP and t-style values are "
             "oriented so positive favors the final retained hand; the t-style values are not normal Z scores."

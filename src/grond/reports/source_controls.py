@@ -102,6 +102,8 @@ def _quick_source_shelx_controls(path: Path | None) -> dict[str, object]:
         return out
 
     def read_controls(candidate: Path) -> dict[str, object]:
+        """Return the HKLF, EXTI, WGHT and ACTA records of one RES or INS file up to END (blank when unreadable)."""
+
         found: dict[str, object] = {"hklf": "", "exti": "", "wght": "", "acta": False}
         try:
             text = candidate.read_text(errors="replace")

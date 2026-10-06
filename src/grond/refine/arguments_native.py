@@ -61,7 +61,7 @@ def build_parser(description: str, *, default_hkl, default_res, default_baseline
         "--diff-step",
         type=float,
         default=None,
-        help="Deprecated compatibility name setting both absolute finite-difference steps in each parameter's native unit; use the group-specific options instead. This is no longer a SciPy relative multiplier.",
+        help="Deprecated compatibility name setting both absolute finite-difference steps in each parameter's native unit; use the group-specific options instead. It is not a SciPy relative multiplier.",
     )
     ap.add_argument("--xyz-diff-step-frac", type=float, default=1e-4, help="Absolute fractional-coordinate step used for native Bloch finite differences.")
     ap.add_argument("--adp-diff-step-a2", type=float, default=1e-4, help="Absolute Ueq step in A^2 used for native Bloch finite differences.")
@@ -107,6 +107,14 @@ def build_parser(description: str, *, default_hkl, default_res, default_baseline
     ap.add_argument("--profile-accumulation", choices=["sum", "mean"], default="sum", help="Accumulate rocking-profile samples as summed detector sub-exposures or legacy normalized means.")
     ap.add_argument("--free-fraction", type=float, default=0.10)
     ap.add_argument("--split-seed", type=int, default=42)
+    from grond.regularize.arguments_native import add_split_scheme_args
+
+    add_split_scheme_args(ap)
+    ap.add_argument(
+        "--split-contract",
+        default="",
+        help="Immutable candidate-union raw-row work/free split (orbit-hash runs; legacy keeps the per-dataset split).",
+    )
     ap.add_argument(
         "--lambda-grid",
         default="1.0",

@@ -111,21 +111,3 @@ def try_read_json(path: Path) -> dict:
         return read_json(path)
     except Exception:
         return {}
-
-
-def _json_contract_equal(left: object, right: object) -> bool:
-    """Compare replay contracts deterministically, including NaN sentinels."""
-
-    return json.dumps(
-        left,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=True,
-        allow_nan=True,
-    ) == json.dumps(
-        right,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=True,
-        allow_nan=True,
-    )

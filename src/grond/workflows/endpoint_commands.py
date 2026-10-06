@@ -10,11 +10,106 @@ from grond.io.config import DatasetSpec
 from grond.paths import engine_script
 from grond.workflows.nuisance_policy import (
     effective_topup_d_min,
+    error_model_sigma_active,
     grid_from_nuisance,
+    refuse_unrepresented_structure_update_physics,
+    resolved_feedback_wght_mode,
+    resolved_final_n_points,
     resolved_post_bloch_sigma_policy,
     resolved_row_plan_cache,
+    resolved_sg_window_max,
     resolved_sg_window_mode,
+    resolved_structure_n_points,
 )
+from grond.workflows.split_args import split_scheme_args
+
+
+def endpoint_intensity_rescale(args: argparse.Namespace) -> str:
+    """Engine ``--rescale`` value for the AUTO ``--endpoint-intensity-scale`` choice (legacy when absent)."""
+
+    requested = str(getattr(args, "endpoint_intensity_scale", "median-iobs") or "median-iobs")
+    if requested not in {"absolute", "median-iobs"}:
+        raise ValueError(f"unknown --endpoint-intensity-scale {requested!r}")
+    return requested
+
+
+def endpoint_handoff_args(args: argparse.Namespace) -> list[str]:
+    """Engine options of the dynamical SHELXL handoff shared by combine, native and feedback-loop stages.
+
+    Missing attributes resolve to the legacy contract so that partial namespaces (continuations, tests)
+    never pick up a new behaviour implicitly; the AUTO parser supplies the new defaults explicitly.
+    """
+
+    cmd = [
+        "--shelxl-convergence-shift-esd",
+        f"{float(getattr(args, 'shelxl_convergence_shift_esd', 0.0) or 0.0):g}",
+        "--shelxl-npd-recovery",
+        str(getattr(args, "shelxl_npd_recovery", "damp") or "damp"),
+        "--endpoint-q-policy",
+        str(getattr(args, "endpoint_q_policy", "clip") or "clip"),
+        "--rescale",
+        endpoint_intensity_rescale(args),
+        "--endpoint-include-free-rows"
+        if bool(getattr(args, "endpoint_include_free_rows", True))
+        else "--no-endpoint-include-free-rows",
+    ]
+    if bool(getattr(args, "shelxl_carry_damp", False)):
+        cmd.append("--keep-damp")
+    return cmd + endpoint_native_output_args(args)
+
+
+def endpoint_native_output_args(args: argparse.Namespace, *, final: bool = False) -> list[str]:
+    """Engine options of the SHELXL-native outputs shared by every endpoint writer.
+
+    The converge call cap (when an endpoint or macro-cycle rule is converge), the error-model refit count
+    (under the error model), the resolved cell e.s.d.s (ZERR), the Olex2/SHELXLE input cleanup (no stale
+    Q-peaks, LIST 6) and, for ``final`` endpoints only, ACTA.  An option is emitted only when it acts, so
+    missing attributes and the legacy flags add no option to the engine commands.
+    """
+
+    cmd: list[str] = []
+    if "converge" in {str(getattr(args, "endpoint_wght_mode", "freeze-zero")), resolved_feedback_wght_mode(args)}:
+        cmd += ["--wght-converge-max-calls", str(int(getattr(args, "wght_converge_max_calls", 20) or 20))]
+    if error_model_sigma_active(args) or str(getattr(args, "post_bloch_sigma_policy", "auto")) == "error_model":
+        cmd += ["--error-model-refits", str(int(getattr(args, "error_model_refits", 1)))]
+    if error_model_sigma_active(args) and str(getattr(args, "error_model_dataset_weight", "apply")) == "off":
+        cmd += ["--error-model-dataset-weight", "off"]
+    zerr = str(getattr(args, "resolved_zerr_esds", "") or "").strip()
+    if zerr:
+        cmd += ["--zerr-esds", zerr]
+    if str(getattr(args, "shelx_ins_cleanup", "off") or "off") == "on":
+        cmd += ["--strip-q-peaks", "--endpoint-list-code", "6"]
+    if final and bool(getattr(args, "shelx_acta", False)):
+        cmd.append("--acta")
+    return cmd
+
+
+def legacy_handoff_conflicts(args: argparse.Namespace) -> list[str]:
+    """Requested handoff settings that a legacy-contract corrected-HKL writer cannot honour.
+
+    The endpoint-calibration replay (scale_contract_replay.py) and the observation-polish endpoint write
+    their own corrected HKL with the legacy contract: every row including split=free, the median-IOBS
+    scale, no correction-ratio exclusion, the DAMP ladder and a fixed SHELXL call count.  Both can become
+    the publication endpoint, so under the default handoff they would silently republish free rows and an
+    unconverged, per-cycle-scaled refinement.  Missing attributes resolve to the legacy contract.
+    """
+
+    conflicts = []
+    if not bool(getattr(args, "endpoint_include_free_rows", True)):
+        conflicts.append("--no-endpoint-include-free-rows (the legacy HKL contains every row, free rows included)")
+    if endpoint_intensity_rescale(args) != "median-iobs":
+        conflicts.append("--endpoint-intensity-scale absolute (the legacy writer only has the median-IOBS scale)")
+    if str(getattr(args, "endpoint_q_policy", "clip") or "clip") != "clip":
+        conflicts.append("--endpoint-q-policy exclude (the legacy writer keeps every correction ratio)")
+    if str(getattr(args, "shelxl_npd_recovery", "damp") or "damp") != "damp":
+        conflicts.append("--shelxl-npd-recovery isor (the legacy writer uses the DAMP ladder)")
+    if float(getattr(args, "shelxl_convergence_shift_esd", 0.0) or 0.0) > 0.0:
+        conflicts.append("--shelxl-convergence-shift-esd > 0 (the legacy writer runs a fixed SHELXL call count)")
+    if str(getattr(args, "dataset_sigma_policy", "auto") or "auto") == "error_model":
+        conflicts.append("--dataset-sigma-policy error_model (the legacy writer only has uniform_z_rms sigmas)")
+    if str(getattr(args, "endpoint_wght_mode", "freeze-zero") or "freeze-zero") == "converge":
+        conflicts.append("--endpoint-wght-mode converge (the legacy writer has no converged-weight loop)")
+    return conflicts
 
 
 def structure_cmd(
@@ -22,6 +117,7 @@ def structure_cmd(
 ) -> list[str]:
     """Build the optional restrained structure-update command."""
 
+    refuse_unrepresented_structure_update_physics(ds.name, nui, dose_supported=False)
     return [
         python,
         str(engine_script("native_structure_update.py")),
@@ -37,9 +133,11 @@ def structure_cmd(
         "--n-basis",
         str(args.structure_n_basis),
         "--n-points",
-        str(args.structure_n_points),
+        str(resolved_structure_n_points(args, ds)),
         "--topup-d-min",
         f"{effective_topup_d_min(args, ds):g}",
+        "--max-support-sg",
+        f"{args.max_support_sg:g}",
         "--sg-window",
         f"{args.sg_window:g}",
         "--sg-window-mode",
@@ -47,7 +145,7 @@ def structure_cmd(
         "--sg-window-min",
         f"{args.sg_window_min:g}",
         "--sg-window-max",
-        f"{args.sg_window_max:g}",
+        f"{resolved_sg_window_max(args, ds):g}",
         "--sg-window-scale",
         f"{args.sg_window_scale:g}",
         "--sg-window-frame-floor",
@@ -66,6 +164,7 @@ def structure_cmd(
         "10",
         "--objective-group-width-deg",
         grid_from_nuisance(nui, "group_width_deg", "1.0"),
+        *split_scheme_args(args, split_contract=ds.split_contract),
         "--block-schedule",
         args.structure_blocks,
         "--atom-selection",
@@ -191,11 +290,11 @@ def shelxl_feedback_cmd(
         "--n-basis",
         str(n_basis),
         "--n-points",
-        str(args.n_points),
+        str(resolved_final_n_points(args, ds)),
         "--final-n-basis",
         "0",
         "--final-n-points",
-        str(args.n_points),
+        str(resolved_final_n_points(args, ds)),
         "--workers",
         str(args.workers),
         "--chunksize",
@@ -207,7 +306,8 @@ def shelxl_feedback_cmd(
         "--endpoint-ls-cycles",
         str(args.shelxl_feedback_endpoint_ls_cycles),
         "--endpoint-wght-mode",
-        str(getattr(args, "endpoint_wght_mode", "freeze-zero")),
+        # The macro-cycle rule; a single-crystal loop's cycle endpoints are also its publication candidates.
+        resolved_feedback_wght_mode(args),
         "--post-bloch-sigma-policy",
         resolved_post_bloch_sigma_policy(args, feedback_loop=True),
         "--post-bloch-sigma-holdout-fraction",
@@ -216,10 +316,13 @@ def shelxl_feedback_cmd(
         f"{args.post_bloch_sigma_min_scale:g}",
         "--post-bloch-sigma-max-scale",
         f"{args.post_bloch_sigma_max_scale:g}",
+        *endpoint_handoff_args(args),
+        "--shelxl-feedback-xyz-tol",
+        f"{float(getattr(args, 'shelxl_feedback_xyz_tol', 0.0) or 0.0):g}",
+        "--shelxl-feedback-keep",
+        str(getattr(args, "shelxl_feedback_keep", "last") or "last"),
         "--lambda-grid",
         FULL_Q_LAMBDA,
-        "--rescale",
-        "median-iobs",
         "--cache-compression",
         args.prediction_cache_compression,
         "--compute-backend",

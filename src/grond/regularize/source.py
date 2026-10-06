@@ -6,6 +6,7 @@ can make an old cached prediction look current after a later helper edit.
 from pathlib import Path
 
 REGULARIZATION_SOURCE_PATHS = (
+    'refine/feedback_trajectory.py',
     'refine/native_output.py',
     'refine/native_objective.py',
     'regularize/evaluation.py',
@@ -47,5 +48,7 @@ REGULARIZATION_SOURCE_PATHS = (
 
 
 def regularization_source_files() -> tuple[Path, ...]:
+    """Return the absolute paths of REGULARIZATION_SOURCE_PATHS in the installed grond package."""
+
     package_root = Path(__file__).resolve().parents[1]
     return tuple(package_root / relative for relative in REGULARIZATION_SOURCE_PATHS)

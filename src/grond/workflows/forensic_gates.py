@@ -12,6 +12,7 @@ from grond.cli_support.tools import default_shelxl_executable
 from grond.cli_support.values import FULL_Q_LAMBDA, try_read_json
 from grond.paths import engine_script
 from grond.workflows.decision import safe_float
+from grond.workflows.endpoint_commands import legacy_handoff_conflicts
 from grond.workflows.report_commands import resolution_limit_cmd
 
 
@@ -339,6 +340,8 @@ def observation_polish_cmd(
         "--shelxl-iterations",
         str(getattr(args, "shelxl_iterations", 5)),
     ]
+    if bool(getattr(args, "shelxl_carry_damp", False)):
+        cmd.append("--keep-damp")
     if getattr(args, "forensic_maps", False) or getattr(args, "make_maps", False):
         cmd.append("--make-maps")
     return cmd
@@ -380,6 +383,15 @@ def run_forensic_gate(
         return {"status": "dry_run", "out_dir": str(out_dir), "commands": len(commands)}
     summary = summarize_forensic_gate(out_dir, row_table, hkl, res, depth)
     if should_run_observation_polish(summary, args, depth):
+        conflicts = legacy_handoff_conflicts(args)
+        if conflicts:
+            # The polish endpoint is a publication candidate written with the legacy handoff contract.
+            reason = "observation-polish endpoint uses the legacy SHELXL handoff and cannot honour: " + "; ".join(conflicts)
+            if getattr(args, "observation_polish", "auto") == "on":
+                raise RuntimeError(f"--observation-polish on: {reason}. Pass the legacy handoff flags or use auto.")
+            summary["observation_polish_skipped"] = {"status": "not_applicable_handoff_contract", "reason": reason}
+            (out_dir / "forensic_gate_summary.json").write_text(json.dumps(summary, indent=2, allow_nan=True) + "\n")
+            return summary
         cmd = observation_polish_cmd(python, row_table, hkl, res, out_dir, args)
         try:
             run_logged(cmd, logs, f"{label_prefix}_forensics_observation_polish", dry_run=args.dry_run)

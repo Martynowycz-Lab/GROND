@@ -2,14 +2,16 @@
 from __future__ import annotations
 
 import hashlib
+import math
 from dataclasses import asdict
 
 import numpy as np
 
 from grond.legacy.engine.bloch_engine import XDSData
 from grond.legacy.engine.detector_scale_regularization import detector_field_diagnostics
+from grond.validation import heldout
 
-from .contracts import Nuisance
+from .contracts import Nuisance, ScaleModel
 from .observations import detector_bin_indices, group_indices, row_resolution_modulation, sigma_eff
 from .scales import fit_frame_detector_scales, fit_group_scales, native_metrics
 
@@ -96,7 +98,91 @@ def apply_q_control(data: XDSData, dyn: np.ndarray, born: np.ndarray, valid, gro
     return out, meta
 
 
-def evaluate_trial(data, target, base_sig, pred, indices, masks, nui: Nuisance, wght_a, wght_b, scale_fit_split: str = "work", q_control_args=None):
+def pspline_trial_scales(data, target, base_sig, dyn, born, groups, valid, scale_fit, nui: Nuisance, scale_model: ScaleModel, orbit_keys) -> dict:
+    """P-spline frame scales fitted on the scale-fit rows only.
+
+    As in tests/reference/reference_lib.py: scan angle omega(ZCAL), row_mr weights from the
+    immutable source sigma, (n_basis, lambda) chosen by inner 3-fold orbit CV R_all
+    restricted to the scale-fit rows (heldout.select_pspline_by_inner_cv), angles of
+    predicted rows clamped to the fitted range. Born chooses its own setting by the same
+    inner CV on the Born rows, as the per-frame path fits Born scales independently: the
+    matched Born control and the hand-invariant Born transform score must never depend
+    on hand-sensitive Bloch predictions.
+    """
+
+    if getattr(data, "pets_exact_a_center", None) is not None:
+        raise ValueError(
+            "--scale-model pspline needs a continuous rotation-scan angle; PETS exact-row input has none. "
+            "Use --scale-model per-frame."
+        )
+    if int(nui.detector_scale_bins) > 1:
+        raise ValueError("--scale-model pspline has no detector field; use --detector-scale-bins 0 or --scale-model per-frame")
+    if abs(float(nui.scale_smoothness)) > 0.0:
+        raise ValueError("--scale-smoothness applies only to per-frame scales; set it to 0 with --scale-model pspline")
+    if orbit_keys is None or len(orbit_keys) != len(target):
+        raise ValueError("--scale-model pspline needs one reflection-orbit key per row for its inner CV")
+    rows = np.where(np.asarray(valid, dtype=bool))[0]
+    fit = np.asarray(scale_fit, dtype=bool)[rows]
+    if np.count_nonzero(fit) < 10:
+        raise ValueError(f"--scale-model pspline needs at least 10 scale-fit rows; found {int(np.count_nonzero(fit))}")
+    ang = np.asarray([data.omega_from_z(float(z)) for z in np.asarray(data.zcal, dtype=float)[rows]], dtype=float)
+    y = np.asarray(target, dtype=float)[rows]
+    sig = np.asarray(base_sig, dtype=float)[rows]
+    group = np.asarray(groups, dtype=int)[rows]
+    keys = np.asarray(orbit_keys, dtype=object)[rows]
+    grid = {"n_basis": tuple(int(n) for n in scale_model.n_basis_grid), "lambda": tuple(float(v) for v in scale_model.lambda_grid)}
+    selection = heldout.select_pspline_by_inner_cv(
+        y, sig, np.asarray(dyn, dtype=float)[rows], ang, group, fit, keys,
+        grid=grid, clamp=bool(scale_model.clamp), objective=scale_model.objective,
+    )
+    if not math.isfinite(float(selection["inner_cv_r_all"])):
+        raise ValueError("--scale-model pspline inner orbit CV had no usable fold; too few scale-fit rows")
+    born_selection = heldout.select_pspline_by_inner_cv(
+        y, sig, np.asarray(born, dtype=float)[rows], ang, group, fit, keys,
+        grid=grid, clamp=bool(scale_model.clamp), objective=scale_model.objective,
+    )
+    if not math.isfinite(float(born_selection["inner_cv_r_all"])):
+        raise ValueError("--scale-model pspline Born inner orbit CV had no usable fold; too few scale-fit rows")
+    chosen = dict(selection["scale"])
+    born_chosen = dict(born_selection["scale"])
+    dyn_fit = heldout.pspline_fit_predict(y, sig, np.asarray(dyn, dtype=float)[rows], ang, group, fit, chosen, bool(scale_model.clamp))
+    born_fit = heldout.pspline_fit_predict(y, sig, np.asarray(born, dtype=float)[rows], ang, group, fit, born_chosen, bool(scale_model.clamp))
+    dyn_scaled = np.full(len(target), np.nan, dtype=float)
+    born_scaled = np.full(len(target), np.nan, dtype=float)
+    angle = np.full(len(target), np.nan, dtype=float)
+    dyn_scaled[rows] = dyn_fit["prediction"]
+    born_scaled[rows] = born_fit["prediction"]
+    angle[rows] = ang
+    info = {
+        **scale_model.to_dict(),
+        "n_basis": int(chosen["n_basis"]),
+        "lambda": float(chosen["lambda"]),
+        "selection": "inner_orbit_cv" if len(selection["grid"]) > 1 else "pinned",
+        "inner_folds": 3,
+        "inner_salt": heldout.INNER_CV_SALT,
+        "inner_cv_r_all": float(selection["inner_cv_r_all"]),
+        "grid": selection["grid"],
+        "edf": float(dyn_fit["edf"]),
+        "born_n_basis": int(born_chosen["n_basis"]),
+        "born_lambda": float(born_chosen["lambda"]),
+        "born_inner_cv_r_all": float(born_selection["inner_cv_r_all"]),
+        "born_edf": float(born_fit["edf"]),
+        "fit_rows": int(np.count_nonzero(fit)),
+        "angle": "omega(ZCAL) in degrees",
+        "fit_angle_range_deg": [float(np.min(ang[fit])), float(np.max(ang[fit]))],
+    }
+    return {"dyn_scaled": dyn_scaled, "born_scaled": born_scaled, "angle": angle, "info": info}
+
+
+def evaluate_trial(data, target, base_sig, pred, indices, masks, nui: Nuisance, wght_a, wght_b, scale_fit_split: str = "work", q_control_args=None, scale_model: ScaleModel | None = None, orbit_keys=None):
+    """Scale and score one nuisance trial's Bloch (dyn) and Born row predictions against the target rows.
+
+    The q control and the row resolution factor act on dyn first. Scales (per-frame, frame x detector field or
+    P-spline) are fitted on the masks[scale_fit_split] rows only. Returns native_metrics of dyn and Born for every
+    split in masks, the fitted scales, the parameter counts and the row arrays. When scales are fitted on work rows,
+    the free-row metrics count no fitted parameter in their dof.
+    """
+
     dyn = np.full(len(target), np.nan, dtype=float)
     dyn_inverse = np.full(len(target), np.nan, dtype=float)
     born = np.full(len(target), np.nan, dtype=float)
@@ -117,6 +203,8 @@ def evaluate_trial(data, target, base_sig, pred, indices, masks, nui: Nuisance, 
     pred_indices = np.asarray(pred["indices"], dtype=int)
 
     def expand_pred_array(name: str, *, dtype=float, default=np.nan):
+        """Return a full-length row array holding the named prediction column at pred's rows and default elsewhere."""
+
         values = np.full(len(target), default, dtype=dtype)
         if name in pred:
             values[pred_indices] = np.asarray(pred[name], dtype=dtype)
@@ -158,7 +246,6 @@ def evaluate_trial(data, target, base_sig, pred, indices, masks, nui: Nuisance, 
     sig = sigma_eff(data, target, base_sig, nui)
     use_wght_a = float(nui.native_wght_a) if np.isfinite(float(nui.native_wght_a)) else float(wght_a)
     use_wght_b = float(nui.native_wght_b) if np.isfinite(float(nui.native_wght_b)) else float(wght_b)
-    q_control_meta = {}
     valid = (
         np.isfinite(target)
         & np.isfinite(sig)
@@ -185,6 +272,14 @@ def evaluate_trial(data, target, base_sig, pred, indices, masks, nui: Nuisance, 
         raise ValueError(f"unknown scale_fit_split={scale_fit_split!r}; choices are {sorted(masks)}")
     scale_fit = masks[scale_fit_split] & valid
     n_scales = len([g for g in np.unique(groups) if np.count_nonzero((groups == g) & scale_fit) >= 2])
+    spline = (
+        pspline_trial_scales(data, target, base_sig, dyn, born, groups, valid, scale_fit, nui, scale_model, orbit_keys)
+        if scale_model is not None and scale_model.kind == "pspline"
+        else None
+    )
+    if spline is not None:
+        # Integer consumers get ceil(EDF); the EDF itself is reported separately.
+        n_scales = int(math.ceil(spline["info"]["edf"]))
     frame_scale_count = int(n_scales)
     detector_scale_count = 0
     if int(nui.detector_scale_bins) > 1:
@@ -196,7 +291,8 @@ def evaluate_trial(data, target, base_sig, pred, indices, masks, nui: Nuisance, 
         or abs(float(nui.absorption_mu_g2)) > 0.0
         or abs(float(nui.absorption_mu_theta2)) > 0.0
     ))
-    n_thick_shape = int(str(nui.thickness_model) != "uniform_gradient" or abs(float(nui.thickness_sigma_frac)) > 0.0)
+    # gamma (mean, shape) has as many parameters as uniform_gradient (t0, grad): its shape takes the gradient's slot.
+    n_thick_shape = int(str(nui.thickness_model) not in {"uniform_gradient", "gamma"} or abs(float(nui.thickness_sigma_frac)) > 0.0)
     n_dose = int(str(nui.dose_b_mode) != "none" and abs(float(nui.dose_b_per_frame)) > 0.0)
     n_jitter = int(str(nui.sg_jitter_mode) != "none" and (
         abs(float(nui.sg_jitter_sigma0)) > 0.0
@@ -220,7 +316,12 @@ def evaluate_trial(data, target, base_sig, pred, indices, masks, nui: Nuisance, 
         + n_resolution
         + n_weight
     )
-    if int(nui.detector_scale_bins) > 1:
+    if spline is not None:
+        dyn_scaled, dyn_scales = spline["dyn_scaled"], {}
+        born_scaled, born_scales = spline["born_scaled"], {}
+        dyn_detector_scales = {}
+        born_detector_scales = {}
+    elif int(nui.detector_scale_bins) > 1:
         detector_fit_kwargs = {
             "scale_smoothness": nui.scale_smoothness,
             "detector_grid_size": int(nui.detector_scale_bins),
@@ -261,15 +362,18 @@ def evaluate_trial(data, target, base_sig, pred, indices, masks, nui: Nuisance, 
         n_bins=int(nui.detector_scale_bins),
         min_rows=int(nui.detector_scale_min_rows),
     )
+    # P-spline Born scales carry their own EDF; per-frame Born shares the group count.
+    born_n_params = n_params if spline is None else n_params - frame_scale_count + int(math.ceil(spline["info"]["born_edf"]))
     metrics = {}
     for split, mask in masks.items():
         # Parameters fitted on work rows do not consume held-out residual dof.
-        split_n_params = 0 if split == "free" and scale_fit_split == "work" else n_params
+        held_out = split == "free" and scale_fit_split == "work"
+        split_n_params = 0 if held_out else n_params
         metrics[split] = {
             "dyn": native_metrics(target, sig, dyn_scaled, mask & valid, use_wght_a, use_wght_b, n_params=split_n_params),
-            "born": native_metrics(target, sig, born_scaled, mask & valid, use_wght_a, use_wght_b, n_params=split_n_params),
+            "born": native_metrics(target, sig, born_scaled, mask & valid, use_wght_a, use_wght_b, n_params=0 if held_out else born_n_params),
         }
-    return {
+    out = {
         "nuisance": asdict(nui),
         "native_weight": {"a": use_wght_a, "b": use_wght_b, "source_a": float(wght_a), "source_b": float(wght_b)},
         "metrics": metrics,
@@ -313,6 +417,12 @@ def evaluate_trial(data, target, base_sig, pred, indices, masks, nui: Nuisance, 
             "valid": valid,
         },
     }
+    if spline is not None:
+        out["scale_model"] = spline["info"]
+        out["scale_edf"] = float(spline["info"]["edf"])
+        out["arrays"]["dyn_row_scale"] = np.where(valid, dyn_scaled / np.where(dyn > 0.0, dyn, np.nan), np.nan)
+        out["arrays"]["scale_angle_deg"] = spline["angle"]
+    return out
 
 
 def paired_inverse_prediction(best: dict) -> dict:

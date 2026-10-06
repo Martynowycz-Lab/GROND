@@ -10,15 +10,22 @@ from pathlib import Path
 from grond.cli_support.values import FULL_Q_LAMBDA
 from grond.io.config import DatasetSpec
 from grond.paths import engine_script
+from grond.regularize.contracts import thickness_distribution_options
+from grond.validation.heldout import DEFAULT_FREE_SALT
 from grond.workflows.crystal_parameters import crystal_arguments
+from grond.workflows.endpoint_commands import endpoint_handoff_args
 from grond.workflows.nuisance_policy import (
     effective_topup_d_min,
     grid_from_nuisance,
+    grid_has_variation,
     prediction_cache_dir,
     resolved_post_bloch_sigma_policy,
     resolved_row_plan_cache,
+    resolved_sg_window_max,
     resolved_sg_window_mode,
 )
+from grond.workflows.scale_model_policy import scale_model_cli_arguments
+from grond.workflows.split_args import split_scheme_args as split_scheme_args
 
 
 def native_stage_cmd(
@@ -46,8 +53,9 @@ def native_stage_cmd(
     allow_pinned_jitter_fallback: bool = True,
     promotion_baseline: Mapping[str, object] | None = None,
     paired_inverse_hand: bool = False,
+    trial_rows_npz: Path | None = None,
 ) -> list[str]:
-    """Build one native nuisance-regularization command for the vendored engine."""
+    """Build one native nuisance-regularization command for the engine."""
 
     from grond.cli_support.tools import default_shelxl_executable
     from grond.io.structure_contract import is_shelx_model
@@ -57,6 +65,8 @@ def native_stage_cmd(
     pinned = {**pinned, **fixed_thickness} if pinned else {}
     n_basis = getattr(args, "fixed_n_basis", None) or n_basis
     n_points = getattr(args, "fixed_n_points", None) or n_points
+    if n_points is None or isinstance(n_points, bool) or int(n_points) < 1:
+        raise ValueError(f"native stage {stage!r} for {ds.name} needs a resolved positive n_points, got {n_points!r}")
     fast = bool(args.fast)
     endpoint_ok = bool(endpoint and is_shelx_model(structure) and not args.native_only)
     lambda_grid = FULL_Q_LAMBDA if endpoint_ok else ""
@@ -116,6 +126,25 @@ def native_stage_cmd(
         # root bound and score the ordinary no-jitter physics as an explicit
         # fallback candidate instead of widening, truncating, or crashing.
         jitter_mode_grid = f"{pinned_jitter_mode},none"
+    # An unpinned (non-adaptive) grid searches dose only on an explicit per-frame grid; the
+    # total-B-over-the-scan grid is converted per crystal by the dose feature gate.
+    unpinned_dose_grid = str(getattr(args, "dose_b_per_frame_grid", "") or "").strip()
+    # The mosaic cone is part of the pinned physics: one candidate is forwarded as the
+    # engine's scalar options (recorded verbatim in its config), a feature grid as grids.
+    mosaicity_modes = grid_from_nuisance(pinned, "mosaicity_mode", "none") if pinned else "none"
+    mosaicity_sigmas = grid_from_nuisance(pinned, "mosaicity_sigma_deg", "0.0") if pinned else "0.0"
+    if grid_has_variation(mosaicity_modes) or grid_has_variation(mosaicity_sigmas):
+        mosaicity_options = ["--mosaicity-mode-grid", mosaicity_modes, "--mosaicity-sigma-deg-grid", mosaicity_sigmas]
+    else:
+        mosaicity_options = ["--mosaicity-mode", mosaicity_modes, "--mosaicity-sigma-deg", mosaicity_sigmas]
+    if any(mode != "none" for mode in mosaicity_modes.replace(",", " ").split()):
+        # Without a cone the engine keeps its own quadrature default.
+        points = int(float(pinned.get("mosaicity_points", getattr(args, "mosaicity_points", 3))))
+        mosaicity_options += ["--mosaicity-points", str(points)]
+    mosaicity_options += ["--mosaicity-max-sigma-deg", f"{float(getattr(args, 'mosaicity_max_sigma_deg', 0.5)):g}"]
+    for field in ("mosaicity_support_sigma_deg", "mosaicity_support_points", "mosaicity_support_width_sigma"):
+        if field in pinned:
+            mosaicity_options += ["--" + field.replace("_", "-"), grid_from_nuisance(pinned, field, "")]
     cmd = [
         python,
         str(engine_script("native_row_regularize.py")),
@@ -139,7 +168,7 @@ def native_stage_cmd(
         "--sg-window-min",
         f"{args.sg_window_min:g}",
         "--sg-window-max",
-        f"{args.sg_window_max:g}",
+        f"{resolved_sg_window_max(args, ds):g}",
         "--sg-window-scale",
         f"{args.sg_window_scale:g}",
         "--sg-window-frame-floor",
@@ -214,13 +243,16 @@ def native_stage_cmd(
         "--absorption-tds-b-grid",
         grid_from_nuisance(pinned, "absorption_tds_b", "0.0") if pinned else "0.0",
         "--dose-b-mode-grid",
-        grid_from_nuisance(pinned, "dose_b_mode", "none") if pinned else ("none" if fast else args.dose_b_mode_grid),
+        grid_from_nuisance(pinned, "dose_b_mode", "none")
+        if pinned
+        else ("none" if fast or not unpinned_dose_grid else args.dose_b_mode_grid),
         "--dose-b-per-frame-grid",
         grid_from_nuisance(pinned, "dose_b_per_frame", "0.0")
         if pinned
-        else ("0.0" if fast else args.dose_b_per_frame_grid),
+        else ("0.0" if fast or not unpinned_dose_grid else unpinned_dose_grid),
         "--row-resolution-b-grid",
         row_resolution_b,
+        *mosaicity_options,
         "--thickness-points",
         str(args.final_thickness_points if (pinned and finalish_stage) else (3 if fast else args.thickness_points)),
         "--topup-d-min",
@@ -231,6 +263,10 @@ def native_stage_cmd(
         f"{args.free_fraction:g}",
         "--split-seed",
         str(args.split_seed),
+        "--split-scheme",
+        str(getattr(args, "split_scheme", "legacy")),
+        "--split-salt",
+        str(getattr(args, "split_salt", DEFAULT_FREE_SALT)),
         "--scale-fit-split",
         scale_fit_split,
         "--selection-metric",
@@ -249,6 +285,7 @@ def native_stage_cmd(
         str(shelxl_iterations),
         "--endpoint-wght-mode",
         str(getattr(args, "endpoint_wght_mode", "freeze-zero")),
+        *endpoint_handoff_args(args),
         "--post-bloch-sigma-policy",
         post_bloch_sigma_policy,
         "--post-bloch-sigma-holdout-fraction",
@@ -288,6 +325,12 @@ def native_stage_cmd(
         "--hkl-float-format",
         "shelx_fixed",
     ]
+    if endpoint_ok and finalish_stage and bool(getattr(args, "shelx_acta", False)):
+        cmd.append("--acta")
+    if endpoint_ok and not fast and str(getattr(args, "endpoint_wght_mode", "freeze-zero")) == "converge":
+        # converge calls are L.S. 10 (the combined endpoints' --shelxl-feedback-endpoint-ls-cycles), not the
+        # engine's one-cycle default, so each call's shift/esd test and weight suggestion see a converged model.
+        cmd += ["--endpoint-ls-cycles", str(int(getattr(args, "shelxl_feedback_endpoint_ls_cycles", 10) or 10))]
     # Apply these last: a thickness neighbourhood or feature scout must not
     # reopen a parameter the caller explicitly fixed.
     for field, option in (
@@ -298,6 +341,10 @@ def native_stage_cmd(
     ):
         if field in fixed_thickness:
             cmd[cmd.index(option) + 1] = grid_from_nuisance(fixed_thickness, field, "")
+    if pinned:
+        # A pinned support thickness distribution (gamma, table/cf/auto) travels with its shape, evaluator and
+        # support; the legacy quadrature adds nothing, so legacy commands are unchanged.
+        cmd.extend(thickness_distribution_options(pinned))
     if strict_pinned_contract:
         cmd.extend(
             [
@@ -314,6 +361,9 @@ def native_stage_cmd(
             ]
         )
     if promotion_baseline:
+        from grond.workflows.decision import nuisance_score_rows
+        from grond.workflows.thickness_materialization import free_wr2_loss_limit
+
         cmd.extend(
             [
                 "--promotion-baseline-json",
@@ -321,11 +371,16 @@ def native_stage_cmd(
                 "--promotion-min-gain",
                 str(float(args.continuous_thickness_min_gain)),
                 "--promotion-max-free-wr2-loss",
-                str(float(args.continuous_thickness_max_free_wr2_loss)),
+                f"{free_wr2_loss_limit(args):g}",
                 "--promotion-max-all-r1-loss",
                 str(float(args.continuous_thickness_max_all_r1_loss)),
             ]
         )
+        if nuisance_score_rows(args) == "work":
+            # Held-out free rows: the composite score and the R1 veto read work rows only (the engine
+            # default is 'all', so legacy commands carry no extra option).
+            cmd += ["--promotion-score-rows", "work"]
+    cmd += scale_model_cli_arguments(args)
     if ds.include_nonpositive:
         cmd.append("--include-nonpositive")
     else:
@@ -339,10 +394,14 @@ def native_stage_cmd(
         cmd += ["--row-contract", str(row_contract)]
     if ds.split_contract:
         cmd += ["--split-contract", str(ds.split_contract)]
+    if str(getattr(args, "exclude_orbits_json", "") or "").strip():
+        cmd += ["--exclude-orbits-json", str(Path(args.exclude_orbits_json).expanduser().resolve())]
     if alternate_hand:
         cmd.append("--alternate-hand")
     if paired_inverse_hand:
         cmd.append("--paired-inverse-hand")
+    if trial_rows_npz is not None:
+        cmd += ["--trial-rows-npz", str(trial_rows_npz)]
     if make_maps and endpoint_ok:
         cmd.append("--make-maps")
     if not endpoint_ok:

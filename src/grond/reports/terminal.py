@@ -11,6 +11,81 @@ from grond.reports.table1 import _quick_complete_jana_metrics
 from grond.reports.values import _quick_count_pair, _quick_fraction, _quick_number, _quick_percent
 
 
+def _plain_number(value: object, digits: int = 2, *, signed: bool = False) -> str:
+    """Format a number with fixed digits (signed when asked), n/a when it is not a finite number."""
+
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "n/a"
+    if number != number or number in {float("inf"), float("-inf")}:
+        return "n/a"
+    return f"{number:+.{digits}f}" if signed else f"{number:.{digits}f}"
+
+
+def _plain_ci(values: object) -> str:
+    """Format a two-value confidence interval as [lo, hi], [n/a] when it is not a pair."""
+
+    items = list(values) if isinstance(values, (list, tuple)) else []
+    return f"[{_plain_number(items[0])}, {_plain_number(items[1])}]" if len(items) == 2 else "[n/a]"
+
+
+def _heldout_validation_lines(block: Mapping[str, object]) -> list[str]:
+    """Terminal lines of the held-out validation, copied from HELDOUT_VALIDATION.json (heldout.terminal_block)."""
+
+    lines = ["Held-out validation (free rows; the leak flags state any place they were used)"]
+    preset = block.get("preset") if isinstance(block.get("preset"), Mapping) else {}
+    if preset:
+        lines.append(f"  Preset {preset.get('name')}: {' '.join(str(t) for t in preset.get('equivalent_flags') or [])}")
+    if block.get("status") != "available":
+        return lines + [f"  Not available: {block.get('reason') or block.get('status') or 'not recorded'}"]
+    for row in block.get("rows") or []:
+        if not isinstance(row, Mapping):
+            continue
+        lines.append(
+            f"  {row.get('crystal')}: R_obs {_plain_number(row.get('r_obs'))} {_plain_ci(row.get('r_obs_ci95'))} %, "
+            f"R_all {_plain_number(row.get('r_all'))} {_plain_ci(row.get('r_all_ci95'))} % on {row.get('free_rows')} "
+            f"free rows / {row.get('free_orbits')} orbits; in-sample R_obs {_plain_number(row.get('in_sample_r_obs'))}; "
+            f"overfitting gap R_obs/R_all {_plain_number(row.get('gap_r_obs'), signed=True)} / "
+            f"{_plain_number(row.get('gap_r_all'), signed=True)} pp"
+        )
+    leaks = [item for item in block.get("leaks") or [] if isinstance(item, Mapping)]
+    if leaks:
+        text = "; ".join(
+            f"{item.get('label')} {'n/a' if item.get('value') is None else 'yes' if item.get('value') else 'no'}"
+            for item in leaks
+        )
+        lines.append(f"  Leak flags (free rows used?): {text}")
+    if block.get("shelxl_endpoint_free_line"):
+        lines.append(str(block["shelxl_endpoint_free_line"]))
+    loop = block.get("shelxl_loop") if isinstance(block.get("shelxl_loop"), Mapping) else {}
+    if loop:
+        last = loop.get("last") if isinstance(loop.get("last"), Mapping) else {}
+        text = lambda value: "n/a" if value is None else str(value)  # noqa: E731  (unrecorded, as the console prints it)
+        lines.append(
+            f"  SHELXL loop: {text(loop.get('status'))}, stop {text(loop.get('stop_reason'))}, kept cycle "
+            f"{text(loop.get('kept_cycle'))} of {text(loop.get('cycles'))}"
+            + (
+                f"; last cycle entering free R_obs {_plain_number(last.get('free_r_obs'))} %, work R_obs "
+                f"{_plain_number(last.get('work_r_obs'))} %, max shift {_plain_number(last.get('max_xyz_shift_A'), 4)} A, "
+                f"NPD {text(last.get('n_npd'))}, ISOR {text(last.get('n_isor'))}"
+                if last
+                else "; no per-cycle trajectory recorded"
+            )
+        )
+    timings = block.get("phase_timings") if isinstance(block.get("phase_timings"), Mapping) else {}
+    if timings:
+        phases = ", ".join(
+            f"{row.get('phase')} {_plain_number(row.get('wall_seconds'), 0)} s"
+            for row in timings.get("phases") or []
+            if isinstance(row, Mapping)
+        )
+        lines.append(f"  Phase wall time: {phases}; total {_plain_number(timings.get('total_wall_seconds'), 0)} s")
+    if block.get("artifact"):
+        lines.append(f"  Details: {block.get('artifact')}")
+    return lines
+
+
 def _format_terminal_finish_summary(payload: Mapping[str, object]) -> str:
     """Return the short human-facing completion report printed by auto/run/finish."""
 
@@ -167,12 +242,12 @@ def _format_terminal_finish_summary(payload: Mapping[str, object]) -> str:
         )
     elif publication_is_direct_ls1:
         endpoint_lines.append(
-            f"  Recommended model-handoff endpoint (direct LS1 corrected-HKL): R1(F)gt {_quick_percent(endpoint.get('R1gt'))}, R1(F)all {_quick_percent(endpoint.get('R1all'))}, wR2(F^2)all {_quick_percent(endpoint.get('wR2all'))}, GooF {_quick_number(endpoint.get('GooF'), 3)}; {_quick_shelxl_issue_text(endpoint)}"
+            f"  Recommended model-handoff endpoint (SHELXL feedback, corrected HKL): R1(F)gt {_quick_percent(endpoint.get('R1gt'))}, R1(F)all {_quick_percent(endpoint.get('R1all'))}, wR2(F^2)all {_quick_percent(endpoint.get('wR2all'))}, GooF {_quick_number(endpoint.get('GooF'), 3)}; {_quick_shelxl_issue_text(endpoint)}"
         )
     else:
         endpoint_lines.extend(
             [
-                f"  Direct LS1 corrected-HKL candidate: R1(F)gt {_quick_percent(feedback.get('R1gt'))}, R1(F)all {_quick_percent(feedback.get('R1all'))}, wR2(F^2)all {_quick_percent(feedback.get('wR2all'))}, GooF {_quick_number(feedback.get('GooF'), 3)}; {_quick_shelxl_issue_text(feedback)}",
+                f"  SHELXL feedback corrected-HKL candidate: R1(F)gt {_quick_percent(feedback.get('R1gt'))}, R1(F)all {_quick_percent(feedback.get('R1all'))}, wR2(F^2)all {_quick_percent(feedback.get('wR2all'))}, GooF {_quick_number(feedback.get('GooF'), 3)}; {_quick_shelxl_issue_text(feedback)}",
                 f"  Recommended model-handoff endpoint: R1(F)gt {_quick_percent(endpoint.get('R1gt'))}, R1(F)all {_quick_percent(endpoint.get('R1all'))}, wR2(F^2)all {_quick_percent(endpoint.get('wR2all'))}, GooF {_quick_number(endpoint.get('GooF'), 3)}; {_quick_shelxl_issue_text(endpoint)}",
             ]
         )
@@ -217,11 +292,45 @@ def _format_terminal_finish_summary(payload: Mapping[str, object]) -> str:
             f"{_quick_flat_hand_t_style_text(t_free, t_free_n, t_free_df)}; "
             "t-style is not a calibrated normal Z score)"
         )
+    heldout_first = str(payload.get("report_layout") or "legacy") == "heldout-first"
+    authority = str(payload.get("hand_decision_authority") or "")
+    heldout_rule = authority == "heldout_orbit_sign"
+    heldout_block = payload.get("heldout_validation") if isinstance(payload.get("heldout_validation"), Mapping) else {}
+    if heldout_first:
+        # The held-out hand evidence leads; the all-row ZKP line stays as a labelled diagnostic.
+        sentences = [str(item) for item in heldout_block.get("hand_summary") or []]
+        hand_line = "\n".join(
+            [
+                f"  Hand: {final_hand} ("
+                + (
+                    "decided by the pooled held-out orbit-sign rule"
+                    if heldout_rule
+                    else "decided by the legacy all-row ZKP rule"
+                    if authority == "diagnostic_only"
+                    else "no hand decision was evaluated; the hand check was skipped"
+                    if authority == "not_evaluated"
+                    else "decision rule not recorded in decisions/hand_decision_heldout_*.json"
+                )
+                + ")",
+                *[f"    {text}" for text in sentences],
+                *([] if sentences else ["    held-out hand evidence: not recorded"]),
+                (
+                    "    Diagnostic only, not the decision rule: "
+                    if heldout_rule
+                    else "    Decision statistic: "
+                    if authority == "diagnostic_only"
+                    else "    All-row statistics: "
+                )
+                + hand_line.strip().removeprefix(f"Hand: {final_hand} ").strip("()"),
+            ]
+        )
     if payload.get("final_hand_preferred") is not None:
         hand_line += (
-            f"\n  All-row preferred hand: {payload['final_hand_preferred']}; "
+            f"\n  {'Held-out' if heldout_rule else 'All-row'} preferred hand: {payload['final_hand_preferred']}; "
             f"evidence {payload.get('final_hand_confidence', 'unavailable')}; "
-            f"exported representation {final_hand}. ZKP is not calibrated sigma confidence."
+            f"exported representation {final_hand}. "
+            + ("Orbit sign z is" if heldout_rule else "ZKP is")
+            + " not calibrated sigma confidence."
         )
     hand_warnings = [str(item) for item in payload.get("final_hand_warnings", [])]
     if hand_warnings:
@@ -262,6 +371,7 @@ def _format_terminal_finish_summary(payload: Mapping[str, object]) -> str:
         f"Progress: {stage_note}. Optional gates can make the final stage count smaller than the starting ETA denominator.",
         timing_line,
         "",
+        *([*_heldout_validation_lines(heldout_block), ""] if heldout_first else []),
         "Decision summary",
         hand_line,
         f"  HKL transform: {transform}; parity {transform_parity}; determinant {transform_determinant}",
@@ -277,6 +387,9 @@ def _format_terminal_finish_summary(payload: Mapping[str, object]) -> str:
         *row_stat_lines,
         "",
         *endpoint_lines,
+        # the held-out SHELXL scores print once: in the held-out block (heldout-first) or here (legacy layout)
+        *([str(heldout_block["shelxl_endpoint_free_line"])]
+          if heldout_block.get("shelxl_endpoint_free_line") and not heldout_first else []),
         "",
         "Open these first",
         f"  Canonical Table 1: {payload.get('table1', '')}",
@@ -284,8 +397,12 @@ def _format_terminal_finish_summary(payload: Mapping[str, object]) -> str:
         f"  Final summary: {payload.get('final_summary', '')}",
         f"  Quick stats: {payload.get('quick_stats', '')}",
         f"  Full JSON: {payload.get('full_json', '')}",
-        f"  Publication model: {files.get('publication_res', '')}",
-        f"  Publication HKL: {files.get('publication_hkl', '')}",
+        *([f"  Final model (all reflections, --free-set off): {files.get('all_data_res', '')}",
+           f"  Final HKL (work and free reflections): {files.get('all_data_hkl', '')}",
+           f"  Endpoint chosen with the free set held out: {files.get('publication_res', '')}"]
+          if files.get("all_data_res") else
+          [f"  Publication model: {files.get('publication_res', '')}",
+           f"  Publication HKL: {files.get('publication_hkl', '')}"]),
         f"  Row table(s): {final_row.get('row_table', '')}",
     ]
     return "\n".join(lines)

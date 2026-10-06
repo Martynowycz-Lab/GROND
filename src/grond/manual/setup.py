@@ -24,6 +24,11 @@ from grond.paths import PACKAGE_ROOT
 
 
 def manual_setup(args) -> int:
+    """Run the ``setup`` stage: check the model and datasets and write prep.json and manual_workflow.json.
+
+    A fresh conventional SHELXL baseline is run only when a baseline HKL and a non-default ``--shelxl`` are given.
+    """
+
     if not args.out_dir:
         raise SystemExit("manual setup requires --out-dir")
     if not args.structure:
@@ -40,7 +45,7 @@ def manual_setup(args) -> int:
     baseline = Path(args.baseline_hkl).expanduser().resolve() if args.baseline_hkl else None
     if baseline is not None and not baseline.is_file():
         raise SystemExit(f"Baseline HKL is missing: {baseline}")
-    from grond.cli import check_sfac_contract
+    from grond.io.structure_contract import check_sfac_contract
 
     sfac_check = check_sfac_contract(structure)
     _write_json(setup_dir / "sfac_check.json", sfac_check)

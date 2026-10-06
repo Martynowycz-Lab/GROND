@@ -27,10 +27,17 @@ from grond.manual.state import (
     _stage,
     _write_json,
 )
+from grond.maps.model_box import DEFAULT_MODEL_BOX_MARGIN_A, native_package_entries, write_model_box_maps
 from grond.maps.native_dynamic import NativeDynamicMapOptions, write_native_dynamic_map_package
 
 
 def manual_finish(args) -> int:
+    """Run the ``finish`` stage: endpoint and row statistics, optional native maps, and the final summaries.
+
+    The starting conventional endpoint counts as comparable only when its model and HKL match. Writes
+    manual_final_summary.json and MANUAL_FINAL_SUMMARY.md, copied to the workflow root as MANUAL_TOP_LEVEL_SUMMARY.*.
+    """
+
     workflow_path, workflow = _load_workflow(args)
     feedback = _require_stage(workflow, "feedback")
     root = Path(workflow["root"])
@@ -56,6 +63,16 @@ def manual_finish(args) -> int:
                 max_grid_points=8_000_000,
             ),
         )
+        if maps.get("status") == "ok" and getattr(args, "model_box_maps", True):
+            try:
+                maps["model_box"] = write_model_box_maps(
+                    native_package_entries(maps),
+                    model,
+                    margin_A=float(getattr(args, "model_box_margin", DEFAULT_MODEL_BOX_MARGIN_A)),
+                    write_res=False,
+                )
+            except Exception as exc:  # figure boxes never block the finish summary
+                maps["model_box"] = {"status": "failed", "error": f"{type(exc).__name__}: {exc}"}
     elapsed = time.perf_counter() - started
     endpoint_res = model
     endpoint_hkl = endpoint_res.with_suffix(".hkl")

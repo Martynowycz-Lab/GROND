@@ -15,7 +15,14 @@ from grond.cli_support.values import try_read_json
 from grond.legacy.engine.shelx_diagnostics import parse_shelx_lst_metrics
 from grond.macromolecule import sha256_file
 from grond.maps.ccp4 import normalize_ccp4_map
+from grond.maps.model_box import (
+    DEFAULT_MODEL_BOX_MARGIN_A,
+    native_package_entries,
+    shelx2map_record_entries,
+    write_model_box_maps,
+)
 from grond.maps.native_dynamic import NativeDynamicMapOptions, write_native_dynamic_map_package
+from grond.maps.placement import PlacementOptions
 from grond.reports.endpoints import _chooser_publication_endpoint, _endpoint_calibration_publication_endpoint
 from grond.reports.values import _quick_final_run, _quick_load_run_summary
 from grond.workflows.conventional_baseline import (
@@ -41,6 +48,7 @@ def _publication_endpoint_from_result(result: Mapping[str, object]) -> Mapping[s
     """Return the selected publication endpoint block from a run result."""
 
     def no_harm_checked(endpoint: Mapping[str, object]) -> Mapping[str, object]:
+        """Return ``endpoint`` with its passed baseline no-harm gate, or {} when any provenance or gate check fails."""
         if not endpoint:
             return {}
         if result.get("combined") and _multi_hand_publication_blockers(result):
@@ -277,8 +285,55 @@ def _shelx2map_compatible_fcf(source: Path) -> tuple[Path, dict[str, object]]:
     return compatible, record
 
 
-def run_finish_endpoint_maps(result: Mapping[str, object], args: argparse.Namespace) -> dict[str, object]:
-    """Generate corrected-HKL endpoint maps from the selected publication endpoint."""
+ENDPOINT_MAP_DEFINITION = (
+    "GROND-corrected endpoint maps from the selected corrected-HKL publication endpoint; primary maps use explicit "
+    "shelx2map -w 1 model-reliability weighting, and the raw unweighted Fo-Fc map is retained as a labeled "
+    "diagnostic. These are not native dynamical residual-potential maps."
+)
+
+
+def _copy_map_inputs(
+    endpoint: Mapping[str, object], endpoint_res: Path, out_dir: Path
+) -> tuple[dict[str, object], Path, dict[str, object]]:
+    """Copy a model's .res/.fcf/.lst/.hkl into a new directory so map work never writes beside the source.
+
+    ``endpoint["endpoint_fcf"]`` (optional) names an FCF that is not next to the
+    .res under the same stem, for example ``figure-maps --conventional-fcf``.
+    """
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stem = endpoint_res.stem
+    copied: dict[str, object] = {"source_dir": str(endpoint_res.resolve().parent), "files": {}}
+    fcf_text = str(endpoint.get("endpoint_fcf", "") or "").strip()
+    for suffix in (".res", ".fcf", ".lst"):
+        source = Path(fcf_text).expanduser() if suffix == ".fcf" and fcf_text else endpoint_res.with_suffix(suffix)
+        if source.is_file():
+            target = out_dir / f"{stem}{suffix}"
+            shutil.copy2(source, target)
+            copied["files"][suffix] = {"source": str(source.resolve()), "sha256": sha256_file(source)}
+    hkl_text = str(endpoint.get("endpoint_hkl", "") or "").strip()
+    hkl = Path(hkl_text).expanduser() if hkl_text else endpoint_res.with_suffix(".hkl")
+    updated = dict(endpoint)
+    if hkl.is_file():
+        target = out_dir / f"{stem}.hkl"
+        shutil.copy2(hkl, target)
+        copied["files"][".hkl"] = {"source": str(hkl.resolve()), "sha256": sha256_file(hkl)}
+        updated["endpoint_hkl"] = str(target)
+    else:
+        updated["endpoint_hkl"] = str(out_dir / f"{stem}.hkl")
+    updated["endpoint_res"] = str(out_dir / f"{stem}.res")
+    return updated, out_dir / f"{stem}.res", copied
+
+
+def run_finish_endpoint_maps(
+    result: Mapping[str, object], args: argparse.Namespace, out_dir: Path | None = None
+) -> dict[str, object]:
+    """Generate corrected-HKL endpoint maps from the selected publication endpoint.
+
+    With ``out_dir`` the endpoint files are copied there first and every map,
+    log and LIST 6 replay is written there; the run directory is only read.
+    """
 
     endpoint = _publication_endpoint_from_result(result)
     endpoint_res_text = str(endpoint.get("endpoint_res", "") or "").strip()
@@ -287,6 +342,24 @@ def run_finish_endpoint_maps(result: Mapping[str, object], args: argparse.Namesp
     endpoint_res = Path(endpoint_res_text).expanduser()
     if not endpoint_res.exists():
         return {"status": "missing_endpoint_res", "endpoint_res": str(endpoint_res)}
+    return shelx2map_model_maps(endpoint, endpoint_res, args, out_dir=out_dir)
+
+
+def shelx2map_model_maps(
+    endpoint: Mapping[str, object],
+    endpoint_res: Path,
+    args: argparse.Namespace,
+    *,
+    out_dir: Path | None = None,
+    prefix: str = "grond_corrected",
+    definition: str = ENDPOINT_MAP_DEFINITION,
+) -> dict[str, object]:
+    """Write shelx2map Fo-Fc, Fo, 2Fo-Fc (w 1) and raw Fo-Fc (w 0) maps for one SHELXL model."""
+
+    copied: dict[str, object] | None = None
+    source_res = endpoint_res
+    if out_dir is not None:
+        endpoint, endpoint_res, copied = _copy_map_inputs(endpoint, endpoint_res, Path(out_dir))
     work_dir = endpoint_res.resolve().parent
     stem = endpoint_res.stem
     source_fcf = work_dir / f"{stem}.fcf"
@@ -317,8 +390,9 @@ def run_finish_endpoint_maps(result: Mapping[str, object], args: argparse.Namesp
         ("fofc_unweighted_diagnostic", "0", "0"),
     ]
     for label, mode, map_weight in map_specs:
-        out_map = work_dir / f"grond_corrected_{label}.map"
-        log_path = work_dir / f"grond_finish_shelx2map_{label}.log"
+        out_map = work_dir / f"{prefix}_{label}.map"
+        log_stem = "grond_finish" if prefix == "grond_corrected" else prefix
+        log_path = work_dir / f"{log_stem}_shelx2map_{label}.log"
         out_map.unlink(missing_ok=True)
         try:
             proc = subprocess.run(
@@ -369,15 +443,19 @@ def run_finish_endpoint_maps(result: Mapping[str, object], args: argparse.Namesp
             "display_role": "diagnostic_unweighted" if map_weight == "0" else "primary_weighted",
         }
     maps_ok = all(item.get("returncode") == 0 and item.get("exists") and item.get("status") != "invalid_map" for item in maps.values())
-    return {
+    record = {
         "status": "ok" if maps_ok else "failed",
-        "definition": "GROND-corrected endpoint maps from the selected corrected-HKL publication endpoint; primary maps use explicit shelx2map -w 1 model-reliability weighting, and the raw unweighted Fo-Fc map is retained as a labeled diagnostic. These are not native dynamical residual-potential maps.",
+        "definition": definition,
         "endpoint_res": str(endpoint_res.resolve()),
         "fcf": str(fcf.resolve()),
         "fcf_compatibility": fcf_compatibility,
         "list6_replay": list6_replay,
         "maps": maps,
     }
+    if copied is not None:
+        record["source_endpoint_res"] = str(Path(source_res).resolve())
+        record["copied_inputs"] = copied
+    return record
 
 
 def _finish_native_row_tables(result: Mapping[str, object]) -> list[tuple[str, Path]]:
@@ -421,7 +499,7 @@ def _finish_native_row_tables(result: Mapping[str, object]) -> list[tuple[str, P
         if endpoint_run_dir:
             return [(endpoint_label, Path(endpoint_run_dir).expanduser() / "native_dyn_calc.csv")]
 
-    if source_kind == "combined_corrected_hkl":
+    if source_kind in {"combined_corrected_hkl", "combined_unmerged_corrected_hkl"}:
         runs_block = result.get("combined_input_runs") or result.get("publication_runs") or result.get("runs") or {}
         if isinstance(runs_block, Mapping):
             tables = [
@@ -534,9 +612,12 @@ def _finish_native_model_contract(
 
 
 def run_finish_native_dynamic_maps(
-    run_dir: Path, result: Mapping[str, object], args: argparse.Namespace
+    run_dir: Path, result: Mapping[str, object], args: argparse.Namespace, out_dir: Path | None = None
 ) -> dict[str, object]:
-    """Generate native row-level dynamical Fourier maps and coefficient files."""
+    """Generate native row-level dynamical Fourier maps and coefficient files.
+
+    They go to ``run_dir/native_dynamic_maps`` unless ``out_dir`` is given.
+    """
 
     row_tables = _finish_native_row_tables(result)
     if not row_tables:
@@ -555,7 +636,7 @@ def run_finish_native_dynamic_maps(
         row_table=[path for _label, path in row_tables],
         row_table_labels=[label for label, _path in row_tables],
         model_path=model,
-        out_dir=run_dir / "native_dynamic_maps",
+        out_dir=Path(out_dir) if out_dir is not None else run_dir / "native_dynamic_maps",
         options=options,
     )
     package["row_model_contract"] = model_contract
@@ -607,5 +688,49 @@ def run_finish_maps(run_dir: Path, result: Mapping[str, object], args: argparse.
                     )
         warnings.append(f"{label} maps: " + "; ".join(details))
     maps["status"] = "ok" if succeeded == len(requested) else "partial" if succeeded else "warning"
+    if succeeded and getattr(args, "model_box_maps", True) and finish_model_box_entries(maps):
+        try:
+            boxes = run_finish_model_boxes(result, maps, args)
+        except Exception as exc:
+            boxes = {"status": "failed", "error": f"{type(exc).__name__}: {exc}", "warnings": []}
+        maps["model_box"] = boxes
+        if boxes.get("status") != "ok":
+            detail = boxes.get("error") or "; ".join(str(item) for item in boxes.get("warnings") or [])
+            warnings.append(f"model-box maps: {boxes.get('status')}" + (f"; {detail}" if detail else ""))
     maps["warnings"] = warnings
     return maps
+
+
+def finish_model_box_entries(maps: Mapping[str, object]) -> list[dict[str, object]]:
+    """Unit-cell maps written by finish, with the model whose phases made each one."""
+
+    native = maps.get("native_dynamic") if isinstance(maps.get("native_dynamic"), Mapping) else {}
+    endpoint = maps.get("shelx2map") if isinstance(maps.get("shelx2map"), Mapping) else {}
+    entries: list[dict[str, object]] = []
+    if native.get("status") == "ok":
+        entries.extend(native_package_entries(native))
+    if endpoint.get("status") == "ok":
+        entries.extend(shelx2map_record_entries(endpoint, family="grond_corrected", model_label="endpoint"))
+    return entries
+
+
+def run_finish_model_boxes(
+    result: Mapping[str, object], maps: Mapping[str, object], args: argparse.Namespace
+) -> dict[str, object]:
+    """Box every finish map around the run's own model (the publication endpoint, else the native-map model)."""
+
+    entries = finish_model_box_entries(maps)
+    if not entries:
+        return {"status": "no_maps", "warnings": []}
+    endpoint = _publication_endpoint_from_result(result)
+    reference_text = str(endpoint.get("endpoint_res", "") or "").strip()
+    reference = Path(reference_text).expanduser() if reference_text else None
+    if reference is None or not reference.is_file():
+        reference = Path(str(entries[0]["model"])).expanduser()
+    return write_model_box_maps(
+        entries,
+        reference,
+        margin_A=float(getattr(args, "model_box_margin", DEFAULT_MODEL_BOX_MARGIN_A)),
+        placement=PlacementOptions(),
+        write_res=False,
+    )

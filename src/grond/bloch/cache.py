@@ -132,11 +132,53 @@ def row_plan_cache_validation_errors(cache: dict, indices, expected_key: str, ex
         meta = {}
     if meta.get("key") != expected_key:
         errors.append("cache key mismatch")
-    if int(meta.get("cache_schema", -1)) != int(expected_meta.get("cache_schema", ROW_PLAN_CACHE_SCHEMA)):
+    if meta.get("cache_schema") != expected_meta.get("cache_schema", ROW_PLAN_CACHE_SCHEMA):
         errors.append("cache schema mismatch")
     for field, expected_value in expected_meta.items():
         if meta.get(field) != expected_value:
             errors.append(f"metadata mismatch: {field}")
+    # Reject malformed containers before indexing their endpoints or comparing
+    # differently shaped row arrays. Missing fields still receive the useful
+    # independent checks below when the present arrays have valid shapes.
+    structural_errors = []
+    matrix_arrays = {"basis_flat", "unique_diffs", "profile_tilts_flat"}
+    integer_arrays = {
+        "indices", "basis_offsets", "profile_offsets", "sg_offsets", "diff_offsets",
+        "basis_flat", "unique_diffs", "diff_idx_flat",
+    }
+    variable_arrays = {
+        "basis_offsets", "basis_flat", "profile_offsets", "profile_weights_flat",
+        "profile_omega_flat", "profile_tilts_flat", "sg_offsets", "sg_basis_flat",
+        "diff_offsets", "diff_idx_flat", "unique_diffs", "unique_inv_d2",
+    }
+    for name in (required | {"omega_bragg_root_available"}).intersection(cache):
+        try:
+            values = np.asarray(cache[name])
+        except (TypeError, ValueError):
+            structural_errors.append(f"{name} is not a numerical array")
+            continue
+        if values.dtype.kind not in {"b", "i", "u", "f"}:
+            structural_errors.append(f"{name} is not a real numerical array")
+            continue
+        if values.ndim != (2 if name in matrix_arrays else 1):
+            structural_errors.append(f"{name} has the wrong number of dimensions")
+        if name.endswith("_offsets") and values.shape != (len(indices) + 1,):
+            structural_errors.append(f"{name} must have one boundary per row plus the final endpoint")
+        if name not in variable_arrays and values.shape != (len(indices),):
+            structural_errors.append(f"{name} must have one value per row")
+        if name in integer_arrays:
+            # Integer storage is already integral; avoid a float copy of the
+            # potentially large beam-difference lookup merely to confirm it.
+            invalid = values.dtype.kind == "f" and (
+                not np.all(np.isfinite(values))
+                or np.any(values != np.floor(values))
+                or np.any(values < -(2**63))
+                or np.any(values >= 2**63)
+            )
+            if invalid or (values.dtype.kind == "u" and np.any(values >= 2**63)):
+                structural_errors.append(f"{name} must contain finite int64-representable integers")
+    if structural_errors:
+        return errors + structural_errors
     if "indices" in cache and not np.array_equal(
         np.asarray(cache["indices"], dtype=np.int64), np.asarray(indices, dtype=np.int64)
     ):

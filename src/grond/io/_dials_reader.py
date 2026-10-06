@@ -1,3 +1,10 @@
+"""Read one DIALS integrated.refl/integrated.expt pair inside the DIALS Python.
+
+``dials_bridge`` runs this file's text with ``python -c``, passing the .refl, .expt, output
+.npz and output .json paths. It writes the reflection columns and flags as NumPy arrays
+(.npz) and the crystal, beam, goniometer, scan, detector and profile models as JSON. It
+imports nothing from GROND, so the DIALS environment can differ from GROND's.
+"""
 
 from __future__ import annotations
 
@@ -11,6 +18,8 @@ from dxtbx.model.experiment_list import ExperimentListFactory
 
 
 def bool_flags(table, name):
+    """Return a DIALS reflection flag as a boolean array, all False when DIALS has no such flag."""
+
     flag = getattr(table.flags, name, None)
     if flag is None:
         return np.zeros(len(table), dtype=bool)
@@ -18,30 +27,40 @@ def bool_flags(table, name):
 
 
 def float_col(table, name, default=np.nan):
+    """Return a reflection-table column as a float array, filled with ``default`` when absent."""
+
     if name not in table:
         return np.full(len(table), default, dtype=float)
     return np.asarray(list(table[name]), dtype=float)
 
 
 def int_col(table, name, default=0):
+    """Return a reflection-table column as an int32 array, filled with ``default`` when absent."""
+
     if name not in table:
         return np.full(len(table), default, dtype=np.int32)
     return np.asarray(list(table[name]), dtype=np.int32)
 
 
 def vec3_col(table, name, default=np.nan):
+    """Return a 3-vector reflection-table column as an (n, 3) float array, filled with ``default`` when absent."""
+
     if name not in table:
         return np.full((len(table), 3), default, dtype=float)
     return np.asarray(list(table[name]), dtype=float)
 
 
 def bbox_col(table):
+    """Return the shoebox bounding boxes as an (n, 6) int32 array, or -1 everywhere when absent."""
+
     if "bbox" not in table:
         return np.full((len(table), 6), -1, dtype=np.int32)
     return np.asarray(list(table["bbox"]), dtype=np.int32)
 
 
 def first_panel_metadata(detector):
+    """Describe the panel count and the first panel's geometry (mm and pixels), distance and gain."""
+
     if detector is None or len(detector) == 0:
         return {}
     panel = detector[0]
@@ -67,6 +86,8 @@ def first_panel_metadata(detector):
 
 
 def profile_model_metadata(profile):
+    """Return the profile model's class name and its ``to_dict()`` parameters when available."""
+
     if profile is None:
         return {"model": None, "parameters": None}
     model = type(profile).__name__
@@ -80,6 +101,13 @@ def profile_model_metadata(profile):
 
 
 def main():
+    """Convert the reflection table and single experiment named on the command line.
+
+    Missing observed centroids (xyzobs.px.value) are replaced by the calculated ones
+    (xyzcal.px). Several experiments or a scan-varying goniometer setting rotation stop the
+    conversion.
+    """
+
     refl_path = Path(sys.argv[1])
     expt_path = Path(sys.argv[2])
     out_npz = Path(sys.argv[3])

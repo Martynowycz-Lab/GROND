@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import functools
+import json
 import math
 from pathlib import Path
 
@@ -12,15 +14,57 @@ from grond.paths import engine_script
 from grond.workflows.crystal_parameters import crystal_arguments
 from grond.workflows.decision import safe_label
 
+# ----------------------------------------------------------------------------- AUTO physics policy
+# Every value below is an AUTO default only; the engine Config and the native engine CLI keep their own
+# defaults.
+
+# Rocking-window mode for rows from GROND's DIALS bridge (header DIALS_BBOX_Z_RANGE_AS_ALF0_BET0=TRUE).
+# Everything DIALS-specific derives from it.
+AUTO_DIALS_WINDOW_MODE = "dials_bbox"
+# Final-fidelity profile spacing of the fixed window in 1/A (the AUTO default 0.010 1/A window gets 50 final
+# and 25 screen points).
+AUTO_FIXED_PROFILE_SPACING = 0.0002
+# Per-row DIALS-bbox window cap in 1/A and its final point count.
+AUTO_DIALS_BBOX_WINDOW_MAX = 0.03
+AUTO_DIALS_BBOX_N_POINTS = 60
+# Window cap for every other mode.
+LEGACY_SG_WINDOW_MAX = 0.012
+# PETS exact rows sample the PETS-owned rocking wedge, not an Sg window, with a fixed point count.
+AUTO_PETS_N_POINTS = 20
+# The native-gradient structure update samples 6 points per 20 window-derived final points (6 for a 0.004 1/A
+# window) unless --structure-n-points is given.
+LEGACY_STRUCTURE_N_POINTS = 6
+LEGACY_STRUCTURE_FINAL_N_POINTS = 20
+# Engine bound on the mosaic width (Config.mosaicity_max_sigma_deg default).
+MOSAICITY_MAX_SIGMA_DEG = 0.5
+# Sequential per-crystal feature gates.  The mosaic cone precedes the Sg-jitter proxy because the
+# two profile broadenings exclude each other and the cone is the geometrically defined one.
+FEATURE_GATE_FAMILIES = ("row_resolution", "absorption", "mosaicity", "sg_jitter", "sigma_error", "dose")
+
+
+def error_model_sigma_active(args: argparse.Namespace) -> bool:
+    """Whether the per-crystal error model sets the SHELXL/merge sigmas (--dataset-sigma-policy error_model)."""
+
+    return str(getattr(args, "dataset_sigma_policy", "auto")) == "error_model"
+
 
 def resolved_post_bloch_sigma_policy(
-    args: argparse.Namespace, *, final_endpoint: bool = False, feedback_loop: bool = False
+    args: argparse.Namespace, *, final_endpoint: bool = False, feedback_loop: bool = False, combined: bool = False
 ) -> str:
-    """Resolve the endpoint sigma calibration policy for a workflow stage."""
+    """Resolve the endpoint sigma calibration policy for a workflow stage.
+
+    Under the error model auto gives every final or feedback per-crystal endpoint
+    its own error model and no second rescale of the merged combined HKL (``combined``), whose rows already
+    carry per-crystal error-model sigmas.  Otherwise auto resolves to uniform_z_rms.
+    """
 
     requested = getattr(args, "post_bloch_sigma_policy", "auto")
     if requested == "auto":
-        return "uniform_z_rms" if (final_endpoint or feedback_loop) else "none"
+        if not (final_endpoint or feedback_loop):
+            return "none"
+        if error_model_sigma_active(args):
+            return "none" if combined else "error_model"
+        return "uniform_z_rms"
     return str(requested)
 
 
@@ -31,6 +75,50 @@ def resolved_dataset_sigma_policy(args: argparse.Namespace, *, multi_dataset: bo
     if requested == "auto":
         return "uniform_z_rms" if multi_dataset else "none"
     return str(requested)
+
+
+def resolved_feedback_wght_mode(args: argparse.Namespace) -> str:
+    """SHELXL weighting policy of the structure-feedback macro-cycles (``endpoint`` follows the endpoints)."""
+
+    requested = str(getattr(args, "shelxl_feedback_wght_mode", "endpoint") or "endpoint")
+    if requested == "endpoint":
+        return str(getattr(args, "endpoint_wght_mode", "freeze-zero"))
+    return requested
+
+
+def refuse_sigma_weight_startup_conflicts(args: argparse.Namespace) -> None:
+    """Refuse at startup, before any stage, sigma/weight settings every corrected-HKL endpoint would refuse.
+
+    The engines refuse these combinations at their first endpoint; a run that mixes the current defaults with
+    part of the older flag set would otherwise stop only after the screening and nuisance stages.
+    """
+
+    if str(getattr(args, "mode", "auto")) not in {"auto", "regularize"}:
+        return
+    conflicts = []
+    weight_modes = {str(getattr(args, "endpoint_wght_mode", "freeze-zero")), resolved_feedback_wght_mode(args)}
+    if "converge" in weight_modes and not float(getattr(args, "shelxl_convergence_shift_esd", 0.0) or 0.0) > 0.0:
+        conflicts.append(
+            "the converge SHELXL weighting mode needs --shelxl-convergence-shift-esd > 0 (AUTO 0.01); with a zero "
+            "tolerance use --endpoint-wght-mode freeze-zero or promote-gold"
+        )
+    error_model = error_model_sigma_active(args) or str(getattr(args, "post_bloch_sigma_policy", "auto")) == "error_model"
+    if error_model and bool(getattr(args, "endpoint_include_free_rows", False)):
+        conflicts.append(
+            "the per-crystal error model (--dataset-sigma-policy error_model) is fitted on work rows only and cannot "
+            "run with --endpoint-include-free-rows (free rows in every SHELXL HKL); add --dataset-sigma-policy auto "
+            "for the legacy free-row HKL"
+        )
+    explicit = str(getattr(args, "cell_esd", "") or "").strip()
+    if explicit:
+        try:
+            values = [float(value) for value in explicit.split(",")]
+        except ValueError:
+            values = []
+        if len(values) != 6 or not all(math.isfinite(value) and value >= 0.0 for value in values):
+            conflicts.append(f"--cell-esd needs six finite nonnegative values a,b,c,alpha,beta,gamma, got {explicit!r}")
+    if conflicts:
+        raise ValueError("cannot run with: " + "; ".join(conflicts))
 
 
 def resolved_merge_sigma_policy(args: argparse.Namespace, *, multi_dataset: bool = False) -> str:
@@ -108,6 +196,35 @@ def resolve_final_n_basis(
         cmd += ["--max-rows", str(args.max_rows)]
     if alternate_hand:
         cmd.append("--alternate-hand")
+    # The support basis is sized for the rocking window, profile sampling and mosaic cone the
+    # stages actually use, not the engine defaults.
+    cmd += [
+        "--sg-window",
+        f"{args.sg_window:g}",
+        "--sg-window-mode",
+        resolved_sg_window_mode(args, ds),
+        "--sg-window-min",
+        f"{args.sg_window_min:g}",
+        "--sg-window-max",
+        f"{resolved_sg_window_max(args, ds):g}",
+        "--sg-window-scale",
+        f"{args.sg_window_scale:g}",
+        "--sg-window-frame-floor",
+        f"{args.sg_window_frame_floor:g}",
+        "--n-points",
+        str(resolved_final_n_points(args, ds)),
+    ]
+    mosaicity_modes, mosaicity_sigmas = auto_mosaicity_grid(args)
+    active_modes = [mode for mode in mosaicity_modes.split(",") if mode != "none"]
+    if active_modes:
+        cmd += [
+            "--mosaicity-mode",
+            active_modes[0],
+            "--mosaicity-sigma-deg",
+            f"{max(parse_strict_grid(mosaicity_sigmas, 'mosaicity sigma')):g}",
+            "--mosaicity-points",
+            str(int(args.mosaicity_points)),
+        ]
     run_logged(cmd, logs, f"{ds.name}_{safe_label(stage)}_support_basis", dry_run=args.dry_run)
     payload = read_json(scan)
     n_basis = int(payload.get("recommended_n_basis") or args.final_basis_fallback)
@@ -155,6 +272,8 @@ def compact_base_nuisance(args: argparse.Namespace) -> dict:
             "sg_jitter_mode": "none",
             "absorption_mode": "none",
             "dose_b_mode": "none",
+            "mosaicity_mode": "none",
+            "mosaicity_sigma_deg": "0.0",
             "row_resolution_b": "0.0",
         }
     pets_static = bool(getattr(args, "pets_static_auto", False))
@@ -181,6 +300,8 @@ def compact_base_nuisance(args: argparse.Namespace) -> dict:
         "absorption_tds_b": "0.0",
         "dose_b_mode": "none",
         "dose_b_per_frame": "0.0",
+        "mosaicity_mode": "none",
+        "mosaicity_sigma_deg": "0.0",
         "row_resolution_b": "0.0",
     }
 
@@ -193,6 +314,7 @@ def transform_scout_nuisance(args: argparse.Namespace) -> dict:
     """
 
     def first_numeric(value: object, fallback: float) -> str:
+        """Return the first finite number in a comma or space separated value as text, else ``fallback``."""
         for token in str(value or "").replace(",", " ").split():
             try:
                 parsed = float(token)
@@ -230,6 +352,8 @@ def transform_scout_nuisance(args: argparse.Namespace) -> dict:
         "absorption_tds_b": "0.0",
         "dose_b_mode": "none",
         "dose_b_per_frame": "0.0",
+        "mosaicity_mode": "none",
+        "mosaicity_sigma_deg": "0.0",
         "row_resolution_b": "0.0",
     }
 
@@ -241,7 +365,7 @@ def apply_speed_profile(args: argparse.Namespace, structure: str | None = None) 
 
     if getattr(args, "fast", False) and getattr(args, "full_fast", False):
         raise SystemExit(
-            "Choose either --fast or --full-fast. --fast is triage-only; --full-fast runs the automatic gates with cheap N/Q."
+            "Choose either --fast or --full-fast. --fast is a quick look; --full-fast runs the automatic gates with cheap N/Q."
         )
     if not getattr(args, "full_fast", False):
         return {"profile": "standard"}
@@ -252,6 +376,7 @@ def apply_speed_profile(args: argparse.Namespace, structure: str | None = None) 
     }
 
     def assign(name: str, value: object) -> None:
+        """Set one option on ``args`` and record the old and new value when it changes."""
         old = getattr(args, name)
         setattr(args, name, value)
         if old != value:
@@ -267,6 +392,10 @@ def apply_speed_profile(args: argparse.Namespace, structure: str | None = None) 
     assign("hand_n_points", min(int(args.hand_n_points), n_points))
     assign("n_points", n_points)
     assign("structure_n_basis", min(int(args.structure_n_basis), n_basis))
+    # Full-fast keeps its cheap structure-update count when none is given explicitly; the unset value
+    # stands for that count in the profile record.
+    if args.structure_n_points is None:
+        args.structure_n_points = LEGACY_STRUCTURE_N_POINTS
     assign("structure_n_points", min(int(args.structure_n_points), max(3, n_points)))
     atom_count = estimate_model_nonh_atoms(structure or getattr(args, "structure", "") or "")
     auto_rows = 250
@@ -309,8 +438,11 @@ def nuisance_with_updates(nui: dict, **updates) -> dict:
     return out
 
 
-def feature_grid(args: argparse.Namespace, family: str, nui: dict) -> dict:
-    """Expand one optional feature family into a candidate nuisance grid."""
+def feature_grid(args: argparse.Namespace, family: str, nui: dict, ds: DatasetSpec | None = None) -> dict:
+    """Expand one optional feature family into a candidate nuisance grid.
+
+    The dose family needs the dataset when its grid is declared as total B over the scan.
+    """
 
     if family == "row_resolution":
         return nuisance_with_updates(nui, row_resolution_b=args.row_resolution_b_grid)
@@ -341,10 +473,19 @@ def feature_grid(args: argparse.Namespace, family: str, nui: dict) -> dict:
             sigma_c_peak=args.sigma_c_peak_grid,
         )
     if family == "dose":
+        per_frame, _conversion = dose_b_per_frame_grid(args, ds)
         return nuisance_with_updates(
             nui,
             dose_b_mode=args.dose_b_mode_grid,
-            dose_b_per_frame=args.dose_b_per_frame_grid,
+            dose_b_per_frame=per_frame,
+        )
+    if family == "mosaicity":
+        modes, sigmas = auto_mosaicity_grid(args)
+        return nuisance_with_updates(
+            nui,
+            mosaicity_mode=modes,
+            mosaicity_sigma_deg=sigmas,
+            mosaicity_points=int(args.mosaicity_points),
         )
     raise ValueError(f"unknown feature family {family!r}")
 
@@ -379,7 +520,14 @@ def feature_is_enabled(args: argparse.Namespace, family: str) -> bool:
             or grid_has_variation(args.sigma_c_peak_grid)
         )
     if family == "dose":
-        return grid_has_variation(args.dose_b_mode_grid) or grid_has_variation(args.dose_b_per_frame_grid)
+        modes = [m for m in str(args.dose_b_mode_grid or "").replace(",", " ").split() if m]
+        values = str(getattr(args, "dose_b_per_frame_grid", "") or "").strip() or str(
+            getattr(args, "dose_b_total_grid", "") or ""
+        )
+        return "linear_frame" in modes and (grid_has_variation(args.dose_b_mode_grid) or grid_has_variation(values))
+    if family == "mosaicity":
+        modes, sigmas = auto_mosaicity_grid(args)
+        return grid_has_variation(modes) or grid_has_variation(sigmas)
     return False
 
 
@@ -406,19 +554,477 @@ def effective_topup_d_min(
     return requested
 
 
+@functools.lru_cache(maxsize=64)
+def _declares_dials_bbox(path: str) -> bool:
+    """Return true when the leading header of a reflection file flags DIALS-bridge bbox z-ranges."""
+
+    source = Path(path).expanduser()
+    if not source.is_file():
+        # Nothing can be computed from a missing file; the engine reports it.
+        return False
+    with source.open(errors="replace") as handle:
+        for line in handle:
+            if not line.startswith("!"):
+                break
+            key, separator, value = line[1:].partition("=")
+            if separator and key.strip() == "DIALS_BBOX_Z_RANGE_AS_ALF0_BET0":
+                return value.strip().upper() == "TRUE"
+    return False
+
+
 def resolved_sg_window_mode(args: argparse.Namespace, ds: DatasetSpec) -> str:
     """Choose the rocking-window source for this dataset.
 
     DIALS rows generated by GROND carry the reflection-table bbox z-range in
-    ALF0/BET0.  The bbox is kept for diagnostics, but auto mode keeps the
-    reference fixed Sg window because the DIALS integration support is usually
-    broader than the physical Bloch quadrature width.
+    ALF0/BET0 and declare it in the header.  Auto uses AUTO_DIALS_WINDOW_MODE
+    for those rows and the fixed Sg window for everything else (in an XDS
+    INTEGRATE.HKL, ALF0/BET0 are incident-beam angles, not a bbox).
     """
 
     requested = str(getattr(args, "sg_window_mode", "auto") or "auto").strip().lower()
     if requested != "auto":
         return requested
-    return "fixed"
+    return AUTO_DIALS_WINDOW_MODE if _declares_dials_bbox(str(ds.hkl)) else "fixed"
+
+
+def resolved_sg_window_max(args: argparse.Namespace, ds: DatasetSpec) -> float:
+    """Return the explicit --sg-window-max, or the cap belonging to the resolved window mode."""
+
+    explicit = getattr(args, "sg_window_max", None)
+    if explicit is not None:
+        return float(explicit)
+    return AUTO_DIALS_BBOX_WINDOW_MAX if resolved_sg_window_mode(args, ds) == "dials_bbox" else LEGACY_SG_WINDOW_MAX
+
+
+def resolved_final_n_points(args: argparse.Namespace, ds: DatasetSpec) -> int:
+    """Return the explicit --n-points, or the final profile point count derived from the window.
+
+    Fixed (and other width-bounded) windows keep AUTO_FIXED_PROFILE_SPACING (0.010 -> 50, 0.004 -> 20);
+    the DIALS-bbox window uses AUTO_DIALS_BBOX_N_POINTS.  PETS exact rows spread the points over the
+    PETS integration wedge, which the Sg window does not describe, so they keep AUTO_PETS_N_POINTS.
+    """
+
+    explicit = getattr(args, "n_points", None)
+    if explicit is not None:
+        return int(explicit)
+    if bool(getattr(args, "pets_static_auto", False)):
+        return int(AUTO_PETS_N_POINTS)
+    if resolved_sg_window_mode(args, ds) == "dials_bbox":
+        return int(AUTO_DIALS_BBOX_N_POINTS)
+    width = float(args.sg_window) * float(getattr(args, "sg_window_scale", 1.0))
+    return max(1, int(math.ceil(round(width / AUTO_FIXED_PROFILE_SPACING, 6))))
+
+
+def resolved_screen_n_points(args: argparse.Namespace, ds: DatasetSpec) -> int:
+    """Return the explicit --screen-n-points, or half the window-derived final count (0.010 -> 25, bbox -> 30)."""
+
+    explicit = getattr(args, "screen_n_points", None)
+    if explicit is not None:
+        return int(explicit)
+    derived = resolved_final_n_points(argparse.Namespace(**{**vars(args), "n_points": None}), ds)
+    return max(1, int(math.ceil(derived / 2.0)))
+
+
+def resolved_structure_n_points(args: argparse.Namespace, ds: DatasetSpec) -> int:
+    """Return the explicit --structure-n-points, or the native-gradient structure-update profile count.
+
+    The derived count keeps the structure-update spacing relative to the row stages: 6 points
+    per 20 window-derived final points (0.004 -> 6, 0.010 -> 15, DIALS bbox 60 -> 18,
+    PETS 20 -> 6).  An explicit --n-points does not change it, as for the screening Q.
+    """
+
+    explicit = getattr(args, "structure_n_points", None)
+    if explicit is not None:
+        return int(explicit)
+    derived = resolved_final_n_points(argparse.Namespace(**{**vars(args), "n_points": None}), ds)
+    return max(1, -(-derived * LEGACY_STRUCTURE_N_POINTS // LEGACY_STRUCTURE_FINAL_N_POINTS))
+
+
+def stage_n_points(args: argparse.Namespace, ds: DatasetSpec, *, screen: bool) -> int:
+    """Profile points for one crystal's screening (screen, thickness, gates) or final-fidelity stage."""
+
+    crystal = crystal_arguments(args, ds.name)
+    return resolved_screen_n_points(crystal, ds) if screen else resolved_final_n_points(crystal, ds)
+
+
+def structure_update_unrepresented_physics(nui: dict, *, dose_supported: bool) -> list[str]:
+    """Selected terms a native-gradient structure-update engine has no option for.
+
+    Neither native_structure_update nor native_multi_structure_update models the mosaic cone, and the
+    single-dataset engine has no dose-B term; updating coordinates without them would silently use
+    other physics than every row stage.
+    """
+
+    def active(mode_key: str, value_key: str) -> bool:
+        """Return whether a nuisance term is on: its mode is not none and its value is nonzero (or not numeric)."""
+        mode = str(nui.get(mode_key, "none") or "none").strip().lower()
+        try:
+            return mode != "none" and abs(float(nui.get(value_key, 0.0) or 0.0)) > 0.0
+        except (TypeError, ValueError):
+            return mode != "none"
+
+    blocked = ["mosaicity_mode"] if active("mosaicity_mode", "mosaicity_sigma_deg") else []
+    if not dose_supported and active("dose_b_mode", "dose_b_per_frame"):
+        blocked.append("dose_b_mode")
+    return blocked
+
+
+def refuse_unrepresented_structure_update_physics(name: str, nui: dict, *, dose_supported: bool) -> None:
+    """Fail closed when the native-gradient structure update would drop selected physics."""
+
+    blocked = structure_update_unrepresented_physics(nui, dose_supported=dose_supported)
+    if blocked:
+        raise ValueError(
+            f"native-gradient structure update for {name} cannot represent the selected {', '.join(blocked)}; "
+            "use --structure-update shelxl_feedback, or disable the term (--mosaicity-mode none, "
+            "--dose-b-mode-grid none)"
+        )
+
+
+def structure_update_window_options(prep: PrepConfig, args: argparse.Namespace) -> dict[str, tuple[str, ...]]:
+    """Per-crystal rocking-window and support options that the multi-dataset structure update would use."""
+
+    options: dict[str, tuple[str, ...]] = {}
+    for ds in prep.datasets:
+        crystal = crystal_arguments(args, ds.name)
+        options[ds.name] = (
+            "--sg-window",
+            f"{crystal.sg_window:g}",
+            "--sg-window-mode",
+            resolved_sg_window_mode(crystal, ds),
+            "--sg-window-min",
+            f"{crystal.sg_window_min:g}",
+            "--sg-window-max",
+            f"{resolved_sg_window_max(crystal, ds):g}",
+            "--sg-window-scale",
+            f"{crystal.sg_window_scale:g}",
+            "--sg-window-frame-floor",
+            f"{crystal.sg_window_frame_floor:g}",
+            "--max-support-sg",
+            f"{crystal.max_support_sg:g}",
+        )
+    return options
+
+
+def shared_structure_update_window(prep: PrepConfig, args: argparse.Namespace, nuisance: dict[str, dict]) -> list[str]:
+    """Rocking-window and support options of the one-window multi-dataset structure update.
+
+    native_multi_structure_update applies one window to every crystal, so the crystals must resolve to
+    the same window; the cone is refused because that engine does not model it (dose B is per dataset).
+    """
+
+    for ds in prep.datasets:
+        refuse_unrepresented_structure_update_physics(ds.name, nuisance.get(ds.name) or {}, dose_supported=True)
+    options = set(structure_update_window_options(prep, args).values())
+    if len(options) != 1:
+        raise ValueError(
+            "native-gradient multi-dataset structure update uses one rocking window for every crystal, but the "
+            "crystals resolve to different windows; use --structure-update shelxl_feedback or set the window explicitly"
+        )
+    return list(options.pop())
+
+
+def shared_structure_update_n_points(prep: PrepConfig, args: argparse.Namespace) -> int:
+    """Profile point count of the one-window multi-dataset structure update; the crystals must agree."""
+
+    counts = {resolved_structure_n_points(crystal_arguments(args, ds.name), ds) for ds in prep.datasets}
+    if len(counts) != 1:
+        raise ValueError(
+            "native-gradient multi-dataset structure update uses one profile point count for every crystal, but "
+            f"the crystals resolve to {sorted(counts)}; set --structure-n-points explicitly"
+        )
+    return counts.pop()
+
+
+def parse_strict_grid(text: object, label: str) -> list[float]:
+    """Parse a comma grid of finite numbers, refusing any token that is not one."""
+
+    values: list[float] = []
+    for token in str(text or "").replace(",", " ").split():
+        try:
+            value = float(token)
+        except ValueError as exc:
+            raise ValueError(f"{label} grid has a non-numeric value {token!r}") from exc
+        if not math.isfinite(value):
+            raise ValueError(f"{label} grid has a non-finite value {token!r}")
+        values.append(value)
+    return values
+
+
+def auto_mosaicity_grid(args: argparse.Namespace) -> tuple[str, str]:
+    """Translate --mosaicity-mode/--mosaicity-sigma-grid into engine mode and sigma grids.
+
+    Sigma 0 means no cone and becomes the mode-none candidate; the positive widths use the
+    requested mode.  Mode none (legacy) disables the cone family entirely.
+    """
+
+    mode = str(getattr(args, "mosaicity_mode", "none") or "none").strip().lower()
+    if mode == "none":
+        return "none", "0.0"
+    sigmas = parse_strict_grid(getattr(args, "mosaicity_sigma_grid", ""), "mosaicity sigma")
+    if not sigmas:
+        raise ValueError("--mosaicity-sigma-grid is empty; use --mosaicity-mode none to disable the mosaic cone")
+    if any(value < 0.0 or value > MOSAICITY_MAX_SIGMA_DEG for value in sigmas):
+        raise ValueError(f"--mosaicity-sigma-grid values must lie in [0, {MOSAICITY_MAX_SIGMA_DEG:g}] degrees")
+    positive = list(dict.fromkeys(value for value in sigmas if value > 0.0))
+    if positive and not any(value == 0.0 for value in sigmas):
+        # The gate compares every width with the active no-cone physics; without that candidate it
+        # would be skipped as an invariant grid and the requested cone would silently never be tested.
+        raise ValueError(
+            "--mosaicity-sigma-grid must include 0, the no-cone reference every cone width is compared with"
+        )
+    modes = (["none"] if any(value == 0.0 for value in sigmas) else []) + ([mode] if positive else [])
+    return ",".join(modes), (",".join(f"{value:.15g}" for value in positive) or "0.0")
+
+
+@functools.lru_cache(maxsize=64)
+def dataset_frame_span(path: str) -> float:
+    """ZCAL span of every row in a reflection file (the frames over which dose B accumulates).
+
+    The engine applies dose B as dose_b_per_frame * (ZCAL - min ZCAL) over all finite ZCAL rows,
+    so the total over the scan is dose_b_per_frame * (max ZCAL - min ZCAL).
+    """
+
+    zcal: list[float] = []
+    with Path(path).expanduser().open(errors="replace") as handle:
+        for line in handle:
+            if line.startswith("!"):
+                continue
+            parts = line.split()
+            if len(parts) < 11 or len(parts[:21]) not in {12, 21}:
+                continue
+            try:
+                value = float(parts[7])
+            except ValueError:
+                continue
+            if math.isfinite(value):
+                zcal.append(value)
+    if len(zcal) < 2:
+        raise ValueError(f"cannot determine the frame span of {path}: fewer than two finite ZCAL rows")
+    span = max(zcal) - min(zcal)
+    if not span > 0.0:
+        raise ValueError(f"reflection rows in {path} span no frames; a dose-B grid over the scan is undefined")
+    return float(span)
+
+
+def dose_b_per_frame_grid(args: argparse.Namespace, ds: DatasetSpec | None) -> tuple[str, dict]:
+    """Return the engine per-frame dose grid and how it was obtained.
+
+    An explicit --dose-b-per-frame-grid is used verbatim (legacy units).  Otherwise
+    --dose-b-total-grid (A^2 over the scan) is divided by this dataset's ZCAL span.
+    """
+
+    explicit = str(getattr(args, "dose_b_per_frame_grid", "") or "").strip()
+    if explicit:
+        return explicit, {"source": "dose_b_per_frame_grid", "per_frame_grid": explicit}
+    totals = parse_strict_grid(getattr(args, "dose_b_total_grid", ""), "dose total B")
+    if not totals:
+        raise ValueError("neither --dose-b-per-frame-grid nor --dose-b-total-grid gives a dose grid")
+    if any(value < 0.0 for value in totals):
+        raise ValueError("--dose-b-total-grid values must be nonnegative (A^2 accumulated over the scan)")
+    if ds is None:
+        raise ValueError("a dose-B grid given as total B over the scan needs the dataset to convert it per frame")
+    span = dataset_frame_span(str(ds.hkl))
+    per_frame = ",".join(f"{value / span:.15g}" for value in totals)
+    return per_frame, {
+        "source": "dose_b_total_grid",
+        "total_b_grid_A2": totals,
+        "zcal_span_frames": span,
+        "per_frame_grid": per_frame,
+        "definition": "dose_b_per_frame = total_B / (max ZCAL - min ZCAL); engine reference frame = min ZCAL",
+    }
+
+
+def _point_count_source(crystal: argparse.Namespace, key: str, derived_source: str) -> str:
+    """Where a crystal's profile point count came from: derived, a named preset (--preset), or given explicitly."""
+
+    from grond.workflows.run_presets import preset_source
+
+    if getattr(crystal, key, None) is None:
+        return derived_source
+    return preset_source(crystal, key) or "explicit"
+
+
+def configure_auto_physics(prep: PrepConfig, args: argparse.Namespace) -> dict:
+    """Resolve the per-crystal AUTO rocking-window and profile contract before any stage is built.
+
+    Unset --n-points/--screen-n-points/--sg-window-max are derived per crystal from the resolved
+    window.  When all crystals agree the values become the run-wide settings; otherwise each crystal
+    carries its own through crystal_arguments and the run-wide value stays unset, so no stage can use
+    another crystal's value.  The derived values go into the crystal's ``auto_physics`` block, never into
+    its ``prediction`` block: crystal_arguments turns a fixed-parameter crystal's prediction values into
+    fixed_* settings that override every stage, which would run the screen-type stages at the final Q.
+    The contract is written to decisions/auto_physics_contract.json.
+    """
+
+    # Validate the gate grids before any calculation starts.
+    auto_mosaicity_grid(args)
+    parse_strict_grid(getattr(args, "dose_b_per_frame_grid", ""), "dose per-frame B")
+    if any(value < 0.0 for value in parse_strict_grid(getattr(args, "dose_b_total_grid", ""), "dose total B")):
+        raise ValueError("--dose-b-total-grid values must be nonnegative (A^2 accumulated over the scan)")
+    dose_by_total = feature_is_enabled(args, "dose") and not str(getattr(args, "dose_b_per_frame_grid", "") or "").strip()
+    records: dict[str, dict] = {}
+    for ds in prep.datasets:
+        crystal = crystal_arguments(args, ds.name)
+        mode = resolved_sg_window_mode(crystal, ds)
+        if mode == "dials_bbox" and Path(ds.hkl).expanduser().is_file() and not _declares_dials_bbox(str(ds.hkl)):
+            # The engine refuses these rows at the first prediction; refuse before any stage runs.
+            raise ValueError(
+                f"sg_window_mode dials_bbox for {ds.name}: {ds.hkl} does not declare "
+                "DIALS_BBOX_Z_RANGE_AS_ALF0_BET0=TRUE (GROND DIALS bridge), so ALF0/BET0 are not a bbox z-range"
+            )
+        derived_source = "pets_wedge" if bool(getattr(crystal, "pets_static_auto", False)) else "window"
+        dose: dict = {}
+        if dose_by_total and Path(ds.hkl).expanduser().is_file():
+            try:
+                dose = dose_b_per_frame_grid(crystal, ds)[1]
+            except ValueError as exc:
+                # The dose gate reports the same error as its failed decision for this crystal.
+                dose = {"source": "dose_b_total_grid", "error": str(exc)}
+                print(f"WARN dose-B gate for {ds.name} cannot convert total B per frame: {exc}", flush=True)
+        records[ds.name] = {
+            "hkl": str(ds.hkl),
+            "dials_bbox_header": _declares_dials_bbox(str(ds.hkl)),
+            "requested_sg_window_mode": str(getattr(crystal, "sg_window_mode", "auto")),
+            "sg_window_mode": mode,
+            "sg_window": float(crystal.sg_window),
+            "sg_window_max": resolved_sg_window_max(crystal, ds),
+            "n_points": resolved_final_n_points(crystal, ds),
+            "screen_n_points": resolved_screen_n_points(crystal, ds),
+            "n_points_source": _point_count_source(crystal, "n_points", derived_source),
+            "screen_n_points_source": _point_count_source(crystal, "screen_n_points", derived_source),
+            "max_support_sg": float(crystal.max_support_sg),
+            "dose_b_grid": dose,
+        }
+    for key in ("n_points", "screen_n_points", "sg_window_max"):
+        if getattr(args, key, None) is not None:
+            continue
+        values = {record[key] for record in records.values()}
+        if len(values) == 1:
+            setattr(args, key, values.pop())
+            continue
+        crystals = getattr(args, "crystal_parameters", None)
+        if not isinstance(crystals, dict):
+            crystals = {}
+            args.crystal_parameters = crystals
+        for name, record in records.items():
+            derived = crystals.setdefault(name, {}).setdefault("auto_physics", {})
+            derived.setdefault(key, record[key])
+    modes, sigmas = auto_mosaicity_grid(args)
+    contract = {
+        "schema": "grond.auto-physics-contract.v1",
+        "auto_dials_window_mode": AUTO_DIALS_WINDOW_MODE,
+        "datasets": records,
+        "mosaicity": {"mode_grid": modes, "sigma_deg_grid": sigmas, "points": int(args.mosaicity_points)},
+        "dose": {
+            "mode_grid": str(args.dose_b_mode_grid),
+            "per_frame_grid": str(getattr(args, "dose_b_per_frame_grid", "") or ""),
+            "total_b_grid_A2": str(getattr(args, "dose_b_total_grid", "") or ""),
+        },
+        "absorption": {
+            "mode_grid": str(args.absorption_mode_grid),
+            "mu_grid": str(args.absorption_mu_grid),
+            "frac_grid": str(args.absorption_frac_grid),
+        },
+        "physics_gate_selection": str(getattr(args, "physics_gate_selection", "in-sample")),
+        "thickness_gate_split": str(getattr(args, "thickness_gate_split", "legacy")),
+    }
+    out = Path(args.out_dir) / "decisions" / "auto_physics_contract.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(contract, indent=2, allow_nan=True) + "\n")
+    return contract
+
+
+def warn_missing_cell_esd_source(structure: str, datasets, args: argparse.Namespace) -> None:
+    """Say at startup when the auto cell e.s.d. policy will fall back to the starting model's ZERR.
+
+    The sources do not depend on the HKL transform (it only permutes the values), so their presence is
+    checked on the input files: every crystal needs its UNIT_CELL axes, and one crystal also needs an XDS
+    CORRECT.LP or a DIALS scan-varying cell.  Without them configure_cell_esd uses the model's ZERR e.s.d.s
+    (or keeps its ZERR unchanged when they are zero) instead of stopping the run; this only warns early.
+    """
+
+    from grond.io.structure_contract import is_shelx_model
+    from grond.refine.cell_esd import dataset_model_cell
+
+    if str(getattr(args, "cell_esd_policy", "source") or "source") == "source" or bool(getattr(args, "dry_run", False)):
+        return
+    if str(getattr(args, "cell_esd", "") or "").strip() or not is_shelx_model(structure):
+        return
+    if not any(line.split()[:1] == ["ZERR"] for line in Path(structure).expanduser().read_text(errors="replace").upper().splitlines()):
+        return
+    hint = "pass --cell-esd a,b,c,alpha,beta,gamma to give measured values"
+    records = []
+    for ds in datasets:
+        try:
+            records.append(dataset_model_cell(ds.hkl, None))
+        except (OSError, ValueError) as exc:
+            print(f"WARN cell e.s.d.s: the cell of {ds.name} cannot be read ({exc}); the ZERR e.s.d.s will come from the "
+                  f"starting model; {hint}", flush=True)
+            return
+    if len(records) == 1 and not (records[0].get("xds_correct_lp_esd") or records[0].get("scan_varying_cell_sd")):
+        mismatch = records[0].get("xds_correct_lp_setting_mismatch")
+        detail = (
+            f" (its CORRECT.LP cell {mismatch['correct_lp_cell']} is in another setting than the row file's axes)"
+            if mismatch
+            else ""
+        )
+        print(
+            f"WARN cell e.s.d.s: one crystal ({datasets[0].name}) without an XDS CORRECT.LP in the row file's setting or "
+            f"a DIALS scan-varying cell{detail}; the ZERR e.s.d.s will come from the starting model; {hint}",
+            flush=True,
+        )
+
+
+def configure_cell_esd(structure: str, datasets, args: argparse.Namespace) -> dict:
+    """Resolve the ZERR cell e.s.d.s of every SHELXL endpoint once the HKL transforms are fixed.
+
+    ``--cell-esd-policy auto`` (AUTO) takes --cell-esd, else the crystals' cell spread, else the one
+    crystal's XDS CORRECT.LP or DIALS scan-varying spread (grond.refine.cell_esd); without a measured source it
+    uses the model's ZERR e.s.d.s (or keeps its ZERR when they are zero) and warns; ``source`` (legacy, and every
+    namespace without the option) keeps the model's ZERR.  The
+    record is written to decisions/cell_esd.json and the value reaches the engines as --zerr-esds.
+    """
+
+    from grond.io.structure_contract import is_shelx_model
+    from grond.refine.cell_esd import resolve_cell_esds
+
+    policy = str(getattr(args, "cell_esd_policy", "source") or "source")
+    args.resolved_zerr_esds = ""
+    if policy == "source":
+        record: dict = {"status": "source_policy", "policy": policy, "definition": "the model's ZERR is written unchanged"}
+    elif not is_shelx_model(structure):
+        record = {"status": "not_shelx_model", "policy": policy, "structure": str(structure)}
+    elif bool(getattr(args, "dry_run", False)):
+        record = {"status": "dry_run", "policy": policy}
+    else:
+        text = Path(structure).expanduser().read_text(errors="replace")
+        if not any(line.split()[:1] == ["ZERR"] for line in text.upper().splitlines()):
+            # Nothing to fill in: SHELXL itself refuses a model without ZERR ("ZERR MISSING") at the first endpoint.
+            record = {"status": "no_zerr_in_model", "policy": policy, "structure": str(structure)}
+            print(f"WARN {structure} has no ZERR record; SHELXL needs 'ZERR Z ...' after CELL", flush=True)
+            out = Path(args.out_dir) / "decisions" / "cell_esd.json"
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(json.dumps(record, indent=2, allow_nan=True) + "\n")
+            return record
+        records = [{"name": ds.name, "hkl": str(ds.hkl), "hkl_transform": ds.hkl_transform} for ds in datasets]
+        record = {"policy": policy, **resolve_cell_esds(structure, records, explicit=str(getattr(args, "cell_esd", "") or ""))}
+        args.resolved_zerr_esds = str(record.get("zerr_esds_arg") or "")
+        floored = record.get("floored_to_print_precision") or []
+        if record.get("status") == "model_zerr_kept":
+            print(f"WARN cell e.s.d.s: {record['source']}; SHELXL bond e.s.d.s will not include the cell uncertainty. "
+                  "Pass --cell-esd a,b,c,alpha,beta,gamma to give measured values.", flush=True)
+        else:
+            prefix = "WARN " if record.get("status") == "ok_model_zerr_fallback" else ""
+            print(
+                f"{prefix}Cell e.s.d.s (ZERR): {', '.join(f'{v:g}' for v in record['esds'])} from {record['source']}"
+                + (f"; below print precision, written as one unit of the last digit: {', '.join(floored)}" if floored else ""),
+                flush=True,
+            )
+    out = Path(args.out_dir) / "decisions" / "cell_esd.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(record, indent=2, allow_nan=True) + "\n")
+    return record
 
 
 def resolved_row_plan_cache(args: argparse.Namespace, *, fixed_model: bool) -> str:

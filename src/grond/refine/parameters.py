@@ -95,6 +95,8 @@ def absolute_finite_difference_jacobian(
 
 
 def atom_is_refinable(atom, selection: str, labels: set[str]) -> bool:
+    """Return whether an atom is refined under ``selection`` (``all``, ``nonh`` or ``labels``); Q peaks never are."""
+
     if atom["name"].upper().startswith("Q"):
         return False
     if selection == "all":
@@ -107,12 +109,16 @@ def atom_is_refinable(atom, selection: str, labels: set[str]) -> bool:
 
 
 def atom_ueq(atom, cell_tuple) -> float:
+    """Return an atom's Ueq in A^2: one third of the trace of U_cart, or its Uiso."""
+
     if atom.get("adp_type") == "anis":
         return float(np.trace(shelx_u_cart_matrix(atom, cell_tuple))) / 3.0
     return float(atom.get("uiso", 0.05))
 
 
 def set_atom_ueq(atom, value: float, cell_tuple) -> None:
+    """Set an atom's Ueq (at least 1e-5 A^2), scaling all six U values of an anisotropic atom."""
+
     value = max(float(value), 1e-5)
     if atom.get("adp_type") == "anis":
         start = atom_ueq(atom, cell_tuple)
@@ -148,6 +154,12 @@ def special_position_coordinate_policy(model, selection: str, label_text: str, p
 
 
 def parameter_layout(model, selection: str, label_text: str, parameter_mode: str = "xyz"):
+    """Return the refined parameters and their start vector for ``parameter_mode``.
+
+    ``xyz`` gives three fractional coordinates per atom (special-position atoms stay fixed),
+    ``adp_ueq`` one Ueq per atom, and ``xyz_adp_ueq`` both.
+    """
+
     labels = {x.strip() for x in re.split(r"[,\s]+", label_text or "") if x.strip()}
     frozen_xyz = {item["atom_index"] for item in special_position_coordinate_policy(model, selection, label_text, parameter_mode)["frozen_atoms"]}
     params = []
@@ -179,6 +191,8 @@ def parameter_layout(model, selection: str, label_text: str, parameter_mode: str
 
 
 def model_from_vector(base_model, params, x):
+    """Return a copy of the model with the parameter vector applied (coordinates wrapped into [0, 1))."""
+
     model = copy.deepcopy(base_model)
     for p, value in zip(params, x, strict=False):
         atom = model["atoms"][p["atom_index"]]
@@ -192,6 +206,8 @@ def model_from_vector(base_model, params, x):
 
 
 def parameter_bounds(params, x0, max_shift_frac: float, adp_shift: float, adp_min: float, adp_max: float):
+    """Return lower and upper bounds: +/- ``max_shift_frac`` for coordinates and a clipped +/- ``adp_shift`` for Ueq."""
+
     lo, hi = [], []
     for p, v in zip(params, x0, strict=False):
         if p.get("kind", "xyz") == "xyz":
@@ -209,6 +225,8 @@ def parameter_bounds(params, x0, max_shift_frac: float, adp_shift: float, adp_mi
 
 
 def parameter_prior(params, x, x0, xyz_sigma: float, adp_sigma: float):
+    """Return the shift of each parameter from its start divided by its prior sigma."""
+
     out = []
     for p, value, start in zip(params, x, x0, strict=False):
         sigma = float(adp_sigma) if p.get("kind") == "adp_ueq" else float(xyz_sigma)

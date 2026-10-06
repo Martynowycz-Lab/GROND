@@ -18,9 +18,18 @@ from grond.io.structure_contract import (
 )
 from grond.macromolecule import sha256_file
 from grond.paths import engine_script
+from grond.reports.console import (
+    console_enabled,
+    report_feature_decisions,
+    report_hand_decision,
+    report_macro_cycles,
+    report_split,
+    report_stage_heldout,
+)
 from grond.workflows.crystal_parameters import crystal_arguments
 from grond.workflows.decision import (
     apply_preflight,
+    nuisance_score_rows,
     preflight_dataset,
     safe_float,
     score_native_summary,
@@ -30,6 +39,15 @@ from grond.workflows.decision import (
 )
 from grond.workflows.endpoint_commands import shelxl_feedback_cmd, structure_cmd
 from grond.workflows.endpoint_selection import run_scale_window_polish
+from grond.workflows.final_hand_selection import (
+    _early_final_agreement,
+    _heldout_preference,
+    hand_decision_settings,
+    heldout_contract_base,
+    heldout_hand_decision,
+    run_early_elastic_hand_selection,
+    write_heldout_hand_decision,
+)
 from grond.workflows.forensic_gates import run_forensic_gate, run_resolution_limit_gate
 from grond.workflows.hand_row_contracts import (
     _args_with_recorded_native_contract,
@@ -45,6 +63,7 @@ from grond.workflows.hand_statistics import (
     hand_diagnostic_supports_other,
     hand_preference_summary,
 )
+from grond.workflows.heldout_gates import run_heldout_feature_gate, uses_heldout_gate
 from grond.workflows.model_selection import (
     best_endpoint_model,
     best_nuisance,
@@ -56,11 +75,23 @@ from grond.workflows.model_selection import (
     should_run_endpoint_feedback,
 )
 from grond.workflows.native_commands import native_stage_cmd
+from grond.workflows.nested_nuisance import (
+    NESTED_GATE_FAMILIES,
+    nested_feedback_args,
+    nested_gate_skip_record,
+    nested_selection_enabled,
+    run_nested_nuisance_stage,
+)
 from grond.workflows.nuisance_policy import (
+    FEATURE_GATE_FAMILIES,
     compact_base_nuisance,
+    configure_auto_physics,
+    configure_cell_esd,
     feature_grid,
     feature_is_enabled,
     resolve_final_n_basis,
+    resolved_final_n_points,
+    stage_n_points,
 )
 from grond.workflows.sg_window_selection import run_sg_window_scout
 from grond.workflows.thickness_materialization import (
@@ -72,6 +103,46 @@ from grond.workflows.thickness_materialization import (
     materialize_continuous_nuisance_run,
 )
 from grond.workflows.transform_selection import _selected_transform_claim_contract, choose_transform_by_scout
+
+# Loop stops that reject a cycle's model but leave the model entering it valid (shelxl_feedback_loop). A failed
+# cycle (non-zero return) is not one of them: it still raises.
+FEEDBACK_SAFE_STOPS = frozenset({"stopped_adp_pathology", "stopped_unsafe_endpoint"})
+
+def feedback_loop_outcome(struct_dir: Path, dataset: str, entering_model: str) -> tuple[Path | None, dict]:
+    """The run holding the loop's usable model, or None plus a fallback record when a safe stop kept the entering model.
+
+    A loop whose first cycle ends NPD/unsafe adopts nothing; like the multi-crystal loop, the clean model that entered
+    it is kept and the ordinary final stage evaluates it. Any other loop without a usable model raises.
+    """
+
+    feedback_summary = try_read_json(struct_dir / "shelxl_feedback_loop_summary.json")
+    run = shelxl_feedback_current_run(struct_dir)
+    if run is not None:
+        return run, {}
+    loop_status = str(feedback_summary.get("status") or "")
+    if loop_status in FEEDBACK_SAFE_STOPS:
+        print(
+            f"WARN {dataset}: SHELXL feedback stopped ({loop_status}) before adopting a cycle; the pre-loop model "
+            "is kept and evaluated by the final stage",
+            flush=True,
+        )
+        return None, {
+            "status": loop_status,
+            "kept": "pre_loop_model",
+            "model": str(entering_model),
+            "stopped_reason": feedback_summary.get("stopped_reason"),
+            "rejected_model": feedback_summary.get("rejected_model"),
+        }
+    runs = feedback_summary.get("runs") or []
+    failed = runs[-1] if runs else {}
+    raise RuntimeError(
+        "SHELXL feedback did not produce a usable RES model. "
+        f"Last cycle status: returncode={failed.get('returncode', 'n/a')}; "
+        f"endpoint={failed.get('output_model', 'n/a')}; "
+        f"health={failed.get('endpoint_res_health', {})}. "
+        f"See {struct_dir / 'shelxl_feedback_loop_summary.json'} and the cycle run.log."
+    )
+
 
 
 def run_feature_gate(
@@ -87,12 +158,36 @@ def run_feature_gate(
     active_run: Path,
     active_nui: dict,
 ) -> tuple[dict, Path, dict]:
-    """Test one optional physics/nuisance family and promote it only if useful."""
+    """Test one optional physics/nuisance family and promote it only if useful.
+
+    The mosaic-cone and dose families are scored on orbit cross-validated work rows
+    (grond.workflows.heldout_gates); the other families keep the in-sample score.
+    """
 
     if not feature_is_enabled(args, family):
         return active_nui, active_run, {"family": family, "status": "skipped", "reason": "no varied grid values"}
-    baseline_score = score_native_summary(read_json(active_run / "summary.json"))
+    if uses_heldout_gate(args, family):
+        return run_heldout_feature_gate(
+            prep,
+            ds,
+            args,
+            python,
+            logs,
+            root,
+            family=family,
+            active_model=active_model,
+            active_run=active_run,
+            active_nui=active_nui,
+        )
+    baseline_summary = read_json(active_run / "summary.json")
+    baseline_score = score_native_summary(baseline_summary, nuisance_score_rows(args))
     gate_dir = root / "runs" / ds.name / f"adaptive_{family}_gate"
+    # Score the gate on the scale-fit split of its baseline so the free/all terms compare like with like.
+    matched_split = (
+        str((baseline_summary.get("config") or {}).get("scale_fit_split") or "") or None
+        if str(getattr(args, "thickness_gate_split", "legacy")) == "matched"
+        else None
+    )
     try:
         run_logged(
             native_stage_cmd(
@@ -103,21 +198,27 @@ def run_feature_gate(
                 gate_dir,
                 args,
                 n_basis=args.screen_n_basis,
-                n_points=args.screen_n_points,
+                n_points=stage_n_points(args, ds, screen=True),
                 stage=f"adaptive_{family}_gate",
-                pinned=feature_grid(args, family, active_nui),
+                pinned=feature_grid(args, family, active_nui, ds=ds),
                 make_maps=False,
                 endpoint=False,
+                scale_fit_split_override=matched_split,
             ),
             logs,
             f"{ds.name}_adaptive_{family}_gate",
             dry_run=args.dry_run,
         )
-        gate_score = score_native_summary(read_json(gate_dir / "summary.json"))
+        gate_summary = read_json(gate_dir / "summary.json")
+        gate_split = str((gate_summary.get("config") or {}).get("scale_fit_split") or "")
+        if matched_split and gate_split != matched_split:
+            raise RuntimeError(f"gate scale-fit split {gate_split!r} differs from its baseline {matched_split!r}")
+        gate_score = score_native_summary(gate_summary, nuisance_score_rows(args))
     except Exception as exc:
         return active_nui, active_run, {"family": family, "status": "failed", "error": str(exc), "run": str(gate_dir)}
     improvement = safe_float(baseline_score.get("score")) - safe_float(gate_score.get("score"))
     accepted = improvement > float(args.feature_accept_delta)
+    scale_fit_split = matched_split or ("all" if getattr(args, "production_scales", False) else "work")
     record = {
         "family": family,
         "status": "accepted" if accepted else "rejected",
@@ -126,6 +227,15 @@ def run_feature_gate(
         "gate_score": gate_score,
         "score_improvement": improvement,
         "accept_delta": float(args.feature_accept_delta),
+        "selection": "in_sample_score_native_summary",
+        "scale_fit_split": scale_fit_split,
+        # The gate stage ranks its grid on --selection-metric, then this score compares it with the baseline.
+        "selection_metric": str(args.selection_metric),
+        "free_rows_in_selection": not (
+            nuisance_score_rows(args) == "work"
+            and str(args.selection_metric) == "work_wR2"
+            and scale_fit_split == "work"
+        ),
     }
     if accepted:
         return best_nuisance(gate_dir) or active_nui, gate_dir, record
@@ -245,6 +355,7 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
         return {"status": "stopped_bad_preflight", "preflight": str(root / "decisions" / ds0.name / "preflight.json")}
 
     ds, transform_decision = choose_transform_by_scout(prep, ds, args, python, logs, root, scout_max_rows=scout_rows)
+    configure_cell_esd(prep.structure, [ds], args)
     screen = root / "runs" / ds.name / "adaptive_screen"
     run_logged(
         native_stage_cmd(
@@ -276,12 +387,99 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
             {"stop": True, "reasons": reasons, "screen": str(screen)},
         )
         return {"status": "stopped_bad_fit", "primary_run": str(screen), "reasons": reasons}
+    # Validation console: the split and the screen's held-out R, printed from their recorded JSON.
+    single_prep = PrepConfig(structure=prep.structure, datasets=[ds], baseline_hkl=prep.baseline_hkl)
+    report_split(single_prep, args, {ds.name: screen}, root)
+    report_stage_heldout(args, {ds.name: screen}, root, label="screen", model=prep.structure)
 
     active_model = prep.structure
     active_nui = best_nuisance(screen)
     absolute_structure_decision = absolute_structure_policy(prep.structure)
     active_hand = "original"
-    if args.hand_control and absolute_structure_decision.get("run_hand_control", True):
+    hand_settings = hand_decision_settings(args)
+    hand_absorption_label = (
+        "uniform_absorption_kept_exact_pair"
+        if hand_settings["pair_absorption"] == "uniform"
+        else "disabled_for_hand_decision_only"
+    )
+    early_hand = bool(
+        args.hand_control
+        and absolute_structure_decision.get("run_hand_control", True)
+        and str(getattr(args, "hand_decision_stage", "final")) == "early"
+    )
+    early_hand_decision: dict = {}
+    if early_hand:
+        # Held-out hand decision on the hand-blind start model, before thickness, gates and refinement.
+        early_hand_decision = run_early_elastic_hand_selection(
+            PrepConfig(
+                structure=prep.structure,
+                datasets=[ds],
+                baseline_hkl=prep.baseline_hkl,
+                notes=prep.notes,
+                default_hkl_transform=prep.default_hkl_transform,
+                geometry_percentile=prep.geometry_percentile,
+                parity_setup_id=prep.parity_setup_id,
+                parity_setup_manifest_sha256=prep.parity_setup_manifest_sha256,
+                metadata=prep.metadata,
+            ),
+            args,
+            python,
+            logs,
+            root,
+            start_model=prep.structure,
+            screen_runs={ds.name: screen},
+            shared_hand_decision={"symmetry_policy": absolute_structure_decision},
+            run_prefix="adaptive",
+        )
+        if str(early_hand_decision.get("status") or "") not in {"kept", "switched", "skipped_dry_run"}:
+            print(
+                f"WARN hand {ds.name}: early held-out hand decision {early_hand_decision.get('status')!r}; continuing "
+                "in the input hand, the final elastic pair decides with the same rule",
+                flush=True,
+            )
+        if bool(early_hand_decision.get("hand_switched", False)):
+            active_model = str(early_hand_decision["selected_model_after"])
+            active_hand = str(early_hand_decision["selected_hand_after"])
+            # Re-screen in the chosen hand so the thickness seed is not chosen in the rejected one.
+            screen = root / "runs" / ds.name / "adaptive_screen_selected_hand"
+            run_logged(
+                native_stage_cmd(
+                    python,
+                    ds,
+                    active_model,
+                    dataset_baseline_hkl(prep, ds),
+                    screen,
+                    args,
+                    n_basis=20 if args.fast else args.screen_n_basis,
+                    n_points=5 if args.fast else args.screen_n_points,
+                    stage="adaptive_screen",
+                    pinned=compact_base_nuisance(args),
+                    make_maps=False,
+                    endpoint=False,
+                ),
+                logs,
+                f"{ds.name}_adaptive_screen_selected_hand",
+                dry_run=args.dry_run,
+            )
+            screen_frame_offsets = resolved_frame_offset_candidates(screen)
+            active_nui = best_nuisance(screen)
+            report_stage_heldout(args, {ds.name: screen}, root, label="screen_selected_hand", model=active_model)
+    if early_hand:
+        absolute_structure_decision.update(
+            {
+                "status": "early_selected_final_confirmation_pending",
+                "selected": active_hand,
+                "selection_stage": "early_elastic_pair_after_screen_then_final_confirmation",
+                "reason": (
+                    "hand selected on held-out evidence right after the screen on the hand-blind start model; "
+                    "the final elastic pair confirms it with the same rule"
+                ),
+                "absorption_policy": hand_absorption_label,
+                "decision_evidence": hand_settings["evidence"],
+                "early_elastic_selection": early_hand_decision,
+            }
+        )
+    elif args.hand_control and absolute_structure_decision.get("run_hand_control", True):
         absolute_structure_decision.update(
             {
                 "status": "deferred_until_final_model",
@@ -291,14 +489,40 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
                     "hand selection is deferred until thickness, geometry, nuisance, and structure refinement are "
                     "complete; the final elastic pair shares one eigendecomposition and does not rerun nuisance grids"
                 ),
-                "absorption_policy": "disabled_for_hand_decision_only",
+                "absorption_policy": hand_absorption_label,
+                "decision_evidence": hand_settings["evidence"],
             }
         )
 
     regularized_nui = active_nui
     thickness_run = screen
     feature_records: list[dict] = []
-    if not args.fast:
+    if nested_selection_enabled(args):
+        # Cone x dose x thickness distribution x lambda jointly by inner orbit CV on work rows; the in-sample
+        # gates then run on the pinned pick (--nuisance-selection sequential: the stages below).
+        regularized_nui, feature_source, nested_record = run_nested_nuisance_stage(
+            prep, ds, args, python, logs, root, active_model=active_model, active_nui=active_nui, run_prefix="adaptive"
+        )
+        feature_records.append(nested_record)
+        for family in FEATURE_GATE_FAMILIES:
+            if family in NESTED_GATE_FAMILIES:
+                feature_records.append(nested_gate_skip_record(family))
+                continue
+            regularized_nui, feature_source, record = run_feature_gate(
+                prep,
+                ds,
+                args,
+                python,
+                logs,
+                root,
+                family=family,
+                active_model=active_model,
+                active_run=feature_source,
+                active_nui=regularized_nui,
+            )
+            feature_records.append(record)
+        thickness_run = feature_source
+    elif not args.fast:
         thickness_run = root / "runs" / ds.name / "adaptive_thickness_polish"
         thickness_baseline = discrete_thickness_baseline_nuisance(args, active_nui)
         thickness_candidates = thickness_polish_nuisance(thickness_baseline, screen_frame_offsets)
@@ -365,7 +589,7 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
                 stage="adaptive_thickness_continuous_materialized",
             )
             feature_records.append(materialization_record)
-        for family in ["row_resolution", "absorption", "sg_jitter", "sigma_error", "dose"]:
+        for family in FEATURE_GATE_FAMILIES:
             regularized_nui, feature_source, record = run_feature_gate(
                 prep,
                 ds,
@@ -380,11 +604,18 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
             )
             feature_records.append(record)
         thickness_run = feature_source
+        if console_enabled(args):
+            # The same records the decision tree carries, written now so the console prints the recorded values.
+            write_json(root / "decisions" / ds.name / "feature_decisions.json", feature_records)
+            report_feature_decisions(
+                ds.name, root / "decisions" / ds.name / "feature_decisions.json", args, nuisance=regularized_nui
+            )
 
     final_model = active_model
     final_n_basis = 20 if args.fast else int(args.final_basis_fallback)
     structure_strategy = resolve_structure_update_strategy(args, multi_dataset=False)
     structure_update_run = None
+    structure_feedback_fallback: dict = {}
     feedback_final_run: Path | None = None
     if args.mode in {"regularize", "auto"} and not args.fast:
         if structure_strategy == "shelxl_feedback":
@@ -403,30 +634,21 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
                     struct_dir,
                     args,
                     n_basis=final_n_basis,
-                ),
+                )
+                + nested_feedback_args(args, root, ds),
                 logs,
                 f"{ds.name}_adaptive_shelxl_feedback",
                 dry_run=args.dry_run,
             )
             structure_update_run = struct_dir
+            report_macro_cycles(struct_dir / "shelxl_feedback_loop_summary.json", args)
             if args.dry_run:
                 feedback_final_run = (
                     struct_dir
-                    / f"cycle_{int(args.shelxl_feedback_cycles):02d}_N{int(final_n_basis)}Q{int(args.n_points)}"
+                    / f"cycle_{int(args.shelxl_feedback_cycles):02d}_N{int(final_n_basis)}Q{resolved_final_n_points(args, ds)}"
                 )
             else:
-                feedback_summary = try_read_json(struct_dir / "shelxl_feedback_loop_summary.json")
-                feedback_final_run = shelxl_feedback_current_run(struct_dir)
-                if feedback_final_run is None:
-                    runs = feedback_summary.get("runs") or []
-                    failed = runs[-1] if runs else {}
-                    raise RuntimeError(
-                        "SHELXL feedback did not produce a usable RES model. "
-                        f"Last cycle status: returncode={failed.get('returncode', 'n/a')}; "
-                        f"endpoint={failed.get('output_model', 'n/a')}; "
-                        f"health={failed.get('endpoint_res_health', {})}. "
-                        f"See {struct_dir / 'shelxl_feedback_loop_summary.json'} and the cycle run.log."
-                    )
+                feedback_final_run, structure_feedback_fallback = feedback_loop_outcome(struct_dir, ds.name, final_model)
                 feedback_model = shelxl_feedback_current_model(struct_dir)
                 if feedback_model is not None:
                     final_model = str(feedback_model)
@@ -510,13 +732,18 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
             hand_pair = root / "runs" / ds.name / "adaptive_final_elastic_hand_pair"
             final_summary = read_json(final / "summary.json")
             final_config = final_summary.get("config") if isinstance(final_summary.get("config"), Mapping) else {}
-            hand_nuisance, source_absorption = elastic_hand_nuisance(best_nuisance(final) or regularized_nui)
+            hand_nuisance, source_absorption = elastic_hand_nuisance(
+                best_nuisance(final) or regularized_nui, absorption_policy=str(hand_settings["pair_absorption"])
+            )
             hand_args = _args_with_recorded_native_contract(args, final_config)
             hand_args.compute_backend = "scipy"
             hand_n_basis = _positive_summary_int(final_config, "n_basis") or (20 if args.fast else final_n_basis)
             hand_n_points = _positive_summary_int(final_config, "n_points") or (5 if args.fast else args.n_points)
             scale_fit_split = str(final_config.get("scale_fit_split") or "work")
             if scale_fit_split not in {"work", "all"}:
+                scale_fit_split = "work"
+            if hand_settings["pair_scale_fit_split"] == "work":
+                # Both hands' pair scales exclude the free orbits.
                 scale_fit_split = "work"
             run_logged(
                 native_stage_cmd(
@@ -602,12 +829,37 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
                 float("nan"),
             )
             hand_flip_threshold = float(getattr(args, "hand_flip_zkp_all", 3.5))
+            heldout_mode = hand_settings["evidence"] == "heldout-orbit-sign"
+            hand_active_before = active_hand
+            heldout_payload = heldout_hand_decision(
+                {
+                    ds.name: {
+                        "status": (
+                            "complete"
+                            if hand_row_contract.get("passed") and hand_stats.get("status") == "ok"
+                            else "calculation_error"
+                        ),
+                        "selected_row_table": str(hand_pair / "native_dyn_calc.csv"),
+                        "inverse_row_table": str(hand_pair / "native_inverse_hand_dyn_calc.csv"),
+                        "pair_run": str(hand_pair),
+                    }
+                },
+                args,
+                stage="final",
+                model=final_model,
+                settings=hand_settings,
+                expected_datasets=1,
+            )
             post_feedback_hand_promotion = {
-                **hand_preference_summary(
-                    raw_all_zkp,
-                    active_hand=active_hand,
-                    threshold=hand_flip_threshold,
-                    calculation_valid=not hand_calculation_errors and hand_stats.get("status") == "ok",
+                **(
+                    _heldout_preference(heldout_payload, active_hand=active_hand)
+                    if heldout_mode
+                    else hand_preference_summary(
+                        raw_all_zkp,
+                        active_hand=active_hand,
+                        threshold=hand_flip_threshold,
+                        calculation_valid=not hand_calculation_errors and hand_stats.get("status") == "ok",
+                    )
                 ),
                 "status": "not_promoted",
                 "method": "nakane_negative_thickness_elastic_pair_v1",
@@ -620,7 +872,16 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
                 "diagnostic": str(stats_path),
                 "paired_run": str(hand_pair),
                 "source_absorption_nuisance": source_absorption,
-                "hand_decision_absorption": "disabled",
+                "hand_decision_absorption": (
+                    "uniform_kept" if hand_settings["pair_absorption"] == "uniform" else "disabled"
+                ),
+                "hand_pair_scale_fit_split": scale_fit_split,
+                "decision_evidence": hand_settings["evidence"],
+                "heldout": {
+                    key: heldout_payload.get(key)
+                    for key in ("status", "pooled", "rule", "reasons", "errors", "supports_switch", "heldout_scheme")
+                },
+                "heldout_decision_artifact": str(root / "decisions" / "hand_decision_heldout_final.json"),
                 "shared_eigendecomposition": True,
                 "nuisance_refit": False,
                 "jitter_refit": False,
@@ -635,10 +896,19 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
                 "matched_all_row_metrics": (hand_stats.get("all") or {}).get("matched_prediction_metrics", {}),
                 "matched_born_control": hand_stats.get("matched_born_control", {}),
             }
-            diagnostic_gate_ok, diagnostic_gate_reasons = hand_diagnostic_supports_other(
+            legacy_gate_ok, legacy_gate_reasons = hand_diagnostic_supports_other(
                 hand_stats,
                 args,
             )
+            if heldout_mode:
+                diagnostic_gate_ok = bool(heldout_payload.get("supports_switch") and not hand_calculation_errors)
+                diagnostic_gate_reasons = [
+                    *list(heldout_payload.get("reasons") or []),
+                    *list(heldout_payload.get("errors") or []),
+                ]
+            else:
+                diagnostic_gate_ok, diagnostic_gate_reasons = legacy_gate_ok, legacy_gate_reasons
+            post_feedback_hand_promotion["legacy_all_row_zkp_rule_would_switch"] = bool(legacy_gate_ok)
             post_feedback_hand_promotion["diagnostic_quality_gate_status"] = (
                 "switch_supported" if diagnostic_gate_ok else "keep_current"
             )
@@ -725,6 +995,51 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
                     f"Hand calculation error: {error}" for error in hand_calculation_errors
                 )
                 absolute_structure_decision["status"] = "hand_calculation_error"
+            elif heldout_mode and heldout_payload.get("status") != "complete":
+                post_feedback_hand_promotion["status"] = "heldout_evidence_error"
+                post_feedback_hand_promotion["warnings"].extend(
+                    f"held-out hand evidence: {error}" for error in heldout_payload.get("errors") or []
+                )
+                absolute_structure_decision["status"] = "hand_heldout_evidence_error"
+            if heldout_mode and heldout_payload.get("status") == "complete" and legacy_gate_ok != diagnostic_gate_ok:
+                post_feedback_hand_promotion["warnings"].append(
+                    "the legacy all-row ZKP rule and the held-out orbit rule disagree; the held-out rule decides"
+                )
+            hand_agreement = (
+                _early_final_agreement(
+                    {
+                        "selected_hand": hand_active_before,
+                        "switched": bool(early_hand_decision.get("hand_switched")),
+                        "escalation_status": (early_hand_decision.get("escalation") or {}).get("status"),
+                        "decided_on": (early_hand_decision.get("escalation") or {}).get("decided_on"),
+                    },
+                    heldout_payload,
+                    switched=active_hand != hand_active_before,
+                )
+                if early_hand
+                else None
+            )
+            if hand_agreement is not None:
+                post_feedback_hand_promotion["early_final_agreement"] = hand_agreement
+                if hand_agreement.get("status") != "confirmed":
+                    message = f"early/final hand decisions: {hand_agreement['status']}"
+                    post_feedback_hand_promotion["warnings"].append(message)
+                    print(f"WARN hand {ds.name}: {message}", flush=True)
+            write_heldout_hand_decision(
+                root / "decisions" / "hand_decision_heldout_final.json",
+                heldout_payload,
+                selected_hand_before=hand_active_before,
+                selected_hand_after=active_hand,
+                switched=active_hand != hand_active_before,
+                selected_model_after=final_model,
+                legacy_all_row_zkp={
+                    "z_positive_favors_selected": raw_all_zkp,
+                    "threshold": hand_flip_threshold,
+                    "would_switch": bool(legacy_gate_ok),
+                },
+                agreement=hand_agreement,
+            )
+            report_hand_decision(root / "decisions" / "hand_decision_heldout_final.json", args)
             post_feedback_hand_promotion["selected_hand_after"] = active_hand
         except Exception as exc:
             final, final_model, active_hand = hand_input_run, hand_input_model, hand_input_representation
@@ -752,6 +1067,36 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
                 "post_feedback_promotion": post_feedback_hand_promotion,
             }
             write_json(root / "runs" / ds.name / "adaptive_hand_calculation_error.json", post_feedback_hand_promotion)
+            # The final held-out contract is written even when the check could not run.
+            failed_final = {**heldout_contract_base("final", final_model, hand_settings), "status": "error", "errors": [error]}
+            hand_agreement = (
+                _early_final_agreement(
+                    {
+                        "selected_hand": hand_input_representation,
+                        "switched": bool(early_hand_decision.get("hand_switched")),
+                        "escalation_status": (early_hand_decision.get("escalation") or {}).get("status"),
+                        "decided_on": (early_hand_decision.get("escalation") or {}).get("decided_on"),
+                    },
+                    failed_final,
+                    switched=False,
+                )
+                if early_hand
+                else None
+            )
+            if hand_agreement is not None:
+                post_feedback_hand_promotion["early_final_agreement"] = hand_agreement
+                print(f"WARN hand {ds.name}: early/final hand decisions: {hand_agreement['status']}", flush=True)
+            write_heldout_hand_decision(
+                root / "decisions" / "hand_decision_heldout_final.json",
+                failed_final,
+                selected_hand_before=hand_input_representation,
+                selected_hand_after=active_hand,
+                switched=False,
+                selected_model_after=final_model,
+                legacy_all_row_zkp={},
+                agreement=hand_agreement,
+            )
+            report_hand_decision(root / "decisions" / "hand_decision_heldout_final.json", args)
 
     if args.dry_run:
         final_row_model_contract = {
@@ -859,6 +1204,7 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
         "absolute_structure_decision": absolute_structure_decision,
         "feature_decisions": feature_records,
         "endpoint_feedback_decision": endpoint_feedback_decision,
+        "structure_feedback_fallback": structure_feedback_fallback,
         "endpoint_feedback_run": str(endpoint_feedback_run) if endpoint_feedback_run else "",
         "post_feedback_hand_promotion": post_feedback_hand_promotion,
         "final_row_model_contract": final_row_model_contract,
@@ -891,6 +1237,7 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
 def run_single(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Path) -> dict:
     """Run either the automatic or fixed single-dataset workflow."""
 
+    configure_auto_physics(prep, args)
     args = crystal_arguments(args, prep.datasets[0].name)
     if args.auto_decide:
         return run_single_adaptive(prep, args, python, logs)
@@ -899,6 +1246,7 @@ def run_single(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pa
     make_maps = args.make_maps
     n_basis = 20 if args.fast else args.screen_n_basis
     n_points = 5 if args.fast else args.screen_n_points
+    configure_cell_esd(prep.structure, [ds], args)
     screen = root / "runs" / ds.name / ("fast_N20_Q5" if args.fast else "screen")
     run_logged(
         native_stage_cmd(

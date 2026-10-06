@@ -1,1 +1,1 @@
-"""Commands support for GROND."""
+"""Implementations of the GROND subcommands."""

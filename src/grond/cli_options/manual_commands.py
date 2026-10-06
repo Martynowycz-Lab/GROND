@@ -1,4 +1,4 @@
-"""Build the public command grammar in its established display order."""
+"""Register ``grond manual`` and its stages: setup, status, scout, thickness, hand, feedback, scales, finish."""
 
 from __future__ import annotations
 
@@ -25,6 +25,8 @@ def register_manual(sub: argparse._SubParsersAction) -> None:
     manual_stages = p_manual.add_subparsers(dest="stage", required=True, metavar="STAGE")
 
     def add_manual_workflow_arg(stage_parser: argparse.ArgumentParser) -> None:
+        """Add the ``--workflow`` option that every manual stage uses."""
+
         stage_parser.add_argument(
             "--workflow",
             default="",
@@ -32,6 +34,10 @@ def register_manual(sub: argparse._SubParsersAction) -> None:
         )
 
     def add_manual_compute_args(stage_parser: argparse.ArgumentParser) -> None:
+        """Add the options of the manual stages that run child commands: workflow, workers,
+        Python, output and tool config.
+        """
+
         add_manual_workflow_arg(stage_parser)
         stage_parser.add_argument(
             "--workers",
@@ -157,7 +163,7 @@ def register_manual(sub: argparse._SubParsersAction) -> None:
     p_manual_thickness.add_argument(
         "--thickness-grid-nm",
         default="50,75,110,150,180,220,260,300",
-        help="Comma-separated mean thickness candidates in nm.",
+        help="Comma-separated mean thickness candidates in nm. A single value pins the thickness at every basis size.",
     )
     p_manual_thickness.add_argument(
         "--gradient-grid",
@@ -178,7 +184,7 @@ def register_manual(sub: argparse._SubParsersAction) -> None:
         description=(
             "The first call computes per-crystal all/free Klar-Palatinus evidence on the thickness-stage model "
             "and pauses. Repeat with --choice input or --choice inverse; the evidence is reused. This simplified "
-            "expert path is not auto's final post-feedback shared-hand selector."
+            "expert path is not auto's held-out hand test."
         ),
     )
     add_manual_compute_args(p_manual_hand)
@@ -253,4 +259,7 @@ def register_manual(sub: argparse._SubParsersAction) -> None:
     p_manual_finish.add_argument(
         "--native-map-spacing", type=float, default=0.25, help="Native map grid spacing in Angstrom."
     )
+    from .endpoint_commands import add_model_box_args
+
+    add_model_box_args(p_manual_finish)
     p_manual_finish.set_defaults(func=cmd_manual)

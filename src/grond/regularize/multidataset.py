@@ -3,15 +3,21 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from pathlib import Path
 
 import numpy as np
 
 from grond.legacy.engine.bloch_engine import sha256
 from grond.legacy.engine.endpoint_modulation import modulation_manifest_fields
+from grond.refine.shelx_input import ABSOLUTE_HKL_KAPPA
+
+ENDPOINT_Q_RATIO_BOUNDS = (0.05, 20.0)
 
 
 def safe_float(v, default=float("nan")):
+    """Return v as a float, or default when it cannot be converted."""
+
     try:
         return float(v)
     except (TypeError, ValueError):
@@ -69,6 +75,15 @@ def scale_contract_provenance(summary: dict, rows: list[dict]) -> dict[str, obje
                 source = candidate_source
                 break
 
+    scale_model = best_native.get("scale_model") if isinstance(best_native.get("scale_model"), dict) else {}
+    if not model_names and scale_model.get("kind") == "fixed_design":
+        model_names = [str(scale_model.get("name", "fixed_design"))]
+        source = "summary.best_native.scale_model"
+    if not model_names and scale_model.get("kind") == "pspline":
+        # Smooth frame scales have no group-width contract; parameter_count stays ceil(EDF), edf is exact.
+        model_names = [f"pspline_n{scale_model.get('n_basis')}_lambda{safe_float(scale_model.get('lambda')):g}"]
+        source = "summary.best_native.scale_model"
+
     if not model_names:
         group_width = safe_float(nuisance.get("group_width_deg"))
         detector_bins = safe_float(nuisance.get("detector_scale_bins"))
@@ -80,13 +95,16 @@ def scale_contract_provenance(summary: dict, rows: list[dict]) -> dict[str, obje
 
     count_value = safe_float(best_native.get("scale_count"))
     count = int(count_value) if math.isfinite(count_value) and count_value >= 0.0 else None
-    return {
+    out = {
         "model": model_names[0] if len(model_names) == 1 else ("mixed" if model_names else "unknown"),
         "models": model_names,
         "model_source": source or "unavailable",
         "parameter_count": count,
         "fit_split": str(best_native.get("scale_fit_split", "")) or "unknown",
     }
+    if scale_model.get("kind") in {"pspline", "fixed_design"}:
+        out["edf"] = safe_float(scale_model.get("edf"))
+    return out
 
 
 def d_spacing_from_model(model: dict, h: int, k: int, ell: int) -> float:
@@ -120,7 +138,7 @@ def filter_native_rows_by_resolution(rows: list[dict], model: dict, min_d_spacin
     """Apply a shared-model-cell endpoint/reporting d cutoff to native rows.
 
     Native tables may carry ``d_A`` calculated from each experiment's fitted
-    cell.  A merged paper endpoint has one structure cell, so its resolution
+    cell.  A merged endpoint has one structure cell, so its resolution
     boundary must instead be calculated from signed HKL and that shared cell.
     """
 
@@ -209,6 +227,8 @@ def apply_native_row_weight(row: dict, weight: float) -> dict:
 
 
 def canonical_p222_friedel(h, k, ell):
+    """Return the smallest equivalent of (h, k, ell) under point group 222 and Friedel inversion (Laue mmm)."""
+
     variants = [
         (h, k, ell),
         (-h, -k, ell),
@@ -243,10 +263,17 @@ def reciprocal_equivalent_keys(
 
 
 def canonical_model_friedel(h: int, k: int, ell: int, symmetry_ops: list[dict]) -> tuple[int, int, int]:
+    """Return the smallest equivalent of (h, k, ell) under the model symmetry operations and Friedel inversion."""
+
     return min(reciprocal_equivalent_keys(h, k, ell, symmetry_ops, merge_friedel=True))
 
 
 def canonical_model_symmetry(h: int, k: int, ell: int, symmetry_ops: list[dict]) -> tuple[int, int, int]:
+    """Return the smallest equivalent of (h, k, ell) under the model symmetry operations only.
+
+    Unlike canonical_model_friedel, no Friedel inversion is added.
+    """
+
     return min(reciprocal_equivalent_keys(h, k, ell, symmetry_ops, merge_friedel=False))
 
 
@@ -263,6 +290,11 @@ def endpoint_key_function(mode: str, symmetry_ops: list[dict]):
 
 
 def shelx_weights(obs, sig, pred, a, b):
+    """Return SHELXL WGHT weights 1 / (sigma^2 + (a P)^2 + b P), P = (max(Iobs, 0) + 2 max(Icalc, 0)) / 3.
+
+    a and b may be per-row arrays.
+    """
+
     p = (np.maximum(obs, 0.0) + 2.0 * np.maximum(pred, 0.0)) / 3.0
     return 1.0 / np.maximum(
         sig * sig + (np.asarray(a, dtype=float) * p) ** 2 + np.asarray(b, dtype=float) * p,
@@ -271,6 +303,12 @@ def shelx_weights(obs, sig, pred, a, b):
 
 
 def metrics(rows: list[dict], pred_col: str, wght_a: float, wght_b: float):
+    """Return R1_all, R1_gt (target_I > 2 sigma_eff), wR2_all, CC and mean |sqrt(w) residual| of one prediction column.
+
+    R values are fractions. Weights are SHELXL WGHT weights, with each row's native_wght_a and native_wght_b when
+    recorded.
+    """
+
     obs = np.asarray([safe_float(r["target_I"]) for r in rows], dtype=float)
     sig = np.asarray([safe_float(r["sigma_eff"]) for r in rows], dtype=float)
     pred = np.asarray([safe_float(r[pred_col]) for r in rows], dtype=float)
@@ -289,6 +327,8 @@ def metrics(rows: list[dict], pred_col: str, wght_a: float, wght_b: float):
     fcalc = np.sqrt(np.maximum(pred, 0.0))
 
     def r1(mask):
+        """Return sum |Fobs - Fcalc| / sum Fobs over the masked rows, NaN when there are none."""
+
         if not np.any(mask):
             return float("nan")
         return float(np.sum(np.abs(fobs[mask] - fcalc[mask])) / max(np.sum(fobs[mask]), 1e-30))
@@ -309,6 +349,8 @@ def metrics(rows: list[dict], pred_col: str, wght_a: float, wght_b: float):
 
 
 def split_metrics(rows: list[dict], pred_col: str, wght_a: float, wght_b: float):
+    """Return metrics of one prediction column on all rows and on the work and free rows (by the split column)."""
+
     out = {}
     for split in ("all", "work", "free"):
         use = rows if split == "all" else [r for r in rows if r.get("split") == split]
@@ -327,8 +369,111 @@ def native_metrics_by_split(rows: list[dict], wght_a: float, wght_b: float) -> d
     }
 
 
-def endpoint_rows_and_corrections_from_native(rows: list[dict], lambda_q: float):
-    """Return corrected endpoint rows and their applied intensity multipliers."""
+def endpoint_correction_denominators(
+    target: np.ndarray,
+    dyn_raw: np.ndarray,
+    dyn_scaled: np.ndarray,
+    q: np.ndarray,
+    lambda_q: float,
+    selected: np.ndarray,
+    *,
+    q_policy: str = "clip",
+    rescale: str = "median-iobs",
+    fc2: np.ndarray | None = None,
+    kappa: float = ABSOLUTE_HKL_KAPPA,
+    restore: np.ndarray | None = None,
+    scales: np.ndarray | None = None,
+    reference_median: float | None = None,
+) -> tuple[np.ndarray, np.ndarray, dict]:
+    """Return per-row divisors d (Icorr = y/d), the rows kept, and an audit; shared by both endpoint writers.
+
+    median-iobs (legacy): d = s * q^lambda with s = dyn_scaled/dyn_raw (or the caller's fitted ``scales``),
+    later rescaled to the median IOBS.
+    absolute: d = pred * q^(lambda-1) / (kappa |F|^2), i.e. Icorr = kappa |F|^2 y / pred for lambda = 1, the
+    absolute-scale handoff (a perfect model gives Icorr = kappa |F|^2 on one scale for every
+    crystal).  pred = dyn_scaled / restore is the scaled prediction in the IOBS units of y.  Rows with
+    |F|^2 = 0 carry no information and are dropped.
+
+    q_policy clip (legacy) clips q into [0.05, 20] (absolute: the divisor relative to its median) and keeps the
+    row. exclude drops rows whose divisor relative to the median of the selected rows lies outside (0.05, 20)
+    (rel = pred/|U_g|^2 relative to its training median) and counts them.
+
+    ``reference_median`` replaces the median of the selected rows by another row set's (the work rows' divisor
+    median), so held-out rows are clipped or excluded by exactly the rule the work rows met.
+    """
+
+    lo, hi = ENDPOINT_Q_RATIO_BOUNDS
+    selected = np.asarray(selected, dtype=bool).copy()
+    audit: dict[str, object] = {
+        "q_policy": str(q_policy),
+        "rescale": str(rescale),
+        "q_ratio_bounds": [lo, hi],
+        "n_rows_selected": int(np.count_nonzero(selected)),
+        "n_excluded_q_rows": 0,
+        "n_zero_fcalc_rows": 0,
+    }
+    if q_policy not in {"clip", "exclude"}:
+        raise ValueError(f"unknown endpoint q policy {q_policy!r}; use clip or exclude")
+    if rescale == "absolute":
+        if fc2 is None:
+            raise ValueError("absolute endpoint intensity scale needs |Fcalc|^2 of the current model for every row")
+        fc2 = np.asarray(fc2, dtype=float)
+        zero_f = selected & ~(np.isfinite(fc2) & (fc2 > 0.0))
+        audit["n_zero_fcalc_rows"] = int(np.count_nonzero(zero_f))
+        selected &= ~zero_f
+        safe_fc2 = np.where(selected, fc2, 1.0)
+        pred = dyn_scaled if restore is None else dyn_scaled / np.asarray(restore, dtype=float)
+        denom = pred * np.power(np.maximum(q, 1e-30), float(lambda_q) - 1.0) / (float(kappa) * safe_fc2)
+        audit["kappa"] = float(kappa)
+    elif rescale in {"median-iobs", "none"}:
+        if scales is None:
+            scales = np.maximum(dyn_scaled / np.maximum(dyn_raw, 1e-30), 1e-30)
+        q_used = np.clip(q, lo, hi) if q_policy == "clip" else q
+        denom = scales * (q_used ** float(lambda_q))
+    else:
+        raise ValueError(f"unknown endpoint rescale mode {rescale!r}")
+    denom = np.where(np.isfinite(denom) & (denom > 0.0), denom, np.nan)
+    selected &= np.isfinite(denom)
+    median = float(np.median(denom[selected])) if np.any(selected) else float("nan")
+    if reference_median is not None:
+        audit["divisor_median_own"] = median
+        median = float(reference_median)
+        audit["divisor_median_source"] = "reference"
+    audit["divisor_median"] = median
+    if np.any(selected):
+        ratio = denom / median
+        outside = selected & ~((ratio > lo) & (ratio < hi))
+        if q_policy == "exclude":
+            audit["n_excluded_q_rows"] = int(np.count_nonzero(outside))
+            selected &= ~outside
+        elif rescale == "absolute":
+            audit["n_clipped_q_rows"] = int(np.count_nonzero(outside))
+            denom = np.where(selected, median * np.clip(ratio, lo, hi), denom)
+    audit["n_rows_kept"] = int(np.count_nonzero(selected))
+    return np.maximum(np.nan_to_num(denom, nan=1.0), 1e-30), selected, audit
+
+
+def endpoint_rows_and_corrections_from_native(
+    rows: list[dict],
+    lambda_q: float,
+    *,
+    q_policy: str = "clip",
+    rescale: str = "median-iobs",
+    model: dict | None = None,
+    kappa: float = ABSOLUTE_HKL_KAPPA,
+    audit: dict | None = None,
+    reference: Mapping[str, object] | None = None,
+):
+    """Return corrected endpoint rows and their applied intensity multipliers.
+
+    The defaults are the legacy contract (q clipped into [0.05, 20], median-IOBS rescale). ``rescale=
+    "absolute"`` needs the current ``model``; its |Fcalc|^2 per row puts the rows on kappa*|F|^2.  ``audit``
+    (a dict) receives the kept/excluded row counts.
+
+    ``reference`` is the audit of another correction of the same crystal (its work rows): its divisor median and
+    median-IOBS rescale factor are used instead of this row set's own, so every row is corrected exactly as it would
+    have been among the reference rows (the held-out endpoint validation corrects the free rows this way).
+    """
 
     hkl = [(int(r["h"]), int(r["k"]), int(r["l"])) for r in rows]
     target = np.asarray([safe_float(r["target_I"]) for r in rows], dtype=float)
@@ -360,30 +505,65 @@ def endpoint_rows_and_corrections_from_native(rows: list[dict], lambda_q: float)
         & np.isfinite(q)
         & (q > 0.0)
     )
-    q_clip = np.clip(q, 0.05, 20.0)
-    scales = np.maximum(dyn_scaled / np.maximum(dyn_raw, 1e-30), 1e-30)
-    denom = np.maximum(scales * (q_clip ** float(lambda_q)), 1e-30)
+    if q_policy == "clip" and rescale == "median-iobs":
+        # Legacy contract, kept byte-for-byte.
+        q_clip = np.clip(q, 0.05, 20.0)
+        scales = np.maximum(dyn_scaled / np.maximum(dyn_raw, 1e-30), 1e-30)
+        denom = np.maximum(scales * (q_clip ** float(lambda_q)), 1e-30)
+        if audit is not None:
+            audit.update({"q_policy": "clip", "rescale": "median-iobs", "n_rows_selected": int(np.count_nonzero(valid)),
+                          "n_rows_kept": int(np.count_nonzero(valid)), "n_excluded_q_rows": 0})
+    else:
+        fc2 = None
+        if rescale == "absolute":
+            if model is None:
+                raise ValueError("absolute endpoint intensity scale needs the current structure model")
+            from grond.bloch.model import fcalc_res_grid
+
+            hkl_array = np.asarray(hkl, dtype=float).reshape(-1, 3)
+            fc2 = np.abs(fcalc_res_grid(model, hkl_array[:, 0], hkl_array[:, 1], hkl_array[:, 2])) ** 2
+        denom, valid, denom_audit = endpoint_correction_denominators(
+            target,
+            dyn_raw,
+            dyn_scaled,
+            q,
+            lambda_q,
+            valid,
+            q_policy=q_policy,
+            rescale=rescale,
+            fc2=fc2,
+            kappa=kappa,
+            restore=restore,
+            reference_median=None if reference is None else float(reference["divisor_median"]),  # type: ignore[arg-type]
+        )
+        if audit is not None:
+            audit.update(denom_audit)
     icorr = target / denom
     sigcorr = sig / denom
-    src = float(np.nanmedian(target[valid])) if np.any(valid) else 1.0
-    dst = float(np.nanmedian(icorr[valid])) if np.any(valid) else 1.0
-    factor = src / max(dst, 1e-30)
+    if rescale == "median-iobs" and reference is not None:
+        factor = float(reference["rescale_factor"])  # type: ignore[arg-type]
+    elif rescale == "median-iobs":
+        src = float(np.nanmedian(target[valid])) if np.any(valid) else 1.0
+        dst = float(np.nanmedian(icorr[valid])) if np.any(valid) else 1.0
+        factor = src / max(dst, 1e-30)
+    else:
+        factor = 1.0
     icorr *= factor
     sigcorr *= factor
+    if audit is not None:
+        audit["rescale_factor"] = float(factor)
     selected = np.where(valid)[0]
     endpoint_rows = [(*hkl[i], float(icorr[i]), float(sigcorr[i])) for i in selected]
     corrections = np.asarray(float(factor) / denom[selected], dtype=float)
     return endpoint_rows, corrections
 
 
-def endpoint_rows_from_native(rows: list[dict], lambda_q: float):
-    """Compatibility wrapper returning only corrected endpoint rows."""
-
-    endpoint_rows, _corrections = endpoint_rows_and_corrections_from_native(rows, lambda_q)
-    return endpoint_rows
-
-
 def apply_hkl_weight(rows, weight: float):
+    """Return HKL rows with sigma divided by sqrt(weight).
+
+    weight <= 0 drops every row; weight 1 returns them unchanged.
+    """
+
     if weight <= 0.0:
         return []
     if abs(weight - 1.0) < 1e-12:
@@ -393,6 +573,8 @@ def apply_hkl_weight(rows, weight: float):
 
 
 def scale_hkl_rows(rows, scale: float):
+    """Return HKL rows with I multiplied by scale and sigma by |scale|."""
+
     scale = float(scale)
     return [(h, k, ell, intensity * scale, sig * abs(scale)) for h, k, ell, intensity, sig in rows]
 
@@ -581,6 +763,13 @@ def estimate_overlap_scales(rows_by_dataset: dict[str, list[tuple]], iterations:
 
 
 def merge_hkl_rows(rows, sigma_policy: str = "formal", canonicalizer=None):
+    """Merge HKL rows sharing a key into inverse-variance weighted means; returns (sorted rows, metadata).
+
+    The merged sigma is 1 / sqrt(sum w) with w = 1/sigma^2 (sigma at least 1e-6). With sigma_policy
+    chisq_overdispersion the sigma of a reflection seen more than once is multiplied by sqrt(reduced chi^2) when
+    that exceeds 1. canonicalizer maps (h, k, l) to the key; the default is the exact signed HKL.
+    """
+
     key_for = canonicalizer or (lambda h, k, ell: (int(h), int(k), int(ell)))
     bins: dict[tuple[int, int, int], dict[str, float]] = {}
     for h, k, ell, intensity, sig in rows:

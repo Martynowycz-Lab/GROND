@@ -91,7 +91,11 @@ def _fit_empirical_sigma_model(
     mode: str,
     row_selection: str = "integrated",
 ) -> tuple[np.ndarray, dict[str, Any]] | None:
-    """Fit sigma_eff^2 = m^2 sigma_raw^2 + (a Iobs)^2 + c^2 from duplicate scatter."""
+    """Fit sigma_eff^2 = m^2 sigma_raw^2 + (a Iobs)^2 + c^2, with m >= 1.
+
+    This diagnostic assumes independent grouped observations share a mean. Different
+    scales or dynamical paths can also contribute to their scatter.
+    """
 
     hkl = np.asarray(arrays.get("hkl", np.empty((0, 3), dtype=int)), dtype=int)
     if hkl.ndim != 2 or hkl.shape[1] != 3 or len(hkl) != len(iobs):
@@ -103,8 +107,8 @@ def _fit_empirical_sigma_model(
 
     rotations = _space_group_rotations(metadata)
     groups: dict[tuple[int, int, int], list[int]] = {}
-    for idx in np.where(keep)[0]:
-        groups.setdefault(_canonical_reciprocal_hkl(hkl[idx], rotations), []).append(int(idx))
+    for row_index in np.where(keep)[0]:
+        groups.setdefault(_canonical_reciprocal_hkl(hkl[row_index], rotations), []).append(int(row_index))
 
     features: list[list[float]] = []
     target: list[float] = []
@@ -116,10 +120,14 @@ def _fit_empirical_sigma_model(
         y = np.asarray([iobs[i] for i in indices], dtype=float)
         s = np.asarray([sigma[i] for i in indices], dtype=float)
         mean = float(np.mean(y))
-        leverage = max(0.0, 1.0 - 1.0 / float(len(indices)))
-        for yy, ss in zip(y, s, strict=True):
-            features.append([float(ss * ss * leverage), float(yy * yy * leverage), float(leverage)])
-            target.append(float((yy - mean) ** 2))
+        count = len(indices)
+        variance_features = np.column_stack((s**2, y**2, np.ones(count)))
+        # For an unweighted mean and unequal independent variances v_i:
+        # E[(y_i - mean(y))^2] = (1 - 2/n) v_i + sum(v_j) / n^2.
+        centered_features = ((1.0 - 2.0 / count) * variance_features
+                             + variance_features.sum(axis=0) / count**2)
+        features.extend(centered_features.tolist())
+        target.extend(((y - mean)**2).tolist())
 
     dof = len(target) - usable_groups
     if usable_groups < 20 or dof < 30:
@@ -127,10 +135,10 @@ def _fit_empirical_sigma_model(
 
     x = np.asarray(features, dtype=float)
     y = np.asarray(target, dtype=float)
-    coeff, _ = nnls(x, y)
-    coeff[0] = max(float(coeff[0]), 1.0)
-    coeff[1] = max(float(coeff[1]), 0.0)
-    coeff[2] = max(float(coeff[2]), 0.0)
+    # Fit the nonnegative excess above the declared raw-variance floor. Clipping
+    # m^2 after fitting would leave the other coefficients at the wrong optimum.
+    coeff, _ = nnls(x, y - x[:, 0])
+    coeff[0] += 1.0
 
     fitted_var = coeff[0] * sigma * sigma + coeff[1] * iobs * iobs + coeff[2]
     sigma_eff = np.sqrt(np.maximum(fitted_var, sigma * sigma))

@@ -11,10 +11,17 @@ from .compression_weights import safe_float, solve_scale
 
 
 def str_col(rows: list[dict[str, str]], name: str, default: str = "") -> np.ndarray:
+    """Return one column of the row table as a string array, with default for missing values."""
+
     return np.asarray([str(r.get(name, default)) for r in rows])
 
 
 def parse_csv_ints(text: str) -> list[int]:
+    """Parse comma-separated integers in first-seen order without repeats.
+
+    global, inf and infinite stand for 10**9, a single group.
+    """
+
     out = []
     for part in str(text).split(","):
         part = part.strip()
@@ -60,6 +67,11 @@ def build_group_strides(args: argparse.Namespace, summary: dict) -> tuple[list[i
 
 
 def split_masks(rows: list[dict[str, str]]) -> dict[str, np.ndarray]:
+    """Return row masks keyed by split name, plus all.
+
+    work and free fall back to every row when the table has no such split.
+    """
+
     split = str_col(rows, "split")
     masks = {"all": np.ones(len(rows), dtype=bool)}
     for name in sorted(set(split)):
@@ -73,6 +85,8 @@ def split_masks(rows: list[dict[str, str]]) -> dict[str, np.ndarray]:
 
 
 def infer_detector_base(detector_bin: np.ndarray) -> int:
+    """Return the side of the smallest square detector grid holding the largest bin (1 when no bin is finite)."""
+
     finite = detector_bin[np.isfinite(detector_bin)]
     if len(finite) == 0:
         return 1
@@ -81,12 +95,19 @@ def infer_detector_base(detector_bin: np.ndarray) -> int:
 
 
 def coarsen_groups(groups: np.ndarray, stride: int, offset: int = 0) -> np.ndarray:
+    """Merge every stride consecutive frame groups into one, after shifting the group index by offset.
+
+    A stride of 10**8 or more gives a single group.
+    """
+
     if int(stride) >= 10**8:
         return np.zeros(len(groups), dtype=int)
     return np.floor_divide(groups.astype(int) - int(offset), max(1, int(stride))).astype(int)
 
 
 def coarsen_detector(detector_bin: np.ndarray, base_bins: int, target_bins: int) -> np.ndarray:
+    """Map bins of a base_bins-square detector grid onto a target_bins-square grid (all 0 when target_bins <= 1)."""
+
     if int(target_bins) <= 1:
         return np.zeros(len(detector_bin), dtype=int)
     base_bins = max(1, int(base_bins))
@@ -100,6 +121,12 @@ def coarsen_detector(detector_bin: np.ndarray, base_bins: int, target_bins: int)
 
 
 def count_scale_params(groups: np.ndarray, det_bins: np.ndarray, fit_good: np.ndarray, target_detector_bins: int) -> tuple[int, int, int]:
+    """Return the (total, frame, detector) scale-parameter counts.
+
+    Frame parameters are the groups with at least two fit rows; the detector adds target^2 tiles when the grid is
+    larger than 1.
+    """
+
     group_count = int(len([g for g in sorted(set(groups[fit_good].astype(int))) if np.count_nonzero((groups == g) & fit_good) >= 2]))
     det_count = int(target_detector_bins) * int(target_detector_bins) if int(target_detector_bins) > 1 else 0
     return group_count + det_count, group_count, det_count
@@ -184,15 +211,21 @@ def adaptive_segment_groups(
         values[:] = 0.0
 
     def make_seg(start: int, end: int) -> dict[str, float | int]:
+        """Return the weighted sums w, s and ss of the log scales of groups start..end as one segment."""
+
         w = float(np.sum(weights[start : end + 1]))
         s = float(np.sum(weights[start : end + 1] * values[start : end + 1]))
         ss = float(np.sum(weights[start : end + 1] * values[start : end + 1] * values[start : end + 1]))
         return {"start": int(start), "end": int(end), "w": w, "s": s, "ss": ss}
 
     def sse(seg: dict[str, float | int]) -> float:
+        """Return the weighted sum of squared deviations of a segment's log scales from their mean."""
+
         return max(0.0, float(seg["ss"]) - float(seg["s"]) * float(seg["s"]) / max(float(seg["w"]), 1e-30))
 
     def merge_cost(left: dict[str, float | int], right: dict[str, float | int]) -> float:
+        """Return how much merging two neighbouring segments increases the summed sse."""
+
         merged = {
             "start": int(left["start"]),
             "end": int(right["end"]),

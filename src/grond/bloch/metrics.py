@@ -13,6 +13,12 @@ from grond.io.xds import XDSData
 
 
 def effective_sigma(data: XDSData, cfg: Config):
+    """Return per-row sigmas inflated by the Config error model; NaN where the XDS sigma is not positive.
+
+    sigma_eff^2 = sigma^2 + (a*I)^2 + (b_corr*I*c)^2 + (c_peak*I*p)^2, where a, b_corr and c_peak are the variance_*
+    fields, c = max(0, 1 - CORR/100) and p = max(0, 1 - PEAK/100) (XDS percentages).
+    """
+
     corr_term = np.maximum(0.0, 1.0 - data.corr / 100.0)
     peak_term = np.maximum(0.0, 1.0 - data.peak / 100.0)
     out = np.full(len(data.sigma), np.nan, dtype=float)
@@ -27,6 +33,13 @@ def effective_sigma(data: XDSData, cfg: Config):
 
 
 def scale_by_groups(obs, sig, pred, groups, fit_mask):
+    """Fit one scale per group on the fit rows and return (scaled predictions, {group: scale}).
+
+    Each scale minimises sum w*(obs - s*pred)^2 with w = 1/sigma^2 over rows in ``fit_mask`` with finite values and
+    positive sigma and prediction; a negative scale is clipped to 0. A group with fewer than two such rows takes the
+    global scale of all fit rows. Scaled predictions are NaN where ``pred`` is not finite.
+    """
+
     obs = np.asarray(obs, dtype=float)
     sig = np.asarray(sig, dtype=float)
     pred = np.asarray(pred, dtype=float)
@@ -65,6 +78,13 @@ def scale_by_groups(obs, sig, pred, groups, fit_mask):
 
 
 def metrics(obs, sig, pred, mask):
+    """Return n, n_gt, R1 (all rows and I > 2 sigma), wR2 and the Pearson CC of obs and pred on ``mask``.
+
+    Only rows with finite obs, pred and positive sigma count. R1 uses F = sqrt(max(I, 0)); wR2 uses the weights
+    1/(sigma^2 + (0.05*P)^2) with P = (max(obs, 0) + 2*max(pred, 0))/3. CC is NaN for fewer than three rows or a
+    constant series.
+    """
+
     mask = (
         np.asarray(mask, dtype=bool)
         & np.isfinite(obs)
@@ -73,12 +93,17 @@ def metrics(obs, sig, pred, mask):
         & np.isfinite(pred)
     )
     obs_m, sig_m, pred_m = obs[mask], sig[mask], pred[mask]
+    if len(obs_m) == 0:
+        return {"n": 0, "n_gt": 0, "R1_all": float("nan"), "R1_gt": float("nan"),
+                "wR2_all": float("nan"), "CC": float("nan")}
     gt = obs_m > 2.0 * sig_m
     fobs = np.sqrt(np.maximum(obs_m, 0.0))
     fpred = np.sqrt(np.maximum(pred_m, 0.0))
     eps = 1e-30
 
     def r1(local):
+        """Return sum|Fobs - Fpred| / sum Fobs over the selected rows, or NaN when none is selected."""
+
         if not np.any(local):
             return float("nan")
         return float(np.sum(np.abs(fobs[local] - fpred[local])) / max(np.sum(fobs[local]), eps))
@@ -102,6 +127,13 @@ def metrics(obs, sig, pred, mask):
 
 
 def evaluate_predictions(data, cfg, pred, fit_scales_on="work", model=None):
+    """Scale dynamical and kinematical predictions per group on one split and score them on every split.
+
+    ``pred`` holds ``dyn``, ``born`` and ``groups`` per row. Splits come from split_masks with the Config free fraction
+    and seed (orbit-aware when ``model`` carries symmetry operations); the scales are fitted on ``fit_scales_on``. The
+    ``delta_*`` entries are dynamical minus kinematical.
+    """
+
     sig = effective_sigma(data, cfg)
     symmetry_ops = model.get("symmetry_ops") if model else None
     masks = split_masks(data.hkl, cfg.free_fraction, cfg.split_seed, symmetry_ops=symmetry_ops)
@@ -123,8 +155,8 @@ def evaluate_predictions(data, cfg, pred, fit_scales_on="work", model=None):
     return out
 
 
-def read_row_index_file(path: str | Path) -> list[int]:
-    """Read zero-based row indices from text or CSV, including one-column CSV."""
+def read_row_index_file(path: str | Path, *, row_count: int | None = None) -> list[int]:
+    """Read unique zero-based row indices from text/CSV and reject invalid requested indices."""
 
     with open(path, newline="") as handle:
         sample = handle.read(4096)
@@ -152,4 +184,8 @@ def read_row_index_file(path: str | Path) -> list[int]:
                     values.append(int(token))
                 except ValueError as exc:
                     raise ValueError(f"invalid row index {token!r} at {path}:{line_number}") from exc
+    invalid = sorted({value for value in values if value < 0 or (row_count is not None and value >= row_count)})
+    if invalid:
+        allowed = "nonnegative" if row_count is None else f"in [0, {row_count})"
+        raise ValueError(f"row indices in {path} must be {allowed}; invalid indices: {invalid[:8]}")
     return sorted(set(values))

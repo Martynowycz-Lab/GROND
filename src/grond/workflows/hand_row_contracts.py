@@ -9,11 +9,22 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from grond.workflows.decision import safe_float, score_native_summary
-from grond.workflows.thickness_materialization import numeric_nuisance_contract_matches
+
+UNIFORM_HAND_PAIR_ABSORPTION_MODES = {"mean", "midgley_like", "midgley"}
 
 
-def elastic_hand_nuisance(nuisance: Mapping[str, object]) -> tuple[dict[str, object], dict[str, object]]:
-    """Freeze every nuisance except absorption for an exact negative-thickness hand pair."""
+def elastic_hand_nuisance(
+    nuisance: Mapping[str, object],
+    *,
+    absorption_policy: str = "strip",
+) -> tuple[dict[str, object], dict[str, object]]:
+    """Freeze the nuisance for an exact negative-thickness hand pair.
+
+    ``absorption_policy="uniform"`` keeps a uniform absorptive potential
+    (H0 + i*mu*I keeps the pair exact) and refuses any non-uniform term instead
+    of silently dropping it.  ``"strip"`` is the legacy elastic pair with every
+    absorption term zeroed.
+    """
 
     elastic = dict(nuisance)
     absorption_keys = (
@@ -25,6 +36,28 @@ def elastic_hand_nuisance(nuisance: Mapping[str, object]) -> tuple[dict[str, obj
         "absorption_tds_b",
     )
     source = {key: elastic.get(key) for key in absorption_keys}
+    if absorption_policy == "uniform":
+        mode = str(elastic.get("absorption_mode") or "none").strip().lower()
+        nonuniform = {
+            key: safe_float(elastic.get(key, 0.0), float("nan"))
+            for key in ("absorption_frac", "absorption_mu_g2", "absorption_mu_theta2", "absorption_tds_b")
+        }
+        mu = safe_float(elastic.get("absorption_mu", 0.0), float("nan"))
+        active_nonuniform = {key: value for key, value in nonuniform.items() if value != 0.0}
+        if mode == "none" or (mode in UNIFORM_HAND_PAIR_ABSORPTION_MODES and not active_nonuniform):
+            if not math.isfinite(mu) or mu < 0.0:
+                raise ValueError(f"hand pair absorption_mu must be finite and nonnegative, got {mu!r}")
+            if mode == "none" and (mu != 0.0 or active_nonuniform):
+                raise ValueError("absorption_mode none carries nonzero absorptive coefficients; refusing the hand pair")
+            return elastic, source
+        raise ValueError(
+            "the exact hand pair keeps only uniform absorption (mean/midgley_like/midgley with zero "
+            f"absorption_frac, absorption_mu_g2, absorption_mu_theta2, absorption_tds_b); this nuisance has "
+            f"absorption_mode={mode!r} with {active_nonuniform or 'a non-uniform mode'}. "
+            "Use --hand-pair-absorption strip for the legacy elastic pair"
+        )
+    if absorption_policy != "strip":
+        raise ValueError(f"unknown hand-pair absorption policy {absorption_policy!r}")
     elastic.update(
         {
             "absorption_mode": "none",
@@ -68,12 +101,19 @@ def _args_with_recorded_native_contract(
 
     cloned = argparse.Namespace(**vars(args))
     direct_keys = (
+        "sg_window",
+        "sg_window_mode",
         "sg_window_min",
         "sg_window_max",
         "sg_window_scale",
         "sg_window_frame_floor",
         "sg_jitter_student_df",
         "sg_jitter_width_factor",
+        # The recorded engine scalars; stages pinned from the recorded nuisance forward
+        # the same cone, and the gate options are not used after the final stage.
+        "mosaicity_mode",
+        "mosaicity_sigma_deg",
+        "mosaicity_points",
         "mosaicity_max_sigma_deg",
         "profile_quadrature",
         "profile_accumulation",
@@ -81,6 +121,9 @@ def _args_with_recorded_native_contract(
         "max_support_sg",
         "free_fraction",
         "split_seed",
+        "split_scheme",
+        "split_salt",
+        "exclude_orbits_json",
         "selection_metric",
         "scale_smoothness",
         "prediction_cache_compression",
@@ -100,119 +143,6 @@ def _args_with_recorded_native_contract(
     if config.get("thickness_points") is not None:
         cloned.final_thickness_points = int(config["thickness_points"])
     return cloned
-
-
-def _native_split_dyn_wr2(summary: Mapping[str, object], split: str) -> float:
-    """Return one split's native dynamical wR2 without applying a fallback."""
-
-    best = summary.get("best_native") if isinstance(summary.get("best_native"), Mapping) else {}
-    metrics = best.get("metrics") if isinstance(best.get("metrics"), Mapping) else {}
-    split_metrics = metrics.get(split) if isinstance(metrics.get(split), Mapping) else {}
-    dyn = split_metrics.get("dyn") if isinstance(split_metrics.get("dyn"), Mapping) else {}
-    return safe_float(dyn.get("wR2_all"), float("nan"))
-
-
-def _validated_row_selection_counts(rows: Mapping[str, object]) -> tuple[int, int, int] | None:
-    """Return an exact selected/work/free count contract, or ``None``.
-
-    Hand comparisons must not treat two absent or equally malformed values as
-    matching evidence. These mappings come from JSON summaries, so requiring
-    actual non-boolean integers is both unambiguous and intentionally strict.
-    """
-
-    keys = ("selected_rows", "work_rows", "free_rows")
-    values: list[int] = []
-    for key in keys:
-        if key not in rows:
-            return None
-        value = rows.get(key)
-        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-            return None
-        values.append(value)
-    selected_rows, work_rows, free_rows = values
-    if selected_rows != work_rows + free_rows:
-        return None
-    return selected_rows, work_rows, free_rows
-
-
-def _pinned_nuisance_mismatches(
-    expected: Mapping[str, object],
-    actual: Mapping[str, object],
-) -> list[str]:
-    """Return material differences in a recomputed one-point nuisance contract.
-
-    Persisted strict-JSON contracts represent disabled nullable numerical
-    fields with ``null``.  Engine summaries represent the same state with
-    ``NaN``.  Those two spellings are equivalent only for the explicitly
-    nullable fields below; missing keys, infinities, and malformed values still
-    fail closed.
-    """
-
-    numeric_keys = (
-        "thickness_A",
-        "thickness_grad_frac",
-        "thickness_sigma_frac",
-        "frame_offset",
-        "group_width_deg",
-        "detector_scale_bins",
-        "sigma_a",
-        "sigma_b_corr",
-        "sigma_c_peak",
-        "row_resolution_b",
-        "scale_smoothness",
-        "sg_jitter_sigma0",
-        "sg_jitter_sigma_d_inv",
-        "sg_jitter_sigma_frame",
-        "sg_jitter_points",
-        "sg_jitter_student_df",
-        "sg_jitter_width_factor",
-        "absorption_mu",
-        "absorption_frac",
-        "absorption_mu_g2",
-        "absorption_mu_theta2",
-        "absorption_tds_b",
-        "dose_b_per_frame",
-        "dose_b_ref_frame",
-        "native_wght_a",
-        "native_wght_b",
-    )
-    categorical_keys = (
-        "thickness_model",
-        "sg_jitter_mode",
-        "absorption_mode",
-        "dose_b_mode",
-        "matrix_convention",
-    )
-    nullable_numeric_keys = {
-        "dose_b_ref_frame",
-        "native_wght_a",
-        "native_wght_b",
-    }
-
-    def disabled_nullable(value: object) -> bool:
-        if value is None:
-            return True
-        try:
-            numeric = float(value)
-        except (TypeError, ValueError):
-            return False
-        return math.isnan(numeric)
-
-    mismatches: list[str] = []
-    for key in numeric_keys:
-        if key not in expected:
-            continue
-        if key not in actual:
-            mismatches.append(f"{key}: selected={expected.get(key)!r}, opposite={actual.get(key)!r}")
-            continue
-        if key in nullable_numeric_keys and disabled_nullable(expected.get(key)) and disabled_nullable(actual.get(key)):
-            continue
-        if not numeric_nuisance_contract_matches(expected.get(key), actual.get(key)):
-            mismatches.append(f"{key}: selected={expected.get(key)!r}, opposite={actual.get(key)!r}")
-    for key in categorical_keys:
-        if key in expected and str(actual.get(key)) != str(expected.get(key)):
-            mismatches.append(f"{key}: selected={expected.get(key)!r}, opposite={actual.get(key)!r}")
-    return mismatches
 
 
 def _row_contract_nullable_numeric_fields(
@@ -289,6 +219,7 @@ def _paired_row_split_contract(
     }
 
     def indexed(path: Path) -> tuple[dict[tuple[str, ...], dict[str, str]], int, list[str]]:
+        """Read a row table keyed by ``key_fields``; return the compared fields per row, duplicate count, errors."""
         rows: dict[tuple[str, ...], dict[str, str]] = {}
         duplicates = 0
         errors: list[str] = []
@@ -322,6 +253,7 @@ def _paired_row_split_contract(
     mismatch_examples: list[dict[str, object]] = []
 
     def parsed_numeric_token(raw: str) -> tuple[str, float]:
+        """Classify a table cell as ``finite``, ``nan`` (the literal NaN sentinel) or ``invalid``, with its value."""
         token = str(raw).strip()
         if token.lower() == "nan":
             return "nan", float("nan")

@@ -24,6 +24,8 @@ from grond.io.pets_geometry import (
 
 
 def _sha256(path: Path) -> str:
+    """Return the hex SHA-256 digest of a file."""
+
     digest = hashlib.sha256()
     with path.open("rb") as stream:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
@@ -32,6 +34,8 @@ def _sha256(path: Path) -> str:
 
 
 def _operation_key(rotation: np.ndarray, translation: np.ndarray) -> tuple[float, ...]:
+    """Return a comparable key for a symmetry operation: rounded rotation and translation reduced to [0, 1)."""
+
     values = [*np.rint(np.asarray(rotation, dtype=float)).reshape(-1).tolist()]
     reduced_translation = np.mod(np.asarray(translation, dtype=float), 1.0)
     reduced_translation[np.isclose(reduced_translation, 1.0, atol=1e-8)] = 0.0
@@ -83,6 +87,10 @@ def _validate_structure_setting(structure: Path, *, space_group_number: int, pet
 
 
 def _loop_columns(block: gemmi.cif.Block, tags: tuple[str, ...]) -> list[list[str]]:
+    """Return the values of the given CIF loop tags, one list per tag; raise ValueError unless
+    all have one nonzero length.
+    """
+
     columns = [list(block.find_values(tag)) for tag in tags]
     lengths = {len(values) for values in columns}
     if lengths == {0}:
@@ -93,6 +101,13 @@ def _loop_columns(block: gemmi.cif.Block, tags: tuple[str, ...]) -> list[list[st
 
 
 def _read_pets_hkl_sidecar(path: Path) -> np.ndarray:
+    """Read the 13-column PETS ``.hkl`` file that accompanies a ``cif_pets`` file.
+
+    Columns 1-3 are h, k, l, 4-5 intensity and sigma, 6 the frame number, 8-10 the incident
+    and 11-13 the diffracted beam directions. Miller indices and frame numbers must be
+    integers.
+    """
+
     rows: list[list[float]] = []
     with path.open() as stream:
         for line_number, line in enumerate(stream, start=1):
@@ -191,6 +206,8 @@ def _validate_static_endpoint_hkl(
 
 
 def _read_jana_reflistout(path: Path) -> dict[tuple[int, int, int, int], int]:
+    """Read a Jana2020 ``eldyn_reflistout`` file as {(h, k, l, zone): category}."""
+
     categories: dict[tuple[int, int, int, int], int] = {}
     with path.open() as stream:
         for line_number, line in enumerate(stream, start=1):
@@ -291,7 +308,6 @@ def read_pets_contract(
     beam_unit = np.asarray([0.0, 0.0, -1.0])
     a_matrices: list[np.ndarray] = []
     zone_errors: list[float] = []
-    half_widths: list[float] = []
     zone_records: list[dict[str, Any]] = []
     for ordinal, row in enumerate(zone_rows, start=1):
         identifier = str(row[0])
@@ -317,7 +333,6 @@ def read_pets_contract(
             )
         a_matrices.append(frame_a)
         zone_errors.append(error)
-        half_widths.append(float(half_width))
         zone_records.append(
             {
                 "source_id": identifier,

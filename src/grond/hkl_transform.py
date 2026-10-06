@@ -1,6 +1,12 @@
+"""Parse signed HKL-axis permutations and describe their handedness.
+
+A transform such as ``l,-k,h`` reindexes integrated rows into the model setting. Its
+determinant (+1 proper, -1 improper) decides whether the model's coordinates must also be
+inverted.
+"""
+
 from __future__ import annotations
 
-from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -27,10 +33,14 @@ class HklTransformInfo:
     coordinate_inversion_required_for_proper_canonicalization: bool
 
     def to_dict(self) -> dict[str, object]:
+        """Return the fields as a plain JSON-ready dictionary."""
+
         return asdict(self)
 
 
 def _determinant_3x3(matrix: tuple[tuple[int, int, int], ...]) -> int:
+    """Return the determinant of an integer 3x3 matrix."""
+
     a, b, c = matrix
     return (
         a[0] * (b[1] * c[2] - b[2] * c[1])
@@ -40,6 +50,8 @@ def _determinant_3x3(matrix: tuple[tuple[int, int, int], ...]) -> int:
 
 
 def _canonical_from_matrix(matrix: tuple[tuple[int, int, int], ...]) -> str:
+    """Spell a signed-permutation matrix as ``h,k,l``-style text, or ``identity``."""
+
     parts: list[str] = []
     for row in matrix:
         nonzero = [(index, value) for index, value in enumerate(row) if value]
@@ -54,6 +66,8 @@ def _canonical_from_matrix(matrix: tuple[tuple[int, int, int], ...]) -> str:
 def _negate_matrix(
     matrix: tuple[tuple[int, int, int], tuple[int, int, int], tuple[int, int, int]],
 ) -> tuple[tuple[int, int, int], tuple[int, int, int], tuple[int, int, int]]:
+    """Return the matrix with every entry sign-flipped (the sign-paired transform)."""
+
     return tuple(tuple(-value for value in row) for row in matrix)  # type: ignore[return-value]
 
 
@@ -113,19 +127,9 @@ def parse_hkl_transform_info(spec: str | None) -> HklTransformInfo:
     )
 
 
-def hkl_transform_determinant(spec: str | None) -> int:
-    """Return +1 for proper and -1 for improper signed permutations."""
-
-    return parse_hkl_transform_info(spec).determinant
-
-
-def canonicalize_hkl_transform(spec: str | None) -> str:
-    """Return GROND's stable spelling for a signed permutation."""
-
-    return parse_hkl_transform_info(spec).canonical
-
-
 def _determinant_float_3x3(matrix: list[list[float]]) -> float:
+    """Return the determinant of a real 3x3 matrix."""
+
     a, b, c = matrix
     return (
         a[0] * (b[1] * c[2] - b[2] * c[1])
@@ -278,176 +282,4 @@ def absolute_configuration_claim_contract(
         "calibration_reference": calibration_reference if calibrated else "",
         "reason": reason,
         "gauge_equivalence": "(model,T) == (inverted_model,-T)",
-    }
-
-
-def validate_external_parity_calibration(
-    payload: Mapping[str, object],
-    *,
-    setup_id: str,
-    proper_transform: str,
-    transform_decision_sha256: str,
-    matched_hand_decision_sha256: str,
-    matched_selected_hand: str,
-) -> dict[str, object]:
-    """Validate the minimal post-selection external parity-calibration schema.
-
-    This boundary intentionally contains no ranking logic.  It can only bind a
-    calibrant after the transform and matched-hand decisions have been frozen
-    and hashed.
-    """
-
-    required_text = (
-        "setup_id",
-        "calibrant_dataset_id",
-        "calibrant_physical_crystal_id",
-        "calibrant_acquisition_fingerprint",
-        "setup_manifest_sha256",
-        "fixed_transform",
-        "transform_decision_sha256",
-        "matched_hand_decision_sha256",
-        "expected_known_configuration",
-        "expected_known_branch",
-        "observed_branch",
-    )
-    missing = [key for key in required_text if not str(payload.get(key) or "").strip()]
-    if missing:
-        raise ValueError(
-            "external parity calibration is missing required field(s): "
-            + ", ".join(missing)
-        )
-    if str(payload.get("kind") or "") != "grond_external_parity_calibration":
-        raise ValueError(
-            "external parity calibration kind must be 'grond_external_parity_calibration'"
-        )
-    for key in ("calibrant_acquisition_fingerprint", "setup_manifest_sha256"):
-        value = str(payload.get(key) or "").strip().lower()
-        if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
-            raise ValueError(
-                f"external parity calibration {key} must be one SHA-256 hex digest"
-            )
-    try:
-        schema_version = int(payload.get("schema_version") or 0)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("external parity calibration schema_version must be 1") from exc
-    if schema_version != 1:
-        raise ValueError("external parity calibration schema_version must be 1")
-    if str(payload["setup_id"]) != str(setup_id):
-        raise ValueError(
-            f"external parity calibration setup_id mismatch: {payload['setup_id']!r} != {setup_id!r}"
-        )
-    fixed_info = parse_hkl_transform_info(str(payload["fixed_transform"]))
-    expected_info = parse_hkl_transform_info(proper_transform)
-    try:
-        fixed_determinant = int(payload.get("fixed_transform_determinant") or 0)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(
-            "external parity calibration fixed_transform_determinant must be +1"
-        ) from exc
-    if not fixed_info.proper or fixed_determinant != 1:
-        raise ValueError(
-            "external parity calibration fixed transform and recorded determinant must both be proper (+1)"
-        )
-    if fixed_info.canonical != expected_info.canonical:
-        raise ValueError(
-            "external parity calibration fixed transform does not match the canonical endpoint transform"
-        )
-    if str(payload["transform_decision_sha256"]) != str(transform_decision_sha256):
-        raise ValueError("external parity calibration transform-decision hash mismatch")
-    if str(payload["matched_hand_decision_sha256"]) != str(
-        matched_hand_decision_sha256
-    ):
-        raise ValueError("external parity calibration matched-hand-decision hash mismatch")
-    if payload.get("reserved_from_validation") is not True:
-        raise ValueError(
-            "external parity calibrant must declare reserved_from_validation: true"
-        )
-    try:
-        source_determinant = float(payload.get("source_orientation_determinant"))
-        transformed_determinant = float(
-            payload.get("transformed_orientation_determinant")
-        )
-    except (TypeError, ValueError) as exc:
-        raise ValueError(
-            "external parity calibration must record numeric source_orientation_determinant "
-            "and transformed_orientation_determinant"
-        ) from exc
-    if (
-        source_determinant <= 0.0
-        or transformed_determinant <= 0.0
-        or payload.get("source_orientation_right_handed") is not True
-    ):
-        raise ValueError(
-            "external parity calibration source and transformed orientation must both be "
-            "explicitly right-handed with positive determinants"
-        )
-    expected_branch = str(payload["expected_known_branch"])
-    observed_branch = str(payload["observed_branch"])
-    if expected_branch not in {"original", "alternate"} or observed_branch not in {
-        "original",
-        "alternate",
-    }:
-        raise ValueError(
-            "expected_known_branch and observed_branch must be original or alternate"
-        )
-    if observed_branch != matched_selected_hand:
-        raise ValueError(
-            "external parity calibration observed branch does not match the frozen hand decision"
-        )
-    setup_parity_multiplier = 1 if observed_branch == expected_branch else -1
-    sign_mapping = payload.get("observed_sign_mapping")
-    if not isinstance(sign_mapping, Mapping):
-        raise ValueError("external parity calibration observed_sign_mapping must be an object")
-    try:
-        original_sign = int(sign_mapping["original"])
-        alternate_sign = int(sign_mapping["alternate"])
-    except (KeyError, TypeError, ValueError) as exc:
-        raise ValueError(
-            "observed_sign_mapping must contain integer original and alternate signs"
-        ) from exc
-    if original_sign != 1 or alternate_sign != -1:
-        raise ValueError(
-            "observed_sign_mapping must use the fixed coordinate convention "
-            "original=+1 and alternate=-1"
-        )
-    independence = payload.get("selection_independence")
-    if not isinstance(independence, Mapping):
-        raise ValueError("external parity calibration selection_independence must be an object")
-    required_independence = {
-        "calibration_used_for_transform_candidate_generation": False,
-        "known_configuration_used_for_transform_ranking": False,
-        "calibration_attached_after_transform_and_hand_frozen": True,
-    }
-    for key, expected in required_independence.items():
-        if independence.get(key) is not expected:
-            raise ValueError(
-                f"external parity calibration selection_independence.{key} must be {expected}"
-            )
-    return {
-        "status": "validated",
-        "schema_version": 1,
-        "setup_id": str(payload["setup_id"]),
-        "calibrant_dataset_id": str(payload["calibrant_dataset_id"]),
-        "calibrant_physical_crystal_id": str(
-            payload["calibrant_physical_crystal_id"]
-        ),
-        "calibrant_acquisition_fingerprint": str(
-            payload["calibrant_acquisition_fingerprint"]
-        ),
-        "setup_manifest_sha256": str(payload["setup_manifest_sha256"]),
-        "fixed_transform": fixed_info.canonical,
-        "fixed_transform_determinant": 1,
-        "expected_known_configuration": str(payload["expected_known_configuration"]),
-        "expected_known_branch": expected_branch,
-        "observed_branch": observed_branch,
-        "setup_parity_multiplier": setup_parity_multiplier,
-        "observed_sign_mapping": {
-            "original": original_sign,
-            "alternate": alternate_sign,
-        },
-        "reserved_from_validation": True,
-        "source_orientation_determinant": source_determinant,
-        "transformed_orientation_determinant": transformed_determinant,
-        "source_orientation_right_handed": True,
-        "selection_independence": dict(required_independence),
     }

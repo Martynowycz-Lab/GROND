@@ -10,10 +10,61 @@ from pathlib import Path
 from grond.cli_support.values import try_read_json
 from grond.io.config import DatasetSpec, PrepConfig
 from grond.paths import engine_script
-from grond.workflows.decision import safe_float, score_native_summary
+from grond.validation.heldout import DEFAULT_FREE_SALT
+from grond.workflows.crystal_parameters import crystal_arguments
+from grond.workflows.decision import nuisance_score_rows, safe_float, score_native_summary
 from grond.workflows.model_selection import best_nuisance, dataset_baseline_hkl
 from grond.workflows.native_commands import native_stage_cmd
-from grond.workflows.nuisance_policy import effective_topup_d_min, first, grid_from_nuisance, resolved_sg_window_mode
+from grond.workflows.nuisance_policy import (
+    effective_topup_d_min,
+    first,
+    grid_from_nuisance,
+    resolved_sg_window_max,
+    resolved_sg_window_mode,
+)
+from grond.workflows.scale_model_policy import scale_model_cli_arguments
+
+
+def free_wr2_loss_limit(args: argparse.Namespace) -> float:
+    """Free-row no-harm veto of the continuous-thickness promotion; off (inf) when free rows are held out."""
+
+    if nuisance_score_rows(args) == "work":
+        return float("inf")
+    return float(args.continuous_thickness_max_free_wr2_loss)
+
+
+def continuous_thickness_scale_fit_split(args: argparse.Namespace) -> str | None:
+    """Scale-fit split of the continuous polish and its full-row materialization.
+
+    The promotion compares the materialized candidate with the discrete polish, which always fits
+    scales on work rows, so both sides use work rows.  None is the legacy behaviour: the split
+    follows --production-scales (all rows) while the discrete baseline stays on work rows.
+    """
+
+    return "work" if str(getattr(args, "thickness_gate_split", "legacy")) == "matched" else None
+
+
+def _unrepresented_continuous_physics(pinned: Mapping[str, object]) -> list[str]:
+    """Pinned terms the phase-only continuous polish cannot represent (it has no such Config fields)."""
+
+    def active(value: object) -> bool:
+        """Return whether a pinned value is on (nonzero, or text other than none)."""
+        try:
+            return abs(float(value)) > 0.0
+        except (TypeError, ValueError):
+            return str(value or "none").strip().lower() not in {"", "none"}
+
+    blocked = []
+    for mode_key, value_keys in (
+        ("mosaicity_mode", ("mosaicity_sigma_deg",)),
+        ("dose_b_mode", ("dose_b_per_frame",)),
+        ("sg_jitter_mode", ("sg_jitter_sigma0", "sg_jitter_sigma_d_inv", "sg_jitter_sigma_frame")),
+        ("absorption_mode", ("absorption_mu", "absorption_frac", "absorption_mu_g2", "absorption_mu_theta2", "absorption_tds_b")),
+    ):
+        mode = str(pinned.get(mode_key, "none") or "none").strip().lower()
+        if mode != "none" and any(active(pinned.get(key, 0.0)) for key in value_keys):
+            blocked.append(mode_key)
+    return blocked
 
 
 def continuous_thickness_cmd(
@@ -30,6 +81,14 @@ def continuous_thickness_cmd(
 ) -> list[str]:
     """Build the phase-only continuous thickness-polish command."""
 
+    args = crystal_arguments(args, ds.name)
+    blocked = _unrepresented_continuous_physics(pinned)
+    if blocked:
+        raise ValueError(
+            "continuous thickness polish cannot represent the pinned "
+            + ", ".join(blocked)
+            + " terms; it would silently optimise thickness without them"
+        )
     thickness = grid_from_nuisance(pinned, "thickness_A", "1200")
     grad = grid_from_nuisance(pinned, "thickness_grad_frac", "0.4")
     frame_offset = grid_from_nuisance(pinned, "frame_offset", "0.0")
@@ -60,7 +119,7 @@ def continuous_thickness_cmd(
         "--sg-window-min",
         f"{args.sg_window_min:g}",
         "--sg-window-max",
-        f"{args.sg_window_max:g}",
+        f"{resolved_sg_window_max(args, ds):g}",
         "--sg-window-scale",
         f"{args.sg_window_scale:g}",
         "--sg-window-frame-floor",
@@ -109,8 +168,12 @@ def continuous_thickness_cmd(
         f"{args.free_fraction:g}",
         "--split-seed",
         str(args.split_seed),
+        "--split-scheme",
+        str(getattr(args, "split_scheme", "legacy")),
+        "--split-salt",
+        str(getattr(args, "split_salt", DEFAULT_FREE_SALT)),
         "--scale-fit-split",
-        "all" if args.production_scales else "work",
+        continuous_thickness_scale_fit_split(args) or ("all" if args.production_scales else "work"),
         "--selection-metric",
         args.continuous_thickness_metric,
         "--strong-rows",
@@ -126,15 +189,25 @@ def continuous_thickness_cmd(
         "--min-promotion-gain",
         str(args.continuous_thickness_min_gain),
         "--max-free-wr2-loss",
-        str(args.continuous_thickness_max_free_wr2_loss),
+        f"{free_wr2_loss_limit(args):g}",
         "--max-all-r1-loss",
         str(args.continuous_thickness_max_all_r1_loss),
     ]
+    if nuisance_score_rows(args) == "work":
+        # Held-out free rows: the engine's R1 veto reads work rows (its default 'all' is the legacy veto).
+        cmd += ["--promotion-score-rows", "work"]
+    cmd += scale_model_cli_arguments(args)
     if ds.include_nonpositive:
         cmd.append("--include-nonpositive")
     max_rows = int(getattr(args, "continuous_thickness_max_rows", 0) or 0)
     if max_rows > 0:
         cmd += ["--max-rows", str(max_rows)]
+    if ds.split_contract and str(getattr(args, "split_scheme", "legacy")) != "legacy":
+        # The legacy continuous polish keeps its historical per-dataset split;
+        # orbit-hash runs bind it to the same immutable contract as every stage.
+        cmd += ["--split-contract", str(ds.split_contract)]
+    if str(getattr(args, "exclude_orbits_json", "") or "").strip():
+        cmd += ["--exclude-orbits-json", str(Path(args.exclude_orbits_json).expanduser().resolve())]
     return cmd
 
 
@@ -291,6 +364,7 @@ def materialize_continuous_nuisance_run(
                 pinned=nuisance,
                 make_maps=False,
                 endpoint=False,
+                scale_fit_split_override=continuous_thickness_scale_fit_split(args),
             ),
             logs,
             f"{ds.name}_{stage}",
@@ -332,18 +406,28 @@ def materialize_continuous_nuisance_run(
         "absorption_tds_b",
         "dose_b_per_frame",
         "dose_b_ref_frame",
+        "mosaicity_sigma_deg",
+        "mosaicity_points",
     )
     categorical_contract_keys = (
         "thickness_model",
         "sg_jitter_mode",
         "absorption_mode",
         "dose_b_mode",
+        "mosaicity_mode",
         "matrix_convention",
+    )
+    # The cone quadrature count is physics only while a cone is active; the phase-only polish records the
+    # Nuisance default and the engine keeps its own when no cone is forwarded.
+    cone_active = bool(
+        _unrepresented_continuous_physics(
+            {key: nuisance[key] for key in ("mosaicity_mode", "mosaicity_sigma_deg") if key in nuisance}
+        )
     )
     mismatches: list[str] = []
     if not args.dry_run:
         for key in numeric_contract_keys:
-            if key not in nuisance:
+            if key not in nuisance or (key == "mosaicity_points" and not cone_active):
                 continue
             if key not in materialized_nuisance or not numeric_nuisance_contract_matches(
                 nuisance.get(key), materialized_nuisance.get(key)
@@ -369,8 +453,20 @@ def materialize_continuous_nuisance_run(
         )
     baseline_summary = try_read_json(baseline_summary_path) if not args.dry_run else {}
     candidate_summary = try_read_json(materialized_summary_path) if not args.dry_run else {}
-    baseline_score = score_native_summary(baseline_summary) if not args.dry_run else {}
-    candidate_score = score_native_summary(candidate_summary) if not args.dry_run else {}
+    baseline_split = str((baseline_summary.get("config") or {}).get("scale_fit_split", ""))
+    candidate_split = str((candidate_summary.get("config") or {}).get("scale_fit_split", ""))
+    if (
+        not args.dry_run
+        and str(getattr(args, "thickness_gate_split", "legacy")) == "matched"
+        and baseline_split != candidate_split
+    ):
+        raise RuntimeError(
+            "continuous-thickness promotion would compare different scale-fit splits "
+            f"(baseline {baseline_split or 'unrecorded'!r}, candidate {candidate_split or 'unrecorded'!r}); "
+            "free-row metrics are only comparable when both fit scales on the same rows"
+        )
+    baseline_score = score_native_summary(baseline_summary, nuisance_score_rows(args)) if not args.dry_run else {}
+    candidate_score = score_native_summary(candidate_summary, nuisance_score_rows(args)) if not args.dry_run else {}
     promotion_reasons: list[str] = []
     score_gain = float("nan")
     free_wR2_loss = float("nan")
@@ -380,6 +476,7 @@ def materialize_continuous_nuisance_run(
     if not args.dry_run:
 
         def positive_free_rows(summary: Mapping[str, object]) -> int:
+            """Return a run's free-row count (dynamical free metrics, else its row selection); 0 when unknown."""
             best = summary.get("best_native") if isinstance(summary.get("best_native"), Mapping) else {}
             metrics = best.get("metrics") if isinstance(best.get("metrics"), Mapping) else {}
             free = metrics.get("free") if isinstance(metrics.get("free"), Mapping) else {}
@@ -413,11 +510,25 @@ def materialize_continuous_nuisance_run(
             all_R1_loss = candidate_r1 - baseline_r1
             if score_gain < float(args.continuous_thickness_min_gain):
                 promotion_reasons.append("full_row_gain_below_minimum")
-            if free_wR2_loss > float(args.continuous_thickness_max_free_wr2_loss):
+            if free_wR2_loss > free_wr2_loss_limit(args):
                 promotion_reasons.append("full_row_free_wR2_loss")
             if all_R1_loss > float(args.continuous_thickness_max_all_r1_loss):
                 promotion_reasons.append("full_row_all_R1_loss")
     accepted = bool(args.dry_run or not promotion_reasons)
+    score_rows = nuisance_score_rows(args)
+    polish_scale_fit_split = continuous_thickness_scale_fit_split(args) or (
+        "all" if getattr(args, "production_scales", False) else "work"
+    )
+    # Free rows stay out of this choice only when the polish ranked on work wR2 with work-fitted scales and
+    # both the polish promotion and this full-row gate scored work rows with the free-wR2 veto off.
+    free_rows_in_selection = not (
+        score_rows == "work"
+        and not math.isfinite(free_wr2_loss_limit(args))
+        and str(getattr(args, "continuous_thickness_metric", "work_wR2")) == "work_wR2"
+        and polish_scale_fit_split == "work"
+        and baseline_split == "work"
+        and candidate_split == "work"
+    )
     selected_run = materialized if accepted else Path(baseline_run)
     selected_nuisance = dict(materialized_nuisance or nuisance) if accepted else best_nuisance(Path(baseline_run))
     if not args.dry_run and not selected_nuisance:
@@ -437,6 +548,7 @@ def materialize_continuous_nuisance_run(
             "baseline_run": str(baseline_run),
             "selected_run": str(selected_run),
             "full_row_contract": True,
+            "scale_fit_split": {"baseline": baseline_split, "candidate": candidate_split},
             "nuisance_contract_verified": not mismatches,
             "baseline_score": baseline_score,
             "candidate_score": candidate_score,
@@ -446,7 +558,10 @@ def materialize_continuous_nuisance_run(
             "baseline_free_rows": baseline_free_rows,
             "candidate_free_rows": candidate_free_rows,
             "min_promotion_gain": float(args.continuous_thickness_min_gain),
-            "max_free_wR2_loss": float(args.continuous_thickness_max_free_wr2_loss),
+            "max_free_wR2_loss": free_wr2_loss_limit(args),
+            "score_rows": score_rows,
+            "selection_rows": "work" if score_rows == "work" else "all",
+            "free_rows_in_selection": bool(free_rows_in_selection),
             "max_all_R1_loss": float(args.continuous_thickness_max_all_r1_loss),
             "promotion_reasons": promotion_reasons,
         },

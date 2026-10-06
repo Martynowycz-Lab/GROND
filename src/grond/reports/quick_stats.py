@@ -26,6 +26,7 @@ from grond.reports.hand import (
     _quick_multi_hand_diagnostic,
     _quick_multi_hand_evidence_lines,
 )
+from grond.reports.heldout import heldout_markdown_lines, heldout_report_for_run, terminal_block
 from grond.reports.nuisance import _quick_dataset_nuisance_table_lines, _quick_thickness_text
 from grond.reports.progress import _quick_progress_finish_info, _quick_progress_source_roots, _quick_progress_timings
 from grond.reports.shelxl import (
@@ -72,6 +73,37 @@ from grond.workflows.conventional_baseline import (
 )
 from grond.workflows.endpoint_selection import _recorded_native_row_tables
 from grond.workflows.finish_maps import _publication_endpoint_from_result
+
+REPORT_LAYOUTS = ("heldout-first", "legacy")
+
+
+def resolve_report_layout(args: argparse.Namespace, result: Mapping[str, object]) -> str:
+    """The run's --report-layout; ``grond finish`` reuses the layout the run recorded (legacy when none was)."""
+
+    value = getattr(args, "report_layout", None)
+    if value is None:
+        quick = result.get("quick_stats") if isinstance(result.get("quick_stats"), Mapping) else {}
+        console = quick.get("console") if isinstance(quick.get("console"), Mapping) else {}
+        value = console.get("report_layout") or "legacy"
+    if str(value) not in REPORT_LAYOUTS:
+        raise ValueError(f"unknown report layout {value!r}; expected one of {list(REPORT_LAYOUTS)}")
+    return str(value)
+
+
+def hand_decision_authority(heldout_report: Mapping[str, object] | None) -> str:
+    """The rule that decided the hand, as recorded in decisions/hand_decision_heldout_<stage>.json.
+
+    A skipped stage (centrosymmetric model, hand control off) evaluated no rule. When every recorded stage was
+    skipped the result is ``not_evaluated``, never the rule named by the skipped stage's empty contract.
+    """
+
+    stages = ((heldout_report or {}).get("hand") or {}).get("stages") or {}
+    recorded = [stages[stage] for stage in ("final", "early") if isinstance(stages.get(stage), Mapping)]
+    evaluated = [doc for doc in recorded if not str(doc.get("status", "")).startswith("skipped")]
+    for doc in evaluated:
+        if doc.get("decision_authority"):
+            return str(doc["decision_authority"])
+    return "not_evaluated" if recorded and not evaluated else "unrecorded"
 
 
 def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argparse.Namespace) -> dict:
@@ -151,6 +183,11 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
     hand_work = hand_blocks.get("work", {}) if isinstance(hand_blocks.get("work"), Mapping) else {}
     hand_free = hand_blocks.get("free", {}) if isinstance(hand_blocks.get("free"), Mapping) else {}
     file_block = _quick_endpoint_file_block(publication_endpoint, final_model)
+    all_data = result.get("final_all_data_refinement") if isinstance(result.get("final_all_data_refinement"), Mapping) else {}
+    if all_data.get("status") == "ok":
+        # --free-set off: the result is the published endpoint refined against work and free reflections
+        artifacts = all_data.get("artifacts") or {}
+        file_block.update({f"all_data_{suffix}": str(artifacts.get(suffix, "")) for suffix in ("res", "hkl", "lst")})
     bloch_diagnostics_path = _write_bloch_diagnostics_reports(
         out_dir,
         frozen_row_tables,
@@ -211,6 +248,19 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
         },
         Path(str(diagnostic_endpoint.get("endpoint_lst"))) if diagnostic_endpoint.get("endpoint_lst") else None,
     )
+    report_layout = resolve_report_layout(args, result)
+    heldout_report = heldout_report_for_run(
+        out_dir, result, frozen_row_tables, publication_shelxl=publication_shelxl, report_layout=report_layout
+    )
+    # Under the held-out orbit rule the all-row ZKP is a diagnostic; the labels follow the recorded rule.
+    authority = hand_decision_authority(heldout_report)
+    zkp_role = (
+        "diagnostic only; the held-out orbit-sign rule decides the hand"
+        if authority == "heldout_orbit_sign"
+        else "no hand decision was evaluated (the hand check was skipped)"
+        if authority == "not_evaluated" and report_layout == "heldout-first"
+        else "the all-row value controls the 3.5 inversion decision"
+    )
     endpoints = []
     resolution_block = row_metrics.get("row_resolution_scale_contracts")
     if not isinstance(resolution_block, Mapping) or not isinstance(resolution_block.get("contracts"), list):
@@ -243,6 +293,13 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
         file_block=file_block,
         input_controls=input_controls,
         final_row_table=frozen_row_console_text,
+        heldout=heldout_report,
+        all_data=all_data,
+        unmerged_endpoint=(
+            try_read_json(Path(str(result["combined"])) / "combined_summary.json").get("combined_unmerged_endpoint")
+            if result.get("combined")
+            else None
+        ),
     )
     jana_summary = _quick_final_jana_row_summary(row_metrics)
     jana_dynamic = jana_summary.get("dynamic") if isinstance(jana_summary.get("dynamic"), Mapping) else {}
@@ -262,12 +319,12 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
     file_block["jana_row_statistics"] = str(jana_md_path if jana_md_path.is_file() else table1["markdown"])
     file_block["jana_row_statistics_json"] = str(jana_json_path if jana_json_path.is_file() else row_metrics_path)
     file_block["jana_row_statistics_per_dataset"] = (
-        str(per_dataset_jana_md_path) if per_dataset_jana_md_path.is_file() else "not available for this historical run"
+        str(per_dataset_jana_md_path) if per_dataset_jana_md_path.is_file() else "not available for this run"
     )
     file_block["jana_row_statistics_per_dataset_json"] = (
         str(per_dataset_jana_json_path)
         if per_dataset_jana_json_path.is_file()
-        else "not available for this historical run"
+        else "not available for this run"
     )
     if result.get("combined") and multi_hand_zkp:
         hand_zkp_report_line = (
@@ -276,17 +333,17 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
             f"`{_quick_number((multi_hand_zkp.get('work') or {}).get('z'), 3)}` / "
             f"`{_quick_number((multi_hand_zkp.get('free') or {}).get('z'), 3)}`; "
             "combined across physical datasets and oriented positive for the final selected hand; "
-            "the all-row value controls the 3.5 inversion decision |"
+            f"{zkp_role} |"
         )
     elif result.get("combined"):
-        hand_zkp_report_line = "| final-hand adjusted ZKP, all/work/free | `not available for this historical run` |"
+        hand_zkp_report_line = "| final-hand adjusted ZKP, all/work/free | `not available for this run` |"
     else:
         hand_zkp_report_line = (
             "| final-hand adjusted ZKP, all/work/free | "
             f"`{_quick_number(hand_all.get('adjusted_zkp_positive_favors_final'), 3)}` / "
             f"`{_quick_number(hand_work.get('adjusted_zkp_positive_favors_final'), 3)}` / "
             f"`{_quick_number(hand_free.get('adjusted_zkp_positive_favors_final'), 3)}`; "
-            "oriented positive for the final selected hand; the all-row value controls the 3.5 inversion decision |"
+            f"oriented positive for the final selected hand; {zkp_role} |"
         )
 
     if result.get("combined") and multi_hand_pooled:
@@ -328,6 +385,7 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
         )
 
     lines = _start_quick_stats_markdown(
+        heldout_lines=heldout_markdown_lines(heldout_report) if report_layout == "heldout-first" else [],
         dataset_nuisance_contracts=dataset_nuisance_contracts,
         endpoint_status_text=endpoint_status_text,
         file_block=file_block,
@@ -375,6 +433,9 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
         source_control_text=source_control_text,
         transform_summary=transform_summary,
     )
+
+    if report_layout != "heldout-first":
+        lines.extend(heldout_markdown_lines(heldout_report))
 
     _append_quick_stats_resolution_rows(
         endpoints=endpoints,
@@ -429,6 +490,9 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
         table1=table1,
         transform_summary=transform_summary,
     )
+    console["report_layout"] = report_layout
+    console["hand_decision_authority"] = hand_decision_authority(heldout_report)
+    console["heldout_validation"] = terminal_block(heldout_report)
 
     _write_quick_stats_final_summary(
         bloch_diagnostics_path=bloch_diagnostics_path,
@@ -437,6 +501,7 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
         file_block=file_block,
         final_summary_path=final_summary_path,
         frozen_row_file_lines=frozen_row_file_lines,
+        heldout_report=heldout_report,
         input_shelxl=input_shelxl,
         jana_born=jana_born,
         jana_dynamic=jana_dynamic,
@@ -603,6 +668,7 @@ def _prepare_quick_stats_hand_context(
 
 def _start_quick_stats_markdown(
     *,
+    heldout_lines=(),
     dataset_nuisance_contracts,
     endpoint_status_text,
     file_block,
@@ -624,6 +690,8 @@ def _start_quick_stats_markdown(
         "",
         "This is the short run summary. Use the detailed reports for diagnostics and audit trails.",
         "",
+        # --report-layout heldout-first: the held-out validation opens the report.
+        *heldout_lines,
         "## Canonical Final Statistics",
         "",
         f"- Table 1, human-readable: `{table1['markdown']}`",
@@ -1564,6 +1632,7 @@ def _write_quick_stats_final_summary(
     result,
     selected_row,
     table1,
+    heldout_report=None,
 ):
     """Render and write the short final summary after the complete quick report exists."""
 
@@ -1610,13 +1679,28 @@ def _write_quick_stats_final_summary(
             "positive favors the selected hand; not a calibrated normal Z score |"
         )
 
+    heldout_rule = console.get("hand_decision_authority") == "heldout_orbit_sign"
+    heldout_first = console.get("report_layout") == "heldout-first"
     final_hand_zkp_line = (
         "| final-hand adjusted ZKP, all/free | "
         f"`{_quick_number(console.get('final_hand_zkp_all'), 3)}` / "
         f"`{_quick_number(console.get('final_hand_zkp_free'), 3)}`; "
-        f"oriented positive for the final selected hand; all-row threshold "
-        f"`{_quick_number(console.get('final_hand_zkp_threshold'), 3)}`; "
-        "held-out evidence warns but does not veto |"
+        f"oriented positive for the final selected hand; "
+        + (
+            "legacy all-row statistic, diagnostic only: the held-out orbit-sign rule decided the hand |"
+            if heldout_rule
+            else "no hand decision was evaluated (the hand check was skipped) |"
+            if heldout_first and console.get("hand_decision_authority") == "not_evaluated"
+            else f"all-row threshold `{_quick_number(console.get('final_hand_zkp_threshold'), 3)}`; "
+            "held-out evidence warns but does not veto |"
+        )
+    )
+    hand_summary = list((console.get("heldout_validation") or {}).get("hand_summary") or [])
+    heldout_hand_rows = (
+        [f"| held-out hand evidence | {'**' + text + '**' if text.startswith('WARNING') else text} |" for text in hand_summary]
+        or ["| held-out hand evidence | `not recorded` |"]
+        if heldout_first
+        else []
     )
 
     final_lines = [
@@ -1624,12 +1708,15 @@ def _write_quick_stats_final_summary(
         "",
         "This is the compact user-facing summary. `QUICK_STATS.md` and the JSON reports keep the full audit trail.",
         "",
+        # --report-layout heldout-first: the held-out validation opens the summary.
+        *(heldout_markdown_lines(heldout_report) if heldout_first else []),
         "## Decision",
         "",
         "| item | value |",
         "|---|---|",
         f"| final hand representation | `{console['final_hand']}` |",
-        f"| all-row preferred hand | `{console.get('final_hand_preferred', 'unavailable')}`; `{console.get('final_hand_confidence', 'unavailable')}`; conditional statistic, not calibrated sigma confidence |",
+        *heldout_hand_rows,
+        f"| {'held-out' if heldout_rule else 'all-row'} preferred hand | `{console.get('final_hand_preferred', 'unavailable')}`; `{console.get('final_hand_confidence', 'unavailable')}`; conditional statistic, not calibrated sigma confidence |",
         final_hand_zkp_line,
         final_hand_t_line,
         f"| selected HKL transform | `{console['selected_transform']}` |",
@@ -1660,6 +1747,7 @@ def _write_quick_stats_final_summary(
         f"| GROND matched Born | {'available' if jana_born_available else 'not available'} | {_table1_pair(jana_born, 'Ninput', 'Nexcluded')} | {_quick_count_pair(jana_born)} | {_table1_pair(jana_born, 'Nmerge_used', 'Nmerge_excluded')} | {_table1_pair(jana_born, 'MNobs', 'MNall')} | {_quick_percent(jana_born.get('Robs'))} | {_quick_percent(jana_born.get('Rall'))} | {_quick_percent(jana_born.get('wRall'))} | {_quick_percent(jana_born.get('MRobs'))} | {_quick_percent(jana_born.get('MRall'))} | {_quick_percent(jana_born.get('MwRall'))} |",
         f"| GROND Bloch dynamical | {'available' if jana_dynamic_available else 'not available'} | {_table1_pair(jana_dynamic, 'Ninput', 'Nexcluded')} | {_quick_count_pair(jana_dynamic)} | {_table1_pair(jana_dynamic, 'Nmerge_used', 'Nmerge_excluded')} | {_table1_pair(jana_dynamic, 'MNobs', 'MNall')} | {_quick_percent(jana_dynamic.get('Robs'))} | {_quick_percent(jana_dynamic.get('Rall'))} | {_quick_percent(jana_dynamic.get('wRall'))} | {_quick_percent(jana_dynamic.get('MRobs'))} | {_quick_percent(jana_dynamic.get('MRall'))} | {_quick_percent(jana_dynamic.get('MwRall'))} |",
         "",
+        *([] if heldout_first else heldout_markdown_lines(heldout_report)),
         "## Within-Family Deltas",
         "",
         "| comparison | dRall | d weighted R | dMRall | dMwRall |",
@@ -1679,11 +1767,15 @@ def _write_quick_stats_final_summary(
         f"- Machine-readable final Table 1: `{table1['json']}`",
         f"- Combined JANA/PETS-style row report: `{file_block['jana_row_statistics']}`",
         f"- Per-dataset JANA/PETS-style row report: `{file_block['jana_row_statistics_per_dataset']}`",
+        *([f"- Final model, refined against all reflections (--free-set off): `{file_block['all_data_res']}`",
+           f"- Its corrected HKL (work and free reflections): `{file_block['all_data_hkl']}`",
+           f"- Its SHELXL listing: `{file_block['all_data_lst']}`"] if file_block.get("all_data_res") else []),
         f"- Open this publication endpoint model: `{file_block['publication_res']}`",
         f"- Use this corrected HKL with that model: `{file_block['publication_hkl']}`",
         f"- The endpoint statistics above come from: `{file_block['publication_lst']}`",
         *frozen_row_file_lines,
         f"- Bloch matrix and row-contract diagnostics: `{bloch_diagnostics_path}`",
+        *([f"- Held-out validation: `{(heldout_report.get('artifacts') or {}).get('markdown')}`"] if heldout_report else []),
         f"- Full quick report: `{quick_path}`",
         f"- Full machine-readable run summary: `{out_dir / 'grond_summary.json'}`",
         "",

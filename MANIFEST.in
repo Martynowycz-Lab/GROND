@@ -5,12 +5,12 @@ include CONTRIBUTING.md
 include DATA_POLICY.md
 include LIMITATIONS.md
 include PROVENANCE.md
-include RELEASE_CHECKLIST.md
 include SECURITY.md
 include constraints.txt
 include environment.yml
-recursive-include docs *.md *.tex *.pdf
+recursive-include docs *.md
 recursive-include examples *.csv *.json
 recursive-include schemas *.json
 recursive-include scripts *.py
 recursive-include tests *.py
+recursive-include tests *.json

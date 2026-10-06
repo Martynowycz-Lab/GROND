@@ -1,3 +1,9 @@
+"""Automatic data-quality and scoring decisions shared by the AUTO workflows.
+
+XDS data preflight, the HKL transform candidate lists, native-stage scores and the stop rule, plus the small helpers
+(safe_float, safe_label, write_json) other workflow modules import.
+"""
+
 from __future__ import annotations
 
 import itertools
@@ -36,8 +42,6 @@ ALL_IMPROPER_SIGNED_PERMUTATIONS = _all_signed_axis_permutations(-1)
 # signed-axis universe for each determinant.
 COMMON_PROPER_TRANSFORMS = list(ALL_PROPER_SIGNED_PERMUTATIONS)
 COMMON_IMPROPER_TRANSFORMS = list(ALL_IMPROPER_SIGNED_PERMUTATIONS)
-# Backward-compatible public name, now intentionally safe for automatic use.
-COMMON_TRANSFORMS = COMMON_PROPER_TRANSFORMS
 ALL_COMMON_TRANSFORMS = [*COMMON_PROPER_TRANSFORMS, *COMMON_IMPROPER_TRANSFORMS]
 
 
@@ -370,15 +374,31 @@ def safe_float(value, fallback: float = float("inf")) -> float:
     return out if math.isfinite(out) else fallback
 
 
-def score_native_summary(summary: dict) -> dict:
-    """Extract the ranking metrics used to compare native Bloch stages."""
+def nuisance_score_rows(args) -> str:
+    """Rows behind in-sample nuisance scores; namespaces without the option keep the legacy score."""
 
+    rows = str(getattr(args, "nuisance_score_rows", "legacy") or "legacy")
+    if rows not in {"work", "legacy"}:
+        raise ValueError(f"unknown --nuisance-score-rows {rows!r}")
+    return rows
+
+
+def score_native_summary(summary: dict, rows: str = "legacy") -> dict:
+    """Extract the ranking metrics used to compare native Bloch stages.
+
+    rows="legacy" scores all rows plus a quarter of the free-row wR2 (free rows then inform selection).
+    rows="work" scores work rows only, so the free rows remain a held-out set; free wR2 is still returned
+    as a diagnostic but carries no weight.
+    """
+
+    if rows not in {"work", "legacy"}:
+        raise ValueError(f"unknown nuisance score rows {rows!r}")
     best = summary.get("best_native") or {}
     metrics = best.get("metrics") or {}
-    all_metrics = metrics.get("all") or {}
+    scored_metrics = metrics.get("work" if rows == "work" else "all") or {}
     free_metrics = metrics.get("free") or {}
-    dyn = all_metrics.get("dyn") or {}
-    born = all_metrics.get("born") or {}
+    dyn = scored_metrics.get("dyn") or {}
+    born = scored_metrics.get("born") or {}
     free_dyn = free_metrics.get("dyn") or {}
     dyn_w = safe_float(dyn.get("wR2_all"), float("inf"))
     free_w = safe_float(free_dyn.get("wR2_all"), dyn_w)
@@ -386,9 +406,11 @@ def score_native_summary(summary: dict) -> dict:
     born_r1gt = safe_float(born.get("R1_gt"), 1.0)
     born_cc = safe_float(born.get("CC"), 0.0)
     dyn_cc = safe_float(dyn.get("CC"), 0.0)
-    score = dyn_w + 0.25 * free_w + 0.10 * dyn_r1 + max(0.0, born_r1gt - 0.35) + max(0.0, 0.5 - born_cc)
+    free_weight = 0.0 if rows == "work" else 0.25
+    score = dyn_w + free_weight * free_w + 0.10 * dyn_r1 + max(0.0, born_r1gt - 0.35) + max(0.0, 0.5 - born_cc)
     return {
         "score": score,
+        "score_rows": rows,
         "dyn_wR2_all": dyn_w,
         "free_dyn_wR2_all": free_w,
         "dyn_R1_all": dyn_r1,

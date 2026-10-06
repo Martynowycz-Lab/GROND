@@ -1,4 +1,4 @@
-"""Build the public command grammar in its established display order."""
+"""Register the scout commands: scout, hand-check and thickness-scout (alias thickness)."""
 
 from __future__ import annotations
 
@@ -39,6 +39,8 @@ def register_scouts(sub: argparse._SubParsersAction) -> None:
         choices=["proper-only", "all-diagnostic"],
         default="proper-only",
     )
+    p_scout.add_argument("--transform-canonicalization", choices=["point-group", "off"], default="point-group")
+    p_scout.add_argument("--split-candidate-set", choices=["shared-closure", "per-crystal"], default="shared-closure")
     p_scout.add_argument("--transform-scout-jobs", type=int, default=0)
     p_scout.add_argument("--transform-scout-workers-per-job", type=int, default=1)
     p_scout.add_argument(

@@ -85,6 +85,13 @@ def output_provenance(out_dir: Path) -> dict[str, dict[str, object]]:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    """Replay the conventional SHELXL baseline in --out-dir and write its provenance summary.
+
+    Returns 0 when SHELXL exits 0, also for an NPD (``adp_pathology``) or otherwise unsafe model: the summary's
+    status and safe_for_feedback judge the model. Returns 2 when an input, SHELXL or its return code is missing, and
+    3 when SHELXL cannot be run or exits nonzero.
+    """
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--res", required=True, help="Conventional SHELX RES/INS model.")
     parser.add_argument("--hkl", required=True, help="Conventional HKLF reflection file.")

@@ -6,8 +6,8 @@ import math
 
 import numpy as np
 from numpy.polynomial.legendre import leggauss
-from scipy.linalg import eigh
 
+from grond.bloch.numerics import hermitian_eigh
 from grond.legacy.engine.bloch_engine import (
     Config,
     XDSBlochPort,
@@ -26,6 +26,8 @@ class ResponseRecords(list):
     """List-compatible response cache with an exact packed propagation view."""
 
     def __init__(self, records=(), *, packed: dict | None = None):
+        """Hold the records and the optional packed view (pack_response_records); packed_status starts not_built."""
+
         super().__init__(records)
         self.packed = packed
         self.packed_status: dict[str, object] = {"status": "not_built"}
@@ -229,6 +231,7 @@ def build_base_config(args) -> Config:
         matrix_convention=str(args.matrix_convention),
         free_fraction=float(args.free_fraction),
         split_seed=int(args.split_seed),
+        double_precision=bool(getattr(args, "double_precision", False)),
     )
 
 
@@ -239,21 +242,27 @@ def propagation_spec(H: np.ndarray, absorptive: bool) -> dict[str, np.ndarray]:
         spectral = XDSBlochPort._nonhermitian_spectral_target_coupling(H)
         if spectral is None:
             return {
-                "matrix": np.asarray(H, dtype=np.complex128),
+                "matrix": np.asarray(H),
                 "absorptive": True,
             }
         vals, coupling = spectral
     else:
-        vals, vecs = eigh(H)
+        vals, vecs = hermitian_eigh(H)
         coupling = vecs[1, :] * np.conj(vecs[0, :])
     return {
-        "vals": np.asarray(vals, dtype=np.complex128),
-        "coupling": np.asarray(coupling, dtype=np.complex128),
+        "vals": np.asarray(vals),
+        "coupling": np.asarray(coupling),
         "absorptive": bool(absorptive),
     }
 
 
 def dyn_from_spec(spec: dict[str, np.ndarray], thick: np.ndarray, weights: np.ndarray) -> float:
+    """Return the thickness-weighted dynamical intensity of one profile point.
+
+    The intensity is sum over t of weights |sum_j c_j exp(2 pi i lambda_j t)|^2, with t (thick) in A. A spec holding
+    a non-Hermitian matrix is propagated directly instead.
+    """
+
     if "matrix" in spec:
         per_t = XDSBlochPort._nonhermitian_target_intensities(spec["matrix"], thick)
         return float(np.sum(weights * per_t))
@@ -265,6 +274,11 @@ def dyn_from_spec(spec: dict[str, np.ndarray], thick: np.ndarray, weights: np.nd
 
 
 def born_from_spec(h10_abs2: float, delta: float, thick: np.ndarray, weights: np.ndarray) -> float:
+    """Return the thickness-weighted kinematic (Born) intensity of one profile point.
+
+    The intensity is sum over t of weights (2 pi)^2 |H10|^2 t^2 (sin x / x)^2, with x = pi delta t.
+    """
+
     arg = np.pi * float(delta) * thick
     sinc = np.ones_like(arg, dtype=float)
     nz = np.abs(arg) >= 1e-12
@@ -300,8 +314,8 @@ def pack_response_records(records: list[dict]) -> dict:
             if "matrix" in dyn_spec:
                 fallback_specs.append((flat_position, dyn_spec))
                 continue
-            values = np.asarray(dyn_spec["vals"], dtype=np.complex128)
-            coupling = np.asarray(dyn_spec["coupling"], dtype=np.complex128)
+            values = np.asarray(dyn_spec["vals"])
+            coupling = np.asarray(dyn_spec["coupling"])
             if values.ndim != 1 or coupling.ndim != 1 or values.shape != coupling.shape:
                 raise ValueError("spectral response values and coupling must be matching vectors")
             bucket = phase_buckets.setdefault(
@@ -314,8 +328,8 @@ def pack_response_records(records: list[dict]) -> dict:
     packed_buckets = {
         int(size): {
             "positions": np.asarray(bucket["positions"], dtype=int),
-            "phase_rates": np.stack(bucket["phase_rates"]).astype(np.complex128, copy=False),
-            "couplings": np.stack(bucket["couplings"]).astype(np.complex128, copy=False),
+            "phase_rates": np.stack(bucket["phase_rates"]),
+            "couplings": np.stack(bucket["couplings"]),
         }
         for size, bucket in phase_buckets.items()
     }
@@ -334,6 +348,8 @@ def pack_response_records(records: list[dict]) -> dict:
 
 
 def _reduce_packed_profiles(values: np.ndarray, packed: dict) -> np.ndarray:
+    """Sum per-profile-point values into per-row values with the packed profile weights."""
+
     weights = np.asarray(packed["profile_weights"], dtype=float)
     offsets = np.asarray(packed["profile_offsets"], dtype=int)
     reduced = np.zeros(len(offsets) - 1, dtype=float)
@@ -352,8 +368,8 @@ def predict_from_packed_response(packed: dict, n_rows: int, t0: float, grad: flo
     for basis_size in sorted(packed["phase_buckets"]):
         bucket = packed["phase_buckets"][basis_size]
         positions = np.asarray(bucket["positions"], dtype=int)
-        rates = np.asarray(bucket["phase_rates"], dtype=np.complex128)
-        couplings = np.asarray(bucket["couplings"], dtype=np.complex128)
+        rates = np.asarray(bucket["phase_rates"])
+        couplings = np.asarray(bucket["couplings"])
         for lower in range(0, len(positions), chunk_size):
             upper = min(lower + chunk_size, len(positions))
             phase = np.exp(rates[lower:upper, :, None] * thick[None, None, :])
@@ -521,6 +537,8 @@ def predict_candidates_from_response(
 
 
 def metric_value(ev: dict, metric: str) -> float:
+    """Return one Bloch metric of an evaluated trial: work_wR2, all_wR2, free_wR2, all_R1 or all_R1gt (fractions)."""
+
     if metric == "work_wR2":
         return float(ev["metrics"]["work"]["dyn"]["wR2_all"])
     if metric == "all_wR2":

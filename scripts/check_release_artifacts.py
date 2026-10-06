@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import tarfile
 import zipfile
 from pathlib import Path
@@ -18,15 +19,11 @@ GENERATED_NAME_TERMS = (
     ".pytest_cache",
 )
 
-REPOSITORY_BOUNDARY_NAME_TERMS = (
-    "exper" + "iments/",
-    "open" + "dm/",
-    "open_direct_" + "methods/",
-    "open-direct-" + "methods/",
-    "pa" + "per/",
-    "manu" + "script/",
-    "raw_" + "data/",
-    "raw-" + "data/",
+# Working directories that belong next to a checkout, never inside a release.
+LOCAL_DIRECTORY_NAME_TERMS = (
+    "experiments/",
+    "raw_data/",
+    "raw-data/",
     "/raw/data/",
     "/cache/",
     "outputs/",
@@ -56,8 +53,8 @@ RAW_DATA_SUFFIXES = (
 NON_PYTHON_PACKAGE_NAME_TERMS = (
     "package.json",
     "package-lock.json",
-    "pn" + "pm-lock.yaml",
-    "ya" + "rn.lock",
+    "pnpm-lock.yaml",
+    "yarn.lock",
     "node_modules/",
 )
 
@@ -68,50 +65,30 @@ NON_PYTHON_PACKAGE_SUFFIXES = (
     ".tsx",
 )
 
-NON_PYTHON_PACKAGE_TEXT_TERMS = (
-    "Java" + "Script",
-    "java" + "script",
-    "n" + "pm install",
-    "ya" + "rn install",
-    "pn" + "pm install",
-)
-
-PACKAGE_BOUNDARY_TERMS = (
-    "pa" + "per" + "/",
-    "manu" + "script",
-    "Chem" + "Rxiv",
-    "Bio" + "Rxiv",
-    "/Users/" + "Mike",
-    "/data/Data1/users/" + "mike",
-    "/data/Data1/" + "mike",
-    "Micro" + "ED",
-    "3D " + "ED",
-    "3D-" + "ED",
-)
-
-REPOSITORY_BOUNDARY_TEXT_TERMS = (
-    "exper" + "iments/",
-    "open" + "dm",
-    "open_direct_" + "methods",
-    "open-direct-" + "methods",
-    "open direct " + "methods",
-    "pa" + "per/",
-    "manu" + "script",
+# Text that must not ship: absolute paths into a personal home or data directory, private keys and
+# instructions for a non-Python package manager. Each pattern needs a path component or keyword after the
+# prefix, so the patterns do not match their own source.
+FORBIDDEN_TEXT_PATTERNS = (
+    ("an absolute macOS home path", re.compile(r"/Users/[\w.-]+/")),
+    ("an absolute Linux home path", re.compile(r"/home/[\w.-]+/")),
+    ("an absolute mounted-volume path", re.compile(r"/Volumes/[\w. -]+/")),
+    ("an absolute data-volume path", re.compile(r"/data/Data\d")),
+    ("a private key", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
+    ("a non-Python package manager command", re.compile(r"\b(?:npm|yarn|pnpm) install\b")),
 )
 
 REQUIRED_SDIST_SUFFIXES = (
     "ACKNOWLEDGMENTS.md",
     "DATA_POLICY.md",
-    "RELEASE_CHECKLIST.md",
     "SECURITY.md",
     "docs/DEVELOPMENT.md",
     "docs/INSTALL.md",
-    "docs/QUICKSTART.md",
+    "docs/USAGE.md",
     "docs/REFERENCES.md",
     "scripts/check_release_artifacts.py",
     "scripts/smoke_install_wheel.py",
-    "tests/package/test_package_metadata.py",
-    "tests/package/test_release_artifact_checker.py",
+    "tests/test_physics.py",
+    "tests/reference/reference_lib.py",
 )
 
 REQUIRED_WHEEL_SUFFIXES = (
@@ -134,14 +111,14 @@ def text_from_bytes(data: bytes) -> str:
 def scan_name(artifact: Path, name: str, failures: list[str]) -> None:
     """Check an archive member name."""
 
-    for term in GENERATED_NAME_TERMS + NON_PYTHON_PACKAGE_NAME_TERMS + PACKAGE_BOUNDARY_TERMS:
+    for term in GENERATED_NAME_TERMS + NON_PYTHON_PACKAGE_NAME_TERMS:
         if term in name:
             failures.append(f"{artifact.name}: {name}: name contains {term!r}")
             return
     folded_name = name.casefold()
-    for term in REPOSITORY_BOUNDARY_NAME_TERMS:
-        if term.casefold() in folded_name:
-            failures.append(f"{artifact.name}: {name}: name crosses repository boundary {term!r}")
+    for term in LOCAL_DIRECTORY_NAME_TERMS:
+        if term in folded_name:
+            failures.append(f"{artifact.name}: {name}: name is inside a local working directory {term!r}")
             return
     if folded_name.endswith(NON_PYTHON_PACKAGE_SUFFIXES):
         failures.append(f"{artifact.name}: {name}: name has a non-Python package suffix")
@@ -150,16 +127,12 @@ def scan_name(artifact: Path, name: str, failures: list[str]) -> None:
 
 
 def scan_text(artifact: Path, name: str, text: str, failures: list[str]) -> None:
-    """Check archive member text for private paths and package-boundary terms."""
+    """Check archive member text for private paths, private keys and non-Python package instructions."""
 
-    for term in NON_PYTHON_PACKAGE_TEXT_TERMS + PACKAGE_BOUNDARY_TERMS:
-        if term in text:
-            failures.append(f"{artifact.name}: {name}: text contains {term!r}")
-            return
-    folded_text = text.casefold()
-    for term in REPOSITORY_BOUNDARY_TEXT_TERMS:
-        if term.casefold() in folded_text:
-            failures.append(f"{artifact.name}: {name}: text crosses repository boundary {term!r}")
+    for label, pattern in FORBIDDEN_TEXT_PATTERNS:
+        match = pattern.search(text)
+        if match:
+            failures.append(f"{artifact.name}: {name}: text contains {label} ({match.group(0)!r})")
             return
 
 

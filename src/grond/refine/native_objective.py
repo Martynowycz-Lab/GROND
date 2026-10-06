@@ -9,6 +9,13 @@ from grond.regularize.scales import fit_frame_detector_scales, fit_group_scales,
 
 
 def choose_objective_rows(data: XDSData, indices, masks, target, sig, n_rows: int, n_bins: int, seed: int):
+    """Return a reproducible subset of ``n_rows`` work rows for the objective, stratified by resolution.
+
+    Rows are split into ``n_bins`` equal-count resolution bins, each contributing in
+    proportion, with draws weighted by sqrt(max(I/sigma, 0) + 1). All candidates are
+    returned when ``n_rows`` <= 0 or ``n_rows`` >= their number.
+    """
+
     candidates = np.asarray([i for i in indices if masks["work"][i] and target[i] > 0 and np.isfinite(target[i]) and np.isfinite(sig[i])], dtype=int)
     if n_rows <= 0 or n_rows >= len(candidates):
         return np.asarray(candidates, dtype=int)
@@ -38,6 +45,10 @@ def choose_objective_rows(data: XDSData, indices, masks, target, sig, n_rows: in
 
 
 def fit_scale_contract(data, target, sig, pred_full, cfg, fit_indices, wght_a, wght_b, detector_scale_bins: int = 0):
+    """Fit per-frame-group scales (and per-detector-bin scales when bins > 1) on the fit rows;
+    return them with the scaled prediction.
+    """
+
     groups = group_indices(data, cfg.group_width_deg, cfg.frame_offset)
     det_bins = detector_bin_indices(data, int(detector_scale_bins))
     fit_mask = np.zeros(len(target), dtype=bool)
@@ -71,6 +82,8 @@ def fit_scale_contract(data, target, sig, pred_full, cfg, fit_indices, wght_a, w
 
 
 def apply_scale_contract(pred_full, contract):
+    """Multiply a prediction by the frozen group and detector scales; rows without a valid scale become NaN."""
+
     scaled = np.full_like(pred_full, np.nan, dtype=float)
     groups = np.asarray(contract["groups"], dtype=int)
     group_scales = {int(k): float(v) for k, v in contract.get("group_scales", {}).items()}
@@ -100,6 +113,12 @@ def apply_row_resolution_to_prediction(data, pred_full, row_resolution_b: float 
 
 
 def scaled_prediction(data, target, sig, pred, cfg, fit_indices, wght_a, wght_b, detector_scale_bins: int = 0, scale_contract=None, row_resolution_b: float = 0.0):
+    """Return the full, scaled prediction and its scales for one set of predicted rows.
+
+    Returns (full, scaled, group scales, group of each row, scale count). A
+    ``scale_contract`` reuses frozen scales; otherwise they are fitted on ``fit_indices``.
+    """
+
     full = np.full(len(target), np.nan, dtype=float)
     full[pred["indices"]] = pred["dyn"]
     full, row_factor, row_meta = apply_row_resolution_to_prediction(data, full, row_resolution_b)
@@ -118,6 +137,8 @@ def scaled_prediction(data, target, sig, pred, cfg, fit_indices, wght_a, wght_b,
 
 
 def residual_vector(data, target, sig, pred_scaled, indices, wght_a, wght_b):
+    """Return sqrt(w) * (Iobs - Icalc) with SHELXL-style weights, for rows where all values are finite."""
+
     idx = np.asarray(indices, dtype=int)
     obs = target[idx]
     calc = pred_scaled[idx]
@@ -131,6 +152,8 @@ def residual_vector(data, target, sig, pred_scaled, indices, wght_a, wght_b):
 
 
 def validation_score(eval_result, metric: str) -> float:
+    """Return the metric named ``<split>_<wR2|R1>`` from an evaluation; raise for an unknown split."""
+
     split, value = metric.split("_", 1)
     if split not in eval_result["splits"]:
         raise ValueError(f"unknown validation split in metric {metric!r}")

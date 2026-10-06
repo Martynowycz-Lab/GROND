@@ -1,5 +1,0 @@
-# Name
-
-GROND stands for **Global Regularization Of Non-kinematical Diffraction**. Regularization names the row-wise correction and control of nuisance terms; the full workflow also refines a structural model through repeated Bloch calculations and conventional least-squares updates. The default inner update uses a frozen correction, so this is an alternating dynamical refinement surrogate rather than an exact dynamical least-squares derivative.
-
-The name recalls two objects in J. R. R. Tolkien's writing: Morgoth's hammer in *The Silmarillion*, “Of the Ruin of Beleriand and the Fall of Fingolfin”, and the battering ram named after it in *The Return of the King*, Book V, “The Siege of Gondor”. The README quotes a short phrase from each. The hammer phrase is reproduced with its chapter attribution in [Tolkien Gateway's account of Fingolfin](https://tolkiengateway.net/wiki/Fall_of_Fingolfin); the ram sentence appears in [this chapter commentary quoting the novel](https://gwydionmadawc.com/57-about-tolkien/000-lord-of-the-rings-chapter-by-chapter/504-the-siege-of-gondor/).

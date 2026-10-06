@@ -58,6 +58,8 @@ else:  # pragma: no cover - direct script execution
 
 
 def read_rows(path: Path) -> list[dict[str, str]]:
+    """Read a CSV file into a list of row dicts; raise if it has no rows."""
+
     with path.open() as f:
         rows = list(csv.DictReader(f))
     if not rows:
@@ -66,6 +68,8 @@ def read_rows(path: Path) -> list[dict[str, str]]:
 
 
 def write_csv(path: Path, rows: list[dict]) -> None:
+    """Write rows to a CSV file with the union of their keys, in first-seen order, as header."""
+
     if not rows:
         path.write_text("")
         return
@@ -83,6 +87,8 @@ def write_csv(path: Path, rows: list[dict]) -> None:
 
 
 def fcol(rows: list[dict[str, str]], name: str, default: float = float("nan")) -> np.ndarray:
+    """Return one column as a float array, with default for missing or unparsable cells."""
+
     vals = []
     for r in rows:
         try:
@@ -93,6 +99,8 @@ def fcol(rows: list[dict[str, str]], name: str, default: float = float("nan")) -
 
 
 def icol(rows: list[dict[str, str]], name: str, default: int = -999999) -> np.ndarray:
+    """Return one column as an int array, with default for missing or unparsable cells."""
+
     vals = []
     for r in rows:
         try:
@@ -103,10 +111,14 @@ def icol(rows: list[dict[str, str]], name: str, default: int = -999999) -> np.nd
 
 
 def scol(rows: list[dict[str, str]], name: str, default: str = "") -> np.ndarray:
+    """Return one column as a string array, with default for missing cells."""
+
     return np.asarray([str(r.get(name, default)) for r in rows])
 
 
 def parse_grid(text: str) -> list[float]:
+    """Parse a comma-separated lambda grid into floats; raise if it is empty."""
+
     vals = [float(v.strip()) for v in str(text).split(",") if v.strip()]
     if not vals:
         raise ValueError("empty lambda grid")
@@ -114,18 +126,26 @@ def parse_grid(text: str) -> list[float]:
 
 
 def pct(v: float) -> float:
+    """Return a fraction as a percentage, or NaN if it is not finite."""
+
     return 100.0 * float(v) if np.isfinite(v) else float("nan")
 
 
 def load_json(path: Path) -> dict:
+    """Read a JSON file, or return an empty dict if it does not exist."""
+
     return json.loads(path.read_text()) if path.exists() else {}
 
 
 def row_key_arrays(rows: list[dict[str, str]]) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Return the row_index, h, k and l columns as int arrays."""
+
     return icol(rows, "row_index"), icol(rows, "h"), icol(rows, "k"), icol(rows, "l")
 
 
 def assert_same_rows(base: list[dict[str, str]], other: list[dict[str, str]], label: str) -> None:
+    """Raise unless other has the same rows as base, compared by row_index, h, k and l."""
+
     if len(base) != len(other):
         raise ValueError(f"{label}: row count mismatch {len(other)} != {len(base)}")
     b = row_key_arrays(base)
@@ -136,6 +156,11 @@ def assert_same_rows(base: list[dict[str, str]], other: list[dict[str, str]], la
 
 
 def load_candidate(path: Path, require_pass: bool) -> dict:
+    """Load one two-part correction output: summary, rows, additive and log-multiplicative terms, wR2.
+
+    Raises if require_pass is set and the candidate did not pass its held-out gate.
+    """
+
     cdir = path if path.is_dir() else path.parent
     summary = load_json(cdir / "summary.json")
     if require_pass and not bool(summary.get("passes_heldout_gate", False)):
@@ -155,6 +180,12 @@ def load_candidate(path: Path, require_pass: bool) -> dict:
 
 
 def choose_correction(candidates: list[dict], combine_mode: str) -> tuple[np.ndarray, np.ndarray, dict]:
+    """Return the (additive, log-multiplicative) correction for combine_mode and a record of the choice.
+
+    best_all and best_free take the candidate with the lowest all-row or free-row wR2; ensemble averages
+    all candidates.
+    """
+
     if not candidates:
         raise ValueError("no correction candidates supplied")
     if combine_mode == "best_all":
@@ -181,6 +212,8 @@ def choose_correction(candidates: list[dict], combine_mode: str) -> tuple[np.nda
 
 
 def metric_blocks(obs, sig, predictions: dict[str, np.ndarray], split: np.ndarray, wght_a: float, wght_b: float) -> dict:
+    """Return native metrics of each prediction on the all, work and free rows."""
+
     valid = np.isfinite(obs) & np.isfinite(sig) & (sig > 0)
     masks = {
         "all": valid,
@@ -194,6 +227,11 @@ def metric_blocks(obs, sig, predictions: dict[str, np.ndarray], split: np.ndarra
 
 
 def correction_quality(obs, sig, base_pred, polished_pred, additive, log_mult, split, wght_a, wght_b) -> dict:
+    """Compare the polished and baseline predictions and return metrics, gains and the raw acceptance flag.
+
+    Raw acceptance needs a lower all-row wR2, with all-row R1 and free wR2 no more than 0.002 worse.
+    """
+
     metrics = metric_blocks(
         obs,
         sig,
@@ -230,6 +268,12 @@ def correction_quality(obs, sig, base_pred, polished_pred, additive, log_mult, s
 
 
 def endpoint_arrays(rows: list[dict[str, str]], additive, log_mult, lambda_q: float):
+    """Return h, k, l, corrected I and sigma, validity, q, cleaned Iobs and the divisor for each row.
+
+    I_corr = (Iobs - additive) / (exp(log_mult) * scale * q**lambda_q), with q = dyn_raw/born_raw clipped
+    to [0.05, 20] and scale = dyn_scaled/dyn_raw.
+    """
+
     h = icol(rows, "h")
     k = icol(rows, "k")
     l = icol(rows, "l")
@@ -259,7 +303,14 @@ def write_endpoint(
     rescale: str,
     make_maps: bool,
     shelxl_iterations: int,
+    keep_damp: bool = False,
 ) -> dict:
+    """Write one corrected endpoint, run SHELXL and optional maps, and return its manifest.
+
+    Writes merged and unmerged HKL, the INS and manifest.json to out_dir. With rescale="median-iobs" the
+    corrected intensities are scaled so their median matches the median Iobs.
+    """
+
     out_dir.mkdir(parents=True, exist_ok=True)
     h, k, l, i_corr, sig_corr, valid, q, clean_obs, denom = endpoint_arrays(rows, additive, log_mult, lambda_q)
     factor = 1.0
@@ -278,8 +329,10 @@ def write_endpoint(
     )
     write_hkl(out_dir / "dyn_observation_polished_unmerged.hkl", rows_unmerged, hkl_format)
     write_hkl(out_dir / "dyn_observation_polished.hkl", rows_merged, hkl_format)
-    write_no_exti_ins(res_path, out_dir / "dyn_observation_polished.ins", hkl_name="dyn_observation_polished.hkl")
-    shelxl = run_shelxl(out_dir, "dyn_observation_polished", iterations=shelxl_iterations)
+    write_no_exti_ins(
+        res_path, out_dir / "dyn_observation_polished.ins", hkl_name="dyn_observation_polished.hkl", keep_damp=keep_damp
+    )
+    shelxl = run_shelxl(out_dir, "dyn_observation_polished", iterations=shelxl_iterations, keep_damp=keep_damp)
     maps = run_maps(out_dir, "dyn_observation_polished") if make_maps else {}
     endpoint_res = out_dir / "dyn_observation_polished.res"
     endpoint_hkl = out_dir / "dyn_observation_polished.hkl"
@@ -323,6 +376,8 @@ def write_endpoint(
 
 
 def copy_promoted_endpoint(best: dict, out_dir: Path) -> dict:
+    """Copy the best endpoint to out_dir/promoted_endpoint, replacing any old copy; return its updated record."""
+
     src_dir = Path(best["endpoint_dir"])
     promoted = out_dir / "promoted_endpoint"
     if promoted.exists():
@@ -336,6 +391,8 @@ def copy_promoted_endpoint(best: dict, out_dir: Path) -> dict:
 
 
 def report_lines(summary: dict) -> list[str]:
+    """Return the REPORT.md lines: row-space metrics, control and polished SHELXL endpoints, and the outcome."""
+
     raw = summary["raw_row_quality"]
     base = raw["metrics"]["baseline_dyn"]["all"]
     pol = raw["metrics"]["polished_observation"]["all"]
@@ -422,6 +479,13 @@ def report_lines(summary: dict) -> list[str]:
 
 
 def main() -> None:
+    """Combine held-out-passing observation corrections and promote them to a corrected endpoint.
+
+    Writes control and polished endpoints, summary.json, REPORT.md and promoted_observation_rows.csv to
+    --out-dir. The best polished endpoint is promoted only if the raw-row gain passes and its SHELXL R1 and
+    wR2 are not worse than the best control's.
+    """
+
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--row-table", required=True)
     ap.add_argument("--hkl", default=str(DEFAULT_HKL), help="Recorded for provenance; row-table HKLs are used for endpoint writing.")
@@ -439,6 +503,7 @@ def main() -> None:
     ap.add_argument("--make-maps", action="store_true")
     ap.add_argument("--shelxl", default=DEFAULT_SHELXL)
     ap.add_argument("--shelxl-iterations", type=int, default=5)
+    ap.add_argument("--keep-damp", action="store_true", help="Legacy: carry an active DAMP instruction into the written INS/RES. Default strips it.")
     ap.add_argument("--require-passed-candidates", action="store_true", default=True)
     ap.add_argument("--no-require-passed-candidates", dest="require_passed_candidates", action="store_false")
     ap.add_argument("--min-raw-wR2-gain", type=float, default=0.002)
@@ -471,11 +536,11 @@ def main() -> None:
     zeros = np.zeros(len(rows), dtype=float)
     for lam in parse_grid(args.lambda_grid):
         control_dir = out_dir / f"control_endpoint_lam_{str(lam).replace('.', 'p')}"
-        control = write_endpoint(control_dir, rows, zeros, zeros, Path(args.res), lam, args.hkl_float_format, args.rescale, False, args.shelxl_iterations)
+        control = write_endpoint(control_dir, rows, zeros, zeros, Path(args.res), lam, args.hkl_float_format, args.rescale, False, args.shelxl_iterations, args.keep_damp)
         control["endpoint_dir"] = str(control_dir.resolve())
         control_results.append(control)
         ep_dir = out_dir / f"endpoint_lam_{str(lam).replace('.', 'p')}"
-        manifest = write_endpoint(ep_dir, rows, additive, log_mult, Path(args.res), lam, args.hkl_float_format, args.rescale, args.make_maps, args.shelxl_iterations)
+        manifest = write_endpoint(ep_dir, rows, additive, log_mult, Path(args.res), lam, args.hkl_float_format, args.rescale, args.make_maps, args.shelxl_iterations, args.keep_damp)
         manifest["endpoint_dir"] = str(ep_dir.resolve())
         endpoint_results.append(manifest)
     fail_if_shelxl_became_unavailable(

@@ -105,8 +105,6 @@ def _installed_features() -> dict[str, bool]:
     absolute_structure = _source_text("legacy/engine/absolute_structure_diagnostic.py")
     transforms = _source_text("hkl_transform.py")
     transform_selection = _source_text("workflows/transform_selection.py")
-    shelx_hkl = _source_text("legacy/engine/shelx_hkl.py")
-    parity_options = _source_text("cli_options/parity_commands.py")
     return {
         "shelxl_feedback_res_guard": (
             "def shelx_res_health" in health
@@ -130,15 +128,8 @@ def _installed_features() -> dict[str, bool]:
         ),
         "proper_hand_parity_contract": (
             "def parse_hkl_transform_info" in transforms
-            and "def validate_external_parity_calibration" in transforms
             and "matched_born_work_only_hand_invariant_v1" in transform_selection
             and "metadata_candidate_elimination_used" in transform_selection
-        ),
-        "canonical_hand_hklf4_gauge_repair": (
-            "def write_sign_paired_hklf4" in shelx_hkl and '"canonicalize-hand"' in parity_options
-        ),
-        "separate_parity_calibration_commands": (
-            '"create-parity-calibration"' in parity_options and '"apply-parity-calibration"' in parity_options
         ),
     }
 
@@ -169,10 +160,6 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         "absolute_structure_uses_pandas": "import pandas" in absolute_structure_text
         or "pd.read_csv" in absolute_structure_text,
         "required_features": required_features,
-        "known_limitations": {
-            "current_final_elastic_parity_calibration_adapter": False,
-            "parity_calibration_commands_accept": "legacy branch-symmetric/common-sigma hand decisions only",
-        },
         "install_status": "current_required_features_present"
         if all(required_features.values())
         else "stale_or_incomplete_install",

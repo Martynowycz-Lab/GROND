@@ -41,13 +41,13 @@ def _choose_intensity(
 
 
 def _bool_array(arrays: dict[str, np.ndarray], name: str, n: int, default: bool = False) -> np.ndarray:
-    """Return a boolean DIALS flag array, tolerating small synthetic test arrays."""
+    """Read a DIALS flag column; only an absent optional column may use its default."""
 
     if name not in arrays:
         return np.full(n, default, dtype=bool)
     arr = np.asarray(arrays[name], dtype=bool)
-    if len(arr) != n:
-        return np.full(n, default, dtype=bool)
+    if arr.shape != (n,):
+        raise ValueError(f"DIALS {name} flag must have one value per reflection")
     return arr
 
 
@@ -56,7 +56,7 @@ def _dials_row_selection_keep(
     n: int,
     row_selection: str,
 ) -> np.ndarray:
-    """Select integrated rows or the subset accepted by DIALS scaling.
+    """Select summation-integrated rows, optionally restricted to accepted scaling rows.
 
     A ``scaled.refl`` table normally retains the original summation columns as
     well as the ``scaled`` flag.  ``row_selection='scaled'`` therefore permits
@@ -68,10 +68,10 @@ def _dials_row_selection_keep(
     selection = str(row_selection or "integrated").strip().lower()
     if selection not in {"integrated", "scaled"}:
         raise ValueError(f"unknown DIALS row selection {row_selection!r}")
-    keep = np.ones(n, dtype=bool)
+    if "integrated_sum" not in arrays:
+        raise ValueError("DIALS row selection requires the integrated_sum flag")
     integrated_sum = _bool_array(arrays, "integrated_sum", n, default=False)
-    if np.any(integrated_sum):
-        keep &= integrated_sum
+    keep = integrated_sum.copy()
     if selection == "scaled":
         scaled = _bool_array(arrays, "scaled", n, default=False)
         if not np.any(scaled):

@@ -7,13 +7,18 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from grond.workflows.dataset_policy import build_dataset_policy, policy_by_name, write_policy_artifacts
-from grond.workflows.decision import safe_float
+from grond.workflows.decision import nuisance_score_rows, safe_float
 
 
 def dataset_policy_kwargs(args: argparse.Namespace) -> dict:
-    """Collect CLI thresholds for multi-dataset inclusion policy decisions."""
+    """Collect CLI thresholds for multi-dataset inclusion policy decisions.
+
+    Under --nuisance-score-rows work the quality metrics read work rows only (free rows stay held out);
+    legacy reads all rows.
+    """
 
     return {
+        "selection_rows": "work" if nuisance_score_rows(args) == "work" else "all",
         "min_rows": args.dataset_policy_min_rows,
         "min_weight": args.dataset_policy_min_weight,
         "primary_min_quality": args.dataset_policy_primary_min_quality,

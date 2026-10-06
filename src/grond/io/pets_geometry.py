@@ -10,6 +10,8 @@ import numpy as np
 
 
 def _number(text: str, *, label: str) -> float:
+    """Parse a finite PETS number, dropping a trailing esd in parentheses such as ``1.234(5)``."""
+
     value_text = str(text).strip()
     if "(" in value_text:
         value_text = value_text.split("(", 1)[0]
@@ -23,6 +25,8 @@ def _number(text: str, *, label: str) -> float:
 
 
 def _required_pair(block: gemmi.cif.Block, tag: str) -> str:
+    """Return a required CIF value as text; raise ValueError when it is missing, ``.`` or ``?``."""
+
     value = block.find_value(tag)
     if value is None or str(value).strip() in {"", ".", "?"}:
         raise ValueError(f"PETS file is missing required field {tag}")
@@ -30,6 +34,8 @@ def _required_pair(block: gemmi.cif.Block, tag: str) -> str:
 
 
 def _rotation(axis: tuple[float, float, float], angle_deg: float) -> np.ndarray:
+    """Return the rotation matrix about ``axis`` by ``angle_deg`` degrees (Rodrigues formula)."""
+
     axis_array = np.asarray(axis, dtype=float)
     axis_array /= np.linalg.norm(axis_array)
     x, y, z = axis_array
@@ -40,6 +46,8 @@ def _rotation(axis: tuple[float, float, float], angle_deg: float) -> np.ndarray:
 
 
 def _cell_matrix(parameters: np.ndarray) -> np.ndarray:
+    """Return the real-space cell vectors a, b, c (A) as rows, with a along x and b in the xy plane."""
+
     a, b, c, alpha_deg, beta_deg, gamma_deg = np.asarray(parameters, dtype=float)
     alpha, beta, gamma = np.radians([alpha_deg, beta_deg, gamma_deg])
     ca, cb, cg = np.cos([alpha, beta, gamma])
@@ -129,6 +137,8 @@ def _validate_ub_metric(ub: np.ndarray, parameters: np.ndarray) -> None:
 
 
 def _axis_position(block: gemmi.cif.Block) -> float:
+    """Return the rotation (tilt) axis position angle in degrees from the PETS measurement text; raise if absent."""
+
     for tag in ("_diffrn_measurement_details", "_diffrn_reflns_reduction_process"):
         text = block.find_value(tag)
         if text is None:

@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import argparse
 
+from .arguments_native import add_scale_model_arguments
+
 
 def build_parser(description: str, *, default_hkl, default_res, max_support_sg, native_regularizer, physical_grad_max) -> argparse.ArgumentParser:
     """Build the parser without reading data or starting a calculation."""
@@ -44,9 +46,18 @@ def build_parser(description: str, *, default_hkl, default_res, max_support_sg, 
     ap.add_argument("--sigma-c-peak", type=float, default=0.15)
     ap.add_argument("--row-resolution-b", type=float, default=0.0)
     ap.add_argument("--scale-smoothness", type=float, default=0.0)
+    add_scale_model_arguments(ap, default="per-frame")
     ap.add_argument("--matrix-convention", default="j_minus_i")
     ap.add_argument("--free-fraction", type=float, default=0.1)
     ap.add_argument("--split-seed", type=int, default=42)
+    from grond.regularize.arguments_native import add_split_scheme_args
+
+    add_split_scheme_args(ap)
+    ap.add_argument(
+        "--split-contract",
+        default="",
+        help="Immutable candidate-union raw-row work/free split shared with every native stage.",
+    )
     ap.add_argument("--scale-fit-split", choices=["all", "work", "free"], default="work")
     ap.add_argument(
         "--selection-metric",
@@ -66,5 +77,14 @@ def build_parser(description: str, *, default_hkl, default_res, max_support_sg, 
     ap.add_argument("--min-promotion-gain", type=float, default=5e-5, help="Minimum selected-objective gain required before replacing the grid value.")
     ap.add_argument("--max-free-wr2-loss", type=float, default=0.002, help="Maximum tolerated free-row wR2 loss for a promoted continuous thickness.")
     ap.add_argument("--max-all-r1-loss", type=float, default=0.001, help="Maximum tolerated all-row R1 loss for a promoted continuous thickness.")
+    ap.add_argument(
+        "--promotion-score-rows",
+        choices=["all", "work"],
+        default="all",
+        help=(
+            "Rows behind the promotion R1 veto. all (default): all-row R1. work: work-row "
+            "R1; with --max-free-wr2-loss inf the promotion then reads no free row."
+        ),
+    )
     ap.add_argument("--progress-every", type=int, default=100)
     return ap

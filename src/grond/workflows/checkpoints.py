@@ -26,6 +26,8 @@ def _checkpoint_path(raw: object, *, base: Path | None = None) -> str:
 
 
 def _summary_section(summary: Mapping[str, object], key: str) -> Mapping[str, object]:
+    """Return ``summary[key]`` when it is a mapping, else an empty dict."""
+
     value = summary.get(key)
     return value if isinstance(value, Mapping) else {}
 

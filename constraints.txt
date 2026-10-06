@@ -1,8 +1,7 @@
 # Known-good broad constraints for GROND development.
 # Keep these loose enough for normal scientific Python wheels.
 numpy>=1.26,<2.6
-scipy>=1.11,<1.18
+scipy>=1.11,<1.19
 gemmi>=0.6,<0.8
-pandas>=2.0,<3
 pytest>=8,<9
 ruff>=0.8

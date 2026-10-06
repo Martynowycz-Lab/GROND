@@ -18,6 +18,8 @@ from types import SimpleNamespace
 
 
 def _bool_flag(table, name):
+    """Return a DIALS reflection flag as a flex.bool, all False when DIALS has no such flag."""
+
     from dials.array_family import flex
 
     flag = getattr(table.flags, name, None)
@@ -110,6 +112,8 @@ def _static_cell_projection(experiment, *, policy, max_length_fraction, max_angl
 
 
 def _pets_params(prefix, *, intensity, partiality, excitation_error, n_merged, step):
+    """Build the phil-like parameter object that DIALS' PETS exporter expects."""
+
     return SimpleNamespace(
         intensity=[str(intensity)],
         pets=SimpleNamespace(
@@ -181,7 +185,16 @@ def _pets_writer(experiments, tables, params, *, frame_ownership):
         raise ValueError(f"unknown PETS frame ownership mode {frame_ownership!r}")
 
     class UniqueFramePETSOutput(PETSOutput):
+        """PETS writer that keeps each source row only in the virtual frame where it is nearest to excitation."""
+
         def _set_virtual_frames(self):
+            """Build the stock virtual frames, then drop each row from all but its nearest-excitation frame.
+
+            The excitation error of a row in a frame is 1/lambda - |UB h + s0|; ties go to
+            the lower frame index. The counts before and after are kept in
+            ``grond_frame_ownership_summary``.
+            """
+
             super()._set_virtual_frames()
             if "grond.source_row_id" not in self.reflections:
                 raise ValueError("nearest-excitation frame ownership requires source-row IDs")
@@ -230,6 +243,8 @@ def _pets_writer(experiments, tables, params, *, frame_ownership):
 
 
 def _space_group_metadata(crystal):
+    """Return the source crystal's space-group symbol and number."""
+
     space_group = crystal.get_space_group()
     return {
         "source_space_group_symbol": str(space_group.info()),
@@ -238,6 +253,8 @@ def _space_group_metadata(crystal):
 
 
 def _severe_bad_flags(table):
+    """Return a flex.bool that is True for rows with any severe DIALS integration flag."""
+
     from dials.array_family import flex
 
     bad = flex.bool(len(table), False)
@@ -257,6 +274,13 @@ def _severe_bad_flags(table):
 
 
 def _export_dials(config):
+    """Write one PETS ``.cif_pets`` file per selected DIALS experiment and return a summary.
+
+    Rows are kept when integrated (or accepted by scaling, for ``row_selection='scaled'``),
+    with a finite intensity and a positive variance, and, unless ``keep_bad_flags``, without
+    severe flags.
+    """
+
     from dials.array_family import flex
     from dxtbx.model.experiment_list import ExperimentList, ExperimentListFactory
 
@@ -377,6 +401,12 @@ def _export_dials(config):
 
 
 def _read_xds_profile_fitting(xds_inp, integrate_hkl):
+    """Return whether XDS used profile fitting, from XDS.INP and the INTEGRATE.HKL header.
+
+    Returns None when neither declares PROFILE_FITTING, and raises ValueError when they
+    disagree.
+    """
+
     pattern = re.compile(r"(?:^|\s)PROFILE_FITTING\s*=\s*([^\s!]+)", re.IGNORECASE)
     values = []
     for path in (Path(xds_inp), Path(integrate_hkl)):
@@ -432,6 +462,12 @@ def _xds_geometry_experiment(xds_dir):
 
 
 def _derive_xds_reindex(experiment, handle):
+    """Return the integer matrix that maps XDS Miller indices to the DIALS setting, and its rounding error.
+
+    The matrix is found by aligning the XDS and DIALS laboratory frames (beam and rotation
+    axis), and must be unimodular (determinant +/-1) with a rounding error of at most 0.10.
+    """
+
     import numpy as np
     from rstbx.cftbx.coordinate_frame_helpers import align_reference_frame
     from scitbx import matrix
@@ -459,6 +495,8 @@ def _derive_xds_reindex(experiment, handle):
 
 
 def _read_xds_ascii_rows(path):
+    """Return the first 12 numbers of each reflection line of an XDS_ASCII.HKL file."""
+
     rows = []
     for line in Path(path).read_text(errors="replace").splitlines():
         if not line.strip() or line.startswith("!"):
@@ -528,6 +566,14 @@ def _xds_source_row_contract_mask(row_count, source_row_ids):
 
 
 def _export_xds(config):
+    """Write a PETS ``.cif_pets`` file from XDS INTEGRATE.HKL and return a summary.
+
+    Requires PROFILE_FITTING=FALSE unless ``allow_profile_fitted_xds``. Intensities are put
+    back on the recorded scale, I_recorded = IOBS * (PEAK/100) / RLP, and sigma is
+    transformed the same way. Rows can be limited to those CORRECT accepted (XDS_ASCII.HKL)
+    and to a row-contract selection.
+    """
+
     import numpy as np
     from dials.array_family import flex
     from dxtbx.model.experiment_list import ExperimentList
@@ -679,6 +725,8 @@ def _export_xds(config):
 
 
 def main():
+    """Run the DIALS or XDS export described by ``--config`` and write its JSON summary to ``--result``."""
+
     from dials.util.version import dials_version
 
     parser = argparse.ArgumentParser()

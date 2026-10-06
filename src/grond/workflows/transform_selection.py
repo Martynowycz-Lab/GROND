@@ -39,6 +39,27 @@ from grond.workflows.nuisance_policy import transform_scout_nuisance
 from grond.workflows.parity_evidence import replay_transform_work_born
 from grond.workflows.transform_metadata import metadata_prefilter_transforms
 
+TRANSFORM_SCOUT_SG_WINDOW = 0.004  # 1/A; the window the transform ranking was validated with
+TRANSFORM_SCOUT_WINDOWS = ("fixed-0.004", "inherit")
+
+
+def transform_scout_window_overrides(args: argparse.Namespace) -> dict:
+    """native_stage_cmd window overrides of a transform scout for --transform-scout-window.
+
+    fixed-0.004 keeps the fixed window the transform ranking was validated with; the AUTO physics window
+    (0.010 or the per-row DIALS bbox) is for the refinement stages, not a Q3/Q10 Born scout.  inherit
+    passes no override, so the scouts use --sg-window and the resolved mode.
+    """
+
+    policy = str(getattr(args, "transform_scout_window", "fixed-0.004") or "fixed-0.004")
+    if policy not in TRANSFORM_SCOUT_WINDOWS:
+        raise ValueError(
+            f"unknown --transform-scout-window {policy!r}; use one of {', '.join(TRANSFORM_SCOUT_WINDOWS)}"
+        )
+    if policy == "inherit":
+        return {"sg_window_override": None, "sg_window_mode_override": None}
+    return {"sg_window_override": TRANSFORM_SCOUT_SG_WINDOW, "sg_window_mode_override": "fixed"}
+
 
 def dataset_with_transform(ds: DatasetSpec, transform: str) -> DatasetSpec:
     """Return a dataset copy using a different HKL transform."""
@@ -132,14 +153,204 @@ def _transform_candidate_generation_contract(
     }
 
 
+def split_candidate_set_policy(args: argparse.Namespace) -> str:
+    """--split-candidate-set: shared-closure (default) or per-crystal."""
+
+    from grond.bloch.splits import SPLIT_CANDIDATE_SETS
+
+    policy = str(getattr(args, "split_candidate_set", "shared-closure") or "shared-closure")
+    if policy not in SPLIT_CANDIDATE_SETS:
+        raise ValueError(f"unknown --split-candidate-set {policy!r}; use one of {', '.join(SPLIT_CANDIDATE_SETS)}")
+    return policy
+
+
+def transform_canonicalization_policy(args: argparse.Namespace) -> str:
+    """--transform-canonicalization: point-group (default) or off (scout every retained candidate)."""
+
+    from grond.bloch.splits import TRANSFORM_CANONICALIZATIONS
+
+    policy = str(getattr(args, "transform_canonicalization", "point-group") or "point-group")
+    if policy not in TRANSFORM_CANONICALIZATIONS:
+        raise ValueError(
+            f"unknown --transform-canonicalization {policy!r}; use one of {', '.join(TRANSFORM_CANONICALIZATIONS)}"
+        )
+    return policy
+
+
+def dataset_transform_candidates(
+    prep: PrepConfig, ds: DatasetSpec, args: argparse.Namespace, *, scouted: bool
+) -> dict[str, object]:
+    """The cell-metric-filtered transform candidates of one dataset (cells only: no intensities, atoms or hand).
+
+    ``scouted`` is False when AUTO keeps the declared transform (--trust-hkl-transform, --no-auto-decide): no split
+    contract is written and the native stages key the declared transform's model setting.
+    """
+
+    hkl_path = str(Path(ds.hkl).expanduser().resolve())
+    declared = parse_hkl_transform_info(ds.hkl_transform or "identity").canonical
+    if not scouted:
+        source = "trusted" if getattr(args, "trust_hkl_transform", False) else "declared"
+        return {"source": source, "hkl": hkl_path, "hkl_transform": declared, "generated": [declared],
+                "retained": [declared], "metric_filter": {}}
+    from grond.legacy.engine.bloch_engine import metric_filter_signed_axis_transforms
+
+    if not Path(hkl_path).is_file():
+        raise ValueError(f"transform candidates: the HKL file of dataset {ds.name!r} does not exist: {ds.hkl}")
+    generated = expand_transform_candidates(
+        ds.hkl_transform,
+        args.transform_candidates,
+        parity_policy=str(getattr(args, "transform_parity_policy", "proper-only")),
+    )
+    retained, metric_filter = metric_filter_signed_axis_transforms(
+        Path(ds.hkl),
+        Path(prep.structure),
+        generated,
+        relative_tolerance=float(getattr(args, "transform_metric_tolerance", 0.02)),
+        dataset_label=ds.name,
+    )
+    return {"source": "scout", "hkl": hkl_path, "hkl_transform": declared, "generated": list(generated),
+            "retained": list(retained), "metric_filter": metric_filter}
+
+
+def _recorded_contract_candidate_sets(datasets: list[DatasetSpec]) -> dict[str, dict]:
+    """The shared-closure ``candidate_set`` blocks of the split contracts the datasets already carry."""
+
+    from grond.bloch.splits import SHARED_CANDIDATE_POLICY
+
+    out: dict[str, dict] = {}
+    for ds in datasets:
+        text = str(ds.split_contract or "").strip()
+        if not text:
+            continue
+        path = Path(text).expanduser()
+        if not path.is_file():
+            raise ValueError(f"split candidates: the split contract of dataset {ds.name!r} does not exist: {text}")
+        block = read_json(path).get("candidate_set")
+        if isinstance(block, Mapping) and block.get("policy") == SHARED_CANDIDATE_POLICY:
+            out[ds.name] = dict(block)
+    return out
+
+
+METRIC_REJECTION_MARKER = "rejected every transform candidate"
+
+
+def exclude_metric_incompatible_datasets(
+    prep: PrepConfig, args: argparse.Namespace, root: Path
+) -> tuple[PrepConfig, dict[str, object]]:
+    """Drop crystals whose cell no transform candidate reconciles with the model (multi-crystal runs).
+
+    One mis-indexed or badly calibrated crystal must not stop a multi-crystal run: it is excluded before any scout
+    or split contract, loudly and with its recorded reason, and the run fails only when no crystal is left.
+    With --metric-incompatible-datasets fail the first rejection stops the run instead.
+    """
+
+    from dataclasses import replace as dc_replace
+
+    policy = str(getattr(args, "metric_incompatible_datasets", "fail") or "fail")
+    if policy not in {"exclude", "fail"}:
+        raise ValueError(f"unknown --metric-incompatible-datasets {policy!r}")
+    kept, excluded = [], {}
+    for ds in prep.datasets:
+        try:
+            dataset_transform_candidates(prep, ds, args, scouted=True)
+        except ValueError as exc:
+            if policy == "fail" or METRIC_REJECTION_MARKER not in str(exc):
+                raise
+            excluded[ds.name] = {"hkl": str(ds.hkl), "reason": str(exc)}
+            print(f"WARN dataset {ds.name} excluded: {exc}", flush=True)
+            continue
+        kept.append(ds)
+    record = {"policy": policy, "excluded": excluded, "kept": [ds.name for ds in kept]}
+    if excluded:
+        write_json(Path(root) / "decisions" / "metric_excluded_datasets.json", record)
+    if not kept:
+        raise RuntimeError("every dataset was rejected by the unit-cell metric filter; nothing is left to refine")
+    return (dc_replace(prep, datasets=kept) if excluded else prep), record
+
+
+def exclude_metric_incompatible_datasets_at_start(
+    prep: PrepConfig, args: argparse.Namespace, root: Path
+) -> PrepConfig:
+    """The start-of-run exclusion: before the split is announced, the conventional control or any scout.
+
+    Every later stage (split plan, leak-free start, run_multi or, when one crystal is left, run_single) then sees
+    the same crystals.  Trusted transforms and single-crystal runs are not filtered here and fail loudly.
+    """
+
+    if len(prep.datasets) < 2 or bool(getattr(args, "trust_hkl_transform", False)):
+        return prep
+    prep, _record = exclude_metric_incompatible_datasets(prep, args, root)
+    return prep
+
+
+def plan_split_candidates(
+    prep: PrepConfig,
+    args: argparse.Namespace,
+    datasets: list[DatasetSpec] | None = None,
+    *,
+    scouted: bool | None = None,
+) -> dict[str, object]:
+    """One split candidate set per crystal, fixed from cell metrics before any scout reads an intensity.
+
+    Under --split-candidate-set shared-closure every crystal's contract is built from the shared closure of all
+    crystals' retained candidates (grond.bloch.splits.shared_candidate_closure), so a Laue orbit is free or excluded in
+    every crystal or in none, whichever transform each crystal's scout later selects.  Each crystal still scouts only
+    its own retained candidates.  Under per-crystal each contract uses that crystal's own retained candidates.
+
+    A declared or trusted dataset that already carries a shared-closure split contract (GROND scout's
+    scouted_prep.json) keeps that contract in every native stage, so the plan is the closure the contracts recorded:
+    it is recomputed from their retained candidates and must reproduce every contract's shared-group hash.
+    """
+
+    from grond.bloch.model import parse_model
+    from grond.bloch.splits import per_crystal_candidate_sets, shared_candidate_closure
+
+    datasets = list(prep.datasets if datasets is None else datasets)
+    if scouted is None:
+        scouted = bool(getattr(args, "auto_decide", True)) and not bool(getattr(args, "trust_hkl_transform", False))
+    candidates = {ds.name: dataset_transform_candidates(prep, ds, args, scouted=scouted) for ds in datasets}
+    retained = {name: list(entry["retained"]) for name, entry in candidates.items()}
+    policy = split_candidate_set_policy(args)
+    recorded = {} if scouted or policy == "per-crystal" else _recorded_contract_candidate_sets(datasets)
+    for name, block in recorded.items():
+        retained[name] = [str(value) for value in block.get("dataset_retained_candidates") or []]
+    if policy == "per-crystal":
+        union = per_crystal_candidate_sets(retained)
+    else:
+        union = shared_candidate_closure(retained, parse_model(Path(prep.structure)).get("symmetry_ops"))
+    if recorded:
+        mismatched = sorted(
+            name
+            for name, block in recorded.items()
+            if str(block.get("shared_group_sha256") or "") != str(union["shared_group_sha256"])
+        )
+        if mismatched:
+            raise ValueError(
+                f"the split contracts of dataset(s) {', '.join(mismatched)} were built from a shared candidate closure "
+                "that the run's datasets do not reproduce (another scout, another model or a dataset without its "
+                "contract); re-scout every dataset (no --trust-hkl-transform) or give every dataset the contract of "
+                "the same scout"
+            )
+        union["closure_from_split_contracts"] = sorted(recorded)
+    for name, entry in candidates.items():
+        union["datasets"][name].update({"hkl": entry["hkl"], "candidate_source": entry["source"]})
+    return {"split_candidate_set": policy, "datasets": candidates, "union": union}
+
+
 def _materialize_transform_hand_split_contract(
     prep: PrepConfig,
     ds: DatasetSpec,
     candidates: list[str],
     args: argparse.Namespace,
     root: Path,
+    *,
+    candidate_set: dict | None = None,
 ) -> tuple[DatasetSpec, dict[str, object]]:
-    """Write and bind the candidate-union raw-row split used by all scouts."""
+    """Write and bind the candidate-union raw-row split used by all scouts.
+
+    ``candidates`` is the crystal's split candidate set (its share of the shared closure, or its own retained
+    candidates under --split-candidate-set per-crystal); ``candidate_set`` records the shared closure.
+    """
 
     from grond.legacy.engine.bloch_engine import (
         build_transform_split_contract,
@@ -147,6 +358,19 @@ def _materialize_transform_hand_split_contract(
     )
 
     path = (root / "decisions" / ds.name / "transform_hand_split_contract.json").resolve()
+    scheme = str(getattr(args, "split_scheme", "legacy"))
+    scheme_kwargs: dict[str, object] = {}
+    if scheme != "legacy":
+        from grond.bloch.splits import load_split_exclusion
+
+        exclusion_path = str(getattr(args, "exclude_orbits_json", "") or "").strip()
+        scheme_kwargs = {
+            "scheme": scheme,
+            "salt": str(args.split_salt),
+            "excluded_orbits": load_split_exclusion(exclusion_path)["ordered_orbits"] if exclusion_path else None,
+        }
+    elif str(getattr(args, "exclude_orbits_json", "") or "").strip():
+        raise ValueError("--exclude-orbits-json requires --split-scheme orbit-hash")
     payload = build_transform_split_contract(
         Path(ds.hkl),
         Path(prep.structure),
@@ -155,6 +379,8 @@ def _materialize_transform_hand_split_contract(
         free_fraction=float(args.free_fraction),
         seed=int(args.split_seed),
         include_friedel=True,
+        **scheme_kwargs,
+        **({"candidate_set": candidate_set} if candidate_set is not None else {}),
     )
     validation = validate_transform_split_contract(
         payload,
@@ -169,6 +395,184 @@ def _materialize_transform_hand_split_contract(
         "sha256": sha256_file(path),
     }
     return dataset_with_split_contract(ds, str(path)), binding
+
+
+CROSS_CRYSTAL_SPLIT_CHECK_SCHEMA = "grond.cross_crystal_split_check.v1"
+_CONFLICTS_IN_MESSAGE = 20
+
+
+def _screen_row_orbits(table: Path, symmetry_ops) -> tuple[dict[str, set[str]], int]:
+    """Laue-orbit keys of the work and free rows of one native row table (h,k,l are in the model setting)."""
+
+    import csv
+
+    from grond.validation import heldout
+
+    hkls: list[tuple[int, int, int]] = []
+    splits: list[str] = []
+    with table.open(newline="") as handle:
+        for row in csv.DictReader(handle):
+            hkls.append((int(float(row["h"])), int(float(row["k"])), int(float(row["l"]))))
+            splits.append(str(row.get("split", "")).strip().lower())
+    unknown = sorted(set(splits) - {"work", "free"})
+    if unknown:
+        raise RuntimeError(f"cross-crystal split check: {table} has split labels {unknown}; expected work or free")
+    keys = heldout.orbit_keys(hkls, symmetry_ops, include_friedel=True) if hkls else []
+    orbits: dict[str, set[str]] = {"work": set(), "free": set()}
+    for key, split in zip(keys, splits, strict=True):
+        orbits[split].add(str(key))
+    return orbits, len(hkls)
+
+
+def _contract_excluded_orbits(ds: DatasetSpec, symmetry_ops) -> set[str]:
+    """Final-transform orbit keys of the rows an orbit-hash split contract excluded (membership 2)."""
+
+    from grond.io.xds import XDSData
+    from grond.validation import heldout
+
+    if not str(ds.split_contract or "").strip():
+        return set()
+    payload = json.loads(Path(ds.split_contract).expanduser().read_text())
+    membership = [int(value) for value in payload.get("membership") or []]
+    if 2 not in membership:
+        return set()
+    data = XDSData(Path(ds.hkl), hkl_transform=ds.hkl_transform)
+    if len(data.hkl) != len(membership):
+        raise RuntimeError(
+            f"cross-crystal split check: split contract {ds.split_contract} has {len(membership)} rows but "
+            f"{ds.hkl} has {len(data.hkl)}"
+        )
+    rows = [hkl for hkl, member in zip(data.hkl, membership, strict=True) if member == 2]
+    return {str(key) for key in heldout.orbit_keys(rows, symmetry_ops, include_friedel=True)}
+
+
+def run_cross_crystal_split_check(
+    prep: PrepConfig,
+    args: argparse.Namespace,
+    screen_runs: Mapping[str, Path],
+    root: Path,
+) -> dict[str, object]:
+    """Refuse a multi-crystal run in which one Laue orbit is held out in one crystal and fitted in another.
+
+    Under --split-candidate-set shared-closure (default) every crystal's contract is built from one shared
+    candidate closure, so this check is an assertion that passes by construction.  Under per-crystal each
+    crystal's orbit-hash contract is built from that crystal's own metric-filtered transform
+    candidates, and a component is free when any of its orbit keys is free.  Crystals that keep
+    different, not Laue-equivalent candidates can therefore put the same orbit on opposite sides, and
+    the combined SHELXL HKL would refine on rows another crystal reports as held out.  After every
+    transform is selected, the work and free rows of the screen row tables are keyed with
+    grond.validation.heldout.orbit_key (model Laue group + Friedel, final-transform model setting) and
+    pooled: no orbit may be free in one crystal and work in another, and no orbit excluded in one
+    crystal (the lockbox listing, or the contract's candidate-union exclusion) may be used in another.
+    The record is decisions/cross_crystal_split_check.json.  The legacy per-dataset split has no
+    crystal-independent free set; it is not checked and nothing is written, so legacy runs are unchanged.
+    """
+
+    scheme = str(getattr(args, "split_scheme", "legacy") or "legacy")
+    if scheme != "orbit-hash":
+        return {"status": "not_applicable_legacy_split", "split_scheme": scheme}
+    from grond.bloch.model import parse_model
+    from grond.bloch.splits import load_split_exclusion
+
+    path = root / "decisions" / "cross_crystal_split_check.json"
+    exclusion_path = str(getattr(args, "exclude_orbits_json", "") or "").strip()
+    exclusion = load_split_exclusion(exclusion_path) if exclusion_path else None
+    record: dict[str, object] = {
+        "schema": CROSS_CRYSTAL_SPLIT_CHECK_SCHEMA,
+        "split_scheme": scheme,
+        "split_salt": str(getattr(args, "split_salt", "")),
+        "free_fraction": float(getattr(args, "free_fraction", 0.10)),
+        "excluded_orbits_sha256": str(exclusion["sha256"]) if exclusion else "",
+        "listed_excluded_orbit_count": len(exclusion["orbits"]) if exclusion else 0,
+        "orbit_key": (
+            "grond.validation.heldout.orbit_key (model Laue group + Friedel) of the screen row-table h,k,l, "
+            "which are in the selected transform's model setting"
+        ),
+        "rule": (
+            "refuse when a Laue orbit is free in one crystal and work in another, or excluded in one crystal "
+            "and used (work or free) in another"
+        ),
+        "split_candidate_set": split_candidate_set_policy(args),
+    }
+    if bool(getattr(args, "dry_run", False)):
+        write_json(path, {**record, "status": "skipped_dry_run"})
+        return {**record, "status": "skipped_dry_run"}
+    symmetry_ops = parse_model(Path(prep.structure)).get("symmetry_ops") or []
+    lockbox = set(exclusion["orbits"]) if exclusion else set()
+    crystals: dict[str, dict[str, object]] = {}
+    status_by_orbit: dict[str, dict[str, set[str]]] = {}
+    excluded_by_orbit: dict[str, set[str]] = {}
+    for ds in prep.datasets:
+        table = Path(screen_runs[ds.name]) / "native_dyn_calc.csv"
+        if not table.is_file():
+            raise RuntimeError(
+                f"cross-crystal split check needs the screen row table of {ds.name}, which is missing: {table}"
+            )
+        orbits, n_rows = _screen_row_orbits(table, symmetry_ops)
+        excluded = _contract_excluded_orbits(ds, symmetry_ops) | lockbox
+        for split, keys in orbits.items():
+            for key in keys:
+                status_by_orbit.setdefault(key, {"work": set(), "free": set()})[split].add(ds.name)
+        for key in excluded:
+            excluded_by_orbit.setdefault(key, set()).add(ds.name)
+        crystals[ds.name] = {
+            "row_table": str(table),
+            "hkl_transform": str(ds.hkl_transform),
+            "split_contract": str(ds.split_contract or ""),
+            "rows": n_rows,
+            "work_orbits": len(orbits["work"]),
+            "free_orbits": len(orbits["free"]),
+            # Orbits the candidate-union contract excluded in addition to the listed (lockbox) orbits.
+            "candidate_union_excluded_orbits": len(excluded - lockbox),
+        }
+    free_work = [
+        {"orbit": key, "free_in": sorted(status["free"]), "work_in": sorted(status["work"])}
+        for key, status in sorted(status_by_orbit.items())
+        if status["free"] and status["work"]
+    ]
+    excluded_used = []
+    for key, excluded_in in sorted(excluded_by_orbit.items()):
+        status = status_by_orbit.get(key) or {"work": set(), "free": set()}
+        used_in = sorted(status["work"] | status["free"])
+        if used_in:
+            excluded_used.append({"orbit": key, "excluded_in": sorted(excluded_in), "used_in": used_in})
+    record.update(
+        {
+            "status": "conflict" if free_work or excluded_used else "consistent",
+            "crystals": crystals,
+            "orbit_count": len(status_by_orbit),
+            "orbits_in_more_than_one_crystal": sum(
+                1 for status in status_by_orbit.values() if len(status["work"] | status["free"]) > 1
+            ),
+            "free_work_conflict_count": len(free_work),
+            "excluded_used_conflict_count": len(excluded_used),
+            "free_work_conflicts": free_work,
+            "excluded_used_conflicts": excluded_used,
+        }
+    )
+    write_json(path, record)
+    if free_work or excluded_used:
+        listed = [
+            f"{item['orbit']} (free in {','.join(item['free_in'])}; work in {','.join(item['work_in'])})"
+            for item in free_work
+        ] + [
+            f"{item['orbit']} (excluded in {','.join(item['excluded_in'])}; used in {','.join(item['used_in'])})"
+            for item in excluded_used
+        ]
+        more = len(listed) - _CONFLICTS_IN_MESSAGE
+        raise RuntimeError(
+            f"cross-crystal free-set conflict: {len(free_work)} Laue orbit(s) are free in one crystal and work in "
+            f"another and {len(excluded_used)} are excluded in one crystal and used in another (keys in the "
+            "selected transforms' model setting). The combined SHELXL HKL would refine on rows that another "
+            "crystal reports as held out. This happens when the crystals keep different, not Laue-equivalent "
+            "transform candidates (candidate_generation in decisions/<crystal>/transform_decision.json). "
+            f"Conflicting orbits: {'; '.join(listed[:_CONFLICTS_IN_MESSAGE])}"
+            + (f"; and {more} more" if more > 0 else "")
+            + f". Full list: {path}. Build the contracts from one shared candidate set (--split-candidate-set "
+            "shared-closure, the default), give every crystal the same Laue-equivalent candidate set with "
+            "--transform-candidates, or supply verified transforms with --trust-hkl-transform."
+        )
+    return record
 
 
 def _transform_record_metadata(
@@ -244,6 +648,7 @@ def transform_scout_records(
     from grond.workflows.crystal_parameters import crystal_arguments
 
     args = crystal_arguments(args, ds.name)
+    window_overrides = transform_scout_window_overrides(args)
     n_basis = getattr(args, "fixed_n_basis", None) or n_basis
     n_points = getattr(args, "fixed_n_points", None) or n_points
     frozen_nuisance = {**transform_scout_nuisance(args), **getattr(args, "fixed_thickness", {})}
@@ -258,6 +663,11 @@ def transform_scout_records(
     ).hexdigest()
 
     def run_one(rank: int, transform: str) -> dict:
+        """Run the scout stage for one transform and return its scored record.
+
+        The score (work-row matched-Born terms only) is replayed from the hash-bound row table and must equal the
+        summary's score. A failed run returns status ``failed`` with an infinite score.
+        """
         cand = dataset_with_transform(ds, transform)
         out_dir = scout_root / safe_label(transform)
         base_record = {
@@ -290,6 +700,7 @@ def transform_scout_records(
                 workers_override=transform_scout_worker_count(args),
                 scale_fit_split_override="work",
                 selection_metric_override="work_born_wR2",
+                **window_overrides,
             )
             if args.dry_run:
                 run_logged(cmd, logs, f"{ds.name}_scout_transform_{scout_stage}_{safe_label(transform)}", dry_run=True)
@@ -378,8 +789,14 @@ def choose_transform_by_scout(
     root: Path,
     *,
     scout_max_rows: int | None = None,
+    split_plan: Mapping[str, object] | None = None,
 ) -> tuple[DatasetSpec, dict]:
-    """Choose the HKL alignment using cheap all-candidate scouts, then rerank top hits."""
+    """Choose the HKL alignment using cheap all-candidate scouts, then rerank top hits.
+
+    ``split_plan`` (``plan_split_candidates`` over every crystal of the run) fixes this crystal's retained
+    candidates and its split candidate set; without it the plan covers this dataset alone.  Retained candidates that
+    are one indexing under the model point group's proper rotations are scouted once (--transform-canonicalization).
+    """
 
     parity_policy = str(getattr(args, "transform_parity_policy", "proper-only"))
     if getattr(args, "trust_hkl_transform", False):
@@ -387,10 +804,9 @@ def choose_transform_by_scout(
         if not selected_info.proper and parity_policy != "all-diagnostic":
             raise ValueError(
                 f"trusted transform {selected_info.canonical!r} is improper (determinant -1) "
-                "and cannot be accepted under --transform-parity-policy=proper-only; use "
-                "GROND canonicalize-hand to invert the endpoint model/HKLF4 pair and adopt "
-                f"{selected_info.proper_canonical_transform!r}, or explicitly use "
-                "all-diagnostic mode without a named absolute-configuration claim"
+                "and cannot be accepted under --transform-parity-policy=proper-only; invert the model "
+                f"coordinates and declare the proper transform {selected_info.proper_canonical_transform!r}, "
+                "or explicitly use all-diagnostic mode without a named absolute-configuration claim"
             )
         selected_transform = selected_info.canonical
         selected = {
@@ -437,21 +853,53 @@ def choose_transform_by_scout(
         write_json(root / "decisions" / ds.name / "transform_decision.json", payload)
         return dataset_with_transform(ds, selected_transform), payload
 
-    candidates = expand_transform_candidates(
-        ds.hkl_transform,
-        args.transform_candidates,
-        parity_policy=parity_policy,
+    from grond.bloch.model import parse_model
+    from grond.bloch.splits import (
+        contract_candidate_set,
+        transform_equivalence_classes,
+        transform_equivalence_disabled,
     )
-    generated_candidates = list(candidates)
-    from grond.legacy.engine.bloch_engine import metric_filter_signed_axis_transforms
 
-    candidates, metric_filter_contract = metric_filter_signed_axis_transforms(
-        Path(ds.hkl),
-        Path(prep.structure),
-        generated_candidates,
-        relative_tolerance=float(getattr(args, "transform_metric_tolerance", 0.02)),
-        dataset_label=ds.name,
-    )
+    plan = split_plan if split_plan is not None else plan_split_candidates(prep, args, [ds], scouted=True)
+    plan_datasets = plan.get("datasets") if isinstance(plan.get("datasets"), Mapping) else {}
+    entry = plan_datasets.get(ds.name) if isinstance(plan_datasets, Mapping) else None
+    if not isinstance(entry, Mapping) or entry.get("source") != "scout":
+        raise ValueError(f"the split candidate plan has no scouted transform candidates for dataset {ds.name!r}")
+    if str(entry.get("hkl") or "") != str(Path(ds.hkl).expanduser().resolve()) or str(
+        entry.get("hkl_transform") or ""
+    ) != parse_hkl_transform_info(ds.hkl_transform or "identity").canonical:
+        raise ValueError(
+            f"the split candidate plan of dataset {ds.name!r} was built for another HKL file or declared transform"
+        )
+    generated_candidates = list(entry["generated"])
+    candidates = list(entry["retained"])
+    metric_filter_contract = dict(entry["metric_filter"])
+    union = dict(plan["union"])
+    union_entry = union["datasets"][ds.name]
+    # The leak-free start removed the rows of the closure recorded at the start of the run; the contracts must use it.
+    # read_json, not try_read_json: a record that exists but does not parse must stop the run, not skip the check.
+    recorded = read_json(root / "decisions" / "split_summary.json")
+    recorded_set = recorded.get("split_candidate_set") if isinstance(recorded, Mapping) else None
+    if isinstance(recorded_set, Mapping) and str(recorded_set.get("shared_group_sha256") or "") != str(
+        union.get("shared_group_sha256") or ""
+    ):
+        raise ValueError(
+            f"dataset {ds.name!r}: the split candidate closure differs from the one recorded at the start of the run "
+            "(decisions/split_summary.json); the model cell or the transform candidate options changed"
+        )
+    if transform_canonicalization_policy(args) == "point-group":
+        equivalence = transform_equivalence_classes(
+            candidates, parse_model(Path(prep.structure)).get("symmetry_ops")
+        )
+    else:
+        equivalence = transform_equivalence_disabled(candidates)
+    scouted_candidates = list(equivalence["representatives"])
+    if int(equivalence["collapsed_candidate_count"]):
+        print(
+            f"transform scout {ds.name}: {len(candidates)} metric-compatible candidates form "
+            f"{len(scouted_candidates)} point-group classes; scouting {', '.join(scouted_candidates)}",
+            flush=True,
+        )
     candidate_generation = _transform_candidate_generation_contract(
         str(args.transform_candidates),
         generated_candidates,
@@ -459,15 +907,21 @@ def choose_transform_by_scout(
         metric_filter_contract,
         parity_policy=parity_policy,
     )
+    candidate_generation["transform_canonicalization"] = equivalence
+    candidate_generation["scouted_candidates"] = scouted_candidates
+    candidate_generation["split_candidates"] = list(union_entry["split_candidates"])
+    candidate_generation["split_candidate_set_policy"] = str(union.get("policy") or "")
     split_contract: dict[str, object] = {}
     if not args.dry_run:
         ds, split_contract = _materialize_transform_hand_split_contract(
             prep,
             ds,
-            candidates,
+            list(union_entry["split_candidates"]),
             args,
             root,
+            candidate_set=contract_candidate_set(union, ds.name),
         )
+    candidates = scouted_candidates
     metadata_transform_decision: dict = {}
     metadata_candidate_elimination_used = False
     baseline_hkl = dataset_baseline_hkl(prep, ds)
@@ -582,6 +1036,7 @@ def choose_transform_by_scout(
             "metadata_order_used_for_ties_or_rerank_admission": False,
         },
         "transform_hand_split_contract": split_contract,
+        "split_candidate_union": union,
         "dataset": ds.name,
         "input_identity": _dataset_decision_identity(prep, ds),
         "selected_transform_claim_contract": claim_contract,

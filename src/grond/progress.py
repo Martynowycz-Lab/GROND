@@ -1,6 +1,13 @@
+"""Resume state and progress display for multi-stage GROND runs.
+
+``grond_progress.json`` in the output directory records each completed stage with its
+command, a hash of the GROND source, fingerprints of its input paths (taken from known
+command-line flags) and of its outputs. A rerun skips a stage only when all of these still
+match.
+"""
+
 from __future__ import annotations
 
-import glob
 import hashlib
 import json
 import math
@@ -13,13 +20,10 @@ from typing import Any
 
 INPUT_PATH_FLAGS = {
     "--baseline-hkl",
-    "--cbf-dir",
     "--config",
     "--datasets-csv",
     "--expt",
     "--hkl",
-    "--images",
-    "--integrate-hkl",
     "--input",
     "--model",
     "--prep",
@@ -39,10 +43,11 @@ INPUT_PATH_FLAGS = {
 }
 OUTPUT_PATH_FLAGS = {"--out", "--out-dir", "--out-mtz", "--output", "--write-rows"}
 ASSIGNMENT_PATH_FLAGS = {"--resolution-limit", "--run", "--scale-polish"}
-MANIFEST_ONLY_FLAGS = {"--cbf-dir", "--images"}
 
 
 def _sha256_file(path: Path) -> str:
+    """Return the hex SHA-256 digest of a file."""
+
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         for block in iter(lambda: handle.read(1024 * 1024), b""):
@@ -51,6 +56,8 @@ def _sha256_file(path: Path) -> str:
 
 
 def _stat_signature(path: Path) -> tuple[int, int, int, int, int]:
+    """Return (device, inode, size, mtime_ns, ctime_ns) for a file."""
+
     stat = path.stat()
     return (
         int(stat.st_dev),
@@ -65,6 +72,8 @@ def _hashed_file_fingerprint(
     path: Path,
     cache: dict[str, tuple[tuple[int, int, int, int, int], dict[str, Any]]] | None,
 ) -> dict[str, Any]:
+    """Return the path, size and SHA-256 of a file, reusing the cache while its stat signature is unchanged."""
+
     path = path.expanduser().resolve()
     signature = _stat_signature(path)
     key = str(path)
@@ -85,26 +94,18 @@ def _manifest_entry(
     child: Path,
     base: Path,
     cache: dict[str, tuple[tuple[int, int, int, int, int], dict[str, Any]]] | None,
-    *,
-    hash_contents: bool,
 ) -> dict[str, Any]:
+    """Describe one file of a directory by its relative name, size and SHA-256."""
+
     try:
         name = str(child.relative_to(base))
     except ValueError:
         name = str(child)
-    if hash_contents:
-        fingerprint = _hashed_file_fingerprint(child, cache)
-        return {
-            "name": name,
-            "size": fingerprint["size"],
-            "sha256": fingerprint["sha256"],
-        }
-    signature = _stat_signature(child)
+    fingerprint = _hashed_file_fingerprint(child, cache)
     return {
         "name": name,
-        "size": signature[2],
-        "mtime_ns": signature[3],
-        "ctime_ns": signature[4],
+        "size": fingerprint["size"],
+        "sha256": fingerprint["sha256"],
     }
 
 
@@ -112,23 +113,20 @@ def _path_fingerprint(
     path: Path,
     cache: dict[str, tuple[tuple[int, int, int, int, int], dict[str, Any]]] | None = None,
     *,
-    metadata_only: bool = False,
     prefer_xds_inputs: bool = True,
 ) -> dict[str, Any]:
+    """Fingerprint an input path: a missing marker, a file digest or a directory manifest.
+
+    For an XDS directory only INTEGRATE.HKL, XDS_ASCII.HKL, XPARM.XDS, GXPARM.XDS and a
+    DIALS scan-point matrix file named in the INTEGRATE.HKL header are used; otherwise the
+    directory is walked, skipping caches, logs and symlinks.
+    """
+
     path = path.expanduser().resolve()
     if not path.exists():
         return {"path": str(path), "status": "missing"}
     if path.is_file():
-        if not metadata_only:
-            return _hashed_file_fingerprint(path, cache)
-        signature = _stat_signature(path)
-        return {
-            "path": str(path),
-            "status": "file_manifest",
-            "size": signature[2],
-            "mtime_ns": signature[3],
-            "ctime_ns": signature[4],
-        }
+        return _hashed_file_fingerprint(path, cache)
     preferred = ("INTEGRATE.HKL", "XDS_ASCII.HKL", "XPARM.XDS", "GXPARM.XDS")
     files = [path / name for name in preferred if (path / name).is_file()] if prefer_xds_inputs else []
     integrate = path / "INTEGRATE.HKL"
@@ -167,45 +165,23 @@ def _path_fingerprint(
                 child,
                 path,
                 cache,
-                hash_contents=not metadata_only,
             )
             for child in files
         ],
     }
 
 
-def _glob_fingerprint(pattern: str) -> dict[str, Any]:
-    expanded = str(Path(pattern).expanduser())
-    matches = sorted(
-        Path(value).expanduser().resolve()
-        for value in glob.glob(expanded, recursive=True)
-        if Path(value).is_file()
-    )
-    files = []
-    for path in matches:
-        signature = _stat_signature(path)
-        files.append(
-            {
-                "name": str(path),
-                "size": signature[2],
-                "mtime_ns": signature[3],
-                "ctime_ns": signature[4],
-            }
-        )
-    return {
-        "path": expanded,
-        "status": "glob_manifest" if files else "missing_glob",
-        "files": files,
-    }
-
-
 def _path_from_flag_value(flag: str, value: str) -> Path:
+    """Return the resolved path given to a flag, dropping a ``name=`` prefix where the flag takes one."""
+
     if flag in ASSIGNMENT_PATH_FLAGS and "=" in value:
         value = value.split("=", 1)[1]
     return Path(value).expanduser().resolve()
 
 
 def _flag_values(command: list[str], flags: set[str]) -> list[tuple[str, str]]:
+    """Return (flag, value) pairs for the given flags, in either ``--flag value`` or ``--flag=value`` form."""
+
     values: list[tuple[str, str]] = []
     for index, token in enumerate(command):
         if token in flags and index + 1 < len(command) and command[index + 1]:
@@ -220,6 +196,8 @@ def _flag_values(command: list[str], flags: set[str]) -> list[tuple[str, str]]:
 
 
 def _flag_paths(command: list[str], flags: set[str]) -> list[Path]:
+    """Return the resolved paths passed to the given flags in a command."""
+
     return [_path_from_flag_value(flag, value) for flag, value in _flag_values(command, flags)]
 
 
@@ -227,16 +205,14 @@ def _input_fingerprints(
     command: list[str],
     cache: dict[str, tuple[tuple[int, int, int, int, int], dict[str, Any]]] | None,
 ) -> list[dict[str, Any]]:
+    """Fingerprint every input path named in a stage command."""
+
     fingerprints = []
     for flag, value in _flag_values(command, INPUT_PATH_FLAGS):
-        if flag == "--images":
-            fingerprints.append(_glob_fingerprint(value))
-            continue
         fingerprints.append(
             _path_fingerprint(
                 _path_from_flag_value(flag, value),
                 cache,
-                metadata_only=flag in MANIFEST_ONLY_FLAGS,
                 prefer_xds_inputs=True,
             )
         )

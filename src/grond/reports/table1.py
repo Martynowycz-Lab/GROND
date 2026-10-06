@@ -7,6 +7,9 @@ import json
 from collections.abc import Mapping
 from pathlib import Path
 
+from grond.reports.endpoint_free_report import table1_free_records
+from grond.reports.heldout import table1_panel_c
+from grond.reports.shelxl import _quick_shelxl_details
 from grond.reports.source_controls import _quick_source_shelx_controls
 from grond.reports.values import _quick_fraction, _quick_int, _quick_number, _quick_percent
 
@@ -137,10 +140,74 @@ def _table1_shelxl_record(
         "EXTI": str(controls.get("exti") or "EXTI none") if available else None,
         "NPD": _quick_int(details.get("npd_count")) if available else None,
         "split": _quick_int(details.get("split_count")) if available else None,
+        "BASF": None,
         "res": res,
         "hkl": hkl,
         "lst": lst,
     }
+
+
+def _table1_all_data_record(all_data: Mapping[str, object] | None) -> dict[str, object] | None:
+    """Panel A record of the final all-data refinement (``--free-set off``), or None when the free set stayed out."""
+
+    if not isinstance(all_data, Mapping) or str(all_data.get("status")) in {"None", "skipped_free_set_on", "dry_run"}:
+        return None
+    artifacts = all_data.get("artifacts") if isinstance(all_data.get("artifacts"), Mapping) else {}
+    lst = str(artifacts.get("lst") or "")
+    details = _quick_shelxl_details({**(all_data.get("shelxl") or {}), **(all_data.get("statistics") or {})},
+                                    Path(lst) if lst else None)
+    res = str(artifacts.get("res") or "")
+    record = _table1_shelxl_record(
+        "GROND final all-data refinement (work + free reflections)",
+        "the published endpoint refined against its work and free reflections (--free-set off); the result",
+        details,
+        _quick_source_shelx_controls(Path(res)) if res else {},
+        res=res,
+        hkl=str(artifacts.get("hkl") or ""),
+        lst=lst,
+    )
+    if all_data.get("status") != "ok":
+        record.update(status="not_available", status_reason=f"{all_data.get('status')}: {all_data.get('reason') or ''}")
+    return record
+
+
+def _table1_unmerged_record(unmerged: Mapping[str, object] | None) -> dict[str, object] | None:
+    """Panel A record of the unmerged multi-crystal SHELXL endpoint, or None when the run has none."""
+
+    if not isinstance(unmerged, Mapping) or not isinstance(unmerged.get("shelxl"), Mapping):
+        return None
+    from grond.reports.shelxl import _quick_shelxl_details
+
+    artifacts = unmerged.get("artifacts") if isinstance(unmerged.get("artifacts"), Mapping) else {}
+    lst = str(artifacts.get("lst") or "")
+    details = _quick_shelxl_details(dict(unmerged["shelxl"]), Path(lst) if lst else None)
+    res_text = str(artifacts.get("res") or "")
+    controls = _quick_source_shelx_controls(Path(res_text)) if res_text else {}
+    record = _table1_shelxl_record(
+        "GROND dynamical unmerged multi-crystal endpoint",
+        "every corrected work row unmerged, batch = crystal, MERG 0, refined BASF",
+        details,
+        controls,
+        res=res_text,
+        hkl=str(artifacts.get("hkl") or ""),
+        lst=lst,
+    )
+    basf = unmerged.get("basf") if isinstance(unmerged.get("basf"), Mapping) else {}
+    values = list(basf.get("values") or [])
+    esds = list(basf.get("esds") or [])
+    if values:
+        record["BASF"] = ", ".join(
+            f"{value:.4f} ({esds[i]:.4f})" if i < len(esds) and esds[i] is not None else f"{value:.4f}"
+            for i, value in enumerate(values)
+        )
+    if record["status"] != "available":
+        record["status_reason"] = f"unmerged endpoint status {unmerged.get('status')!r}: no SHELXL statistics"
+    return record
+
+
+HELD_OUT_ROWS_DEFINITION = (
+    "Held-out rows (`held-out orbits`, reporting only; nothing is chosen on them): the final model of the endpoint above scored with SHELXL L.S. 0 (no parameter moves; final WGHT, BASF and EXTI) on the free orbits, which never entered any refinement HKL. GROND free rows are corrected exactly like the work rows. R1 is SHELXL's R1(Free); wR2 and GooF are on the model's scale with the final weights, GooF with N (no parameter was fitted to these reflections). The conventional leak-free start (the supplied model refined on the work orbits of the baseline HKL) is shown on its own work orbits and on the free orbits: the conventional reference above was refined on every reflection, the free orbits included, so it has no held-out counterpart. Details: HELDOUT_VALIDATION.md, section SHELXL endpoint on held-out orbits."
+)
 
 
 def _table1_pair(row: Mapping[str, object], first: str, second: str) -> str:
@@ -149,6 +216,61 @@ def _table1_pair(row: Mapping[str, object], first: str, second: str) -> str:
     a = row.get(first)
     b = row.get(second)
     return f"{a}/{b}" if a is not None and b is not None else "n/a"
+
+
+def _table1_panel_c_lines(panel: Mapping[str, object]) -> list[str]:
+    """Markdown for Panel C: held-out free-row R factors, in-sample, gap and leak flags."""
+
+    lines = ["", "## C. Held-Out Validation (Free Rows)", ""]
+    if panel.get("status") != "available":
+        return lines + [f"Not available: {panel.get('reason') or 'no held-out rows'}."]
+
+    def ci(value, bounds):
+        """Format a fraction and its 95% CI as percent 'value [lo, hi]', or the value alone without a CI."""
+
+        if not bounds or len(bounds) != 2:
+            return _quick_percent(value)
+        return f"{_quick_percent(value)} [{_quick_percent(bounds[0])}, {_quick_percent(bounds[1])}]"
+
+    def flag(value):
+        """Format a flag as yes or no, n/a for None."""
+
+        return "n/a" if value is None else ("yes" if value else "no")
+
+    leak_columns = (
+        "free_rows_in_scale_fit",
+        "free_rows_in_nuisance_selection",
+        "free_rows_in_dataset_policy",
+        "free_rows_in_shelxl_hkl",
+        "free_rows_in_macro_cycle_selection",
+        "free_rows_in_hand_decision",
+    )
+    lines += [
+        "| crystal | Nfree/Nobs/orbits | Rall held-out [95% CI] | Robs held-out [95% CI] | Rall/Robs in-sample | gap Rall/Robs | "
+        "free rows in scale fit / nuisance selection / dataset policy / SHELXL HKL / macro-cycle selection / hand decision |",
+        "|---|---:|---:|---:|---:|---:|---|",
+    ]
+    for row in panel.get("rows") or []:
+        lines.append(
+            f"| {row['crystal']} | {row.get('n_free')}/{row.get('n_free_obs')}/{row.get('n_orbits')} | "
+            f"{ci(row.get('heldout_Rall'), row.get('heldout_Rall_ci95'))} | {ci(row.get('heldout_Robs'), row.get('heldout_Robs_ci95'))} | "
+            f"{_quick_percent(row.get('insample_Rall'))}/{_quick_percent(row.get('insample_Robs'))} | "
+            f"{_quick_percent(row.get('gap_Rall'))}/{_quick_percent(row.get('gap_Robs'))} | "
+            + " / ".join(flag(row.get(column)) for column in leak_columns)
+            + " |"
+        )
+    definitions = panel.get("definitions") or {}
+    lines += [
+        "",
+        f"Panel C definitions: held-out rows are the `split=free` rows of the final row tables, predicted with the run's own scales; "
+        f"Rall/Robs are the Panel B amplitude forms (Robs: Iobs > 3 sigma); 95% CIs: {definitions.get('ci')}; orbits: "
+        f"{definitions.get('orbit_keys')}. In-sample is the same model on work rows; gap = held-out minus in-sample. "
+        f"A `yes` leak flag means the free rows were used there, so the held-out value is optimistic. SHELXL HKL evidence: "
+        f"{panel.get('shelxl_hkl_evidence')}. Macro-cycle selection evidence: {panel.get('macro_cycle_selection_evidence')}. "
+        f"Hand-decision evidence: {panel.get('hand_decision_evidence')}. Dataset-policy evidence: "
+        f"{panel.get('dataset_policy_evidence')}.",
+    ]
+    return lines
 
 
 def _write_final_statistics_table1(
@@ -162,8 +284,15 @@ def _write_final_statistics_table1(
     file_block: Mapping[str, object],
     input_controls: Mapping[str, object],
     final_row_table: str,
+    heldout: Mapping[str, object] | None = None,
+    unmerged_endpoint: Mapping[str, object] | None = None,
+    all_data: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
-    """Write the canonical final statistics Table 1 without mixing metric families."""
+    """Write the canonical final statistics Table 1 without mixing metric families.
+
+    ``unmerged_endpoint`` (the combined summary's ``combined_unmerged_endpoint``) adds the unmerged
+    multi-crystal SHELXL endpoint (batch = crystal, MERG 0, refined BASF) to Panel A.
+    """
 
     jana = _quick_final_jana_row_summary(row_metrics)
     dynamic = jana.get("dynamic") if isinstance(jana.get("dynamic"), Mapping) else None
@@ -231,7 +360,18 @@ def _write_final_statistics_table1(
         hkl=str(file_block.get("publication_hkl") or ""),
         lst=str(file_block.get("publication_lst") or ""),
     )
-    endpoint_records = [conventional_endpoint, born_endpoint, dynamic_endpoint]
+    # Held-out scores (SHELXL L.S. 0 on the free orbits, reporting only) sit next to the endpoint they score.
+    endpoint_free = heldout.get("shelxl_endpoint_free") if isinstance(heldout, Mapping) else None
+    free_records = table1_free_records(endpoint_free)
+    endpoint_records = [conventional_endpoint, *free_records.get("conventional", []), born_endpoint, dynamic_endpoint]
+    endpoint_records += free_records.get("grond_merged", [])
+    unmerged_record = _table1_unmerged_record(unmerged_endpoint)
+    if unmerged_record is not None:
+        endpoint_records.append(unmerged_record)
+    endpoint_records += free_records.get("grond_unmerged", [])
+    all_data_record = _table1_all_data_record(all_data)
+    if all_data_record is not None:
+        endpoint_records.append(all_data_record)
 
     payload = {
         "schema": "grond.table1_final_statistics.v1",
@@ -264,6 +404,11 @@ def _write_final_statistics_table1(
         "shelxl_endpoints": endpoint_records,
         "jana_pets_rows": row_records,
     }
+    panel_c = table1_panel_c(heldout)
+    if panel_c is not None:
+        payload["heldout_validation"] = panel_c
+    if isinstance(endpoint_free, Mapping):
+        payload["shelxl_endpoint_free"] = endpoint_free
 
     md_path = out_dir / "TABLE1_FINAL_STATISTICS.md"
     json_path = out_dir / "TABLE1_FINAL_STATISTICS.json"
@@ -279,8 +424,8 @@ def _write_final_statistics_table1(
         "",
         "## A. SHELXL Endpoint Statistics",
         "",
-        "| model | status | Ngt/Nall | R1(F)gt | R1(F)all | wR2(F^2)all | GooF | parameters/restraints | WGHT | EXTI | NPD/split |",
-        "|---|---|---:|---:|---:|---:|---:|---:|---|---|---:|",
+        "| model | status | Ngt/Nall | R1(F)gt | R1(F)all | wR2(F^2)all | GooF | parameters/restraints | WGHT | EXTI | NPD/split | BASF |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---|---|---:|---|",
     ]
     for row in endpoint_records:
         lines.append(
@@ -298,6 +443,7 @@ def _write_final_statistics_table1(
                     str(row.get("WGHT") or "n/a"),
                     str(row.get("EXTI") or "n/a"),
                     _table1_pair(row, "NPD", "split"),
+                    str(row.get("BASF") or "n/a"),
                 ]
             )
             + " |"
@@ -305,7 +451,7 @@ def _write_final_statistics_table1(
     lines.extend(
         [
             "",
-            "SHELXL definitions: `R1(F)gt` is the conventional amplitude R factor for SHELXL's observed/greater-than subset; `R1(F)all` uses all endpoint reflections; `wR2(F^2)all` and `GooF` use the endpoint sigma and active `WGHT` contract. `Ngt` is not the JANA/PETS `Nobs` count.",
+            "SHELXL definitions: `R1(F)gt` is the conventional amplitude R factor for SHELXL's observed/greater-than subset; `R1(F)all` uses all endpoint reflections; `wR2(F^2)all` and `GooF` use the endpoint sigma and active `WGHT` contract. `Ngt` is not the JANA/PETS `Nobs` count. The unmerged multi-crystal endpoint, when present, refines every corrected work row unmerged (MERG 0, batch = crystal) with one BASF batch scale per extra crystal (value (e.s.d.)); its counts and R factors are over unmerged rows.",
             "",
             "## B. JANA/PETS-Style Row And Post-Refinement Merged Statistics",
             "",
@@ -337,6 +483,12 @@ def _write_final_statistics_table1(
             )
             + " |"
         )
+    if free_records:
+        at = lines.index("## B. JANA/PETS-Style Row And Post-Refinement Merged Statistics")
+        lines[at:at] = [
+            HELD_OUT_ROWS_DEFINITION,
+            "",
+        ]
     unavailable = [row for row in row_records + endpoint_records if row.get("status") != "available"]
     lines.extend(
         [
@@ -346,6 +498,12 @@ def _write_final_statistics_table1(
             "The Born row is the matched single-scattering control under the final GROND row contract. It is not a third SHELXL endpoint.",
         ]
     )
+    if panel_c is not None:
+        lines.extend(_table1_panel_c_lines(panel_c))
+    if all_data_record is not None and all_data_record["status"] == "available":
+        lines.extend(["", "The run used `--free-set off`: its result is the final all-data refinement (last row of Panel A), "
+                      "the published endpoint refined against its work and free reflections. Panels B and C describe the "
+                      "endpoint before that step, when the free reflections were still held out."])
     if unavailable:
         lines.extend(["", "## Explicitly Unavailable Statistics", ""])
         for row in unavailable:

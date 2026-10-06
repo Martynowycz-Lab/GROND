@@ -1,3 +1,9 @@
+"""Prep files: the structure, the XDS datasets and their per-dataset options for a GROND run.
+
+A prep file is JSON. ``write_datasets_csv`` writes the same datasets, with their nuisance
+parameters, as a spreadsheet-friendly table.
+"""
+
 from __future__ import annotations
 
 import csv
@@ -41,6 +47,8 @@ def validate_hkl_transform(value: str) -> None:
 
 
 def parse_bool_text(value: str, *, field: str) -> bool:
+    """Parse yes/no text (1/0, true/false, yes/no, on/off) as a bool; raise ValueError naming ``field`` otherwise."""
+
     text = str(value).strip().lower()
     if text in TRUE_TEXT:
         return True
@@ -68,6 +76,8 @@ class DatasetSpec:
     acquisition_fingerprint: str = ""
 
     def __post_init__(self) -> None:
+        """Check the dataset name, HKL path, transform, target mode and numeric limits; normalize the ID fields."""
+
         if not DATASET_NAME_RE.fullmatch(self.name):
             raise ValueError(
                 "dataset name must start with a letter or number and contain only "
@@ -113,6 +123,10 @@ class PrepConfig:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        """Check the structure path, unique dataset names, default transform and percentile;
+        normalize the setup fields.
+        """
+
         if not str(self.structure).strip():
             raise ValueError("structure path must not be empty")
         if not self.datasets:

@@ -58,6 +58,14 @@ class ProfileMixin:
             raw = base * math.sqrt(max(rlp_ratio, 1e-12) / peak_frac)
             source = "sg_window*sqrt((RLP/median_RLP)/(PEAK/100))"
         elif mode == "dials_bbox":
+            # Only GROND's DIALS bridge stores the reflection-table bbox z-range in ALF0/BET0.  In an XDS
+            # INTEGRATE.HKL those columns are incident-beam angles, so a width derived from them is meaningless.
+            header = getattr(self.data, "header", {}) or {}
+            if str(header.get("DIALS_BBOX_Z_RANGE_AS_ALF0_BET0", "")).strip().upper() != "TRUE":
+                raise ValueError(
+                    "sg_window_mode=dials_bbox requires reflection rows whose header declares "
+                    "DIALS_BBOX_Z_RANGE_AS_ALF0_BET0=TRUE (GROND DIALS bridge); use sg_window_mode=fixed otherwise"
+                )
             z0 = float(self.data.alf0[row_idx])
             z1 = float(self.data.bet0[row_idx])
             if np.isfinite(z0) and np.isfinite(z1) and z1 > z0:
@@ -306,8 +314,78 @@ class ProfileMixin:
             },
         )
 
+    def window_integral_factor(self, sg_window_i):
+        """Width of this row's Sg window relative to the configured base window (1 for fixed windows)."""
+        if str(getattr(self.cfg, "sg_window_mode", "fixed") or "fixed").lower() == "fixed":
+            return 1.0
+        return float(sg_window_i) / max(float(getattr(self.cfg, "sg_window", sg_window_i)), 1e-30)
+
+    def row_transverse_target_points(self, row_idx, hkl, omega_center, center_sg, sg_window_i):
+        """Re-centred transverse mosaic spread (``mosaicity_mode="transverse_target"``).
+
+        Each mosaic block is tilted about the axis perpendicular to both the beam and the rotation axis.
+        A tilt about the rotation axis is an exact scan-angle shift and a tilt about the beam leaves every
+        excitation error unchanged, so for a full-reflection (target-Sg) row only this transverse tilt
+        carries physics. For every block the scan angle is re-solved so that the target samples exactly
+        the untilted row's excitation errors; only the other beams' excitation errors change. Block
+        intensities are averaged incoherently with normalised Gauss-Hermite weights, and the target's
+        two-beam (Born) intensity is identical for every tilt.
+        """
+
+        sigma = float(getattr(self.cfg, "mosaicity_sigma_deg", 0.0))
+        requested, base_weights, jitter_meta = self.row_profile_sg_points(row_idx, hkl, sg_window_i)
+        if int(jitter_meta.get("sg_jitter_kernel_points", 1)) > 1:
+            raise ValueError("transverse_target cannot be combined with target-Sg jitter")
+        physical_targets = float(center_sg) + np.asarray(requested, dtype=float)
+        hkl_arr = np.asarray([hkl], dtype=int)
+        base_omegas = [float(self.solve_sg_profile_target(row_idx, hkl, omega_center, t, jitter_meta)) for t in physical_targets]
+        n = max(1, int(getattr(self.cfg, "mosaicity_points", 3)))
+        if sigma <= 0.0 or n == 1:
+            tilts, tilt_weights = np.asarray([0.0]), np.asarray([1.0])
+        else:
+            nodes, raw = hermgauss(n)
+            tilts = math.sqrt(2.0) * sigma * np.asarray(nodes, dtype=float)
+            tilt_weights = np.asarray(raw, dtype=float) / max(float(np.sum(raw)), 1e-30)
+        step = 1e-4
+        omegas, orient, weights, residuals = [], [], [], []
+        original_sum = float(np.sum(base_weights))
+        for tau, w_tau in zip(tilts, tilt_weights, strict=True):
+            solved, jac = [], []
+            for omega0, target in zip(base_omegas, physical_targets, strict=True):
+                omega = float(omega0)
+                for _ in range(12):
+                    value = float(self.sg_for_hkls_at_orientation(hkl_arr, omega, 0.0, tau)[0])
+                    deriv = (float(self.sg_for_hkls_at_orientation(hkl_arr, omega + step, 0.0, tau)[0])
+                             - float(self.sg_for_hkls_at_orientation(hkl_arr, omega - step, 0.0, tau)[0])) / (2.0 * step)
+                    if not math.isfinite(deriv) or abs(deriv) <= 1e-12:
+                        raise ValueError(f"transverse_target: vanishing dSg/domega for row {row_idx}")
+                    delta = (value - float(target)) / deriv
+                    omega -= delta
+                    if abs(delta) < 1e-10:
+                        break
+                final = float(self.sg_for_hkls_at_orientation(hkl_arr, omega, 0.0, tau)[0])
+                residuals.append(final - float(target))
+                solved.append(omega)
+                jac.append(1.0 / max(abs(deriv), 1e-12))
+            wt = np.asarray(base_weights, dtype=float) * np.asarray(jac)
+            wt *= original_sum / max(float(np.sum(wt)), 1e-30) * self.window_integral_factor(sg_window_i)
+            omegas.extend(solved)
+            orient.extend([(0.0, float(tau))] * len(solved))
+            weights.extend((w_tau * wt).tolist())
+        jitter_meta = dict(jitter_meta)
+        jitter_meta.update({"sg_profile_coordinate": "target_sg", "sg_profile_angle_jacobian": True,
+                            "sg_profile_weight_sum": float(np.sum(weights)), "sg_profile_points_total": int(len(weights))})
+        mosaicity_meta = {"mosaicity_mode": "transverse_target", "mosaicity_sigma_deg": sigma,
+                          "mosaicity_kernel_points": int(len(tilts)),
+                          "mosaicity_max_target_sg_residual": float(np.max(np.abs(residuals))) if residuals else 0.0}
+        return (np.asarray(omegas, dtype=float), np.asarray(orient, dtype=float), np.asarray(weights, dtype=float),
+                np.asarray(residuals, dtype=float), jitter_meta, mosaicity_meta)
+
     def row_profile_orientation_points(self, row_idx, hkl, omega_center, center_sg, sg_window_i):
         """Return explicit scan angles and two-axis mosaic orientations."""
+
+        if str(getattr(self.cfg, "mosaicity_mode", "none") or "none").lower() == "transverse_target":
+            return self.row_transverse_target_points(row_idx, hkl, omega_center, center_sg, sg_window_i)
 
         (
             base_omegas,
@@ -435,6 +513,10 @@ class ProfileMixin:
         original_weight_sum = float(np.sum(base_weights))
         base_weights *= jacobian
         base_weights *= original_weight_sum / max(float(np.sum(base_weights)), 1e-30)
+        # The observation integrates I over the row's Sg window. With a per-row (adaptive) window the
+        # renormalised sum is a window mean, so restore the integral by the width relative to the base window
+        # (identity for sg_window_mode="fixed", where every row uses the base width).
+        base_weights *= self.window_integral_factor(sg_window_i)
         angular_offsets, angular_weights, mosaicity_meta = self.row_mosaicity_angle_points()
         sample_omegas = (
             np.asarray(base_omegas, dtype=float)[:, None] + np.asarray(angular_offsets, dtype=float)[None, :]

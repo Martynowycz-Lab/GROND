@@ -16,7 +16,7 @@ from grond.io.config import DatasetSpec, PrepConfig, write_prep
 from grond.io.structure_contract import check_sfac_contract, prepare_structure_for_legacy
 from grond.runtime import auto_chunksize, auto_worker_count
 from grond.workflows.decision import ALL_PROPER_SIGNED_PERMUTATIONS, apply_preflight, preflight_dataset, write_json
-from grond.workflows.transform_selection import choose_transform_by_scout
+from grond.workflows.transform_selection import choose_transform_by_scout, plan_split_candidates
 
 
 def _fill_common_run_defaults(args: argparse.Namespace) -> argparse.Namespace:
@@ -72,6 +72,8 @@ def cmd_scout(args: argparse.Namespace) -> int:
     )
     selected: list[DatasetSpec] = []
     records: dict[str, object] = {}
+    # One split candidate set for every crystal (see GROND auto); trusted transforms write no split contract.
+    split_plan = None if getattr(args, "trust_hkl_transform", False) else plan_split_candidates(prep, args)
     for source in prep.datasets:
         preflight = preflight_dataset(
             source,
@@ -92,6 +94,7 @@ def cmd_scout(args: argparse.Namespace) -> int:
             logs,
             root,
             scout_max_rows=scout_rows,
+            split_plan=split_plan,
         )
         selected.append(decided)
         records[source.name] = {

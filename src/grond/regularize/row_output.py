@@ -12,6 +12,13 @@ from .observations import target_factor
 
 
 def write_row_table(path: Path, data: XDSData, target, best_eval, masks, target_mode: str = "iobs"):
+    """Write the native row table CSV of one evaluated trial: one line per valid row.
+
+    Each line holds the row identity, target and sigmas, Sg and profile diagnostics, raw and scaled Bloch (dyn) and
+    Born predictions, and residuals (scaled prediction - target) / sigma_eff. split is free for masks['free'] rows,
+    else work.
+    """
+
     arrays = best_eval["arrays"]
     source_factors = np.asarray(target_factor(data, target_mode), dtype=float)
     dvals = np.asarray([data.cell.calculate_d(tuple(int(v) for v in h)) for h in data.hkl], dtype=float)
@@ -30,6 +37,9 @@ def write_row_table(path: Path, data: XDSData, target, best_eval, masks, target_
             "split", "row_resolution_factor", "dyn_raw_unmodulated", "dyn_raw", "born_raw", "q_dyn_over_born", "dyn_scaled", "born_scaled",
             "dyn_residual_over_sigma", "born_residual_over_sigma",
         ]
+        if "scale_angle_deg" in arrays:
+            # P-spline scale coordinate omega(ZCAL); per-frame tables keep the historical columns.
+            fields.append("scale_angle_deg")
         w = csv.DictWriter(f, fieldnames=fields)
         w.writeheader()
         default_float = np.full(len(target), np.nan, dtype=float)
@@ -39,7 +49,7 @@ def write_row_table(path: Path, data: XDSData, target, best_eval, masks, target_
         for i in np.where(arrays["valid"])[0]:
             split = "free" if masks["free"][i] else "work"
             q = arrays["dyn_raw"][i] / max(arrays["born_raw"][i], 1e-30)
-            w.writerow({
+            row = {
                 "row_index": int(i),
                 "h": int(data.hkl[i, 0]), "k": int(data.hkl[i, 1]), "l": int(data.hkl[i, 2]),
                 "d_A": float(dvals[i]),
@@ -96,7 +106,10 @@ def write_row_table(path: Path, data: XDSData, target, best_eval, masks, target_
                 "born_scaled": float(arrays["born_scaled"][i]),
                 "dyn_residual_over_sigma": float((arrays["dyn_scaled"][i] - target[i]) / max(arrays["sigma_eff"][i], 1e-12)),
                 "born_residual_over_sigma": float((arrays["born_scaled"][i] - target[i]) / max(arrays["sigma_eff"][i], 1e-12)),
-            })
+            }
+            if "scale_angle_deg" in arrays:
+                row["scale_angle_deg"] = float(arrays["scale_angle_deg"][i])
+            w.writerow(row)
 
 
 def native_row_table_artifact(path: Path) -> dict[str, str]:

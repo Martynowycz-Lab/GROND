@@ -28,10 +28,8 @@ from typing import Any
 import numpy as np
 
 from grond.io.dials_geometry import (
-    DIALS_SG_P95_ABS_LIMIT_INV_A as DIALS_SG_P95_ABS_LIMIT_INV_A,
     _a_scan_points_for_current_scan as _a_scan_points_for_current_scan,
     _format_header_vector as _format_header_vector,
-    _interp_scan_a as _interp_scan_a,
     _real_space_axes_from_a as _real_space_axes_from_a,
     _require_valid_dials_geometry as _require_valid_dials_geometry,
     _rotation_matrix as _rotation_matrix,
@@ -39,18 +37,11 @@ from grond.io.dials_geometry import (
     dials_sg_statistics as dials_sg_statistics,
 )
 from grond.io.dials_selection import (
-    _bool_array as _bool_array,
     _choose_intensity as _choose_intensity,
     _dials_row_selection_keep as _dials_row_selection_keep,
-    _dials_sigma_preflight_keep as _dials_sigma_preflight_keep,
 )
 from grond.io.dials_sigma import (
-    _canonical_reciprocal_hkl as _canonical_reciprocal_hkl,
-    _detector_gain as _detector_gain,
     _dials_sigma_multiplier as _dials_sigma_multiplier,
-    _finite_i_over_sigma as _finite_i_over_sigma,
-    _fit_empirical_sigma_model as _fit_empirical_sigma_model,
-    _space_group_rotations as _space_group_rotations,
 )
 
 DIALS_HELPER_CODE = Path(__file__).with_name("_dials_reader.py").read_text()
@@ -139,13 +130,12 @@ def convert_dials_to_grond(
     """Write a GROND-ready XDS-like directory from DIALS `.refl` and `.expt` files.
 
     The default intensity mode uses DIALS summation intensities completed by
-    `(lp/qe)/partiality`, while retaining partiality as the GROND `PEAK` quality
-    field.  With GROND's default `--min-peak 90`, this keeps fully recorded rows
+    `(lp/qe)/partiality`, with sigmas multiplied by the same factor. Partiality
+    remains the GROND `PEAK` quality field. With GROND's default `--min-peak 90`, this keeps fully recorded rows
     for production but leaves lower-partiality rows available for diagnostics.
-    ``row_selection='scaled'`` uses the raw summation values but retains only
-    rows accepted by DIALS scaling. Production conversion drops severe DIALS
-    bad-row flags by default and keeps
-    the detector-model summation variance unchanged. Empirical or gain-based
+    ``row_selection='scaled'`` additionally requires DIALS scaling acceptance;
+    it does not change the intensity mode. Production conversion drops severe
+    DIALS bad-row flags and applies no additional variance recalibration. Empirical or gain-based
     sigma inflation remains available as an explicit diagnostic policy.
     """
 
@@ -493,7 +483,7 @@ def convert_dials_to_grond(
         f"- Sigma mode: `{sigma_summary['mode']}`; multiplier `{sigma_summary['sigma_multiplier']:.6g}` ({sigma_summary['source']}).\n"
         f"- DIALS scan array range: `{list(scan_array_range)}`; GROND `STARTING_FRAME={starting_frame}`. Raw DIALS z coordinates are preserved.\n"
         "- `PEAK` is `100 * DIALS partiality`, so GROND's ordinary `--min-peak 90` means partiality >= 0.90.\n"
-        "- `ALF0` and `BET0` store the DIALS reflection-table `bbox` z-range. GROND can use this as an auditable rocking-width estimate with `--sg-window-mode dials_bbox`.\n"
+        "- `ALF0` and `BET0` store the DIALS reflection-table `bbox` z-range. With the default `--sg-window-mode auto` GROND uses it as the per-row rocking-window width (capped at 0.03 1/A by default; XDS rows use the fixed 0.010 1/A window).\n"
         "- Rows flagged `dont_integrate` or with severe DIALS bad-pixel/integration flags are dropped by default. Use the keep flags only for diagnostics.\n"
         "- `DIALS_A_AT_SCAN_POINTS.txt` carries scan-varying reciprocal A matrices. GROND interpolates these and applies the full DIALS `S R F A` goniometer geometry for Sg calculations.\n\n"
         "Run GROND with `--xds-dir` pointed at this generated directory, or use `GROND auto --dials-refl ... --dials-expt ...` to create it automatically under the run output directory.\n"

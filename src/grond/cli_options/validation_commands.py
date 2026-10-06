@@ -1,4 +1,4 @@
-"""Build the public command grammar in its established display order."""
+"""Register the validation and runtime commands: validate-ls1, validate, doctor and compile."""
 
 from __future__ import annotations
 
@@ -144,7 +144,7 @@ def register_runtime(sub: argparse._SubParsersAction) -> None:
     from grond.commands.doctor import cmd_doctor
     from grond.commands.validation import cmd_compile, cmd_validate
 
-    p_val = sub.add_parser("validate", help="Compile the vendored engine scripts with the selected Python.")
+    p_val = sub.add_parser("validate", help="Compile the engine scripts with the selected Python.")
     p_val.add_argument("--python", default="")
     add_tool_config_args(p_val)
     p_val.set_defaults(func=cmd_validate)
@@ -176,7 +176,7 @@ def register_runtime(sub: argparse._SubParsersAction) -> None:
     p_doc.set_defaults(func=cmd_doctor)
 
     p_compile = sub.add_parser(
-        "compile", help="Compile-check GROND and vendored engine modules without writing bytecode into the source tree."
+        "compile", help="Compile-check the GROND package and its engine modules without writing bytecode into the source tree."
     )
     p_compile.add_argument("--python", default="")
     add_tool_config_args(p_compile)

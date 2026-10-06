@@ -1,4 +1,4 @@
-"""Observation units, eligibility, and scale-group geometry. Preserve signed row membership: silently dropping difficult rows changes the scientific comparison."""
+"""Observation units, row selection and scale-group geometry."""
 
 from __future__ import annotations
 
@@ -138,6 +138,12 @@ def endpoint_observation_arrays(data: XDSData, target, sigma, mode: str):
 
 
 def sigma_eff(data: XDSData, target, base_sigma, nui: Nuisance):
+    """Return the effective sigma of every row: the base sigma plus the error-model terms in quadrature.
+
+    The sigma_a, sigma_b_corr and sigma_c_peak terms are proportional to the target; the second and third also scale
+    with (1 - CORR/100) and (1 - PEAK/100).
+    """
+
     corr_term = np.maximum(0.0, 1.0 - data.corr / 100.0)
     peak_term = np.maximum(0.0, 1.0 - np.maximum(data.peak, 0.0) / 100.0)
     return np.sqrt(
@@ -149,6 +155,12 @@ def sigma_eff(data: XDSData, target, base_sigma, nui: Nuisance):
 
 
 def group_indices(data: XDSData, group_width_deg: float, frame_offset: float):
+    """Return the scale group of every row: omega at ZCAL + frame_offset in group_width_deg bins.
+
+    Bins start at the smallest omega. PETS exact-row input keeps its own virtual-frame partition, except a validated
+    static HKLF4 endpoint, which bins the cumulative rotation between its orientation matrices.
+    """
+
     if getattr(data, "pets_exact_a_center", None) is not None:
         static_endpoint = (
             str(data.header.get("PETS_STATIC_HKLF4_VALIDATED", ""))
@@ -184,6 +196,11 @@ def group_indices(data: XDSData, group_width_deg: float, frame_offset: float):
 
 
 def detector_bin_indices(data: XDSData, n_bins: int):
+    """Return every row's tile y * n_bins + x on an n_bins x n_bins grid over XCAL and YCAL (all 0 when n_bins <= 1).
+
+    The detector size comes from the header NX and NY, else from the largest calculated position plus 1.
+    """
+
     if int(n_bins) <= 1:
         return np.zeros(len(data.hkl), dtype=int)
     nx_text = str(data.header.get("NX", ""))
@@ -253,6 +270,13 @@ def geometry_tail_mask(data: XDSData, base_mask, percentile: float = 100.0):
 
 
 def row_selection(data: XDSData, target, positive_only: bool, min_d: float, min_peak: float, max_rows: int = 0, geometry_percentile: float = 100.0):
+    """Return the indices of the eligible rows.
+
+    Eligible rows have a finite target, positive sigma and RLP, pass the optional positive, PEAK and d cuts, and are
+    not in the geometry tail. With max_rows > 0 at most max_rows rows are kept, taken in turn from frame x
+    resolution strata, highest target/sigma first.
+    """
+
     mask = (
         np.isfinite(target)
         & np.isfinite(data.sigma)
@@ -266,35 +290,37 @@ def row_selection(data: XDSData, target, positive_only: bool, min_d: float, min_
     if min_peak > 0:
         mask &= data.peak >= min_peak
     if min_d > 0:
-        dvals = np.asarray([data.cell.calculate_d(tuple(int(v) for v in h)) for h in data.hkl], dtype=float)
-        mask &= dvals >= min_d
+        d_spacings = np.asarray([data.cell.calculate_d(tuple(int(v) for v in h)) for h in data.hkl], dtype=float)
+        mask &= d_spacings >= min_d
     geom_keep, _geom_summary = geometry_tail_mask(data, mask, geometry_percentile)
     mask &= geom_keep
-    idx = np.where(mask)[0]
-    if max_rows > 0 and len(idx) > max_rows:
+    indices = np.where(mask)[0]
+    if max_rows > 0 and len(indices) > max_rows:
         n_bins = max(1, min(10, int(math.sqrt(int(max_rows)))))
-        dvals = np.asarray(
-            [data.cell.calculate_d(tuple(int(v) for v in data.hkl[i])) for i in idx],
+        d_spacings = np.asarray(
+            [data.cell.calculate_d(tuple(int(v) for v in data.hkl[row_index])) for row_index in indices],
             dtype=float,
         )
-        frames = np.asarray(data.zcal[idx], dtype=float)
-        isigi = np.asarray(target[idx], dtype=float) / np.asarray(data.sigma[idx], dtype=float)
+        frames = np.asarray(data.zcal[indices], dtype=float)
+        signal_to_noise = np.asarray(target[indices], dtype=float) / np.asarray(data.sigma[indices], dtype=float)
 
         def rank_bins(values):
+            """Return equal-count rank bins 0..n_bins-1 of values (stable order for ties)."""
+
             order = np.argsort(values, kind="mergesort")
             bins = np.empty(len(values), dtype=int)
             bins[order] = np.minimum(n_bins - 1, np.arange(len(values)) * n_bins // len(values))
             return bins
 
         frame_bins = rank_bins(frames)
-        resolution_bins = rank_bins(1.0 / np.maximum(dvals, 1e-12))
+        resolution_bins = rank_bins(1.0 / np.maximum(d_spacings, 1e-12))
         strata = {}
-        for local, row_idx in enumerate(idx):
-            strata.setdefault((int(frame_bins[local]), int(resolution_bins[local])), []).append(
-                (float(isigi[local]), int(row_idx))
+        for position, row_index in enumerate(indices):
+            strata.setdefault((int(frame_bins[position]), int(resolution_bins[position])), []).append(
+                (float(signal_to_noise[position]), int(row_index))
             )
         queues = [
-            [row_idx for _score, row_idx in sorted(rows, key=lambda item: (item[0], -item[1]))]
+            [row_index for _score, row_index in sorted(rows, key=lambda item: (item[0], -item[1]))]
             for _key, rows in sorted(strata.items())
         ]
         selected = []
@@ -302,8 +328,8 @@ def row_selection(data: XDSData, target, positive_only: bool, min_d: float, min_
             for queue in queues:
                 if queue and len(selected) < int(max_rows):
                     selected.append(queue.pop())
-        idx = np.asarray(selected, dtype=int)
-    return idx
+        indices = np.asarray(selected, dtype=int)
+    return indices
 
 
 def row_contract_selection(data: XDSData, target, path: Path) -> tuple[np.ndarray, dict]:
@@ -341,7 +367,7 @@ def row_contract_selection(data: XDSData, target, path: Path) -> tuple[np.ndarra
     checked_target = checked_sigma = checked_d = 0
     for ordinal, row in enumerate(rows, start=2):
         try:
-            idx = int(str(row["row_index"]).strip())
+            row_index = int(str(row["row_index"]).strip())
             hkl = tuple(int(str(row[field]).strip()) for field in ("h", "k", "l"))
             target_i = float(str(row["target_I"]).strip())
             xds_sigma = float(str(row["xds_sigma"]).strip())
@@ -351,35 +377,35 @@ def row_contract_selection(data: XDSData, target, path: Path) -> tuple[np.ndarra
             if len(errors) >= 10:
                 break
             continue
-        if idx < 0 or idx >= len(data.hkl):
-            errors.append(f"line {ordinal}: row_index {idx} is outside XDS range [0, {len(data.hkl)})")
-        elif idx in seen:
-            errors.append(f"line {ordinal}: duplicate row_index {idx}")
+        if row_index < 0 or row_index >= len(data.hkl):
+            errors.append(f"line {ordinal}: row_index {row_index} is outside XDS range [0, {len(data.hkl)})")
+        elif row_index in seen:
+            errors.append(f"line {ordinal}: duplicate row_index {row_index}")
         else:
-            seen.add(idx)
-            observed_hkl = tuple(int(value) for value in np.asarray(data.hkl[idx], dtype=int))
+            seen.add(row_index)
+            observed_hkl = tuple(int(value) for value in np.asarray(data.hkl[row_index], dtype=int))
             if observed_hkl != hkl:
                 errors.append(
-                    f"line {ordinal}: row_index {idx} HKL mismatch; contract={hkl}, XDS={observed_hkl}"
+                    f"line {ordinal}: row_index {row_index} HKL mismatch; contract={hkl}, XDS={observed_hkl}"
                 )
             else:
                 if not (
                     math.isfinite(target_i)
-                    and math.isclose(float(target[idx]), target_i, rel_tol=1e-11, abs_tol=1e-10)
+                    and math.isclose(float(target[row_index]), target_i, rel_tol=1e-11, abs_tol=1e-10)
                 ):
                     errors.append(
-                        f"line {ordinal}: row_index {idx} target_I mismatch; "
-                        f"contract={target_i:.17g}, XDS={float(target[idx]):.17g}"
+                        f"line {ordinal}: row_index {row_index} target_I mismatch; "
+                        f"contract={target_i:.17g}, XDS={float(target[row_index]):.17g}"
                     )
                 else:
                     checked_target += 1
                 if not (
                     math.isfinite(xds_sigma)
-                    and math.isclose(float(data.sigma[idx]), xds_sigma, rel_tol=1e-11, abs_tol=1e-10)
+                    and math.isclose(float(data.sigma[row_index]), xds_sigma, rel_tol=1e-11, abs_tol=1e-10)
                 ):
                     errors.append(
-                        f"line {ordinal}: row_index {idx} xds_sigma mismatch; "
-                        f"contract={xds_sigma:.17g}, XDS={float(data.sigma[idx]):.17g}"
+                        f"line {ordinal}: row_index {row_index} xds_sigma mismatch; "
+                        f"contract={xds_sigma:.17g}, XDS={float(data.sigma[row_index]):.17g}"
                     )
                 else:
                     checked_sigma += 1
@@ -394,7 +420,7 @@ def row_contract_selection(data: XDSData, target, path: Path) -> tuple[np.ndarra
                     and math.isclose(d_actual, d_expected, rel_tol=1e-8, abs_tol=1e-9)
                 ):
                     errors.append(
-                        f"line {ordinal}: row_index {idx} d_A mismatch; "
+                        f"line {ordinal}: row_index {row_index} d_A mismatch; "
                         f"contract={d_expected:.17g}, XDS={d_actual:.17g}"
                     )
                 else:
@@ -429,10 +455,15 @@ def row_contract_selection(data: XDSData, target, path: Path) -> tuple[np.ndarra
 
 
 def endpoint_resolution_modulation(data: XDSData, valid, endpoint_b: float):
+    """Return exp(endpoint_b (s^2 - s^2_center)) per row, s = 1/(2d), and its metadata; all 1 when endpoint_b is 0.
+
+    s^2_center is the median over the valid rows.
+    """
+
     if abs(float(endpoint_b)) <= 0.0:
         return np.ones(len(data.hkl), dtype=float), {"endpoint_b": float(endpoint_b), "s2_center": float("nan")}
-    dvals = np.asarray([data.cell.calculate_d(tuple(int(v) for v in h)) for h in data.hkl], dtype=float)
-    s2 = 1.0 / np.maximum(4.0 * dvals * dvals, 1e-30)
+    d_spacings = np.asarray([data.cell.calculate_d(tuple(int(v) for v in h)) for h in data.hkl], dtype=float)
+    s2 = 1.0 / np.maximum(4.0 * d_spacings * d_spacings, 1e-30)
     center_mask = np.asarray(valid, dtype=bool) & np.isfinite(s2)
     s2_center = float(np.nanmedian(s2[center_mask])) if np.any(center_mask) else float(np.nanmedian(s2))
     mod = np.exp(float(endpoint_b) * (s2 - s2_center))
@@ -451,8 +482,8 @@ def row_resolution_modulation(data: XDSData, valid, row_resolution_b: float):
     row_resolution_b = float(row_resolution_b)
     if abs(row_resolution_b) <= 0.0:
         return np.ones(len(data.hkl), dtype=float), {"row_resolution_b": row_resolution_b, "row_s2_center": float("nan")}
-    dvals = np.asarray([data.cell.calculate_d(tuple(int(v) for v in h)) for h in data.hkl], dtype=float)
-    s2 = 1.0 / np.maximum(4.0 * dvals * dvals, 1e-30)
+    d_spacings = np.asarray([data.cell.calculate_d(tuple(int(v) for v in h)) for h in data.hkl], dtype=float)
+    s2 = 1.0 / np.maximum(4.0 * d_spacings * d_spacings, 1e-30)
     center_mask = np.asarray(valid, dtype=bool) & np.isfinite(s2)
     s2_center = float(np.nanmedian(s2[center_mask])) if np.any(center_mask) else float(np.nanmedian(s2))
     exponent = np.clip(row_resolution_b * (s2 - s2_center), -20.0, 20.0)

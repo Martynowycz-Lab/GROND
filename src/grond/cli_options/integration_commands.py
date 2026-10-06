@@ -1,4 +1,4 @@
-"""Build the public command grammar in its established display order."""
+"""Register import-dials, import-pets, pets-evaluate, export-pets and apply-diffbloch-model."""
 
 from __future__ import annotations
 
@@ -66,7 +66,7 @@ def register_integration(sub: argparse._SubParsersAction) -> None:
             "requires its companion 13-column .hkl file so the acquisition frame remains "
             "known. PETS-owned *_dyn.cif_pets virtual-frame occurrences require the explicit "
             "--allow-virtual-frames acknowledgement. An ordinary import becomes eligible "
-            "for full q/LS1 AUTO only when --baseline-hkl is PETS' row-matched static SHELX "
+            "for the full AUTO run with SHELXL rounds only when --baseline-hkl is PETS' row-matched static SHELX "
             "export. PETS virtual-frame occurrences remain native row-space data and are "
             "never claimed as a conventional SHELXL HKLF4 endpoint."
         ),

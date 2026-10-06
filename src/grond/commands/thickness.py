@@ -41,6 +41,10 @@ from grond.workflows.thickness_scout import (
 def cmd_thickness_scout(args: argparse.Namespace) -> int:
     """Run a diagnostic thickness contract-sensitivity scout."""
 
+    # --preset comes with the shared run options, but only grond auto and grond run apply it; refuse it here
+    # rather than silently running with other settings than the ones asked for.
+    if str(getattr(args, "preset", "standard") or "standard") != "standard":
+        raise SystemExit(f"--preset {args.preset} applies to grond auto and grond run only, not to thickness-scout")
     args.out_dir = str(Path(args.out_dir).expanduser().resolve())
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)

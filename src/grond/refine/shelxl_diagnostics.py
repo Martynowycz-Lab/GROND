@@ -16,6 +16,13 @@ from .shelx_input import _iter_recommended_wght_terms, parse_shelx_wght_terms
 
 
 def parse_lst(path: Path):
+    """Read the statistics of a SHELXL .lst file into a dict.
+
+    Collects the active WGHT, reflection counts, R(int), R(sigma), wR2, GooF, R1 (Fo >
+    4sig(Fo) and all data), the last cycle's shift/esd and the listed pathologies.
+    ``status`` is ``missing``, ``ok``, ``bad_hkl_format`` or ``no_regularization_stats``.
+    """
+
     out = {"lst": str(path), "status": "missing"}
     if not path.exists():
         return out
@@ -51,12 +58,49 @@ def parse_lst(path: Path):
         out["N_gt"] = int(m[-1][1])
         out["R1_all"] = float(m[-1][2])
         out["N_all"] = int(m[-1][3])
+    out.update(parse_shift_esd(text))
     if "wR2_all" not in out or "R1_all" not in out:
         if "HAS WRONG FORMAT" in text:
             out["status"] = "bad_hkl_format"
         else:
             out["status"] = "no_regularization_stats"
     return out
+
+
+def parse_shift_esd(text: str) -> dict:
+    """Last L.S. cycle's mean and maximum shift/esd and the parameter that carries the maximum.
+
+    The parameter may be a single token such as ``OSF`` or an ADP/atom pair such as ``U23 C1``.
+    """
+
+    m = re.findall(r"Mean shift/esd =\s+([-\d.]+)\s+Maximum =\s+([-\d.]+) for\s+([^\n]*)", text)
+    if not m:
+        return {}
+    return {
+        "mean_shift_esd": float(m[-1][0]),
+        "max_shift_esd": float(m[-1][1]),
+        "max_shift_param": m[-1][2].strip(),
+    }
+
+
+def npd_atoms_from_lst_text(text: str) -> list[str]:
+    """Atoms SHELXL flagged NON POSITIVE DEFINITE, in order of first appearance."""
+
+    atoms: list[str] = []
+    for atom in re.findall(r"(\S+)\s+\*\*\s*NON[- ]POSITIVE DEFINITE", text, flags=re.I):
+        if atom not in atoms:
+            atoms.append(atom)
+    return atoms
+
+
+def parse_suggested_wght_res(res_text: str) -> tuple[float, float] | None:
+    """SHELXL's suggested next WGHT written after END in a RES file."""
+
+    tail = res_text.split("\nEND", 1)
+    if len(tail) < 2:
+        return None
+    m = re.findall(r"^WGHT\s+([-\d.]+)\s+([-\d.]+)", tail[1], flags=re.M)
+    return (float(m[-1][0]), float(m[-1][1])) if m else None
 
 
 def parse_recommended_wght(lst_path: Path) -> tuple[float, float] | None:

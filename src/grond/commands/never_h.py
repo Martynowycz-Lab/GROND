@@ -29,6 +29,11 @@ from grond.workflows.model_alignment import reindex_hkl, require_no_hydrogen, wr
 
 
 def recorded_run(command, directory: Path, label: str) -> None:
+    """Run one external command in ``directory`` with its command, log and timing files; raise when it fails.
+
+    For SHELXL steps (``shelxl``, ``zero_cycle_LIST6``) an empty or missing model.res is also a failure.
+    """
+
     directory.mkdir(parents=True, exist_ok=True)
     save_json(directory / f"{label}.command.json", {"command": command, "cwd": str(directory)})
     started = time.time()
@@ -62,6 +67,14 @@ def refine_step(shelxl: str, directory: Path, cycle: int) -> dict:
 
 
 def _run(args, out: Path) -> int:
+    """Run the matched never-H branch in ``out`` with the frozen physics of a full-H reference run.
+
+    The full-H replay is checked first, then the aligned H-free model is refined for ``--cycles`` SHELXL cycles and,
+    with maps on, matched maps are built. Only coordinates, ADPs, the SHELXL scale and the Bloch/Born predictions
+    change; beam membership, nuisance, scales, sigma factors and the merge are those of the full-H reference. Finished
+    cycles are reused when their input and model hashes match, and changed inputs or code need a new ``--out-dir``.
+    """
+
     paths = ReferencePaths(args.path_map)
     reference = load_reference(Path(args.reference_run).expanduser().resolve(), paths)
     source = Path(args.structure).expanduser().resolve()
@@ -134,6 +147,7 @@ def _run(args, out: Path) -> int:
     reference["model"] = str(snapshots / "full_H.res")
 
     def status(stage, **extra):
+        """Write STATUS.json with the running stage and print the stage."""
         save_json(out / "STATUS.json", {"status": "running", "stage": stage, "pid": os.getpid(), "updated": time.time(), **extra})
         print(stage, flush=True)
 
@@ -142,6 +156,7 @@ def _run(args, out: Path) -> int:
         predict_dataset(ds, Path(reference["model"]), Path(reference["model"]), out / "reference_replay" / ds["name"], workers=min(workers, 4), smoke=True)
 
     def calculate(model, directory):
+        """Predict every reference dataset's rows for ``model`` under ``directory``; return them by dataset."""
         rows = {}
         for ds in reference["datasets"]:
             status(f"{directory.name}: {ds['name']}", model=str(model))
@@ -187,6 +202,18 @@ def _run(args, out: Path) -> int:
         from grond.workflows.matched_maps import build_matched_maps
         status("Build matched maps")
         maps = build_matched_maps(conventional, final, out / "maps", shelxl, maptool, recorded_run, args.map_grid_spacing)
+        if getattr(args, "model_box_maps", True):
+            from grond.workflows.figure_maps import never_h_model_boxes
+
+            status("Box maps around the full-H model")
+            try:
+                boxes = never_h_model_boxes(out / "maps", Path(reference["model"]),
+                                            margin_A=float(getattr(args, "model_box_margin", 3.0)))
+            except Exception as exc:  # figure boxes never invalidate the refinement
+                boxes = {"status": "failed", "error": f"{type(exc).__name__}: {exc}"}
+            save_json(out / "maps" / "MODEL_BOX_MANIFEST.json", boxes)
+            maps["model_box"] = {"status": boxes.get("status"), "manifest": str(out / "maps" / "MODEL_BOX_MANIFEST.json"),
+                                 "warnings": boxes.get("warnings", [])}
     result = {"status": "complete_with_warning" if warning else "complete", "warning": warning,
               "model": str(final / "model.res"), "cycles": records, "maps": maps,
               "reference_replay_passed": True, "commands": str(out / "RUN_MANIFEST.json")}
@@ -197,6 +224,8 @@ def _run(args, out: Path) -> int:
 
 
 def cmd_never_h(args) -> int:
+    """Run ``grond never-h`` under a lock on ``--out-dir``; a failure is written to STATUS.json before exiting."""
+
     import fcntl
 
     if args.cycles < 0 or not 0 < args.map_grid_spacing <= 1:

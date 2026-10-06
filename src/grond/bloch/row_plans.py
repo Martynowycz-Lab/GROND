@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import math
-
 import numpy as np
 
+from grond.bloch.basis import ranked_candidates
+from grond.bloch.hamiltonian import ProfileHamiltonians
 from grond.bloch.numerics import _rotation_matrix_axis_angle
 
 
@@ -39,6 +39,8 @@ class RowPlanMixin:
         return matrices, offsets, weights, semiangle, ordinal
 
     def pets_exact_sg_for_hkls(self, hkls, orientation):
+        """Return exact S_g = (k^2 - |s0 + g|^2)/(2k) in Å⁻¹ for HKL rows, with g = orientation @ h."""
+
         g = (np.asarray(orientation, dtype=float) @ np.asarray(hkls, dtype=float).T).T
         return (self.data.k**2 - np.sum((self.data.s0 + g) ** 2, axis=1)) / (2.0 * self.data.k)
 
@@ -62,10 +64,7 @@ class RowPlanMixin:
         needed = max(0, int(self.cfg.n_basis) - len(basis))
         if needed:
             take = min(len(candidates), needed + 1)
-            if take < len(candidates):
-                local = np.argpartition(best_score[candidates], -take)[-take:]
-                candidates = candidates[local]
-            candidates = candidates[np.lexsort((candidates, -best_score[candidates]))]
+            candidates = ranked_candidates(best_score, candidates, take)
             for index in candidates:
                 candidate = tuple(int(value) for value in self.pool_hkl[index])
                 if candidate in seen:
@@ -112,19 +111,17 @@ class RowPlanMixin:
             else dynamic_static
         )
         h10_born = born_static[1, 0]
-        dynamic_matrices = []
+        sg_profiles = np.empty((len(orientations), len(basis)), dtype=dynamic_static.real.dtype)
         born_values = []
         born_deltas = []
-        for orientation in orientations:
+        for profile_index, orientation in enumerate(orientations):
             sg_basis = self.pets_exact_sg_for_hkls(basis, orientation)
-            dynamic_matrices.append(self.hamiltonian_from_static(dynamic_static, sg_basis))
+            sg_profiles[profile_index] = sg_basis
             delta = float(np.real(sg_basis[1] - sg_basis[0]))
             born_deltas.append(delta)
-            sinc = np.sinc(delta * self.thick)
-            born_t = (2.0 * math.pi) ** 2 * (abs(h10_born) ** 2) * (self.thick**2) * (sinc**2)
-            born_values.append(float(np.sum(self.thick_w * born_t)))
+            born_values.append(self.born_thickness_average(h10_born, delta))
         return {
-            "_dyn_matrices": dynamic_matrices,
+            "_dyn_matrices": ProfileHamiltonians(dynamic_static, sg_profiles),
             "_profile_weights": np.asarray(profile_weights, dtype=float),
             "_born_vals": np.asarray(born_values, dtype=float),
             "_born_h10_abs2": float(abs(h10_born) ** 2),
@@ -202,18 +199,16 @@ class RowPlanMixin:
         else:
             H_born_static = H_dyn_static
         h10_born = H_born_static[1, 0]
-        dyn_matrices, born_vals, born_deltas = [], [], []
-        for omega, (along_deg, transverse_deg) in zip(solved_omegas, mosaic_tilts, strict=True):
+        sg_profiles = np.empty((len(solved_omegas), len(basis)), dtype=H_dyn_static.real.dtype)
+        born_vals, born_deltas = [], []
+        for profile_index, (omega, (along_deg, transverse_deg)) in enumerate(zip(solved_omegas, mosaic_tilts, strict=True)):
             sg_basis = self.sg_for_hkls_at_orientation(basis, omega, along_deg, transverse_deg)
-            H = self.hamiltonian_from_static(H_dyn_static, sg_basis)
-            dyn_matrices.append(H)
+            sg_profiles[profile_index] = sg_basis
             delta = float(np.real(sg_basis[1] - sg_basis[0]))
             born_deltas.append(delta)
-            sinc = np.sinc(delta * self.thick)
-            born_t = (2.0 * math.pi) ** 2 * (abs(h10_born) ** 2) * (self.thick**2) * (sinc**2)
-            born_vals.append(float(np.sum(self.thick_w * born_t)))
+            born_vals.append(self.born_thickness_average(h10_born, delta))
         return {
-            "_dyn_matrices": dyn_matrices,
+            "_dyn_matrices": ProfileHamiltonians(H_dyn_static, sg_profiles),
             "_profile_weights": np.asarray(profile_weights, dtype=float),
             "_born_vals": np.asarray(born_vals, dtype=float),
             "_born_h10_abs2": float(abs(h10_born) ** 2),
@@ -237,6 +232,12 @@ class RowPlanMixin:
         }
 
     def finish_row_prediction_plan(self, plan, dyn_vals):
+        """Return a row plan's public fields with the profile-weighted ``dyn`` and ``born`` intensities added.
+
+        ``dyn_vals`` holds one dynamical target intensity per profile point. Keys starting with ``_`` are working arrays
+        and are dropped; ``max_sg_solve_residual`` is the largest |S_g| root-solve residual.
+        """
+
         profile_weights = np.asarray(plan["_profile_weights"], dtype=float)
         born_vals = np.asarray(plan["_born_vals"], dtype=float)
         sg_resid = np.asarray(plan["_sg_resid"], dtype=float)
@@ -251,6 +252,11 @@ class RowPlanMixin:
         return out
 
     def row_prediction(self, row_idx):
+        """Predict one row: its plan record with profile-weighted, thickness-averaged ``dyn`` and ``born``.
+
+        With paired_inverse_hand the same eigensystems also give the inverse-hand intensity as ``dyn_inverse``.
+        """
+
         plan = self.row_prediction_plan(row_idx)
         if bool(getattr(self.cfg, "paired_inverse_hand", False)):
             pairs = [self.propagate_direct_to_target_thickness_average_pair(H) for H in plan["_dyn_matrices"]]

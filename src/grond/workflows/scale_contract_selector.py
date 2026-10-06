@@ -1,3 +1,5 @@
+"""Choose between the full and the compact multi-dataset scale contract from their recorded metrics."""
+
 from __future__ import annotations
 
 import math
@@ -5,6 +7,8 @@ from collections.abc import Mapping
 
 
 def _finite(mapping: Mapping[str, object], key: str) -> float:
+    """Return ``mapping[key]`` as a float; raise ValueError(key) when it is not finite."""
+
     value = float(mapping[key])
     if not math.isfinite(value):
         raise ValueError(key)
@@ -12,6 +16,8 @@ def _finite(mapping: Mapping[str, object], key: str) -> float:
 
 
 def _integer(mapping: Mapping[str, object], key: str) -> int:
+    """Return ``mapping[key]`` as an int when it is a finite whole number; raise ValueError(key) otherwise."""
+
     value = _finite(mapping, key)
     integer = int(value)
     if value != integer:

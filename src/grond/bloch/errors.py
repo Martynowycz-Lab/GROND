@@ -19,6 +19,8 @@ class NonPassiveAbsorptionError(ValueError):
     """
 
     def __init__(self, message, *, details=None):
+        """Keep the message and a plain-dict copy of ``details`` (empty when None)."""
+
         super().__init__(message)
         self.details = dict(details or {})
 

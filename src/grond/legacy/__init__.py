@@ -1,1 +1,1 @@
-"""Vendored command-line engine scripts used by the public GROND CLI."""
+"""Command-line engine scripts that the GROND CLI runs as worker processes."""

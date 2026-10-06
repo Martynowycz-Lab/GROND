@@ -6,12 +6,15 @@ from pathlib import Path
 
 import numpy as np
 
+from grond.bloch.model import shelx_encoded
 from grond.legacy.engine.bloch_engine import XDSData
 
 from .parameters import atom_ueq
 
 
 def write_objective_rows(path: Path, data: XDSData, rows, target, sig, masks) -> None:
+    """Write the objective rows as CSV: HKL, d, Iobs, sigma, work/free split and XDS geometry columns."""
+
     fieldnames = [
         "row_index",
         "h",
@@ -53,11 +56,24 @@ def write_objective_rows(path: Path, data: XDSData, rows, target, sig, masks) ->
             )
 
 
-def format_native_value(eval_result, split: str, key: str) -> float:
-    return float(eval_result["splits"][split][key])
+def _plain_uiso(token: str) -> bool:
+    """True for a Uiso written as a plain positive value (not a riding multiplier, fixed value or free variable)."""
+
+    try:
+        value = float(token)
+    except ValueError:
+        return False
+    return value > 0.0 and not shelx_encoded(value)
 
 
 def update_res_coordinates(src: Path, dst: Path, model) -> None:
+    """Copy a SHELX .res, replacing the coordinates and ADPs of atoms in ``model``.
+
+    Anisotropic atoms are rewritten on two lines. Isotropic atoms, including free hydrogens, take their updated
+    ``uiso`` over a plain positive value; riding multipliers (negative) and free-variable or fixed encodings
+    (``10*m+p``) are kept, as are occupancies and other instruction records.
+    """
+
     atom_by_name = {a["name"]: a for a in model["atoms"]}
     lines = src.read_text(errors="replace").splitlines()
     out = []
@@ -83,10 +99,8 @@ def update_res_coordinates(src: Path, dst: Path, model) -> None:
                 if line.rstrip().endswith("=") and i + 1 < len(lines):
                     i += 1
             else:
-                # Preserve riding-H negative Uiso multipliers and occupancy
-                # conventions unless this atom has an explicit updated Uiso.
                 rest = parts[5:]
-                if atom.get("element", "").upper() != "H" and "uiso" in atom and len(rest) >= 2:
+                if "uiso" in atom and len(rest) >= 2 and _plain_uiso(rest[1]):
                     rest = [rest[0], f"{float(atom['uiso']):.5f}"] + rest[2:]
                 newline = (
                     f"{prefix}{parts[0]:<4s} {parts[1]:>2s} "
@@ -101,6 +115,8 @@ def update_res_coordinates(src: Path, dst: Path, model) -> None:
 
 
 def write_parameter_csv(path: Path, params, x0, x_final):
+    """Write each refined parameter with its start value, final value and shift."""
+
     with path.open("w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=["atom", "kind", "coord", "start", "final", "shift"])
         w.writeheader()
@@ -109,6 +125,8 @@ def write_parameter_csv(path: Path, params, x0, x_final):
 
 
 def write_model_delta_csv(path: Path, start_model, final_model):
+    """Write each atom's coordinate shifts (fractional) and Ueq change between two models."""
+
     start_by_name = {a["name"]: a for a in start_model["atoms"]}
     with path.open("w", newline="") as f:
         fieldnames = ["atom", "element", "dx", "dy", "dz", "start_ueq", "final_ueq", "delta_ueq"]

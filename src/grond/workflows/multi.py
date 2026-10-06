@@ -12,6 +12,7 @@ from grond.cli_support.values import read_json, try_read_json
 from grond.io.config import DatasetSpec, PrepConfig, write_datasets_csv
 from grond.io.structure_contract import absolute_structure_policy
 from grond.paths import engine_script
+from grond.reports.console import report_feature_decisions, report_macro_cycles, report_split, report_stage_heldout
 from grond.workflows.crystal_parameters import crystal_arguments
 from grond.workflows.dataset_gates import (
     apply_dataset_policy_to_nuisance,
@@ -20,10 +21,14 @@ from grond.workflows.dataset_gates import (
     require_policy_active_runs,
     run_dataset_policy_gate,
 )
-from grond.workflows.dataset_policy import write_policy_weighted_runs
+from grond.workflows.dataset_policy import policy_by_name, write_policy_weighted_runs
 from grond.workflows.decision import apply_preflight, preflight_dataset, thickness_polish_nuisance, write_json
 from grond.workflows.endpoint_selection import run_scale_window_polish
-from grond.workflows.final_hand_selection import run_multi_final_elastic_hand_selection
+from grond.workflows.final_hand_selection import (
+    hand_decision_settings,
+    run_early_elastic_hand_selection,
+    run_multi_final_elastic_hand_selection,
+)
 from grond.workflows.forensic_gates import run_forensic_gate, run_resolution_limit_gate
 from grond.workflows.hand_row_contracts import _args_with_recorded_native_contract, _positive_summary_int
 from grond.workflows.model_selection import (
@@ -32,12 +37,25 @@ from grond.workflows.model_selection import (
     resolve_structure_update_strategy,
     resolved_frame_offset_candidates,
 )
-from grond.workflows.native_commands import native_stage_cmd
+from grond.workflows.native_commands import native_stage_cmd, split_scheme_args
+from grond.workflows.nested_nuisance import (
+    NESTED_GATE_FAMILIES,
+    feedback_final_nuisance,
+    nested_gate_skip_record,
+    nested_selection_enabled,
+    run_nested_nuisance_stage,
+)
 from grond.workflows.nuisance_policy import (
+    FEATURE_GATE_FAMILIES,
     compact_base_nuisance,
+    configure_auto_physics,
+    configure_cell_esd,
     effective_topup_d_min,
     resolve_final_n_basis,
     resolved_row_plan_cache,
+    shared_structure_update_n_points,
+    shared_structure_update_window,
+    stage_n_points,
 )
 from grond.workflows.report_commands import combine_cmd
 from grond.workflows.scale_selection import run_multi_scale_contract_selection
@@ -52,16 +70,84 @@ from grond.workflows.thickness_materialization import (
     discrete_thickness_promotion_record,
     materialize_continuous_nuisance_run,
 )
-from grond.workflows.transform_selection import choose_transform_by_scout
+from grond.workflows.transform_selection import (
+    choose_transform_by_scout,
+    exclude_metric_incompatible_datasets,
+    plan_split_candidates,
+    run_cross_crystal_split_check,
+)
+
+
+def final_hand_evidence_datasets(
+    prep: PrepConfig,
+    args: argparse.Namespace,
+    final_dataset_policy: Mapping[str, object],
+    policy_active: Mapping[str, Path],
+) -> dict[str, object]:
+    """Crystals pooled in the final hand check.
+
+    ``--hand-evidence-datasets not-excluded`` (default) keeps every crystal except one the final dataset policy
+    excluded, and that exclusion must carry its recorded reason; a downweighted or completeness-only crystal is
+    demoted for the endpoint, not for the hand, and stays in the pooled evidence.  ``policy-active`` (legacy)
+    keeps the primary and downweighted crystals only.
+    """
+
+    scope = str(getattr(args, "hand_evidence_datasets", "policy-active") or "policy-active")
+    names = [dataset.name for dataset in prep.datasets]
+    rows = policy_by_name(final_dataset_policy)
+    roles = {name: str((rows.get(name) or {}).get("action") or "primary") for name in names}
+    if scope == "policy-active":
+        included = [name for name in names if name in policy_active]
+        excluded = {
+            name: list((rows.get(name) or {}).get("reasons") or [f"dataset policy action {roles[name]}"])
+            for name in names
+            if name not in policy_active
+        }
+        label = "primary_and_downweighted_policy_active_datasets_only"
+    elif scope == "not-excluded":
+        excluded = {}
+        for name in names:
+            if roles[name] != "exclude":
+                continue
+            reasons = [str(reason) for reason in (rows.get(name) or {}).get("reasons") or [] if str(reason).strip()]
+            if not reasons:
+                raise RuntimeError(
+                    f"the final dataset policy excluded {name} without a recorded reason; refusing to drop it "
+                    "from the pooled hand evidence"
+                )
+            excluded[name] = reasons
+        included = [name for name in names if name not in excluded]
+        label = "every_dataset_except_policy_excluded_with_recorded_reason"
+    else:
+        raise ValueError(f"unknown --hand-evidence-datasets {scope!r}; expected not-excluded or policy-active")
+    if not included:
+        raise RuntimeError("no crystal is left for the final hand check; refusing to decide the hand on no evidence")
+    return {
+        "scope": scope,
+        "policy_label": label,
+        "included": included,
+        "excluded": excluded,
+        "roles": roles,
+        "demoted_included": {name: roles[name] for name in included if roles[name] not in {"primary"}},
+        "policy_status": str(final_dataset_policy.get("status") or ""),
+    }
 
 
 def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Path) -> dict:
     """Run one structure against multiple datasets and combine endpoints."""
 
     root = Path(args.out_dir)
+    configure_auto_physics(prep, args)
     if args.auto_decide:
+        # Every crystal's split contract comes from one candidate set fixed by cell metrics before any scout, so an
+        # orbit is free (or excluded) in every crystal or in none (--split-candidate-set; trusted transforms write
+        # no contract).
+        if not getattr(args, "trust_hkl_transform", False) and len(prep.datasets) > 1:
+            prep, _metric_exclusions = exclude_metric_incompatible_datasets(prep, args, root)
+        split_plan = None if getattr(args, "trust_hkl_transform", False) else plan_split_candidates(prep, args)
 
         def decide_dataset(ds0: DatasetSpec) -> tuple[DatasetSpec, int]:
+            """Preflight one crystal and choose its HKL transform by scout; return the dataset and its scout row cap."""
             preflight = preflight_dataset(
                 ds0,
                 requested_min_peak=ds0.min_peak,
@@ -76,7 +162,7 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
             ds = apply_preflight(ds0, preflight)
             scout_rows = preflight.scout_max_rows if preflight.scout_max_rows > 0 else args.scout_max_rows
             ds, _transform_decision = choose_transform_by_scout(
-                prep, ds, args, python, logs, root, scout_max_rows=scout_rows
+                prep, ds, args, python, logs, root, scout_max_rows=scout_rows, split_plan=split_plan
             )
             return ds, int(scout_rows)
 
@@ -103,6 +189,7 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
             parity_setup_manifest_sha256=prep.parity_setup_manifest_sha256,
             metadata=prep.metadata,
         )
+    configure_cell_esd(prep.structure, prep.datasets, args)
     screen_runs: dict[str, Path] = {}
     initial_runs: dict[str, Path] = {}
     nuisance: dict[str, dict] = {}
@@ -117,7 +204,7 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
                 run_dir,
                 args,
                 n_basis=20 if args.fast else args.screen_n_basis,
-                n_points=5 if args.fast else args.screen_n_points,
+                n_points=5 if args.fast else stage_n_points(args, ds, screen=True),
                 stage="screen",
                 pinned=compact_base_nuisance(args),
                 make_maps=False,
@@ -129,30 +216,104 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
         screen_runs[ds.name] = run_dir
         initial_runs[ds.name] = run_dir
         nuisance[ds.name] = best_nuisance(run_dir)
+    # Every transform is selected and every crystal has screen rows: before any hand, thickness or structure
+    # work, refuse a run whose held-out orbits differ between crystals (orbit-hash only; legacy is unchanged).
+    # With the shared candidate closure this assertion passes by construction.
+    run_cross_crystal_split_check(prep, args, screen_runs, root)
+    # Validation console: the split and the screen's held-out R, printed from their recorded JSON.
+    report_split(prep, args, screen_runs, root)
+    report_stage_heldout(args, screen_runs, root, label="screen", model=prep.structure)
 
     selected_hand = "original"
     symmetry_policy = absolute_structure_policy(prep.structure)
+    hand_settings = hand_decision_settings(args)
+    hand_applicable = bool(args.hand_control and symmetry_policy.get("run_hand_control", True))
+    early_hand = bool(hand_applicable and str(getattr(args, "hand_decision_stage", "final")) == "early")
+    shared_model = prep.structure
+    early_hand_decision: dict = {}
+    if early_hand:
+        # Decide on the hand-blind start model before thickness, gates and the SHELXL loop,
+        # so every later stage refines the chosen hand.
+        early_hand_decision = run_early_elastic_hand_selection(
+            prep,
+            args,
+            python,
+            logs,
+            root,
+            start_model=prep.structure,
+            screen_runs=screen_runs,
+            shared_hand_decision={"symmetry_policy": symmetry_policy},
+        )
+        if str(early_hand_decision.get("status") or "") not in {"kept", "switched", "skipped_dry_run"}:
+            print(
+                f"WARN hand: early held-out hand decision {early_hand_decision.get('status')!r}; continuing in the "
+                "input hand, the final elastic pair decides with the same rule",
+                flush=True,
+            )
+        if bool(early_hand_decision.get("hand_switched", False)):
+            selected_hand = str(early_hand_decision["selected_hand_after"])
+            shared_model = str(early_hand_decision["selected_model_after"])
+            for ds in prep.datasets:
+                # Re-screen in the chosen hand so the thickness seed is not chosen in the rejected one.
+                run_dir = root / "runs" / ds.name / ("fast_N20_Q5_selected_hand" if args.fast else "screen_selected_hand")
+                run_logged(
+                    native_stage_cmd(
+                        python,
+                        ds,
+                        shared_model,
+                        dataset_baseline_hkl(prep, ds),
+                        run_dir,
+                        args,
+                        n_basis=20 if args.fast else args.screen_n_basis,
+                        n_points=5 if args.fast else stage_n_points(args, ds, screen=True),
+                        stage="screen",
+                        pinned=compact_base_nuisance(args),
+                        make_maps=False,
+                    ),
+                    logs,
+                    f"{ds.name}_screen_selected_hand",
+                    dry_run=args.dry_run,
+                )
+                screen_runs[ds.name] = run_dir
+                initial_runs[ds.name] = run_dir
+                nuisance[ds.name] = best_nuisance(run_dir)
+            report_stage_heldout(args, screen_runs, root, label="screen_selected_hand", model=shared_model)
     shared_hand_decision = {
         "schema_version": 2,
         "status": (
-            "deferred_until_final_model"
-            if args.hand_control and symmetry_policy.get("run_hand_control", True)
+            "early_selected_final_confirmation_pending"
+            if early_hand
+            else "deferred_until_final_model"
+            if hand_applicable
             else "skipped_not_applicable"
         ),
         "selection_scope": "shared_multi_dataset_model",
         "selected": selected_hand,
         "symmetry_policy": symmetry_policy,
-        "selection_stage": "final_elastic_negative_thickness_pair",
+        "selection_stage": (
+            "early_elastic_pair_after_screen_then_final_confirmation"
+            if early_hand
+            else "final_elastic_negative_thickness_pair"
+        ),
         "method": "nakane_negative_thickness_elastic_pair_v1",
-        "absorption_policy": "disabled_for_hand_decision_only",
+        "decision_evidence": hand_settings["evidence"],
+        "absorption_policy": (
+            "uniform_absorption_kept_exact_pair"
+            if hand_settings["pair_absorption"] == "uniform"
+            else "disabled_for_hand_decision_only"
+        ),
         "nuisance_refit": False,
         "jitter_refit": False,
         "known_configuration_used_for_selection": False,
         "reason": (
-            "hand selection is deferred until all thickness, geometry, nuisance, and shared-structure work is complete"
+            "hand selected on held-out evidence right after the screen on the hand-blind start model; "
+            "the final elastic pair confirms it with the same rule"
+            if early_hand
+            else "hand selection is deferred until all thickness, geometry, nuisance, and shared-structure work is complete"
         ),
     }
-    shared_model = prep.structure
+    if early_hand:
+        shared_hand_decision["early_elastic_selection"] = early_hand_decision
     shared_hand_decision["selected_model"] = shared_model
     write_json(root / "decisions" / "shared_absolute_structure_decision.json", shared_hand_decision)
     for ds in prep.datasets:
@@ -165,7 +326,33 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
         active_run = initial_runs[ds.name]
         active_nui = nuisance[ds.name]
         screen_frame_offsets = resolved_frame_offset_candidates(screen_runs[ds.name])
-        if not args.fast:
+        if nested_selection_enabled(args):
+            # Cone x dose x thickness distribution x lambda jointly by inner orbit CV on work rows; the in-sample
+            # gates then run on the pinned pick (--nuisance-selection sequential: the stages below).
+            active_nui, active_run, nested_record = run_nested_nuisance_stage(
+                prep, ds, args, python, logs, root, active_model=shared_model, active_nui=active_nui,
+                run_prefix="multi",
+            )
+            feature_records = [nested_record]
+            for family in FEATURE_GATE_FAMILIES:
+                if family in NESTED_GATE_FAMILIES:
+                    feature_records.append(nested_gate_skip_record(family))
+                    continue
+                active_nui, active_run, record = run_feature_gate(
+                    prep,
+                    ds,
+                    args,
+                    python,
+                    logs,
+                    root,
+                    family=family,
+                    active_model=shared_model,
+                    active_run=active_run,
+                    active_nui=active_nui,
+                )
+                feature_records.append(record)
+            write_json(root / "decisions" / ds.name / "feature_decisions.json", feature_records)
+        elif not args.fast:
             thick = root / "runs" / ds.name / "multi_thickness_polish"
             thickness_baseline = discrete_thickness_baseline_nuisance(args, active_nui)
             run_logged(
@@ -177,7 +364,7 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
                     thick,
                     args,
                     n_basis=args.screen_n_basis,
-                    n_points=args.screen_n_points,
+                    n_points=stage_n_points(args, ds, screen=True),
                     stage="multi_thickness_polish",
                     pinned=thickness_polish_nuisance(thickness_baseline, screen_frame_offsets),
                     promotion_baseline=thickness_baseline,
@@ -206,7 +393,7 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
                         args,
                         continuous_seed,
                         n_basis=args.screen_n_basis,
-                        n_points=args.screen_n_points,
+                        n_points=stage_n_points(args, ds, screen=True),
                         stage="multi_thickness_continuous",
                     ),
                     logs,
@@ -225,14 +412,14 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
                     continuous_run=continuous,
                     selected_nuisance=active_nui,
                     n_basis=args.screen_n_basis,
-                    n_points=args.screen_n_points,
+                    n_points=stage_n_points(args, ds, screen=True),
                     stage="multi_thickness_continuous_materialized",
                 )
             else:
                 materialization_record = None
             if materialization_record is not None:
                 feature_records.append(materialization_record)
-            for family in ["row_resolution", "absorption", "sg_jitter", "sigma_error", "dose"]:
+            for family in FEATURE_GATE_FAMILIES:
                 active_nui, active_run, record = run_feature_gate(
                     prep,
                     ds,
@@ -247,6 +434,9 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
                 )
                 feature_records.append(record)
             write_json(root / "decisions" / ds.name / "feature_decisions.json", feature_records)
+            report_feature_decisions(
+                ds.name, root / "decisions" / ds.name / "feature_decisions.json", args, nuisance=active_nui
+            )
         initial_runs[ds.name] = active_run
         nuisance[ds.name] = active_nui
 
@@ -278,8 +468,12 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
                 nuisance=nuisance,
                 structure_dataset_policy=structure_dataset_policy,
             )
+            report_macro_cycles(root / "runs" / "shared_shelxl_feedback" / "multi_shelxl_feedback_loop_summary.json", args)
+            # The final, hand-pair and publication stages use the thickness selected for the kept model.
+            nuisance = feedback_final_nuisance(nuisance, structure_feedback)
         elif structure_strategy == "native_gradient":
             shared = root / "runs" / "shared_structure_update"
+            structure_window = shared_structure_update_window(prep, args, nuisance)
             cmd = [
                 python,
                 str(engine_script("native_multi_structure_update.py")),
@@ -292,9 +486,10 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
                 "--n-basis",
                 str(args.structure_n_basis),
                 "--n-points",
-                str(args.structure_n_points),
+                str(shared_structure_update_n_points(prep, args)),
                 "--topup-d-min",
                 f"{effective_topup_d_min(args, min_d_spacing=min(ds.min_d_spacing for ds in prep.datasets)):g}",
+                *structure_window,
                 "--min-d-spacing",
                 "0.70",
                 "--min-peak",
@@ -339,6 +534,7 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
                 args.restraints,
                 "--scale-fit-split",
                 "work",
+                *split_scheme_args(args),
                 "--workers",
                 str(args.workers),
                 "--chunksize",
@@ -373,7 +569,7 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
                     run_dir,
                     args,
                     n_basis=final_n_basis,
-                    n_points=args.n_points,
+                    n_points=stage_n_points(args, ds, screen=False),
                     stage="final",
                     pinned=nuisance[ds.name],
                     make_maps=args.make_maps,
@@ -446,7 +642,8 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
         full_input_runs = weighted_runs
         full_publication_runs = policy_active_runs(weighted_runs, final_dataset_policy)
         require_policy_active_runs(full_publication_runs, context="final publication")
-    hand_dataset_names = set(full_publication_runs)
+    hand_scope = final_hand_evidence_datasets(prep, args, final_dataset_policy, full_publication_runs)
+    hand_dataset_names = set(hand_scope["included"])
     hand_prep = PrepConfig(
         structure=prep.structure,
         datasets=[dataset for dataset in prep.datasets if dataset.name in hand_dataset_names],
@@ -458,10 +655,9 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
         parity_setup_manifest_sha256=prep.parity_setup_manifest_sha256,
         metadata={
             **dict(prep.metadata or {}),
-            "final_hand_dataset_policy": "primary_and_downweighted_policy_active_datasets_only",
-            "excluded_from_final_hand_selection": sorted(
-                {dataset.name for dataset in prep.datasets} - hand_dataset_names
-            ),
+            "final_hand_dataset_policy": hand_scope["policy_label"],
+            "excluded_from_final_hand_selection": sorted(hand_scope["excluded"]),
+            "hand_evidence_datasets": hand_scope,
         },
     )
     post_feedback_multi_hand_diagnostic = run_multi_final_elastic_hand_selection(
@@ -474,6 +670,16 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
         selected_hand=selected_hand,
         final_runs={name: final_runs[name] for name in hand_dataset_names},
         shared_hand_decision=shared_hand_decision,
+        early_decision=(
+            {
+                "selected_hand": selected_hand,
+                "switched": bool(early_hand_decision.get("hand_switched", False)),
+                "escalation_status": (early_hand_decision.get("escalation") or {}).get("status"),
+                "decided_on": (early_hand_decision.get("escalation") or {}).get("decided_on"),
+            }
+            if early_hand
+            else None
+        ),
     )
     if bool(post_feedback_multi_hand_diagnostic.get("hand_switched", False)):
         final_model = str(post_feedback_multi_hand_diagnostic["selected_model_after"])
@@ -601,7 +807,7 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
     )
     combined = root / "runs" / "combined"
     run_logged(
-        combine_cmd(python, combined_input_runs, final_model, combined, args),
+        combine_cmd(python, combined_input_runs, final_model, combined, args, free_validation=True),
         logs,
         "combine_final",
         dry_run=args.dry_run,
@@ -639,6 +845,12 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
         "publication_runs": {k: str(v) for k, v in publication_runs.items()},
         "publication_full_runs": {k: str(v) for k, v in full_publication_runs.items()},
         "post_feedback_multi_hand_diagnostic": post_feedback_multi_hand_diagnostic,
+        "early_hand_decision": early_hand_decision,
+        "hand_decision_heldout": {
+            stage: str(root / "decisions" / f"hand_decision_heldout_{stage}.json")
+            for stage in ("early", "final")
+            if (root / "decisions" / f"hand_decision_heldout_{stage}.json").is_file()
+        },
         "structure_update_strategy": structure_strategy,
         "structure_feedback": structure_feedback,
         "forensics": forensic_runs,

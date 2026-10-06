@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import argparse
 
-from grond.cli_support.values import DEFAULT_MAX_SUPPORT_SG
+# AUTO beam-inclusion cutoff |Sg| in 1/A (the analogue of JANA2020's Sg(matrix) and diffBloch's sg_max, both
+# 0.01); the engine default is the same.
+AUTO_MAX_SUPPORT_SG = 0.01
+# AUTO fixed rocking-window width in 1/A, used for rows without a DIALS-bbox header (XDS INTEGRATE.HKL, DIALS
+# bridge files without the bbox columns).
+AUTO_SG_WINDOW = 0.010
 
 
 def add_crystal_overrides(ap: argparse.ArgumentParser) -> None:
@@ -126,7 +131,13 @@ def add_basis(ap: argparse.ArgumentParser) -> None:
         "--screen-n-basis", type=int, default=24, help="Basis size for initial nuisance/geometry screening."
     )
     ap.add_argument(
-        "--screen-n-points", type=int, default=10, help="Quadrature points for initial nuisance/geometry screening."
+        "--screen-n-points",
+        type=int,
+        default=None,
+        help=(
+            "Quadrature points for screening, thickness and feature-gate stages. Default derives it per crystal from "
+            "the rocking window as half the final count (fixed 0.010: 25; DIALS bbox: 30). Legacy: 10."
+        ),
     )
     ap.add_argument(
         "--n-basis",
@@ -137,8 +148,12 @@ def add_basis(ap: argparse.ArgumentParser) -> None:
     ap.add_argument(
         "--n-points",
         type=int,
-        default=20,
-        help="Quadrature points for pinned final polish runs; keep <=20 for production.",
+        default=None,
+        help=(
+            "Quadrature points for pinned final, feedback and hand runs. Default derives it per crystal from the "
+            "rocking window: fixed windows keep 0.0002 1/A spacing (0.010: 50), the DIALS bbox window uses 60; PETS "
+            "exact rows keep 20 over their own wedge. Legacy: 20."
+        ),
     )
     ap.add_argument(
         "--final-basis-scan-limit",
@@ -160,15 +175,31 @@ def add_basis(ap: argparse.ArgumentParser) -> None:
 def add_geometry(ap: argparse.ArgumentParser) -> None:
     """Add geometry options in the established order."""
 
-    ap.add_argument("--sg-window", type=float, default=0.004)
+    ap.add_argument(
+        "--sg-window",
+        type=float,
+        default=AUTO_SG_WINDOW,
+        help=(
+            "Fixed rocking-window width in 1/A (default 0.010), used when rows carry no DIALS bbox; also the "
+            "reference width of adaptive windows."
+        ),
+    )
     ap.add_argument(
         "--sg-window-mode",
         choices=["auto", "fixed", "zobs_residual", "zobs_plus_floor", "rlp_peak", "dials_bbox"],
         default="auto",
-        help="Rocking-width source. Auto keeps the fixed Sg width; DIALS bbox z-ranges are available as an explicit diagnostic.",
+        help=(
+            "Rocking-width source. Auto uses the per-row DIALS bbox z-range for rows from GROND's DIALS bridge "
+            "(header DIALS_BBOX_Z_RANGE_AS_ALF0_BET0=TRUE) and the fixed Sg width otherwise. Legacy: fixed."
+        ),
     )
     ap.add_argument("--sg-window-min", type=float, default=0.003)
-    ap.add_argument("--sg-window-max", type=float, default=0.012)
+    ap.add_argument(
+        "--sg-window-max",
+        type=float,
+        default=None,
+        help="Upper bound of per-row windows. Default 0.03 1/A for the DIALS bbox window and 0.012 otherwise. Legacy: 0.012.",
+    )
     ap.add_argument("--sg-window-scale", type=float, default=1.0)
     ap.add_argument("--sg-window-frame-floor", type=float, default=0.50)
     ap.add_argument(
@@ -180,7 +211,7 @@ def add_geometry(ap: argparse.ArgumentParser) -> None:
     ap.add_argument(
         "--sg-window-scout-grid",
         default="0.003,0.004,0.006,0.008",
-        help="Comma-separated fixed Sg widths tested by the late rocking-window scout.",
+        help="Comma-separated fixed Sg widths tested by the late rocking-window scout; the run's own width is always added.",
     )
     ap.add_argument("--sg-window-scout-n-basis", type=int, default=24, help="Basis size for the late Sg-window scout.")
     ap.add_argument(
@@ -196,13 +227,13 @@ def add_geometry(ap: argparse.ArgumentParser) -> None:
         "--sg-window-scout-min-wR2-gain",
         type=float,
         default=0.002,
-        help="Minimum all-row wR2 gain required before a non-baseline Sg width can be promoted.",
+        help="Minimum wR2 gain required before a non-baseline Sg width can be promoted (all rows; work rows under --nuisance-score-rows work).",
     )
     ap.add_argument(
         "--sg-window-scout-free-wR2-tolerance",
         type=float,
         default=0.003,
-        help="Maximum held-out wR2 penalty allowed when promoting a non-baseline Sg width.",
+        help="Maximum held-out wR2 penalty allowed when promoting a non-baseline Sg width (--nuisance-score-rows legacy only; work uses no free-row penalty).",
     )
     ap.add_argument(
         "--topup-d-min",
@@ -213,8 +244,11 @@ def add_geometry(ap: argparse.ArgumentParser) -> None:
     ap.add_argument(
         "--max-support-sg",
         type=float,
-        default=DEFAULT_MAX_SUPPORT_SG,
-        help="Maximum absolute excitation error for beam-basis support (default 0.01 A^-1).",
+        default=AUTO_MAX_SUPPORT_SG,
+        help=(
+            "Beam-inclusion cutoff: maximum |Sg| for beam-basis support in A^-1 (default 0.01, as JANA2020 "
+            "Sg(matrix) and diffBloch sg_max)."
+        ),
     )
     ap.add_argument(
         "--profile-quadrature",
@@ -372,14 +406,114 @@ def add_nuisance(ap: argparse.ArgumentParser) -> None:
             "candidate. This preserves the local-root bound and records any selected nuisance change."
         ),
     )
-    ap.add_argument("--absorption-mode-grid", default="none,midgley_like")
-    ap.add_argument("--absorption-mu-grid", default="0.0,0.00005")
-    ap.add_argument("--absorption-frac-grid", default="0.0,0.02")
+    ap.add_argument(
+        "--absorption-mode-grid",
+        default="none",
+        help="Absorption feature-gate grid. Default none (no absorption). Legacy: none,midgley_like.",
+    )
+    ap.add_argument("--absorption-mu-grid", default="0.0", help="Legacy: 0.0,0.00005.")
+    ap.add_argument("--absorption-frac-grid", default="0.0", help="Legacy: 0.0,0.02.")
     ap.add_argument("--absorption-mu-g2-grid", default="0.0")
     ap.add_argument("--absorption-mu-theta2-grid", default="0.0")
     ap.add_argument("--absorption-tds-b-grid", default="0.0")
-    ap.add_argument("--dose-b-mode-grid", default="none")
-    ap.add_argument("--dose-b-per-frame-grid", default="0.0")
+    ap.add_argument(
+        "--dose-b-mode-grid",
+        default="none,linear_frame",
+        help="Dose-B feature-gate modes. Legacy: none (with --dose-b-per-frame-grid 0.0).",
+    )
+    ap.add_argument(
+        "--dose-b-total-grid",
+        default="0,0.5,1,2,3",
+        help=(
+            "Dose-B grid in A^2 accumulated over the whole scan; each crystal converts it to B per frame with "
+            "its own ZCAL span. Ignored when --dose-b-per-frame-grid is given."
+        ),
+    )
+    ap.add_argument(
+        "--dose-b-per-frame-grid",
+        default="",
+        help="Explicit dose-B grid in A^2 per XDS frame (legacy units); overrides --dose-b-total-grid. Legacy: 0.0.",
+    )
+    ap.add_argument(
+        "--mosaicity-mode",
+        choices=["none", "transverse_target"],
+        default="transverse_target",
+        help=(
+            "Mosaic model tested per crystal by the mosaicity feature gate: transverse_target is the re-centred "
+            "transverse Gauss-Hermite cone. none disables the gate (legacy)."
+        ),
+    )
+    ap.add_argument(
+        "--mosaicity-sigma-grid",
+        default="0,0.1,0.2,0.3",
+        help="Mosaic cone widths in degrees tested per crystal; 0 is the no-cone candidate.",
+    )
+    ap.add_argument(
+        "--mosaicity-points", type=int, default=3, help="Gauss-Hermite tilt points of the mosaic cone quadrature."
+    )
+    ap.add_argument(
+        "--physics-gate-selection",
+        choices=["orbit-cv", "in-sample"],
+        default="orbit-cv",
+        help=(
+            "Score of the mosaicity and dose feature gates. orbit-cv compares every candidate on 3-fold "
+            "orbit-grouped cross-validation over work rows (free rows unused) and accepts only a paired "
+            "orbit-bootstrap improvement; in-sample is the legacy score of the other feature gates."
+        ),
+    )
+    ap.add_argument(
+        "--thickness-gate-split",
+        choices=["matched", "legacy"],
+        default="matched",
+        help=(
+            "Scale-fit split of the continuous-thickness polish and the in-sample feature gates. matched fits the "
+            "continuous polish on work rows and every gate on its baseline's split, so each comparison uses one "
+            "split; legacy follows --production-scales."
+        ),
+    )
+    ap.add_argument(
+        "--nuisance-selection",
+        choices=["nested", "sequential"],
+        default="nested",
+        help=(
+            "nested: per crystal, after the screen and the early hand decision, select mosaic cone x dose B x thickness "
+            "distribution (--nested-families) x P-spline lambda jointly by inner orbit CV on work rows from Bloch "
+            "spectra, and pin the pick for every later stage (the cone and dose gates do not run). sequential: the "
+            "discrete/continuous thickness polish followed by the cone and dose gates. Legacy: sequential."
+        ),
+    )
+    ap.add_argument(
+        "--nested-n-basis",
+        type=int,
+        default=64,
+        help=(
+            "Beam limit of the nested-selection spectra (screen profile points, AUTO window and support)."
+        ),
+    )
+    ap.add_argument(
+        "--nested-n-points",
+        default="final",
+        help=(
+            "Profile points of the nested-selection spectra and of the per-cycle thickness updates: final (default; "
+            "the crystal's final points, 60 for DIALS bridges and 50 for the fixed 0.010 window), screen (30 and 25; "
+            "about half the spectra cost) or an integer. The anchor and replay runs stay at screen fidelity."
+        ),
+    )
+    ap.add_argument(
+        "--nested-families",
+        default="uniform_gradient,gamma",
+        help="Thickness-distribution families of the nested selection: uniform_gradient (t0, gradient) and/or gamma (mean, shape).",
+    )
+    ap.add_argument(
+        "--feedback-thickness-update",
+        choices=["on", "off"],
+        default=None,
+        help=(
+            "Re-select the thickness distribution and lambda (physics variant fixed) on the spectra of each new "
+            "structure before every SHELXL macro-cycle and for the final model. Default: on with "
+            "--nuisance-selection nested, not applicable with sequential. Legacy: off."
+        ),
+    )
     ap.add_argument(
         "--thickness-points", type=int, default=5, help="Thickness quadrature points for screen/regularization stages."
     )

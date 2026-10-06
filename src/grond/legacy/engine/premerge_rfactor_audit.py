@@ -25,6 +25,8 @@ else:  # pragma: no cover - direct script execution
 
 
 def read_rows(path: Path) -> list[dict[str, str]]:
+    """Read a CSV file into a list of row dicts; raise if it has no rows."""
+
     with path.open() as f:
         rows = list(csv.DictReader(f))
     if not rows:
@@ -33,6 +35,8 @@ def read_rows(path: Path) -> list[dict[str, str]]:
 
 
 def fcol(rows: list[dict[str, str]], name: str, default=float("nan")) -> np.ndarray:
+    """Return one column as a float array, with default for missing or unparsable cells."""
+
     out = []
     for r in rows:
         try:
@@ -43,6 +47,8 @@ def fcol(rows: list[dict[str, str]], name: str, default=float("nan")) -> np.ndar
 
 
 def icol(rows: list[dict[str, str]], name: str, default=-1) -> np.ndarray:
+    """Return one column as an int array, with default for missing or unparsable cells."""
+
     out = []
     for r in rows:
         try:
@@ -52,11 +58,9 @@ def icol(rows: list[dict[str, str]], name: str, default=-1) -> np.ndarray:
     return np.asarray(out, dtype=int)
 
 
-def scol(rows: list[dict[str, str]], name: str, default="") -> np.ndarray:
-    return np.asarray([str(r.get(name, default)) for r in rows])
-
-
 def write_csv(path: Path, rows: list[dict]) -> None:
+    """Write rows to a CSV file with the first row's keys as header; an empty list writes an empty file."""
+
     if not rows:
         path.write_text("")
         return
@@ -67,10 +71,14 @@ def write_csv(path: Path, rows: list[dict]) -> None:
 
 
 def pct(v: float) -> float:
+    """Return a fraction as a percentage, or NaN if it is not finite."""
+
     return 100.0 * float(v) if np.isfinite(v) else float("nan")
 
 
 def safe_metric(obs, sig, pred, mask, wght_a, wght_b, n_params=0) -> dict:
+    """Return the core native metrics (n, n_gt, R1, R2, wR2, GooF, CC) for the rows in mask."""
+
     out = native_metrics(obs, sig, pred, mask, wght_a, wght_b, n_params=n_params)
     return {
         "n": out["n"],
@@ -85,10 +93,14 @@ def safe_metric(obs, sig, pred, mask, wght_a, wght_b, n_params=0) -> dict:
 
 
 def p222_equivs(h: int, k: int, l: int) -> list[tuple[int, int, int]]:
+    """Return the four P222 rotation mates of (h, k, l)."""
+
     return [(h, k, l), (h, -k, -l), (-h, k, -l), (-h, -k, l)]
 
 
 def canonical_key(h: int, k: int, l: int, mode: str) -> tuple[int, int, int]:
+    """Return one HKL's group key: itself (exact) or its smallest P222 mate, optionally with Friedel mates."""
+
     if mode == "exact":
         return (int(h), int(k), int(l))
     equivs = p222_equivs(int(h), int(k), int(l))
@@ -100,6 +112,8 @@ def canonical_key(h: int, k: int, l: int, mode: str) -> tuple[int, int, int]:
 
 
 def group_indices(h, k, l, mode: str, valid: np.ndarray) -> dict[tuple[int, int, int], np.ndarray]:
+    """Group the valid rows by canonical_key and return {key: row indices}."""
+
     groups: dict[tuple[int, int, int], list[int]] = defaultdict(list)
     for i, ok in enumerate(valid):
         if ok:
@@ -108,6 +122,8 @@ def group_indices(h, k, l, mode: str, valid: np.ndarray) -> dict[tuple[int, int,
 
 
 def weighted_group_mean(obs, sig, groups: dict[tuple[int, int, int], np.ndarray]) -> np.ndarray:
+    """Return each row's inverse-variance weighted group mean of Iobs, floored at zero."""
+
     out = np.full_like(obs, np.nan, dtype=float)
     for idx in groups.values():
         s = np.maximum(sig[idx], 1e-12)
@@ -118,6 +134,8 @@ def weighted_group_mean(obs, sig, groups: dict[tuple[int, int, int], np.ndarray]
 
 
 def simple_group_mean(values, groups: dict[tuple[int, int, int], np.ndarray]) -> np.ndarray:
+    """Return each row's plain group mean of the finite values."""
+
     out = np.full_like(values, np.nan, dtype=float)
     for idx in groups.values():
         good = np.isfinite(values[idx])
@@ -147,6 +165,13 @@ def group_summary(
     wght_a,
     wght_b,
 ) -> tuple[dict, np.ndarray, list[dict]]:
+    """Compare the model with the scalar group floor for one grouping; return (summary, multiplicity, group rows).
+
+    The floor predicts every row by its group's weighted mean Iobs, the best any merged scalar can do. The
+    summary holds both metric sets, the residual share above the floor and the within-group correlation of
+    observed and predicted variation.
+    """
+
     floor_pred = weighted_group_mean(obs, sig, groups)
     pred_mean = simple_group_mean(pred, groups)
     dyn = safe_metric(obs, sig, pred, valid, wght_a, wght_b)
@@ -258,6 +283,8 @@ def group_summary(
 
 
 def quantile_bins(values: np.ndarray, n_bins: int) -> list[np.ndarray]:
+    """Split the finite values into n_bins equal-count bins of row indices, in increasing order."""
+
     good = np.where(np.isfinite(values))[0]
     if not len(good):
         return []
@@ -266,6 +293,8 @@ def quantile_bins(values: np.ndarray, n_bins: int) -> list[np.ndarray]:
 
 
 def axis_bins(axis_name, values, obs, sig, pred, floor_pred, valid, wght_a, wght_b, n_bins) -> list[dict]:
+    """Return model and group-floor metrics in quantile bins of one row axis."""
+
     rows = []
     for bi, idx in enumerate(quantile_bins(values, n_bins), start=1):
         mask = np.zeros(len(obs), dtype=bool)
@@ -299,6 +328,8 @@ def axis_bins(axis_name, values, obs, sig, pred, floor_pred, valid, wght_a, wght
 
 
 def hkl_class(h: int, k: int, l: int) -> str:
+    """Label one HKL as the origin, an axial row (odd or even index), a zone plane or general."""
+
     hz = int(h) == 0
     kz = int(k) == 0
     lz = int(l) == 0
@@ -323,6 +354,8 @@ def hkl_class(h: int, k: int, l: int) -> str:
 
 
 def hkl_class_bins(rows, h, k, l, obs, sig, pred, valid, wght_a, wght_b) -> list[dict]:
+    """Return metrics and residual shares for each HKL class, most residual-enriched first."""
+
     classes = np.asarray([hkl_class(a, b, c) for a, b, c in zip(h, k, l, strict=False)])
     total_abs = np.nansum(np.abs(obs[valid] - pred[valid]))
     total_weighted = np.nansum(shelx_weights(obs[valid], sig[valid], pred[valid], wght_a, wght_b) * (obs[valid] - pred[valid]) ** 2)
@@ -360,6 +393,8 @@ def hkl_class_bins(rows, h, k, l, obs, sig, pred, valid, wght_a, wght_b) -> list
 
 
 def hkl_class_equiv_modulation(h, k, l, obs, sig, pred, valid, groups: dict[tuple[int, int, int], np.ndarray]) -> list[dict]:
+    """Return, for each HKL class, how well the model's within-group variation tracks the observed one."""
+
     classes = np.asarray([hkl_class(a, b, c) for a, b, c in zip(h, k, l, strict=False)])
     out = []
     for cls in sorted(set(classes[valid])):
@@ -434,6 +469,8 @@ def hkl_class_equiv_modulation(h, k, l, obs, sig, pred, valid, groups: dict[tupl
 
 
 def trim_curve(obs, sig, pred, floor_pred, valid, wght_a, wght_b) -> list[dict]:
+    """Return metrics after dropping the top 0 to 5% of rows by residual excess over the group floor."""
+
     abs_model = np.abs(obs - pred)
     abs_floor = np.abs(obs - floor_pred)
     excess = np.maximum(abs_model - abs_floor, 0.0)
@@ -462,6 +499,8 @@ def trim_curve(obs, sig, pred, floor_pred, valid, wght_a, wght_b) -> list[dict]:
 
 
 def add_xds_axes(rows: list[dict[str, str]], hkl_path: Path):
+    """Return XDS xcal, ycal, zcal and detector radius (px from the median) per row; NaN without the HKL file."""
+
     n = len(rows)
     x = np.full(n, np.nan, dtype=float)
     y = np.full(n, np.nan, dtype=float)
@@ -479,6 +518,8 @@ def add_xds_axes(rows: list[dict[str, str]], hkl_path: Path):
 
 
 def verdict(summary: dict, primary_mode: str) -> list[str]:
+    """Return plain-language findings from the primary grouping's summary."""
+
     s = summary["group_modes"][primary_mode]
     dyn = s["dyn"]
     scalar = s["group_floor"]
@@ -502,6 +543,8 @@ def verdict(summary: dict, primary_mode: str) -> list[str]:
 
 
 def modulation_verdict(class_mod_rows: list[dict]) -> list[str]:
+    """Return findings for HKL classes whose within-group modulation is anti-correlated with the model."""
+
     out = []
     for r in class_mod_rows:
         corr = r.get("within_equiv_obs_pred_corr", float("nan"))
@@ -515,6 +558,11 @@ def modulation_verdict(class_mod_rows: list[dict]) -> list[str]:
 
 
 def main() -> None:
+    """Run the pre-merge R-factor audit on a native row table.
+
+    Writes the group, axis-bin, HKL-class and trim CSVs, summary.json and REPORT.md to --out-dir.
+    """
+
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--row-table", required=True)
     ap.add_argument("--hkl", default=str(DEFAULT_HKL))

@@ -1,5 +1,3 @@
 # Acknowledgments
 
-We thank Takanori Nakane for suggesting the strong/weak-beam Bethe partition that led to the optional `scipy_bethe` Schur backend, and for suggesting fixed-size matrices as a direction for the padded JAX experiments.
-
-OpenAI Codex was used as an interactive implementation and documentation tool during development. The GROND authors remain responsible for the scientific decisions, software, validation and interpretation of its outputs.
+We thank Takanori Nakane for the negative-thickness identity used to calculate the inverse hand from the same eigendecomposition, for suggesting the strong/weak-beam Bethe partition behind the optional `scipy_bethe` backend, and for suggesting fixed-size matrices for the experimental JAX backend.

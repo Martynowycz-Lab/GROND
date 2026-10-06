@@ -7,7 +7,7 @@ name = "grond"
 version = "0.2.2"
 description = "Global Regularization Of Non-kinematical Diffraction for electron-diffraction data."
 readme = "README.md"
-requires-python = ">=3.11,<3.14"
+requires-python = ">=3.11"
 license = "MIT"
 authors = [{name = "Martynowycz Lab"}]
 keywords = ["electron diffraction", "Bloch waves", "N-beam", "XDS", "crystallography", "non-kinematical diffraction"]
@@ -18,13 +18,14 @@ classifiers = [
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
   "Topic :: Scientific/Engineering :: Chemistry",
   "Topic :: Scientific/Engineering :: Physics",
 ]
 dependencies = [
   "gemmi>=0.6,<0.8",
   "numpy>=1.26,<2.6",
-  "scipy>=1.11,<1.18",
+  "scipy>=1.11,<1.19",
 ]
 
 [project.urls]
@@ -37,7 +38,6 @@ Changelog = "https://github.com/Martynowycz-Lab/GROND/blob/main/CHANGELOG.md"
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.8", "build>=1.2"]
 config = ["PyYAML>=6"]
-raw = ["fabio>=2024.0"]
 
 [project.scripts]
 grond = "grond.cli:main"
@@ -47,7 +47,7 @@ GROND = "grond.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-grond = ["legacy/**/*.py", "schemas/*.json"]
+grond = ["schemas/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -70,8 +70,6 @@ combine-as-imports = true
 # E402 keeps BLAS thread limits ahead of NumPy/SciPy imports. Optimizer callbacks
 # covered by B023 are consumed synchronously before their enclosing loop advances.
 "src/grond/legacy/engine/bloch_engine.py" = ["E402", "E741"]
-"src/grond/legacy/engine/build_dynrows_xds.py" = ["E741"]
-"src/grond/legacy/engine/dynrow_contract.py" = ["E741"]
 "src/grond/legacy/engine/native_multi_structure_update.py" = ["B023", "E402"]
 "src/grond/legacy/engine/native_observation_polish_endpoint.py" = ["E741"]
 "src/grond/legacy/engine/native_row_regularize.py" = ["E402", "E741"]
@@ -83,6 +81,5 @@ combine-as-imports = true
 "src/grond/legacy/engine/row_mr_report.py" = ["E741"]
 "src/grond/legacy/engine/scale_contract_replay.py" = ["E741"]
 "src/grond/legacy/engine/support_basis_scan.py" = ["E402"]
-"src/grond/legacy/engine/xds_raw_profile_integrator.py" = ["E741"]
 "src/grond/refine/native_output.py" = ["E741"]
 "src/grond/refine/shelx_input.py" = ["E741"]

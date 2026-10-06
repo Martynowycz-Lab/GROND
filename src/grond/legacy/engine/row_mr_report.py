@@ -31,6 +31,8 @@ except ImportError:  # pragma: no cover - used when executed as a script.
 
 
 def safe_float(value, default=float("nan")) -> float:
+    """Convert value to float, or return default when it cannot be converted."""
+
     try:
         return float(value)
     except (TypeError, ValueError):
@@ -62,6 +64,11 @@ def standard_json_data(value):
 
 
 def read_csv_rows(path: Path, dataset: str) -> list[dict]:
+    """Read one row table, filling in a missing dataset label and the direct-engine column spellings.
+
+    A missing target_I is taken from iobs, and a missing source_sigma from xds_sigma, sigma or sigma_eff.
+    """
+
     with path.open(newline="") as f:
         rows = [dict(r) for r in csv.DictReader(f)]
     for row in rows:
@@ -85,12 +92,16 @@ def read_csv_rows(path: Path, dataset: str) -> list[dict]:
 
 
 def read_json(path: Path) -> dict:
+    """Read a JSON file, or return an empty dict if it does not exist."""
+
     if not path.exists():
         return {}
     return json.loads(path.read_text())
 
 
 def parse_named_path(text: str) -> tuple[str, Path]:
+    """Parse name=path, or name a bare path after its parent folder (or its stem)."""
+
     if "=" in text:
         name, path = text.split("=", 1)
         return name.strip(), Path(path).expanduser()
@@ -117,6 +128,8 @@ def parse_resolution_limit_path(text: str) -> tuple[str, Path]:
 
 
 def atom_formula(model: dict) -> str:
+    """Return the asymmetric-unit formula from atom elements and rounded occupancies, C and H first."""
+
     counts: dict[str, int] = defaultdict(int)
     for atom in model.get("atoms", []):
         element = str(atom.get("element", "")).strip()
@@ -134,6 +147,8 @@ def atom_formula(model: dict) -> str:
 
 
 def model_lattice_label(model: dict) -> str:
+    """Return the report's lattice label: the SHELX LATT code, or 'from CIF/model symmetry'."""
+
     latt = model.get("shelx_latt")
     if latt is None:
         return "from CIF/model symmetry"
@@ -141,6 +156,8 @@ def model_lattice_label(model: dict) -> str:
 
 
 def reciprocal_equivalent_keys(h: int, k: int, l: int, symmetry_ops: list[dict]) -> list[tuple[int, int, int]]:
+    """Return the sorted HKLs related to (h, k, l) by the model rotations and their inverses."""
+
     hkl = np.asarray([int(h), int(k), int(l)], dtype=float)
     keys: list[tuple[int, int, int]] = []
     for op in symmetry_ops or [{"rot": np.eye(3).tolist()}]:
@@ -152,6 +169,8 @@ def reciprocal_equivalent_keys(h: int, k: int, l: int, symmetry_ops: list[dict])
 
 
 def canonical_hkl(h: int, k: int, l: int, symmetry_ops: list[dict]) -> tuple[int, int, int]:
+    """Return the smallest symmetry-equivalent HKL, used as the merge key."""
+
     return min(reciprocal_equivalent_keys(h, k, l, symmetry_ops))
 
 
@@ -164,6 +183,11 @@ def jana_adjusted_observations(obs: np.ndarray, sigma: np.ndarray) -> tuple[np.n
 
 
 def row_sqrt_weights(obs: np.ndarray, sigma: np.ndarray, instability_u: float = 0.01) -> np.ndarray:
+    """Return JANA-style amplitude weights 1/sqrt(sigma_F² + (u F)²), with F = sqrt(I) and sigma_F = sigma/(2F).
+
+    Weak rows (I < 0.01 sigma) use sigma_F = 5 sqrt(sigma).
+    """
+
     obs_adjusted, weak = jana_adjusted_observations(obs, sigma)
     sqrt_obs = np.sqrt(np.maximum(obs_adjusted, 0.0))
     sigma_sqrt = sigma / np.maximum(2.0 * sqrt_obs, 1e-30)
@@ -173,6 +197,12 @@ def row_sqrt_weights(obs: np.ndarray, sigma: np.ndarray, instability_u: float = 
 
 
 def row_mr_r_factors(obs, sigma, calc, instability_u: float = 0.01, observed_sigma_cut: float = 3.0) -> dict:
+    """Return Nall, Nobs, Robs, Rall, wRobs and wRall of calc against obs in the JANA/PETS convention.
+
+    Weak observations are set to zero first. R is on amplitudes sqrt(I); wR weights intensity residuals
+    with row_sqrt_weights. Observed rows have I > observed_sigma_cut * sigma before that adjustment.
+    """
+
     obs = np.asarray(obs, dtype=float)
     sigma = np.asarray(sigma, dtype=float)
     calc = np.asarray(calc, dtype=float)
@@ -199,6 +229,8 @@ def row_mr_r_factors(obs, sigma, calc, instability_u: float = 0.01, observed_sig
     observed = obs_original > float(observed_sigma_cut) * sigma
 
     def r_factor(use):
+        """Return the amplitude R factor sum|Fo - Fc| / sum Fo over the rows in use, NaN if none."""
+
         if not np.any(use):
             return float("nan")
         return float(np.sum(np.abs(fobs[use] - fcalc[use])) / max(np.sum(fobs[use]), 1e-30))
@@ -207,6 +239,8 @@ def row_mr_r_factors(obs, sigma, calc, instability_u: float = 0.01, observed_sig
     residual = obs - calc
 
     def wr_factor(use):
+        """Return the weighted R factor over the rows in use, NaN if none."""
+
         if not np.any(use):
             return float("nan")
         return float(
@@ -226,6 +260,8 @@ def row_mr_r_factors(obs, sigma, calc, instability_u: float = 0.01, observed_sig
 
 
 def merged_arrays(hkl, obs, sigma, calc, symmetry_ops: list[dict]):
+    """Merge rows by symmetry-equivalent HKL: mean obs and calc, sigma = sqrt(sum sigma²)/n, and multiplicity."""
+
     groups: dict[tuple[int, int, int], list[int]] = defaultdict(list)
     for i, (h, k, l) in enumerate(hkl):
         groups[canonical_hkl(int(h), int(k), int(l), symmetry_ops)].append(i)
@@ -257,6 +293,11 @@ def merged_arrays(hkl, obs, sigma, calc, symmetry_ops: list[dict]):
 
 
 def compute_model_metrics(rows: list[dict], model: dict, calc_column: str, instability_u: float = 0.01) -> dict:
+    """Return the row R factors and merged MR factors of one calc column.
+
+    Merging uses rows with finite values and integral HKL, after the weak-observation adjustment.
+    """
+
     hkl_float = np.asarray(
         [[safe_float(r.get("h")), safe_float(r.get("k")), safe_float(r.get("l"))] for r in rows],
         dtype=float,
@@ -376,6 +417,8 @@ def compute_per_dataset_row_mr(rows: list[dict], model: dict, instability_u: flo
 
 
 def fmt_float(value, digits: int = 3) -> str:
+    """Format a number with the given decimals, or 'n/a' if it is not finite."""
+
     v = safe_float(value)
     if not math.isfinite(v):
         return "n/a"
@@ -392,6 +435,8 @@ def fmt_delta_percent(value, digits: int = 2) -> str:
 
 
 def fmt_int_pair(a, b) -> str:
+    """Format two integers as 'a, b'."""
+
     return f"{int(a)}, {int(b)}"
 
 
@@ -614,6 +659,8 @@ def endpoint_summary_rows(
     def append(
         label: str, rows: list[dict], dmin: float, scale_model: str, scale_params: str, status: str = "ok"
     ) -> None:
+        """Add one endpoint summary: the rows kept at dmin, their row/MR factors and the scale description."""
+
         kept = rows_at_or_below_resolution(rows, dmin, resolution_model)
         summary = compute_row_mr_summary(kept, model, instability_u=instability_u) if kept else {}
         endpoint_rows.append(
@@ -778,6 +825,8 @@ def row_contract_table_rows(endpoint_rows: list[dict]) -> list[dict]:
 
 
 def markdown_table(rows: list[dict]) -> list[str]:
+    """Return Markdown table lines for rows, with the first row's keys as header."""
+
     headers = list(rows[0].keys())
     lines = ["| " + " | ".join(headers) + " |", "|" + "|".join(["---"] * len(headers)) + "|"]
     for row in rows:
@@ -846,6 +895,8 @@ def load_scale_polish_payloads(items: list[str]) -> list[dict]:
 
 
 def tex_escape(text: str) -> str:
+    """Escape LaTeX special characters in text."""
+
     repl = {
         "\\": r"\textbackslash{}",
         "&": r"\&",
@@ -862,6 +913,8 @@ def tex_escape(text: str) -> str:
 
 
 def summary_metadata(rows: list[dict], model: dict, run_summaries: list[dict]) -> dict:
+    """Collect the report's crystal, resolution and dynamical-setup fields from the rows, model and run summaries."""
+
     dvals = np.asarray([safe_float(r.get("d_A")) for r in rows], dtype=float)
     finite_d = dvals[np.isfinite(dvals) & (dvals > 0)]
     cell = model.get("cell", [float("nan")] * 6)
@@ -892,7 +945,14 @@ def summary_metadata(rows: list[dict], model: dict, run_summaries: list[dict]) -
         cfg = rec.get("config", {})
         best_native = rec.get("best_native") or {}
         best = best_native.get("nuisance", {})
-        if "frame_scale_count" in best_native:
+        scale_model = best_native.get("scale_model") if isinstance(best_native.get("scale_model"), dict) else {}
+        if scale_model.get("kind") == "pspline":
+            # Smooth frame scales are reported by their effective degrees of freedom, not the integer ceil(EDF).
+            frame_scale_counts.append(
+                f"P-spline EDF {fmt_float(safe_float(scale_model.get('edf')), 1)} "
+                f"(n_basis {scale_model.get('n_basis')}, lambda {scale_model.get('lambda')})"
+            )
+        elif "frame_scale_count" in best_native:
             frame_scale_counts.append(safe_float(best_native.get("frame_scale_count")))
         if "detector_scale_count" in best_native:
             detector_scale_counts.append(
@@ -928,6 +988,8 @@ def summary_metadata(rows: list[dict], model: dict, run_summaries: list[dict]) -
                 target.append(str(best.get(key)))
 
     def uniq_text(values, digits=3):
+        """Join the distinct values, numbers with the given decimals, or return 'n/a'."""
+
         if not values:
             return "n/a"
         out = []
@@ -977,6 +1039,11 @@ def write_markdown(
     *,
     canonical: bool = False,
 ) -> None:
+    """Write the Markdown publication report: setup, row/MR factors, scale and endpoint summaries.
+
+    canonical=True writes the JANA/PETS row-statistics tables.
+    """
+
     cell = meta["cell"]
     scale_rows = scale_polish_table_rows(scale_payloads or [])
     row_rows = jana_table_rows(row_mr_summary) if canonical else table_rows(row_mr_summary)
@@ -1058,6 +1125,8 @@ def write_latex(
     *,
     canonical: bool = False,
 ) -> None:
+    """Write the LaTeX publication report; canonical=True writes the JANA/PETS row-statistics tables."""
+
     rows = jana_table_rows(row_mr_summary) if canonical else table_rows(row_mr_summary)
     scale_rows = scale_polish_table_rows(scale_payloads or [])
     endpoint_rows = (
@@ -1203,6 +1272,8 @@ def write_latex(
 
 
 def build_pdf(tex_path: Path) -> dict:
+    """Compile a .tex file with the first LaTeX engine found and return the build status."""
+
     pdflatex = shutil.which("pdflatex") or shutil.which("xelatex") or shutil.which("lualatex")
     if not pdflatex:
         return {"built": False, "reason": "no LaTeX engine found"}
@@ -1228,6 +1299,8 @@ def build_pdf(tex_path: Path) -> dict:
 
 
 def main() -> None:
+    """Compute row and MR factors for each --run and write the Markdown, LaTeX, CSV and JSON tables to --out-dir."""
+
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
         "--run", action="append", default=[], help="Dataset run as name=/path/to/run_dir, or just /path/to/run_dir."

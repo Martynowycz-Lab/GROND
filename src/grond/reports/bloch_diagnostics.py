@@ -37,6 +37,13 @@ def _write_bloch_diagnostics_report(
     nuisance = _quick_nuisance(final_summary)
     native_weight = best_native.get("native_weight") if isinstance(best_native.get("native_weight"), Mapping) else {}
     basis_stats = best_native.get("basis_size_stats") if isinstance(best_native.get("basis_size_stats"), Mapping) else {}
+    scale_model = best_native.get("scale_model") if isinstance(best_native.get("scale_model"), Mapping) else {}
+    scale_text = (
+        f"P-spline in scan angle; n_basis `{scale_model.get('n_basis', 'n/a')}`; lambda `{scale_model.get('lambda', 'n/a')}`; "
+        f"EDF `{_quick_number(scale_model.get('edf'), 2)}`"
+        if scale_model.get("kind") == "pspline"
+        else f"group width `{_quick_number(nuisance.get('group_width_deg'), 6)}` deg; detector bins `{nuisance.get('detector_scale_bins', 'n/a')}`; scale count `{best_native.get('scale_count', 'n/a')}`"
+    )
     row_selection = final_summary.get("row_selection") if isinstance(final_summary.get("row_selection"), Mapping) else {}
     filters = final_summary.get("filters") if isinstance(final_summary.get("filters"), Mapping) else {}
     diagnostics = final_summary.get("diagnostics") if isinstance(final_summary.get("diagnostics"), Mapping) else {}
@@ -76,6 +83,8 @@ def _write_bloch_diagnostics_report(
         bethe_strong = _quick_float(kernel.get("bethe_strong_count"), 0.0)
 
     def strong_weak_text(basis_value: float) -> str:
+        """Split a basis size into Bethe strong and weak beams, 'N strong / M weak'; n/a when a count is unknown."""
+
         if not math.isfinite(basis_value) or basis_value <= 0 or not math.isfinite(bethe_strong) or bethe_strong <= 0:
             return "n/a"
         strong = min(int(round(bethe_strong)), int(round(basis_value)))
@@ -175,7 +184,7 @@ def _write_bloch_diagnostics_report(
         f"| thickness model | `{nuisance.get('thickness_model', 'n/a')}`; center `{_quick_number(nuisance.get('thickness_A', nuisance.get('thickness_grid')), 3)}` A; gradient `{_quick_number(nuisance.get('thickness_grad_frac', nuisance.get('thickness_grad_grid')), 6)}` |",
         f"| Sg jitter | `{nuisance.get('sg_jitter_mode', 'n/a')}`; sigma0 `{_quick_number(nuisance.get('sg_jitter_sigma0'), 6)}`; sigma d^-1 `{_quick_number(nuisance.get('sg_jitter_sigma_d_inv'), 6)}`; sigma frame `{_quick_number(nuisance.get('sg_jitter_sigma_frame'), 6)}`; points `{nuisance.get('sg_jitter_points', 'n/a')}` |",
         f"| absorption | `{nuisance.get('absorption_mode', 'n/a')}`; mu `{_quick_number(nuisance.get('absorption_mu'), 6)}`; frac `{_quick_number(nuisance.get('absorption_frac'), 6)}` |",
-        f"| scale model | group width `{_quick_number(nuisance.get('group_width_deg'), 6)}` deg; detector bins `{nuisance.get('detector_scale_bins', 'n/a')}`; scale count `{best_native.get('scale_count', 'n/a')}` |",
+        f"| scale model | {scale_text} |",
         f"| native row weights | a `{_quick_number(native_weight.get('a'), 6)}`; b `{_quick_number(native_weight.get('b'), 6)}` |",
         "",
         "## Availability Notes",

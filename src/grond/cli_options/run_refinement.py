@@ -20,13 +20,42 @@ def add_scales_and_screening(ap: argparse.ArgumentParser) -> None:
         action="store_false",
         help="Fit nuisance scales on work rows only (the default).",
     )
+    ap.add_argument(
+        "--scale-model",
+        choices=["pspline", "per-frame"],
+        default="pspline",
+        help=(
+            "Frame-scale family fitted in every native stage. pspline (default): smooth P-spline in scan angle "
+            "on the scale-fit rows, n_basis and lambda chosen per crystal by inner orbit CV; scale polish, "
+            "compact scale-contract selection and endpoint-calibration replays are then off. per-frame: free "
+            "per-frame scales with post-hoc compression."
+        ),
+    )
+    ap.add_argument(
+        "--scale-spline-n-basis-grid",
+        default="32",
+        help="P-spline basis sizes tried by the inner orbit CV; one value pins it.",
+    )
+    ap.add_argument(
+        "--scale-spline-lambda-grid",
+        default="0.3,1,3,10,30,100",
+        help="P-spline smoothing penalties tried by the inner orbit CV; one value pins it.",
+    )
 
 
 def add_structure_updates(ap: argparse.ArgumentParser) -> None:
     """Add structure updates options in the established order."""
 
     ap.add_argument("--structure-n-basis", type=int, default=24)
-    ap.add_argument("--structure-n-points", type=int, default=6)
+    ap.add_argument(
+        "--structure-n-points",
+        type=int,
+        default=None,
+        help=(
+            "Profile points of the native-gradient structure update. Default: 6 per 20 window-derived final "
+            "points (6 for the legacy 0.004 1/A window, 15 for the 0.010 default, 18 for the DIALS bbox)."
+        ),
+    )
     ap.add_argument("--structure-objective-rows", type=int, default=400)
     ap.add_argument("--structure-max-nfev", type=int, default=5)
     ap.add_argument(

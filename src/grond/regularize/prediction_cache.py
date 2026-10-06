@@ -19,6 +19,8 @@ from grond.legacy.engine.bloch_engine import (
 def external_geometry_fingerprints(data: XDSData, cfg: Config) -> dict:
     """Bind outer predictions to geometry contents before any cache hit."""
 
+    if isinstance(data, XDSData):
+        data.verify_source_files()
     result = {}
     for label, value in (
         ("geometry_path", cfg.geometry_path_file),
@@ -58,6 +60,11 @@ def canonical_prediction_cache_payload(payload: dict) -> str:
 
 
 def write_prediction_cache(path: Path, save: dict, payload: dict, compression: str) -> None:
+    """Write the prediction arrays and the JSON metadata to an NPZ file through a temporary file and a rename.
+
+    compression none writes it uncompressed; any other value compresses it.
+    """
+
     tmp = path.with_name(f"{path.stem}.{os.getpid()}.tmp.npz")
     if compression == "none":
         np.savez(tmp, **save, meta_json=json.dumps(payload, sort_keys=True))

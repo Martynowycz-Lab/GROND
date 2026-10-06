@@ -102,6 +102,9 @@ def build_parser(description: str, *, max_support_sg, target_modes) -> argparse.
     ap.add_argument("--ug-d-min", type=float, default=0.30)
     ap.add_argument("--free-fraction", type=float, default=0.10)
     ap.add_argument("--split-seed", type=int, default=42)
+    from grond.regularize.arguments_native import add_split_scheme_args
+
+    add_split_scheme_args(ap)
     ap.add_argument("--acceptance-metric", choices=["all_wR2", "work_wR2", "free_wR2", "all_R1"], default="all_wR2")
     ap.add_argument("--acceptance-min-delta", type=float, default=0.0)
     ap.add_argument("--free-wR2-tolerance", type=float, default=0.002)

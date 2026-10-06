@@ -1,3 +1,9 @@
+"""Macromolecular helpers: FreeR flags, MTZ export of corrected rows and the protein endpoint.
+
+FreeR flags are assigned once per unique (symmetry-merged) HKL, in resolution shells, so
+every observation of a reflection shares its flag.
+"""
+
 from __future__ import annotations
 
 import csv
@@ -55,6 +61,8 @@ class MtzExportSummary:
 
 
 def _safe_float(value: object, default: float = float("nan")) -> float:
+    """Return ``value`` as a finite float, or ``default`` when it is missing or not finite."""
+
     try:
         out = float(str(value).strip())
     except (TypeError, ValueError):
@@ -63,6 +71,8 @@ def _safe_float(value: object, default: float = float("nan")) -> float:
 
 
 def _safe_int(value: object) -> int:
+    """Return ``value`` as an integer Miller index; raise ValueError if it is not a whole number."""
+
     number = _safe_float(value)
     if not math.isfinite(number) or not float(number).is_integer():
         raise ValueError(f"expected an integer Miller index, got {value!r}")
@@ -174,6 +184,8 @@ def canonical_hkl(hkl: tuple[int, int, int], sg: gemmi.SpaceGroup, *, merge_anom
 
 
 def _row_d(row: dict[str, Any], cell: gemmi.UnitCell | None, key: tuple[int, int, int]) -> float:
+    """Return a row's resolution d in A from its own columns, else from the cell, else NaN."""
+
     for name in ("d_A", "d", "resolution_A", "res_A"):
         value = _safe_float(row.get(name))
         if math.isfinite(value) and value > 0:
@@ -193,6 +205,8 @@ def _unique_records(
     cell: gemmi.UnitCell | None = None,
     merge_anomalous: bool = True,
 ) -> dict[tuple[int, int, int], dict[str, Any]]:
+    """Group rows by symmetry-unique HKL, with the row count and median d (A) of each."""
+
     records: dict[tuple[int, int, int], dict[str, Any]] = {}
     for row in rows:
         key = canonical_hkl(hkl_from_row(row), sg, merge_anomalous=merge_anomalous)
@@ -208,6 +222,12 @@ def _unique_records(
 
 
 def _shell_groups(records: dict[tuple[int, int, int], dict[str, Any]], shells: int) -> list[list[tuple[int, int, int]]]:
+    """Split unique HKLs into ``shells`` groups of equal size ordered by 1/d^2.
+
+    All keys form a single group when fewer than two shells are asked for or any d is
+    missing.
+    """
+
     keys = sorted(records)
     if shells <= 1 or not keys:
         return [keys]
@@ -328,6 +348,8 @@ def propagate_free_flags(
 
 
 def _first_finite(row: dict[str, Any], names: tuple[str, ...]) -> float:
+    """Return the first finite value among the named row columns, or NaN."""
+
     for name in names:
         value = _safe_float(row.get(name))
         if math.isfinite(value):
@@ -336,6 +358,12 @@ def _first_finite(row: dict[str, Any], names: tuple[str, ...]) -> float:
 
 
 def _q_ramp_weight(d_A: float, *, off_d_A: float, full_d_A: float) -> float:
+    """Return the weight (0 to 1) of the dynamical q correction at resolution ``d_A``.
+
+    The weight is 0 at or beyond ``off_d_A``, 1 at or inside ``full_d_A`` and linear in d in
+    between. Invalid inputs give 1 (the full correction).
+    """
+
     if not (math.isfinite(d_A) and d_A > 0):
         return 1.0
     if off_d_A <= 0 or full_d_A <= 0 or off_d_A <= full_d_A:
@@ -580,6 +608,8 @@ def export_corrected_mtz(
 
 
 def sha256_file(path: str | Path) -> str:
+    """Return the hex SHA-256 digest of a file."""
+
     digest = hashlib.sha256()
     with Path(path).expanduser().open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):

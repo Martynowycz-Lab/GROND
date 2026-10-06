@@ -17,6 +17,7 @@ processed by a separate least-squares model-update bridge after the row target i
 from __future__ import annotations
 
 import csv
+import functools
 import hashlib
 import json
 import math
@@ -41,22 +42,16 @@ import numpy as np
 import scipy
 from scipy.optimize import brentq
 
+from grond.bloch.config import prediction_precision_record
+from grond.bloch.model import fcalc_res_grid, model_content_hash
+from grond.bloch.numerics import validate_row_indices
 from grond.refine.shelx_input import (
-    _SHELX_FLOAT_TOKEN_RE as _SHELX_FLOAT_TOKEN_RE,
-    DEFAULT_ELECTRON_WAVELENGTH_A as DEFAULT_ELECTRON_WAVELENGTH_A,
-    _format_wght_line as _format_wght_line,
-    _hklf_order as _hklf_order,
-    _iter_recommended_wght_terms as _iter_recommended_wght_terms,
-    _unsupported_endpoint_reason as _unsupported_endpoint_reason,
+    ABSOLUTE_HKL_KAPPA as ABSOLUTE_HKL_KAPPA,
     enforce_hkl_row_width as enforce_hkl_row_width,
-    force_shelxl_cycle_count as force_shelxl_cycle_count,
-    force_shelxl_one_cycle as force_shelxl_one_cycle,
     normalize_shelx_cell_wavelength as normalize_shelx_cell_wavelength,
-    parse_shelx_wght_pair as parse_shelx_wght_pair,
     parse_shelx_wght_terms as parse_shelx_wght_terms,
     parse_wght as parse_wght,
-    set_active_wght_lines as set_active_wght_lines,
-    shelx_wavelength_needs_electron_default as shelx_wavelength_needs_electron_default,
+    requests_acta as requests_acta,
     write_endpoint_ins as write_endpoint_ins,
     write_hkl as write_hkl,
     write_no_exti_ins as write_no_exti_ins,
@@ -67,47 +62,49 @@ from grond.refine.shelxl_diagnostics import (
     parse_recommended_wght as parse_recommended_wght,
     shelx_res_health as shelx_res_health,
     shelxl_iteration_safe as shelxl_iteration_safe,
-    shelxl_statistics_complete as shelxl_statistics_complete,
 )
 from grond.refine.shelxl_iterations import (
-    DEFAULT_NPD_DAMP_LIMSE as DEFAULT_NPD_DAMP_LIMSE,
-    DEFAULT_NPD_DAMP_RETRIES as DEFAULT_NPD_DAMP_RETRIES,
+    NPD_RECOVERY_METHODS as NPD_RECOVERY_METHODS,
+    WGHT_CONVERGE_DEFAULT_MAX_CALLS as WGHT_CONVERGE_DEFAULT_MAX_CALLS,
+    WGHT_MODES as WGHT_MODES,
     _active_wght_from_stats as _active_wght_from_stats,
-    _shelxl_attempt_label as _shelxl_attempt_label,
-    archive_shelxl_attempt as archive_shelxl_attempt,
-    archived_shelxl_attempt_record as archived_shelxl_attempt_record,
+    endpoint_call_converged as endpoint_call_converged,
+    endpoint_initial_wght as endpoint_initial_wght,
     promote_recommended_wght as promote_recommended_wght,
     recommended_wght_from_stats as recommended_wght_from_stats,
+    recover_npd_attempt as recover_npd_attempt,
     recover_npd_shelxl_attempt as recover_npd_shelxl_attempt,
     run_one_shelxl_attempt as run_one_shelxl_attempt,
     select_last_safe_shelxl_iteration as select_last_safe_shelxl_iteration,
+    shelxl_model_restraint_audit as shelxl_model_restraint_audit,
+    shelxl_shift_converged as shelxl_shift_converged,
     snapshot_safe_shelxl_iteration as snapshot_safe_shelxl_iteration,
-    write_active_damp as write_active_damp,
+    wght_agreement as wght_agreement,
+    wght_call_limit as wght_call_limit,
+    wght_convergence_summary as wght_convergence_summary,
+    wght_promotes as wght_promotes,
     write_active_wght as write_active_wght,
 )
 from grond.regularize.arguments_native import build_parser as build_native_parser
 from grond.regularize.contracts import (
     AUTO_EXACT_ROW_PLAN_MIN_REUSE as AUTO_EXACT_ROW_PLAN_MIN_REUSE,
-    TARGET_MODE_LABELS as TARGET_MODE_LABELS,
     TARGET_MODES as TARGET_MODES,
     Nuisance as Nuisance,
-    absorption_parameter_grid as absorption_parameter_grid,
     estimated_row_plan_reuse_per_geometry_key as estimated_row_plan_reuse_per_geometry_key,
     kernel_variance_terms as kernel_variance_terms,
     parse_float_grid as parse_float_grid,
     parse_int_grid as parse_int_grid,
     resolve_fixed_model_row_plan_cache as resolve_fixed_model_row_plan_cache,
+    scale_model_from_args as scale_model_from_args,
 )
 from grond.regularize.evaluation import (
-    apply_q_control as apply_q_control,
     evaluate_trial as evaluate_trial,
     paired_inverse_prediction as paired_inverse_prediction,
-    resolution_shell_bins as resolution_shell_bins,
 )
-from grond.regularize.grid import populate_nuisance_trials
+from grond.regularize.grid import mosaicity_candidate_grid, populate_nuisance_trials
+from grond.regularize.multidataset import endpoint_correction_denominators
 from grond.regularize.observations import (
     automatic_frame_offset_grid as automatic_frame_offset_grid,
-    detector_bin_indices as detector_bin_indices,
     endpoint_observation_arrays as endpoint_observation_arrays,
     endpoint_resolution_modulation as endpoint_resolution_modulation,
     geometry_tail_mask as geometry_tail_mask,
@@ -115,11 +112,9 @@ from grond.regularize.observations import (
     nominal_frame_width_deg as nominal_frame_width_deg,
     parse_group_width_grid as parse_group_width_grid,
     row_contract_selection as row_contract_selection,
-    row_resolution_modulation as row_resolution_modulation,
     row_selection as row_selection,
     sigma_eff as sigma_eff,
     target_arrays as target_arrays,
-    target_factor as target_factor,
 )
 from grond.regularize.prediction_cache import (
     cacheable_prediction_arrays as cacheable_prediction_arrays,
@@ -134,8 +129,6 @@ from grond.regularize.row_output import (
     write_row_table as write_row_table,
 )
 from grond.regularize.scales import (
-    _fit_global_scale as _fit_global_scale,
-    _scale_fit_mask as _scale_fit_mask,
     fit_frame_detector_scales as fit_frame_detector_scales,
     fit_group_scales as fit_group_scales,
     native_metrics as native_metrics,
@@ -143,26 +136,22 @@ from grond.regularize.scales import (
     solve_regularized_scales as solve_regularized_scales,
 )
 from grond.regularize.selection import (
-    _NUISANCE_CATEGORICAL_FIELDS as _NUISANCE_CATEGORICAL_FIELDS,
-    _NUISANCE_NULLABLE_NUMERIC_FIELDS as _NUISANCE_NULLABLE_NUMERIC_FIELDS,
-    _promotion_trial_record as _promotion_trial_record,
     _trial_full_row_score as _trial_full_row_score,
-    _trial_metric_value as _trial_metric_value,
-    _trial_split_count as _trial_split_count,
-    _trial_valid_mask as _trial_valid_mask,
-    _valid_mask_sha256 as _valid_mask_sha256,
     metric_row as metric_row,
     nuisance_reference_matches as nuisance_reference_matches,
     rank_trials as rank_trials,
     select_trial_with_promotion_gate as select_trial_with_promotion_gate,
-    trial_metric as trial_metric,
 )
+from grond.regularize.trial_rows import write_trial_rows_npz
+from grond.validation import heldout as heldout
 
 try:
     from grond.paths import runtime_cache_dir
 except ImportError:  # Direct script execution from the legacy engine directory.
 
     def runtime_cache_dir(*parts: str) -> Path:
+        """Return the GROND cache directory ($GROND_CACHE_DIR or ~/.cache/grond) joined with parts."""
+
         override = os.environ.get("GROND_CACHE_DIR", "").strip()
         root = Path(override).expanduser() if override else Path.home() / ".cache" / "grond"
         return root.joinpath(*parts)
@@ -172,31 +161,19 @@ try:  # Package import.
         DEFAULT_MAX_SUPPORT_SG,
         Config,
         InfeasibleSgJitterProfileError,
-        NonPassiveAbsorptionError as NonPassiveAbsorptionError,
         XDSBlochPort,
         XDSData,
         alternate_hand_model,
         frozen_kernel_contract,
-        load_transform_split_contract_masks,
         parse_model,
         sha256,
-        split_masks,
-    )
-    from .detector_scale_regularization import (
-        detector_field_diagnostics as detector_field_diagnostics,
-        solve_regularized_detector_field as solve_regularized_detector_field,
     )
     from .endpoint_modulation import modulation_manifest_fields
-    from .post_bloch_sigma import fit_uniform_z_rms_sigma_scale, scale_row_sigmas
-    from .shelx_diagnostics import (
-        parse_shelx_lst_pathologies as parse_shelx_lst_pathologies,
-        shelx_pathology_safe_for_feedback as shelx_pathology_safe_for_feedback,
-    )
+    from .post_bloch_sigma import fit_error_model_sigma, fit_uniform_z_rms_sigma_scale, scale_row_sigmas
     from .shelx_hkl import (
         safe_fixed_width_factor as safe_fixed_width_factor,
-        write_fixed_width_hkl as write_fixed_width_hkl,
     )
-except ImportError:  # Direct script execution from this directory.
+except ImportError:  # Direct script execution from this directory: the same names as the package import.
     from bloch_engine import (
         DEFAULT_MAX_SUPPORT_SG,
         Config,
@@ -205,21 +182,25 @@ except ImportError:  # Direct script execution from this directory.
         XDSData,
         alternate_hand_model,
         frozen_kernel_contract,
-        load_transform_split_contract_masks,
         parse_model,
         sha256,
-        split_masks,
     )
     from endpoint_modulation import modulation_manifest_fields
-    from post_bloch_sigma import fit_uniform_z_rms_sigma_scale, scale_row_sigmas
+    from post_bloch_sigma import fit_error_model_sigma, fit_uniform_z_rms_sigma_scale, scale_row_sigmas
+    from shelx_hkl import (
+        safe_fixed_width_factor as safe_fixed_width_factor,
+    )
 
 
-ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_HKL = Path("INTEGRATE.HKL")
 DEFAULT_RES = Path("model.res")
 DEFAULT_BASELINE_HKL = Path("model.hkl")
 SHELXL = os.environ.get("SHELXL") or shutil.which("shelxl") or shutil.which("shelxl2019") or ""
 SHELX2MAP = os.environ.get("SHELX2MAP") or shutil.which("shelx2map") or ""
+# The same limit as the ``grond finish`` shelx2map calls. A quick map takes about a second; shelx2map
+# spins forever on an FCF whose header has a line over 80 characters (a long SHELXL _shelx_title),
+# which run_maps avoids with the finish copy of the FCF, so the limit is the backstop.
+SHELX2MAP_TIMEOUT_SECONDS = 120
 
 PREDICTION_CACHE_SCHEMA = 7
 
@@ -290,6 +271,8 @@ def _prediction_engine_source_fingerprint() -> str:
 
 
 def _installed_version(distribution: str) -> str:
+    """Return the installed version of a distribution, or 'not-installed'."""
+
     try:
         return distribution_version(distribution)
     except PackageNotFoundError:
@@ -349,6 +332,16 @@ def _xds_header_bragg_omega(data: XDSData, hkl: np.ndarray, omega0: float) -> fl
     )
 
 
+def _zcal_convention_record(data) -> dict:
+    """How ZCAL was converted to the spindle angle (io/xds.py resolve_zcal_frame_convention)."""
+
+    return {
+        "zcal_frame_convention": getattr(data, "zcal_frame_convention", "scan_start"),
+        "zcal_frame_convention_reason": getattr(data, "zcal_frame_convention_reason", ""),
+        "zcal_angle_origin_frame": float(getattr(data, "zcal_angle_origin", getattr(data, "starting_frame", 0.0))),
+    }
+
+
 def xds_frame_datum_summary(data: XDSData, indices: np.ndarray, max_samples: int = 512) -> dict:
     """Measure the global-header versus row-ZCAL angular datum in frames."""
 
@@ -376,6 +369,7 @@ def xds_frame_datum_summary(data: XDSData, indices: np.ndarray, max_samples: int
             "sampled_rows": sampled_rows,
             "successful_rows": 0,
             "failed_rows": int(failures),
+            **_zcal_convention_record(data),
         }
     median = float(np.median(values))
     p05 = float(np.quantile(values, 0.05))
@@ -393,6 +387,7 @@ def xds_frame_datum_summary(data: XDSData, indices: np.ndarray, max_samples: int
     return {
         "status": "unreliable" if reliability_reasons else "ok",
         "definition": "(nearest global-header Sg=0 omega - XDS ZCAL omega) / OSCILLATION_RANGE",
+        **_zcal_convention_record(data),
         "sampled_rows": sampled_rows,
         "successful_rows": successful_rows,
         "failed_rows": int(failures),
@@ -428,6 +423,11 @@ def resolve_frame_offset_grid(text: str, data: XDSData, indices: np.ndarray) -> 
 
 
 def exact_hkl_merge(hkls, intensities, sigmas):
+    """Merge rows with the same signed HKL by inverse-variance weighting; return sorted (h, k, l, I, sigma).
+
+    No symmetry or Friedel merging; sigmas are floored at 1e-6.
+    """
+
     bins: dict[tuple[int, int, int], dict[str, float]] = {}
     for hkl, I, sig in zip(hkls, intensities, sigmas, strict=True):
         h = tuple(int(v) for v in hkl)
@@ -444,7 +444,25 @@ def exact_hkl_merge(hkls, intensities, sigmas):
     return rows
 
 
-def prediction_cache_key(data: XDSData, hkl: Path, res: Path, cfg: Config, indices, model_tag: str = "original"):
+def prediction_cache_key(
+    data: XDSData, hkl: Path, res: Path, cfg: Config, indices, model_tag: str = "original", *, model: dict
+):
+    """Return the 20-character prediction cache key and the payload it hashes.
+
+    Source-file hashes and the effective numerical model are separate bindings.
+    The model may intentionally differ from the RES, for example after hand
+    inversion. As in XDSBlochPort, its working cell comes from the row geometry.
+    """
+
+    indices = validate_row_indices(indices, row_count=len(data.iobs))
+    loaded_sources = data.verify_source_files() if isinstance(data, XDSData) else None
+    hkl_hash = sha256(hkl)
+    if loaded_sources is not None and hkl_hash != loaded_sources["hkl"]:
+        raise ValueError("prediction HKL file does not match the rows loaded into XDSData")
+    effective_model = dict(model)
+    effective_model["cell"] = (
+        data.cell.a, data.cell.b, data.cell.c, data.cell.alpha, data.cell.beta, data.cell.gamma,
+    )
     scan_matrix_path = getattr(data, "a_scan_points_path", None)
     scan_matrix_sha256 = ""
     if scan_matrix_path:
@@ -455,13 +473,14 @@ def prediction_cache_key(data: XDSData, hkl: Path, res: Path, cfg: Config, indic
         "cache_schema": PREDICTION_CACHE_SCHEMA,
         "prediction_engine_source_sha256": PREDICTION_ENGINE_SOURCE_SHA256,
         "numerical_runtime_versions": NUMERICAL_RUNTIME_VERSIONS,
-        "hkl_sha256": sha256(hkl),
+        "hkl_sha256": hkl_hash,
         "scan_matrix_sha256": scan_matrix_sha256,
         "external_geometry": external_geometry_fingerprints(data, cfg),
         "res_sha256": sha256(res),
+        "model_content_sha256": model_content_hash(effective_model),
         "model_tag": str(model_tag),
         "hkl_transform": str(getattr(data, "hkl_transform_spec", "identity")),
-        "indices_sha256": hashlib.sha256(np.asarray(indices, dtype=np.int64).tobytes()).hexdigest(),
+        "indices_sha256": hashlib.sha256(indices.tobytes()).hexdigest(),
         "cfg": asdict(cfg),
     }
     text = canonical_prediction_cache_payload(payload)
@@ -483,14 +502,25 @@ def predict_with_cache(
     cache_compression: str = "compressed",
     ug_cache_dir: Path | None = None,
 ):
+    """Return Bloch predictions for indices from a validated cache file, or compute and cache them.
+
+    Sets cache_status to "hit" or "built"; a stale or unreadable cache file is ignored and rebuilt.
+    res_hash identifies the source RES at load time; model may carry a declared
+    in-memory transformation, whose numerical content is bound independently.
+    """
+
+    key, payload = prediction_cache_key(data, hkl_path, res_path, cfg, indices, model_tag=model_tag, model=model)
+    if payload["res_sha256"] != res_hash:
+        raise ValueError("source RES changed after model loading; reload the model and its source hash")
     cache_dir.mkdir(parents=True, exist_ok=True)
-    key, payload = prediction_cache_key(data, hkl_path, res_path, cfg, indices, model_tag=model_tag)
     path = cache_dir / f"native_pred_{key}.npz"
     if path.exists():
         try:
             pred = read_prediction_cache(path)
             errors = prediction_cache_validation_errors(pred, payload, indices)
             if not errors:
+                if prediction_cache_key(data, hkl_path, res_path, cfg, indices, model_tag=model_tag, model=model)[0] != key:
+                    raise ValueError("prediction inputs changed while loading the cache")
                 pred.pop("prediction_cache_meta", None)
                 pred["cache_status"] = "hit"
                 pred["cache_path"] = str(path)
@@ -507,6 +537,9 @@ def predict_with_cache(
         data, model, cfg, cache_dir=resolved_ug_cache_dir, res_hash=res_hash
     )
     pred = port.predict_rows(indices, workers=workers, chunksize=chunksize)
+    final_key, _ = prediction_cache_key(data, hkl_path, res_path, cfg, indices, model_tag=model_tag, model=model)
+    if final_key != key:
+        raise ValueError("prediction inputs changed during calculation; refusing to cache the result")
     save = cacheable_prediction_arrays(pred)
     validation_view = {**save, "prediction_cache_meta": payload}
     errors = prediction_cache_validation_errors(validation_view, payload, indices)
@@ -518,7 +551,24 @@ def predict_with_cache(
     return pred
 
 
-def run_shelxl(work_dir: Path, stem: str, iterations: int = 1, wght_mode: str = "freeze-zero", endpoint_ls_cycles: int = 1):
+def run_shelxl(
+    work_dir: Path,
+    stem: str,
+    iterations: int = 1,
+    wght_mode: str = "freeze-zero",
+    endpoint_ls_cycles: int = 1,
+    *,
+    convergence_shift_esd: float = 0.0,
+    npd_recovery: str = "damp",
+    keep_damp: bool = False,
+    wght_converge_max_calls: int = WGHT_CONVERGE_DEFAULT_MAX_CALLS,
+):
+    """Run up to ``iterations`` SHELXL calls; with ``convergence_shift_esd`` > 0 stop once |max shift/esd| < it.
+
+    ``wght_mode="converge"`` makes up to ``wght_converge_max_calls`` calls from WGHT 0 0, promoting SHELXL's
+    suggested WGHT, and stops only once the applied and suggested weights agree as well.
+    """
+
     exe = str(SHELXL)
     if not shelxl_executable_is_available(exe):
         msg = f"SHELXL executable not found: {SHELXL}\n"
@@ -527,11 +577,18 @@ def run_shelxl(work_dir: Path, stem: str, iterations: int = 1, wght_mode: str = 
     history = []
     last_safe = None
     last_proc = None
-    n_iter = max(1, int(iterations))
     mode = str(wght_mode or "freeze-zero")
+    n_iter = wght_call_limit(mode, iterations, wght_converge_max_calls)
+    tolerance = float(convergence_shift_esd or 0.0)
     freeze_zero = mode == "freeze-zero"
-    if mode not in {"inherit", "freeze-zero", "promote"}:
+    if mode not in WGHT_MODES:
         return {"returncode": None, "status": "invalid_wght_mode", "wght_mode": mode}
+    if mode == "converge" and not tolerance > 0.0:
+        return {"returncode": None, "status": "invalid_converge_tolerance", "wght_mode": mode}
+    if npd_recovery not in NPD_RECOVERY_METHODS:
+        return {"returncode": None, "status": "invalid_npd_recovery", "npd_recovery": str(npd_recovery)}
+    # An endpoint written with ACTA keeps it on every call, so the CIF is SHELXL's CIF of the kept .res.
+    acta = requests_acta(work_dir / f"{stem}.ins")
     if freeze_zero:
         write_active_wght(work_dir / f"{stem}.ins", 0.0, 0.0)
     for i in range(n_iter):
@@ -548,13 +605,14 @@ def run_shelxl(work_dir: Path, stem: str, iterations: int = 1, wght_mode: str = 
         )
         last_proc = proc
         if str(stats.get("status", "")) == "adp_pathology" and base_ins_text:
-            recovered_proc, stats = recover_npd_shelxl_attempt(
+            recovered_proc, stats = recover_npd_attempt(
                 work_dir,
                 stem,
                 exe,
                 iteration=i + 1,
                 base_ins_text=base_ins_text,
                 initial_stats=stats,
+                method=npd_recovery,
             )
             if recovered_proc is not None:
                 last_proc = recovered_proc
@@ -565,12 +623,25 @@ def run_shelxl(work_dir: Path, stem: str, iterations: int = 1, wght_mode: str = 
         stats["safe_snapshot_res"] = last_safe["res"]
         stats["safe_snapshot_lst"] = last_safe["lst"]
         stats["safe_snapshot_fcf"] = last_safe["fcf"]
+        stats["shift_esd_converged"] = shelxl_shift_converged(stats, tolerance)
+        stats["wght_agreement"] = wght_agreement(stats)
         last_safe["stats"] = dict(stats)
+        if endpoint_call_converged(stats, mode, tolerance):
+            break
         res = work_dir / f"{stem}.res"
         if i + 1 < n_iter and res.exists():
             active = (0.0, 0.0) if freeze_zero else _active_wght_from_stats(stats)
-            write_endpoint_ins(res, ins, hkl_name=f"{stem}.hkl", keep_exti=True, wght=active, ls_cycles=endpoint_ls_cycles)
-            if mode == "promote":
+            write_endpoint_ins(
+                res,
+                ins,
+                hkl_name=f"{stem}.hkl",
+                keep_exti=True,
+                wght=active,
+                ls_cycles=endpoint_ls_cycles,
+                keep_damp=keep_damp,
+                acta=acta,
+            )
+            if wght_promotes(mode):
                 stats["next_wght"] = promote_recommended_wght(
                     ins,
                     recommended_wght_from_stats(stats),
@@ -600,6 +671,8 @@ def run_shelxl(work_dir: Path, stem: str, iterations: int = 1, wght_mode: str = 
             keep_exti=True,
             wght=active,
             ls_cycles=endpoint_ls_cycles,
+            keep_damp=keep_damp,
+            acta=acta,
         )
         final["res_normalized_for_reopen"] = True
         final["res_health"] = shelx_res_health(
@@ -612,6 +685,17 @@ def run_shelxl(work_dir: Path, stem: str, iterations: int = 1, wght_mode: str = 
     final["iterations"] = n_iter
     final["iterations_completed"] = len(history)
     final["endpoint_ls_cycles"] = max(1, int(endpoint_ls_cycles))
+    final["convergence_shift_esd"] = tolerance
+    final["converged"] = bool(shelxl_iteration_safe(final) and endpoint_call_converged(final, mode, tolerance))
+    final["wght_convergence"] = wght_convergence_summary(
+        history, final, mode=mode, max_calls=n_iter, shift_tolerance=tolerance
+    )
+    final["npd_recovery_method"] = str(npd_recovery)
+    final["keep_damp"] = bool(keep_damp)
+    if acta:
+        cif = work_dir / f"{stem}.cif"
+        final["acta_cif"] = str(cif) if cif.is_file() else ""
+    final.update(shelxl_model_restraint_audit(work_dir / f"{stem}.res"))
     final["iteration_history"] = history
     final["wght_mode"] = mode
     pathology = final.get("res_health") or {}
@@ -624,20 +708,89 @@ def run_shelxl(work_dir: Path, stem: str, iterations: int = 1, wght_mode: str = 
 
 
 def run_maps(work_dir: Path, stem: str):
+    """Quick shelx2map endpoint maps, written as full-cell P1 maps plus a model box each.
+
+    shelx2map writes an asymmetric-unit box with its space-group number; a
+    viewer that ignores the stored operators then expands a nonstandard setting
+    (P21/n, say) with the standard one.  As in ``grond finish`` each map is
+    rewritten as the full cell in P1, and ``<label>_model_box.map`` covers the
+    whole endpoint model plus 3 A.
+    """
+
+    from grond.maps.ccp4 import normalize_ccp4_map
+    from grond.maps.model_box import write_model_box_maps
+    from grond.workflows.finish_maps import _shelx2map_compatible_fcf
+
     maps = {}
     exe = str(SHELX2MAP)
-    if ("/" in exe and not Path(exe).exists()) or ("/" not in exe and shutil.which(exe) is None) or not (work_dir / f"{stem}.fcf").exists():
+    source_fcf = work_dir / f"{stem}.fcf"
+    if ("/" in exe and not Path(exe).exists()) or ("/" not in exe and shutil.which(exe) is None) or not source_fcf.exists():
         return maps
+    # As in ``grond finish``: a long _shelx_title is shortened in a separate copy for shelx2map; the
+    # endpoint FCF stays as SHELXL wrote it. Any other header line over the limit gets no call.
+    try:
+        fcf, fcf_compatibility = _shelx2map_compatible_fcf(source_fcf)
+    except ValueError as exc:
+        fcf, fcf_compatibility = None, {"status": "fcf_header_incompatible", "error": str(exc),
+                                        "source_fcf": str(source_fcf.resolve())}
     for label, mode in [("fofc", "0"), ("fo", "1"), ("2fofc", "2")]:
         out_map = work_dir / f"{label}.map"
-        proc = subprocess.run([exe, "-m", mode, "-o", str(out_map.name), stem], cwd=str(work_dir), text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        (work_dir / f"shelx2map_{label}.log").write_text(proc.stdout)
+        log_path = work_dir / f"shelx2map_{label}.log"
+        if fcf is None:
+            log_path.write_text(fcf_compatibility["error"] + "\n")
+            maps[label] = {"map": str(out_map), "requested_map": str(out_map), "returncode": None,
+                           "exists": out_map.exists(), "status": "failed", "reason": fcf_compatibility["error"],
+                           "fcf_compatibility": fcf_compatibility}
+            continue
+        map_dir = fcf.parent
+        map_arg = out_map.name if fcf == source_fcf else str(out_map.resolve())
+        try:
+            proc = subprocess.run([exe, "-m", mode, "-o", map_arg, fcf.stem], cwd=str(map_dir), text=True,
+                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=SHELX2MAP_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired as exc:
+            # subprocess.run has killed and reaped shelx2map; a partial output is not a map.
+            out_map.unlink(missing_ok=True)
+            output = exc.stdout or ""
+            if isinstance(output, bytes):
+                output = output.decode(errors="replace")
+            reason = f"shelx2map exceeded its {SHELX2MAP_TIMEOUT_SECONDS}-second limit and was stopped"
+            log_path.write_text(output + f"\n{reason}\n")
+            maps[label] = {"map": str(out_map), "requested_map": str(out_map), "returncode": None,
+                           "exists": out_map.exists(), "status": "failed", "reason": reason,
+                           "timeout_seconds": SHELX2MAP_TIMEOUT_SECONDS, "fcf_compatibility": fcf_compatibility}
+            continue
+        log_path.write_text(proc.stdout)
         actual = out_map
         for line in proc.stdout.splitlines():
             m = re.search(r'Map data written to "([^"]+)"', line)
             if m:
-                actual = work_dir / m.group(1)
-        maps[label] = {"map": str(actual), "requested_map": str(out_map), "returncode": proc.returncode, "exists": actual.exists()}
+                actual = map_dir / m.group(1)
+        maps[label] = {"map": str(actual), "requested_map": str(out_map), "returncode": proc.returncode, "exists": actual.exists(),
+                       "fcf_compatibility": fcf_compatibility}
+        if proc.returncode == 0 and actual.exists():
+            try:
+                maps[label]["normalization"] = normalize_ccp4_map(actual)
+            except (ValueError, RuntimeError, OSError) as exc:
+                maps[label]["normalization_error"] = str(exc)
+    model = work_dir / f"{stem}.res"
+    entries = [
+        {"label": label, "map": item["map"], "model": str(model), "model_label": "endpoint"}
+        for label, item in maps.items()
+        if item.get("returncode") == 0 and item.get("exists") and "normalization" in item
+    ]
+    if entries and model.is_file():
+        try:
+            boxes = write_model_box_maps(entries, model, write_res=False)
+        except Exception as exc:  # a figure convenience must never stop the endpoint
+            boxes = {"status": "failed", "error": f"{type(exc).__name__}: {exc}", "maps": {}}
+        reference_pdb = (boxes.get("models") or {}).get("reference", {}).get("pdb", "")
+        for entry in entries:
+            box = (boxes.get("maps") or {}).get(entry["label"], {})
+            maps[entry["label"]]["model_box_status"] = box.get("status", boxes.get("status"))
+            maps[entry["label"]]["model_box_map"] = (box.get("box_map") or {}).get("map", "")
+            maps[entry["label"]]["model_box_reference_pdb"] = reference_pdb
+            if box.get("error") or boxes.get("error"):
+                maps[entry["label"]]["model_box_error"] = box.get("error") or boxes.get("error")
     return maps
 
 
@@ -663,7 +816,26 @@ def export_corrected_endpoint(
     post_bloch_sigma_max_scale: float = 4.0,
     endpoint_wght_mode: str = "freeze-zero",
     target_mode: str = "iobs",
+    *,
+    q_policy: str = "clip",
+    include_free_rows: bool = True,
+    convergence_shift_esd: float = 0.0,
+    npd_recovery: str = "damp",
+    keep_damp: bool = False,
+    wght_converge_max_calls: int = WGHT_CONVERGE_DEFAULT_MAX_CALLS,
+    native_outputs: dict | None = None,
+    error_model_refits: int = 1,
 ):
+    """Write the corrected HKL/INS for one dataset and refine it with SHELXL.
+
+    The keyword-only options select the dynamical handoff contract; their defaults are the legacy one
+    (clipped q, free rows written, median-IOBS rescale via ``rescale``).  AUTO passes its default contract:
+    free rows excluded, pathological correction ratios excluded, ``rescale="absolute"`` (kappa*|F|^2 with
+    the OSF reset to sqrt(kappa)), SHELXL iterated to shift/esd convergence and ISOR-only NPD recovery.
+    ``post_bloch_sigma_policy="error_model"`` fits this crystal's error model on its unmerged work rows
+    (free rows scored, never fitted); ``native_outputs`` are write_endpoint_ins SHELXL-native options.
+    """
+
     out_dir.mkdir(parents=True, exist_ok=True)
     arrays = best_eval["arrays"]
     q = arrays["dyn_raw"] / np.maximum(arrays["born_raw"], 1e-30)
@@ -672,6 +844,8 @@ def export_corrected_endpoint(
     scales = np.full(len(target), np.nan, dtype=float)
     for g, scale in best_eval["dyn_scales"].items():
         scales[groups == int(g)] = float(scale)
+    if "dyn_row_scale" in arrays:  # P-spline scales are per row, not per frame group
+        scales = np.asarray(arrays["dyn_row_scale"], dtype=float)
     if best_eval.get("dyn_detector_scales"):
         det_bins = arrays.get("detector_bins")
         if det_bins is not None:
@@ -697,7 +871,39 @@ def export_corrected_endpoint(
     )
     if not np.any(valid):
         raise ValueError("no finite rows with positive sigma, prediction, and fitted scale are available for endpoint export")
-    denom = scales * (q_clip ** float(lambda_q))
+    free_rows_excluded = 0
+    free_candidates = valid & np.asarray(masks.get("free", np.zeros(len(valid), dtype=bool)), dtype=bool)
+    if not include_free_rows:
+        # Free rows are predicted and scored in the row table but never written to the HKL.  Keep only
+        # rows marked work, as the combine does (split == "work"), so no other held-out label can leak in.
+        work = np.asarray(masks["work"], dtype=bool)
+        free_rows_excluded = int(np.count_nonzero(valid & ~work))
+        valid = valid & work
+        if not np.any(valid):
+            raise ValueError("no work rows are available for endpoint export after excluding free rows")
+    correction_audit: dict = {"q_policy": str(q_policy), "rescale": str(rescale), "n_excluded_q_rows": 0}
+    fc2 = None
+    if q_policy == "clip" and rescale != "absolute":
+        denom = scales * (q_clip ** float(lambda_q))
+    else:
+        if rescale == "absolute":
+            model_now = parse_model(res_path)
+            fc2 = np.abs(fcalc_res_grid(model_now, data.hkl[:, 0], data.hkl[:, 1], data.hkl[:, 2])) ** 2
+        denom, valid, correction_audit = endpoint_correction_denominators(
+            endpoint_target,
+            arrays["dyn_raw"],
+            arrays["dyn_scaled"],
+            q,
+            float(lambda_q),
+            valid,
+            q_policy=q_policy,
+            rescale=rescale,
+            fc2=fc2,
+            restore=endpoint_restore_factor,
+            scales=scales,
+        )
+        if not np.any(valid):
+            raise ValueError("no rows remain for endpoint export after the q-ratio/|Fcalc| exclusions")
     Icorr = endpoint_target / denom
     sigcorr = endpoint_sig / denom
     modulation, modulation_meta = endpoint_resolution_modulation(data, valid, endpoint_b)
@@ -717,12 +923,50 @@ def export_corrected_endpoint(
     )
     rows_unmerged = [(data.hkl[i, 0], data.hkl[i, 1], data.hkl[i, 2], Icorr[i], sigcorr[i]) for i in np.where(valid)[0]]
     rows_merged = exact_hkl_merge(data.hkl[valid], Icorr[valid], sigcorr[valid])
-    hkl = out_dir / "dyn_nuisance_corrected.hkl"
     rows_merged, rows_unmerged, hkl_safe_factor = enforce_hkl_row_width(
         rows_merged, rows_unmerged, hkl_format
     )
     post_bloch_sigma = {"policy": str(post_bloch_sigma_policy), "status": "not_requested"}
-    if str(post_bloch_sigma_policy) == "uniform_z_rms":
+    if str(post_bloch_sigma_policy) == "error_model":
+        if include_free_rows:
+            raise ValueError(
+                "--post-bloch-sigma-policy error_model is fitted on work rows only and needs "
+                "--no-endpoint-include-free-rows (free rows in the HKL would enter the fit)"
+            )
+        free_rows = []
+        if np.any(free_candidates):
+            # Free rows (own q-ratio median) are put on the work rows' scale, scored by the fitted error
+            # model and reported; they are never fitted and never written to an HKL.
+            if q_policy == "clip" and rescale != "absolute":
+                free_denom, free_valid = scales * (q_clip ** float(lambda_q)), free_candidates
+            else:
+                free_denom, free_valid, _free_audit = endpoint_correction_denominators(
+                    endpoint_target,
+                    arrays["dyn_raw"],
+                    arrays["dyn_scaled"],
+                    q,
+                    float(lambda_q),
+                    free_candidates,
+                    q_policy=q_policy,
+                    rescale=rescale,
+                    fc2=fc2,
+                    restore=endpoint_restore_factor,
+                    scales=scales,
+                )
+            free_factor = modulation * float(factor) * float(hkl_safe_factor) / np.maximum(free_denom, 1e-30)
+            free_rows = [
+                (data.hkl[i, 0], data.hkl[i, 1], data.hkl[i, 2], endpoint_target[i] * free_factor[i], endpoint_sig[i] * free_factor[i])
+                for i in np.where(free_valid)[0]
+            ]
+        uncalibrated_unmerged = list(rows_unmerged)
+        rows_unmerged, post_bloch_sigma = fit_error_model_sigma(
+            uncalibrated_unmerged,
+            parse_model(res_path),
+            free_rows=free_rows,
+            label=str(out_dir.name),
+        )
+        rows_merged = _merge_rows(rows_unmerged)
+    elif str(post_bloch_sigma_policy) == "uniform_z_rms":
         try:
             current_model = parse_model(res_path)
             post_bloch_sigma = fit_uniform_z_rms_sigma_scale(
@@ -747,28 +991,94 @@ def export_corrected_endpoint(
             "policy": str(post_bloch_sigma_policy),
             "status": "unknown_policy",
         }
-    rows_merged, rows_unmerged, post_sigma_hkl_safe_factor = enforce_hkl_row_width(
-        rows_merged, rows_unmerged, hkl_format
+    base_hkl_safe_factor = hkl_safe_factor
+    # freeze-zero and converge: WGHT 0 0; promote-gold: WGHT 0.1 0; promote and inherit: the source's.
+    initial_wght = endpoint_initial_wght(str(endpoint_wght_mode))
+
+    def write_and_refine(pass_dir: Path, merged, unmerged, start_res: Path):
+        """Write this pass's HKL/INS from ``start_res`` and refine them; returns (shelxl, hkl factor, rows)."""
+
+        pass_dir.mkdir(parents=True, exist_ok=True)
+        merged, unmerged, post_factor = enforce_hkl_row_width(merged, unmerged, hkl_format)
+        factor_total = base_hkl_safe_factor * post_factor
+        write_hkl(pass_dir / "dyn_nuisance_corrected.hkl", merged, hkl_format)
+        write_hkl(pass_dir / "dyn_nuisance_corrected_unmerged.hkl", unmerged, hkl_format)
+        # On the absolute scale Fo^2 = kappa_eff*|F|^2 (kappa_eff = kappa*hkl_safe_factor): restart OSF at sqrt(kappa_eff).
+        pass_osf = math.sqrt(ABSOLUTE_HKL_KAPPA * factor_total) if rescale == "absolute" else None
+        write_endpoint_ins(
+            start_res,
+            pass_dir / "dyn_nuisance_corrected.ins",
+            hkl_name="dyn_nuisance_corrected.hkl",
+            keep_exti=keep_exti,
+            wght=initial_wght,
+            ls_cycles=endpoint_ls_cycles,
+            keep_damp=keep_damp,
+            osf=pass_osf,
+            **dict(native_outputs or {}),
+        )
+        result = run_shelxl(
+            pass_dir,
+            "dyn_nuisance_corrected",
+            iterations=shelxl_iterations,
+            wght_mode=endpoint_wght_mode,
+            endpoint_ls_cycles=endpoint_ls_cycles,
+            convergence_shift_esd=convergence_shift_esd,
+            npd_recovery=npd_recovery,
+            keep_damp=keep_damp,
+            wght_converge_max_calls=wght_converge_max_calls,
+        )
+        return result, post_factor, pass_osf, merged, unmerged
+
+    start_res = res_path
+    error_model_passes: list[dict] = []
+    if str(post_bloch_sigma_policy) == "error_model" and int(error_model_refits) > 0:
+        # Error-model passes, as for the combined endpoint: pass 1 fits against the entering model, each refit
+        # against the model SHELXL refined in the previous pass (work rows only, intensities unchanged).  Each
+        # pass has its own directory; an unsafe pass stops the refits and the last clean pass is kept and then
+        # written and refined again as this endpoint.
+        state = {"pass": 1, "merged": rows_merged, "unmerged": rows_unmerged, "sigma": post_bloch_sigma, "start": start_res}
+        first_state, kept = state, None
+        for pass_index in range(1, int(error_model_refits) + 2):
+            if pass_index > 1:
+                refit_unmerged, refit_sigma = fit_error_model_sigma(
+                    uncalibrated_unmerged,
+                    parse_model(start_res),
+                    free_rows=free_rows,
+                    label=str(out_dir.name),
+                )
+                state = {
+                    "pass": pass_index,
+                    "merged": _merge_rows(refit_unmerged),
+                    "unmerged": refit_unmerged,
+                    "sigma": refit_sigma,
+                    "start": start_res,
+                }
+            pass_dir = out_dir / f"error_model_pass{pass_index}"
+            pass_shelxl, _factor, _osf, _merged, _unmerged = write_and_refine(pass_dir, state["merged"], state["unmerged"], state["start"])
+            record = {
+                "pass": pass_index,
+                "directory": str(pass_dir.resolve()),
+                "sigma_model": str(state["start"]),
+                "error_model": {key: state["sigma"].get(key) for key in ("k", "u", "model_intensity_scale", "work_rms_z_after", "free_rms_z_after")},
+                "shelxl": {key: pass_shelxl.get(key) for key in ("status", "R1_gt", "R1_all", "wR2_all", "GooF", "active_wght_a", "active_wght_b", "recommended_wght_a", "recommended_wght_b", "npd_atoms")},
+                "kept": False,
+            }
+            error_model_passes.append(record)
+            refined = pass_dir / "dyn_nuisance_corrected.res"
+            if str(pass_shelxl.get("status", "")) != "ok" or not refined.exists():
+                record["reason"] = f"SHELXL status {pass_shelxl.get('status')!r}: refits stop, the last clean pass is kept"
+                break
+            kept = state
+            start_res = refined
+        kept = kept or first_state
+        error_model_passes[kept["pass"] - 1]["kept"] = True
+        rows_merged, rows_unmerged, post_bloch_sigma, start_res = kept["merged"], kept["unmerged"], kept["sigma"], kept["start"]
+    shelxl, post_sigma_hkl_safe_factor, osf, rows_merged, rows_unmerged = write_and_refine(
+        out_dir, rows_merged, rows_unmerged, start_res
     )
-    hkl_safe_factor *= post_sigma_hkl_safe_factor
-    write_hkl(hkl, rows_merged, hkl_format)
-    write_hkl(out_dir / "dyn_nuisance_corrected_unmerged.hkl", rows_unmerged, hkl_format)
-    initial_wght = (0.0, 0.0) if str(endpoint_wght_mode) == "freeze-zero" else None
-    write_endpoint_ins(
-        res_path,
-        out_dir / "dyn_nuisance_corrected.ins",
-        hkl_name="dyn_nuisance_corrected.hkl",
-        keep_exti=keep_exti,
-        wght=initial_wght,
-        ls_cycles=endpoint_ls_cycles,
-    )
-    shelxl = run_shelxl(
-        out_dir,
-        "dyn_nuisance_corrected",
-        iterations=shelxl_iterations,
-        wght_mode=endpoint_wght_mode,
-        endpoint_ls_cycles=endpoint_ls_cycles,
-    )
+    hkl_safe_factor = base_hkl_safe_factor * post_sigma_hkl_safe_factor
+    if error_model_passes:
+        post_bloch_sigma = {**post_bloch_sigma, "passes": error_model_passes, "final_sigma_model": str(start_res)}
     maps = run_maps(out_dir, "dyn_nuisance_corrected") if make_maps else {}
     endpoint_res = out_dir / "dyn_nuisance_corrected.res"
     endpoint_lst = out_dir / "dyn_nuisance_corrected.lst"
@@ -787,6 +1097,21 @@ def export_corrected_endpoint(
         "shelxl_iterations": int(max(1, shelxl_iterations)),
         "endpoint_ls_cycles": int(max(1, endpoint_ls_cycles)),
         "endpoint_wght_mode": str(endpoint_wght_mode),
+        "endpoint_initial_wght": list(initial_wght or []),
+        "native_outputs": dict(native_outputs or {}),
+        "shelxl_convergence_shift_esd": float(convergence_shift_esd),
+        "shelxl_npd_recovery": str(npd_recovery),
+        "keep_damp": bool(keep_damp),
+        "free_rows": {"policy": "include" if include_free_rows else "exclude", "n_excluded": free_rows_excluded},
+        "q_policy": str(q_policy),
+        "n_excluded_q_rows": int(correction_audit.get("n_excluded_q_rows", 0)),
+        "endpoint_correction": correction_audit,
+        "intensity_scale": {
+            "mode": str(rescale),
+            "kappa": ABSOLUTE_HKL_KAPPA if rescale == "absolute" else None,
+            "kappa_effective": ABSOLUTE_HKL_KAPPA * hkl_safe_factor if rescale == "absolute" else None,
+            "osf_reset": osf,
+        },
         "post_bloch_sigma": post_bloch_sigma,
         "fit_target_mode": str(target_mode),
         "endpoint_target_mode": "iobs",
@@ -796,9 +1121,9 @@ def export_corrected_endpoint(
         "endpoint_target_factor_p95": float(np.nanpercentile(endpoint_restore_factor[valid], 95)),
         "rows_unmerged": len(rows_unmerged),
         "rows_merged_exact_hkl": len(rows_merged),
-        "q_median": float(np.nanmedian(q_clip[valid])),
-        "q_p05": float(np.nanpercentile(q_clip[valid], 5)),
-        "q_p95": float(np.nanpercentile(q_clip[valid], 95)),
+        "q_median": float(np.nanmedian((q_clip if q_policy == "clip" else q)[valid])),
+        "q_p05": float(np.nanpercentile((q_clip if q_policy == "clip" else q)[valid], 5)),
+        "q_p95": float(np.nanpercentile((q_clip if q_policy == "clip" else q)[valid], 95)),
         "shelxl": shelxl,
         "maps": maps,
         "artifacts": {
@@ -814,7 +1139,38 @@ def export_corrected_endpoint(
     return manifest
 
 
+def _merge_rows(rows_unmerged):
+    """Exact-HKL inverse-variance merge of (h, k, l, I, sigma) rows."""
+
+    return exact_hkl_merge(
+        np.asarray([row[:3] for row in rows_unmerged], dtype=int).reshape(-1, 3),
+        np.asarray([row[3] for row in rows_unmerged], dtype=float),
+        np.asarray([row[4] for row in rows_unmerged], dtype=float),
+    )
+
+
+def native_endpoint_outputs(args) -> dict:
+    """write_endpoint_ins SHELXL-native options requested on the native command line (none by default)."""
+
+    out: dict = {}
+    zerr_text = str(getattr(args, "zerr_esds", "") or "").strip()
+    if zerr_text:
+        out["zerr_esds"] = [float(value) for value in zerr_text.split(",")]
+    if bool(getattr(args, "strip_q_peaks", False)):
+        out["strip_q_peaks"] = True
+    if int(getattr(args, "endpoint_list_code", 0) or 0) > 0:
+        out["list_code"] = int(args.endpoint_list_code)
+    if bool(getattr(args, "acta", False)):
+        out["acta"] = True
+    return out
+
+
 def copy_baseline(out_dir: Path, res_path: Path, hkl_path: Path):
+    """Re-refine the user's own HKL and model for one SHELXL cycle and return its statistics.
+
+    This conventional baseline keeps the model's WGHT, EXTI and DAMP but forces a single L.S. cycle.
+    """
+
     out_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(hkl_path, out_dir / "temp_a.hkl")
     # This is a diagnostic replay of the user's conventional endpoint, not a
@@ -829,8 +1185,9 @@ def copy_baseline(out_dir: Path, res_path: Path, hkl_path: Path):
         keep_exti=True,
         wght=None,
         ls_cycles=1,
+        keep_damp=True,
     )
-    return run_shelxl(out_dir, "temp_a", iterations=1, wght_mode="inherit", endpoint_ls_cycles=1)
+    return run_shelxl(out_dir, "temp_a", iterations=1, wght_mode="inherit", endpoint_ls_cycles=1, keep_damp=True)
 
 
 def endpoint_has_adp_pathology(endpoint: dict) -> bool:
@@ -869,6 +1226,11 @@ def sg_jitter_candidate_rejection(cfg: Config, exc: InfeasibleSgJitterProfileErr
 
 
 def main():
+    """Fit the nuisance grid to native Bloch rows, write corrected-HKL endpoints and score them with SHELXL.
+
+    Writes the trial table, row tables, endpoints, summary.json and REPORT.md to --out-dir.
+    """
+
     ap = build_native_parser(
         description=__doc__,
         default_hkl=DEFAULT_HKL,
@@ -880,10 +1242,26 @@ def main():
         runtime_cache_directory=runtime_cache_dir,
     )
     args = ap.parse_args()
+    # The precision every prediction Config uses: --double, else GROND_PRECISION (complex64 when unset).
+    prediction_precision = prediction_precision_record(args.double_precision)
+    args.double_precision = prediction_precision["double_precision"]
     if args.paired_inverse_hand and str(args.q_control) != "real":
         raise ValueError(
             "--paired-inverse-hand cannot be combined with a shuffled-q control"
         )
+    if args.endpoint_wght_mode == "converge" and not float(args.shelxl_convergence_shift_esd or 0.0) > 0.0:
+        ap.error("--endpoint-wght-mode converge needs --shelxl-convergence-shift-esd > 0 (AUTO 0.01)")
+    if args.post_bloch_sigma_policy == "error_model" and args.endpoint_include_free_rows:
+        ap.error(
+            "--post-bloch-sigma-policy error_model is fitted on work rows only and needs --no-endpoint-include-free-rows"
+        )
+    if str(args.zerr_esds or "").strip():
+        try:
+            parsed = [float(value) for value in str(args.zerr_esds).split(",")]
+        except ValueError:
+            parsed = []
+        if len(parsed) != 6 or not all(math.isfinite(value) and value >= 0.0 for value in parsed):
+            ap.error(f"--zerr-esds needs six finite nonnegative values a,b,c,alpha,beta,gamma, got {args.zerr_esds!r}")
     configure_shelxl_executable(args.shelxl)
     require_endpoint_shelxl(
         args.shelxl,
@@ -922,7 +1300,7 @@ def main():
             raise ValueError(
                 "PETS exact rocking wedges currently implement uniform direct-angle sampling only"
             )
-        if str(args.mosaicity_mode) != "none" or abs(float(args.mosaicity_sigma_deg)) > 0.0:
+        if any(mode != "none" or abs(sigma) > 0.0 for mode, sigma in mosaicity_candidate_grid(args)):
             raise ValueError(
                 "PETS exact-row mosaicity controls are not implemented and cannot be silently ignored"
             )
@@ -977,33 +1355,48 @@ def main():
         )
         indices = row_selection(data, target, args.positive_only, args.min_d_spacing, args.min_peak, args.max_rows, args.geometry_percentile)
     model = parse_model(Path(args.res))
-    split_contract_summary = {}
-    if str(args.split_contract).strip():
-        masks, split_contract_summary = load_transform_split_contract_masks(
-            Path(args.split_contract),
-            data,
-            model,
-        )
-        if not math.isclose(
-            float(args.free_fraction),
-            float(split_contract_summary["free_fraction"]),
-            rel_tol=0.0,
-            abs_tol=1e-12,
-        ):
+    from grond.bloch.splits import resolve_split_masks
+
+    masks, excluded_rows, split_contract_summary, split_scheme_summary = resolve_split_masks(
+        data,
+        model,
+        split_contract=str(args.split_contract),
+        free_fraction=args.free_fraction,
+        split_seed=args.split_seed,
+        split_scheme=str(getattr(args, "split_scheme", "legacy")),
+        split_salt=str(getattr(args, "split_salt", "")),
+        exclude_orbits_json=str(getattr(args, "exclude_orbits_json", "") or ""),
+    )
+    if np.any(excluded_rows):
+        # Excluded (lockbox) orbits leave the row set before any fit, selection or report.
+        indices = np.asarray(indices, dtype=int)
+        if row_contract_summary and np.any(excluded_rows[indices]):
             raise ValueError(
-                "--free-fraction does not match the immutable transform/hand split contract"
+                "--row-contract selects rows whose orbits are in --exclude-orbits-json; "
+                "the row contract must come from a run with the same orbit exclusion"
             )
-        if int(args.split_seed) != int(split_contract_summary["split_seed"]):
-            raise ValueError(
-                "--split-seed does not match the immutable transform/hand split contract"
+        datum_indices = np.asarray(datum_indices, dtype=int)
+        datum_indices = datum_indices[~excluded_rows[datum_indices]]
+        if not row_contract_summary and int(args.max_rows) > 0:
+            # Rank the --max-rows subset among non-excluded rows only, so excluded orbits never
+            # occupy or displace a selection slot; the geometry filter above is unchanged.
+            eligible = np.zeros(len(target), dtype=bool)
+            eligible[datum_indices] = True
+            indices = np.asarray(
+                row_selection(
+                    data,
+                    np.where(eligible, target, np.nan),
+                    args.positive_only,
+                    args.min_d_spacing,
+                    args.min_peak,
+                    args.max_rows,
+                    100.0,
+                ),
+                dtype=int,
             )
-    else:
-        masks = split_masks(
-            data.hkl,
-            args.free_fraction,
-            args.split_seed,
-            symmetry_ops=model.get("symmetry_ops"),
-        )
+        else:
+            indices = indices[~excluded_rows[indices]]
+        split_scheme_summary["excluded_selected_rows_dropped"] = True
     selected_mask = np.zeros(len(target), dtype=bool)
     selected_mask[indices] = True
     masks = {k: v & selected_mask for k, v in masks.items()}
@@ -1051,6 +1444,13 @@ def main():
             f"resolved grid={frame_offset_values}",
             flush=True,
         )
+    scale_model = scale_model_from_args(args)
+    scale_orbit_keys = None
+    if scale_model.kind == "pspline":
+        # Inner-CV folds of the P-spline scale fit use model-Laue orbits with Friedel pairs.
+        scale_orbit_keys = np.full(len(target), "", dtype=object)
+        scale_orbit_keys[indices] = heldout.orbit_keys(data.hkl[indices], model.get("symmetry_ops"), include_friedel=True)
+    trial_evaluator = functools.partial(evaluate_trial, scale_model=scale_model, orbit_keys=scale_orbit_keys)
     populate_nuisance_trials(
         args=args,
         thickness_models=thickness_models,
@@ -1073,7 +1473,7 @@ def main():
         detector_scale_bins_values=detector_scale_bins_values,
         wght_a_values=wght_a_values,
         wght_b_values=wght_b_values,
-        evaluate_trial=evaluate_trial,
+        evaluate_trial=trial_evaluator,
         target=target,
         base_sig=base_sig,
         masks=masks,
@@ -1103,6 +1503,11 @@ def main():
 
     all_trials_sorted = rank_trials(all_trials, args.selection_metric)
     ranked_candidate = all_trials_sorted[0]
+    if str(args.trial_rows_npz).strip():
+        trial_rows = write_trial_rows_npz(
+            Path(args.trial_rows_npz), data, target, base_sig, masks, all_trials_sorted, model.get("symmetry_ops")
+        )
+        print(f"trial rows: {trial_rows['trials']} trials x {trial_rows['rows']} rows -> {trial_rows['path']}", flush=True)
     promotion_decision = {
         "family": "discrete_thickness_polish",
         "status": "not_requested",
@@ -1123,6 +1528,7 @@ def main():
             min_gain=args.promotion_min_gain,
             max_free_wr2_loss=args.promotion_max_free_wr2_loss,
             max_all_r1_loss=args.promotion_max_all_r1_loss,
+            score_rows=args.promotion_score_rows,
         )
         (out / "discrete_thickness_promotion.json").write_text(
             json.dumps(promotion_decision, indent=2, allow_nan=True) + "\n"
@@ -1187,7 +1593,7 @@ def main():
     if args.paired_inverse_hand:
         inverse_pred = paired_inverse_prediction(best)
         paired_indices = inverse_pred["indices"]
-        inverse_eval = evaluate_trial(
+        inverse_eval = trial_evaluator(
             data,
             target,
             base_sig,
@@ -1202,11 +1608,19 @@ def main():
         )
         inverse_row_table = out / "native_inverse_hand_dyn_calc.csv"
         write_row_table(inverse_row_table, data, target, inverse_eval, masks, target_mode=args.target_mode)
+        pair_absorption_mode = str(best["nuisance"].get("absorption_mode", "none") or "none").lower()
+        pair_absorption_mu = float(best["nuisance"].get("absorption_mu", 0.0) or 0.0)
         paired_inverse_hand = {
             "status": "complete",
             "method": "nakane_negative_thickness_elastic_pair_v1",
             "physics_contract": {
-                "absorption": "disabled",
+                "absorption": (
+                    "disabled"
+                    if pair_absorption_mode == "none" or pair_absorption_mu == 0.0
+                    else "uniform_scalar_exp(-4*pi*mu*t)_both_hands"
+                ),
+                "absorption_mode": pair_absorption_mode,
+                "absorption_mu": pair_absorption_mu,
                 "incident_wave": "real direct-beam basis vector",
                 "same_rows_basis_geometry_nuisance": True,
                 "same_positive_physical_thickness_distribution": True,
@@ -1264,6 +1678,14 @@ def main():
                             post_bloch_sigma_max_scale=args.post_bloch_sigma_max_scale,
                             endpoint_wght_mode=args.endpoint_wght_mode,
                             target_mode=args.target_mode,
+                            q_policy=args.endpoint_q_policy,
+                            include_free_rows=args.endpoint_include_free_rows,
+                            convergence_shift_esd=args.shelxl_convergence_shift_esd,
+                            npd_recovery=args.shelxl_npd_recovery,
+                            keep_damp=args.keep_damp,
+                            wght_converge_max_calls=args.wght_converge_max_calls,
+                            native_outputs=native_endpoint_outputs(args),
+                            error_model_refits=args.error_model_refits,
                         )
                     )
     fail_if_shelxl_became_unavailable(
@@ -1486,6 +1908,7 @@ def main():
             "selected_native_b": best["native_weight"]["b"],
             "endpoint_wght_mode": args.endpoint_wght_mode,
         },
+        "prediction_precision": prediction_precision,
         "bloch_kernel_contract": frozen_kernel_contract(
             Config(
                 n_basis=args.n_basis,
@@ -1529,6 +1952,11 @@ def main():
                 thickness_grad_frac=best["nuisance"]["thickness_grad_frac"],
                 thickness_sigma_frac=best["nuisance"]["thickness_sigma_frac"],
                 thickness_points=args.thickness_points,
+                thickness_gamma_shape=best["nuisance"].get("thickness_gamma_shape", 1.0),
+                thickness_evaluator=best["nuisance"].get("thickness_evaluator", "quadrature"),
+                thickness_min_A=best["nuisance"].get("thickness_min_A", 100.0),
+                thickness_max_A=best["nuisance"].get("thickness_max_A", 10000.0),
+                thickness_table_dt_A=best["nuisance"].get("thickness_table_dt_A", 2.0),
                 group_width_deg=best["nuisance"]["group_width_deg"],
                 free_fraction=args.free_fraction,
                 split_seed=args.split_seed,
@@ -1555,6 +1983,7 @@ def main():
                 matrix_convention=args.matrix_convention,
                 row_plan_cache=str(row_plan_cache_decision["resolved"]),
                 paired_inverse_hand=args.paired_inverse_hand,
+                double_precision=bool(getattr(args, "double_precision", False)),
             )
         ),
         "profile_root_solver": profile_root_solver_audit,
@@ -1565,6 +1994,7 @@ def main():
             "geometry_filter": geometry_summary,
             "contract": row_contract_summary,
             "transform_hand_split_contract": split_contract_summary,
+            "split_scheme": split_scheme_summary,
         },
         "best_native": {k: v for k, v in best.items() if k != "arrays"},
         "selection_ranked_best_native": {k: v for k, v in ranked_candidate.items() if k != "arrays"},
@@ -1632,8 +2062,11 @@ def main():
     for ep in endpoint_results:
         sh = ep["shelxl"]
         sig_meta = ep.get("post_bloch_sigma") or {}
-        sig_scale = sig_meta.get("sigma_scale", 1.0 if sig_meta.get("status") == "not_requested" else float("nan"))
-        heldout_z = sig_meta.get("heldout_rms_z_after", sig_meta.get("all_rms_z_after", float("nan")))
+        # error_model: k of sigma'^2 = k^2 (sigma^2 + (u P)^2) and the free-row RMS(z)
+        sig_scale = sig_meta.get("sigma_scale", sig_meta.get("k", 1.0 if sig_meta.get("status") == "not_requested" else float("nan")))
+        heldout_z = sig_meta.get(
+            "heldout_rms_z_after", sig_meta.get("free_rms_z_after", sig_meta.get("all_rms_z_after", float("nan")))
+        )
         lines.append(
             f"| {ep['lambda_q']:.2f} | {ep.get('endpoint_b', 0.0):.2f} | {'on' if ep.get('keep_exti') else 'off'} | "
             f"{sig_scale:.3f} | {heldout_z:.3f} | "
@@ -1643,6 +2076,8 @@ def main():
             f"{ep['q_p05']:.3f}/{ep['q_median']:.3f}/{ep['q_p95']:.3f} |"
         )
     def _percent_or_nan(value):
+        """Return a fraction as a percentage, or NaN when it is missing or not numeric."""
+
         try:
             if value is None:
                 return float("nan")

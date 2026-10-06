@@ -10,10 +10,27 @@ import math
 import numpy as np
 
 
+def ranked_candidates(scores, candidates, count):
+    """Rank by descending score, break ties by pool index, then apply the cap.
+
+    Selecting a partial partition first can discard earlier equally scored
+    beams before the tie breaker sees them.
+    """
+    order = np.lexsort((candidates, -scores[candidates]))
+    return candidates[order[:count]]
+
+
 class BasisMixin:
     """One cohesive part of XDSBlochPort; initialized by the public facade."""
 
     def select_basis(self, target_hkl, omega_bragg, row_idx=None):
+        """Return one row's beam basis as an (n, 3) int array: direct beam, target, then the strongest top-up beams.
+
+        Top-up beams come from the pool with |S_g| <= max_support_sg at ``omega_bragg``. They are ranked by
+        |U_g|^2 / (|S_g| + 1e-5), ties by pool order, until n_basis beams are chosen. With ``row_idx`` the pool U_g
+        carry that row's dose attenuation.
+        """
+
         sg_pool = self.sg_for_hkls(self.pool_hkl, omega_bragg)
         if row_idx is None:
             pool_ug = self.pool_ug
@@ -28,12 +45,9 @@ class BasisMixin:
         if needed == 0:
             return np.asarray(basis, dtype=int)
         take = min(len(candidates), needed + 1)
-        if take < len(candidates):
-            local = np.argpartition(score[candidates], -take)[-take:]
-            candidates = candidates[local]
-        candidates = candidates[np.lexsort((candidates, -score[candidates]))]
-        for idx in candidates:
-            h = tuple(int(v) for v in self.pool_hkl[idx])
+        candidates = ranked_candidates(score, candidates, take)
+        for pool_index in candidates:
+            h = tuple(int(v) for v in self.pool_hkl[pool_index])
             if h in seen:
                 continue
             basis.append(h)
@@ -111,12 +125,9 @@ class BasisMixin:
         if needed == 0:
             return np.asarray(basis, dtype=int), meta
         take = min(len(candidates), needed + 1)
-        if take < len(candidates):
-            local = np.argpartition(best_score[candidates], -take)[-take:]
-            candidates = candidates[local]
-        candidates = candidates[np.lexsort((candidates, -best_score[candidates]))]
-        for idx in candidates:
-            h = tuple(int(v) for v in self.pool_hkl[idx])
+        candidates = ranked_candidates(best_score, candidates, take)
+        for pool_index in candidates:
+            h = tuple(int(v) for v in self.pool_hkl[pool_index])
             if h in seen:
                 continue
             basis.append(h)
@@ -136,7 +147,7 @@ class BasisMixin:
     ):
         """Select one frozen basis over the declared rocking-profile support.
 
-        ``center`` preserves the historical row-center selection. The
+        ``center`` selects the basis at the row centre. The
         high-fidelity ``common_profile`` mode evaluates a fixed support grid
         spanning the complete solved rocking interval and retains every beam
         that enters the Sg support at any support orientation. The support
@@ -218,10 +229,7 @@ class BasisMixin:
         needed = max(0, int(self.cfg.n_basis) - len(basis))
         if needed:
             take = min(len(candidates), needed + 1)
-            if take < len(candidates):
-                local = np.argpartition(best_score[candidates], -take)[-take:]
-                candidates = candidates[local]
-            candidates = candidates[np.lexsort((candidates, -best_score[candidates]))]
+            candidates = ranked_candidates(best_score, candidates, take)
             for index in candidates:
                 candidate = tuple(int(value) for value in self.pool_hkl[index])
                 if candidate in seen:

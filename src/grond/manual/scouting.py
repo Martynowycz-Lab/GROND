@@ -9,6 +9,7 @@ from collections.abc import Mapping
 from dataclasses import asdict
 from pathlib import Path
 
+from grond.cli_support.values import parse_numeric_grid
 from grond.hkl_transform import parse_hkl_transform_info
 from grond.io.config import load_prep
 from grond.manual.execution import _child_base, _run_stage_command, _tool_args, _verbose_child_output
@@ -26,6 +27,11 @@ from grond.manual.state import (
 
 
 def manual_scout(args) -> int:
+    """Run the ``scout`` stage: choose each crystal's proper HKL transform, or record the prep file's.
+
+    ``--skip`` keeps the prep-file transforms as a user assertion after a preflight; improper ones are refused.
+    """
+
     workflow_path, workflow = _load_workflow(args)
     _require_stage(workflow, "setup")
     root = Path(workflow["root"])
@@ -116,6 +122,8 @@ def manual_scout(args) -> int:
 
 
 def _summary_bindings(values: list[str] | None) -> dict[str, str]:
+    """Parse ``--summary DATASET=PATH`` options into resolved summary paths by dataset."""
+
     result: dict[str, str] = {}
     for value in values or []:
         if "=" not in value:
@@ -220,6 +228,12 @@ def _validate_reused_summary_binding(dataset, summary_path: Path) -> dict[str, o
 
 
 def manual_thickness(args) -> int:
+    """Run the ``thickness`` stage: select each crystal's thickness nuisance, or bind supplied summaries.
+
+    The thickness command runs at most 10 profile points; a single ``--thickness-grid-nm`` value pins the thickness.
+    ``--skip`` needs one hash-checked ``--summary`` per crystal.
+    """
+
     workflow_path, workflow = _load_workflow(args)
     _require_stage(workflow, "scout")
     root = Path(workflow["root"])
@@ -280,6 +294,9 @@ def manual_thickness(args) -> int:
             "0",
             *_tool_args(args),
         ]
+        if len(parse_numeric_grid(args.thickness_grid_nm)) == 1:
+            # One value pins the thickness; the later basis sizes must not reopen a local window around it.
+            command_line.append("--no-local-confirmation")
         command = _run_stage_command(command_line, verbose=_verbose_child_output(args))
         source_handoff = _read_json(out / "thickness_handoff.json")
         selected = {name: str(row["selected_summary"]) for name, row in source_handoff.get("datasets", {}).items()}

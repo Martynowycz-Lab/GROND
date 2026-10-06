@@ -2,21 +2,20 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 TARGET_MODES = ("iobs", "iobs_over_rlp", "iobs_times_peak", "recorded_proxy")
 
 
-TARGET_MODE_LABELS = {
-    "iobs": "IOBS",
-    "iobs_over_rlp": "IOBS/RLP",
-    "iobs_times_peak": "IOBS*PEAK/100",
-    "recorded_proxy": "IOBS*PEAK/(100*RLP)",
-}
-
-
 @dataclass(frozen=True)
 class Nuisance:
+    """Nuisance values of one native trial; each trial record stores them as its nuisance dict.
+
+    Thicknesses are in A and angles in degrees. sigma_a, sigma_b_corr and sigma_c_peak are the error-model terms of
+    sigma_eff. A NaN native_wght_a or native_wght_b means the stage's SHELXL weights are used.
+    """
+
     thickness_A: float
     thickness_grad_frac: float
     frame_offset: float
@@ -58,6 +57,62 @@ class Nuisance:
     detector_scale_ridge: float = 0.05
     detector_scale_smoothness: float = 0.10
     detector_scale_min_rows: int = 20
+    # Support thickness distributions (grond.bloch.thickness); "quadrature" is the legacy node quadrature.
+    thickness_gamma_shape: float = 1.0
+    thickness_evaluator: str = "quadrature"
+    thickness_min_A: float = 100.0
+    thickness_max_A: float = 10000.0
+    thickness_table_dt_A: float = 2.0
+
+
+THICKNESS_MODELS = ("single", "uniform_gradient", "gaussian", "gaussian_gradient", "gamma")
+
+
+def thickness_shape_grids(args, thickness_model: str) -> tuple[list[float], list[float], list[float]]:
+    """(grad, gaussian sigma fraction, gamma shape) grids of one thickness model; unused axes are one value."""
+
+    if thickness_model not in THICKNESS_MODELS:
+        raise ValueError(f"unknown thickness_model {thickness_model!r}")
+    grad_values = parse_float_grid(args.thickness_grad_grid) if thickness_model in {"uniform_gradient", "gaussian_gradient"} else [0.0]
+    sigma_values = parse_float_grid(args.thickness_sigma_frac_grid) if thickness_model in {"gaussian", "gaussian_gradient"} else [0.0]
+    shape_values = (
+        parse_float_grid(getattr(args, "thickness_gamma_shape_grid", "1.0")) if thickness_model == "gamma" else [1.0]
+    )
+    return grad_values, sigma_values, shape_values
+
+
+def thickness_support_fields(args) -> dict[str, float | str]:
+    """Nuisance/Config fields of the thickness evaluator and its physical support (nm options in A)."""
+
+    return {
+        "thickness_evaluator": str(getattr(args, "thickness_evaluator", "quadrature")),
+        "thickness_min_A": 10.0 * float(getattr(args, "thickness_min_nm", 10.0)),
+        "thickness_max_A": 10.0 * float(getattr(args, "thickness_max_nm", 1000.0)),
+        "thickness_table_dt_A": float(getattr(args, "thickness_table_dt", 2.0)),
+    }
+
+
+def thickness_distribution_options(nuisance: dict) -> list[str]:
+    """Native command options that pin a support thickness distribution from a nuisance record.
+
+    Empty for the legacy quadrature, so commands of legacy stages stay byte-identical.
+    """
+
+    evaluator = str(nuisance.get("thickness_evaluator", "quadrature") or "quadrature")
+    if evaluator == "quadrature" and str(nuisance.get("thickness_model", "")) != "gamma":
+        return []
+    return [
+        "--thickness-gamma-shape-grid",
+        f"{float(nuisance.get('thickness_gamma_shape', 1.0)):.17g}",
+        "--thickness-evaluator",
+        evaluator,
+        "--thickness-min-nm",
+        f"{float(nuisance.get('thickness_min_A', 100.0)) / 10.0:.17g}",
+        "--thickness-max-nm",
+        f"{float(nuisance.get('thickness_max_A', 10000.0)) / 10.0:.17g}",
+        "--thickness-table-dt",
+        f"{float(nuisance.get('thickness_table_dt_A', 2.0)):.17g}",
+    ]
 
 
 def kernel_variance_terms(nuisance: dict) -> dict[str, float]:
@@ -71,14 +126,77 @@ def kernel_variance_terms(nuisance: dict) -> dict[str, float]:
 
 
 def parse_float_grid(text: str) -> list[float]:
+    """Parse a comma- or space-separated list of floats."""
+
     return [float(x) for x in str(text).replace(",", " ").split() if x.strip()]
 
 
 def parse_int_grid(text: str) -> list[int]:
+    """Parse a comma- or space-separated list of numbers, rounded to integers."""
+
     return [int(round(float(x))) for x in str(text).replace(",", " ").split() if x.strip()]
 
 
+SCALE_MODELS = ("per-frame", "pspline")
+
+
+@dataclass(frozen=True)
+class ScaleModel:
+    """Frame-scale family fitted inside every native trial.
+
+    Like ``scale_fit_split`` this is a stage evaluation contract, not a Nuisance
+    field. ``per-frame`` is the free per-group fit. ``pspline`` is the smooth
+    P-spline in scan angle (tests/reference/reference_lib.py fit_scales_cv) whose
+    (n_basis, lambda) are chosen by inner 3-fold orbit CV over the scale-fit rows.
+    """
+
+    kind: str = "per-frame"
+    n_basis_grid: tuple[int, ...] = (32,)
+    lambda_grid: tuple[float, ...] = (0.3, 1.0, 3.0, 10.0, 30.0, 100.0)
+    objective: str = "row_mr"
+    clamp: bool = True
+
+    def __post_init__(self) -> None:
+        """Refuse an unknown kind; for pspline also empty grids, n_basis below 4 and non-positive lambda."""
+
+        if self.kind not in SCALE_MODELS:
+            raise ValueError(f"unknown scale model {self.kind!r}; choices are {', '.join(SCALE_MODELS)}")
+        if self.kind == "pspline":
+            if not self.n_basis_grid or not self.lambda_grid:
+                raise ValueError("pspline scale model needs non-empty n_basis and lambda grids")
+            if any(int(n) < 4 for n in self.n_basis_grid):
+                raise ValueError("pspline n_basis values must be at least 4 (cubic B-splines)")
+            if any(not math.isfinite(float(v)) or float(v) <= 0.0 for v in self.lambda_grid):
+                raise ValueError("pspline lambda values must be finite and positive")
+
+    def to_dict(self) -> dict[str, object]:
+        """Return the scale-model contract as a JSON-safe dict."""
+
+        return {
+            "kind": self.kind,
+            "n_basis_grid": [int(n) for n in self.n_basis_grid],
+            "lambda_grid": [float(v) for v in self.lambda_grid],
+            "objective": self.objective,
+            "clamp": bool(self.clamp),
+        }
+
+
+def scale_model_from_args(args) -> ScaleModel:
+    """Scale-model contract from parsed options; absent options mean the legacy per-frame fit."""
+
+    kind = str(getattr(args, "scale_model", "per-frame") or "per-frame")
+    if kind == "per-frame":
+        return ScaleModel()
+    return ScaleModel(
+        kind=kind,
+        n_basis_grid=tuple(parse_int_grid(getattr(args, "scale_spline_n_basis_grid", "32"))),
+        lambda_grid=tuple(parse_float_grid(getattr(args, "scale_spline_lambda_grid", "0.3,1,3,10,30,100"))),
+    )
+
+
 def absorption_parameter_grid(args, mode: str) -> list[dict[str, float | str]]:
+    """Return every absorption parameter set of one mode as Nuisance fields; parameters the mode does not use are 0."""
+
     valid_modes = {"none", "mean", "beam_dependent", "offdiag_fraction", "offdiag_tds", "midgley_like"}
     if mode not in valid_modes:
         raise ValueError(f"unknown absorption mode {mode!r}")
@@ -125,19 +243,8 @@ def estimated_row_plan_reuse_per_geometry_key(
     thickness_candidates = 0
     for _thickness in parse_float_grid(args.thickness_grid):
         for model in thickness_models:
-            if model not in {"single", "uniform_gradient", "gaussian", "gaussian_gradient"}:
-                raise ValueError(f"unknown thickness_model {model!r}")
-            grad_values = (
-                parse_float_grid(args.thickness_grad_grid)
-                if model in {"uniform_gradient", "gaussian_gradient"}
-                else [0.0]
-            )
-            sigma_values = (
-                parse_float_grid(args.thickness_sigma_frac_grid)
-                if model in {"gaussian", "gaussian_gradient"}
-                else [0.0]
-            )
-            thickness_candidates += len(grad_values) * len(sigma_values)
+            grad_values, sigma_values, shape_values = thickness_shape_grids(args, model)
+            thickness_candidates += len(grad_values) * len(sigma_values) * len(shape_values)
     absorption_candidates = sum(
         len(absorption_parameter_grid(args, mode)) for mode in absorption_modes
     )

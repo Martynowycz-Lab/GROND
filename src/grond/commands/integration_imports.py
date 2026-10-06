@@ -83,9 +83,9 @@ def cmd_import_pets(args: argparse.Namespace) -> int:
         "scan_points": str(bridge.scan_points),
         "summary": str(bridge.summary),
         "scope": (
-            "ordinary PETS row-space plus validated q/LS1 AUTO endpoint"
+            "ordinary PETS row-space plus a validated SHELXL endpoint for AUTO"
             if static_endpoint_ready
-            else "native PETS row-space calculation only; no validated static LS1 endpoint"
+            else "native PETS row-space calculation only; no validated static SHELXL endpoint"
         ),
     }
     if bridge.prep:

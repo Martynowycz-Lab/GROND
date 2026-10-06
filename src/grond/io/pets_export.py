@@ -35,29 +35,9 @@ class PetsExportResult:
     readme: Path
 
 
-def xds_recorded_observation(
-    iobs: float,
-    sigma: float,
-    peak_percent: float,
-    rlp: float,
-) -> tuple[float, float]:
-    """Undo XDS INTEGRATE's RLP/partiality correction for one observation.
-
-    XDS documents ``IOBS = I_recorded * RLP / (PEAK/100)``.  This inverse is
-    therefore exact for a summation-only INTEGRATE.HKL row.  The uncertainty is
-    transformed by the same positive linear factor.
-    """
-
-    values = (iobs, sigma, peak_percent, rlp)
-    if not all(math.isfinite(float(value)) for value in values):
-        raise ValueError("XDS observation terms must all be finite")
-    if float(rlp) <= 0.0 or float(peak_percent) <= 0.0 or float(sigma) <= 0.0:
-        raise ValueError("XDS RLP, PEAK, and SIGMA must be positive")
-    factor = (float(peak_percent) / 100.0) / float(rlp)
-    return float(iobs) * factor, float(sigma) * factor
-
-
 def _sha256(path: Path) -> str:
+    """Return the hex SHA-256 digest of a file."""
+
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
@@ -66,6 +46,8 @@ def _sha256(path: Path) -> str:
 
 
 def _required_float(block: gemmi.cif.Block, tag: str) -> float:
+    """Return a required finite number from a CIF block; raise ValueError when missing or not finite."""
+
     value = block.find_value(tag)
     if value is None or not str(value).strip() or str(value).strip() in {"?", "."}:
         raise ValueError(f"PETS export is missing required value {tag}")
@@ -205,6 +187,10 @@ def _validate_and_repair_pets(path: Path) -> dict[str, Any]:
 
 
 def _resolve_dials_python(value: str) -> str:
+    """Return the Python used to run the DIALS helper: the given path or command, else
+    ``dials.python``, else this Python.
+    """
+
     if value:
         candidate = Path(value).expanduser()
         if candidate.is_file():
@@ -218,6 +204,8 @@ def _resolve_dials_python(value: str) -> str:
 
 
 def _source_hashes(config: dict[str, Any]) -> dict[str, str]:
+    """Return {resolved path: SHA-256} for the DIALS or XDS input files and the optional row contract."""
+
     paths: list[Path] = []
     if config["source_kind"] == "DIALS":
         paths.extend((Path(config["refl"]), Path(config["expt"])))
@@ -278,6 +266,8 @@ def _row_contract_selection(path: str | Path, selection: str) -> dict[str, Any]:
 
 
 def _write_readme(path: Path, manifest_name: str, files: list[Path], source_kind: str) -> None:
+    """Write the README that lists the exported ``cif_pets`` files and points to the manifest."""
+
     names = "\n".join(f"- `{file.name}`" for file in files)
     xds_note = ""
     if source_kind == "XDS":

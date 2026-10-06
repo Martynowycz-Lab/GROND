@@ -1,14 +1,14 @@
-# Portable Inputs and Refinement Endpoints
+# Portable inputs and refinement endpoints
 
-GROND starts ordinary integration workflows from XDS `INTEGRATE.HKL` plus `XPARM.XDS`/`GXPARM.XDS`, and DIALS `integrated.refl` plus `integrated.expt`. A separate PETS2 importer preserves PETS-owned observations under the stricter [interoperability contract](INTEROPERABILITY.md); it is optional. Other integration programs can still feed GROND if they can write the same information into the portable `grond-row-v1` row contract. The point of this contract is not to make every external file format part of GROND. The point is to give external wrappers, custom scripts, and future readers one small target format that says exactly what GROND needs.
+GROND reads XDS (`INTEGRATE.HKL`) and DIALS (`integrated.refl` with `integrated.expt`) directly, and PETS2 data through `grond import-pets` ([INTEROPERABILITY.md](INTEROPERABILITY.md)). Other integration programs can feed GROND by writing the portable `grond-row-v1` format: a table of observations and a JSON file with the geometry. It states exactly what GROND needs, so a wrapper script can produce it.
 
-The JSON metadata schema is in `schemas/grond-row-v1.schema.json` in the source tree. Wheel installs also include the same file under `grond/schemas/grond-row-v1.schema.json`.
+The JSON schema is `schemas/grond-row-v1.schema.json` in the source tree; the wheel installs it as `grond/schemas/grond-row-v1.schema.json`.
 
-## What A GROND Row Means
+## What a row is
 
-A row is one signed observation of one reflection in one exposure or rotation-integration support window. It is not a merged unique reflection. GROND needs rows because the Bloch correction depends on the signed index, the crystal orientation at the time that spot was integrated, the excitation error near the rocking condition, and row-level quality information. Once all observations of the same `hkl` are merged, much of that geometry has been thrown away.
+A row is one signed observation of one reflection in one exposure or integration window, not a merged reflection. The Bloch correction depends on the signed index, the crystal orientation when the spot was recorded and its excitation error, and merging throws that away.
 
-The minimal row table can be CSV, TSV, or JSON Lines. A CSV example looks like this:
+The table can be CSV, TSV or JSON Lines:
 
 ```csv
 row_id,dataset_id,h,k,l,Iobs,sigma_Iobs,frame,x_px,y_px,partiality,lp,profile_correlation,bbox_z0,bbox_z1
@@ -16,13 +16,15 @@ row_id,dataset_id,h,k,l,Iobs,sigma_Iobs,frame,x_px,y_px,partiality,lp,profile_co
 1,crystal_a,0,1,3,422.8,27.6,18.0,2063.9,1988.2,0.95,1.0,88.7,17.4,18.6
 ```
 
-The required row fields are `h`, `k`, `l`, `Iobs`, and `sigma_Iobs`. The Miller indices must be signed integers and must be in the same basis as the solved structure after any known reindexing transform has been applied. `Iobs` should be the background-subtracted summation-style integrated intensity on a consistent scale. `sigma_Iobs` is the standard uncertainty of that intensity in the same scale; GROND does not silently flip negative sigma values to positive values. The row must also provide either `frame` or `alpha_deg`. `frame` is the calculated or centroid frame coordinate in the scan convention given by the metadata sidecar. `alpha_deg` can be used instead when the integration program naturally reports the goniometer angle directly.
+Required fields are `h`, `k`, `l`, `Iobs` and `sigma_Iobs`, and each row needs either `frame` or `alpha_deg`.
 
-The recommended optional fields are `x_px`, `y_px`, `frame_obs`, `partiality`, `lp`, `profile_correlation`, `rlp`, `peak`, `corr`, `bbox_z0`, `bbox_z1`, and `panel`. GROND can run without most of them, but they make geometry audits, partiality gates, detector-scale diagnostics, and rocking-width estimates much better. If `partiality` is present, GROND writes `100 * partiality` into the compatibility `PEAK` field. If `bbox_z0` and `bbox_z1` are present, GROND can use their width as an auditable rocking-window estimate.
+- `h`, `k`, `l` are signed integers in the setting of the solved model, after any known reindexing.
+- `Iobs` is the background-subtracted summation intensity on one consistent scale, and `sigma_Iobs` its standard uncertainty on the same scale. GROND does not turn negative sigmas positive; the converted file requires positive sigmas on every row.
+- `frame` is the calculated or centroid frame coordinate in the scan convention of the geometry file; `alpha_deg` is the goniometer angle, for programs that report it directly.
 
-## Geometry Sidecar
+Optional fields are `row_id`, `dataset_id`, `x_px`, `y_px`, `frame_obs`, `partiality`, `lp`, `profile_correlation`, `rlp`, `peak`, `corr`, `bbox_z0`, `bbox_z1`, `panel` and `source`. They help the geometry checks and the partiality limit. `partiality` is written as `100 * partiality` into the `PEAK` column, and `bbox_z0`/`bbox_z1` are kept as the observation's frame range.
 
-The row table is paired with a JSON metadata file. This file tells GROND how to convert a signed row into a reciprocal vector and excitation error:
+## Geometry file
 
 ```json
 {
@@ -45,9 +47,9 @@ The row table is paired with a JSON metadata file. This file tells GROND how to 
 }
 ```
 
-`reciprocal_A_matrix` is the most important field. It is the 3 by 3 matrix that maps a signed column vector `(h,k,l)` into a reciprocal-space vector in the laboratory coordinate system before the goniometer rotation for that frame is applied. If your program instead gives real-space unit-cell axes in the same laboratory basis, write them as `real_space_axes_A` with the real axes as columns; GROND will invert them. For scan-varying orientation models, add `A_scan_points` as a list of 3 by 3 reciprocal matrices. GROND linearly interpolates those matrices by frame before applying the goniometer rotation.
+`reciprocal_A_matrix` maps a signed column vector `(h,k,l)` to a reciprocal-space vector in the laboratory frame before the goniometer rotation of that frame. If your program gives real-space axes in the same frame, write them as `real_space_axes_A` (axes as columns) and GROND inverts them. For a scan-varying orientation, add `A_scan_points`, a list of 3×3 reciprocal matrices; GROND interpolates them linearly by frame.
 
-With this sidecar, GROND computes
+GROND then computes
 
 ```text
 alpha(frame) = starting_angle_deg + (frame - starting_frame) * oscillation_range_deg
@@ -55,61 +57,39 @@ g_h(alpha)  = R(rotation_axis, alpha) A(frame) h
 Sg(alpha)   = (k^2 - |s0 + g_h(alpha)|^2) / (2k)
 ```
 
-where `s0` is the incident wave vector and `k = 1 / wavelength_A`. This is why a row-only merged HKL file is insufficient for Bloch regularization: it does not define `alpha`, `A(frame)`, or the signed row geometry.
+where `s0` is the incident wave vector and `k = 1 / wavelength_A`. A merged HKL file cannot give `alpha`, `A(frame)` or the signed observations, which is why it is not enough for the Bloch calculation.
 
-## Commands For Wrapper Authors
-
-Generate a template pair:
+## Commands
 
 ```bash
-GROND row-template \
-  --rows-out my_rows.csv \
-  --metadata-out my_rows_metadata.json
+grond row-template --rows-out my_rows.csv --metadata-out my_rows_metadata.json
+grond row-validate --rows my_rows.csv --metadata my_rows_metadata.json
+grond row-validate --rows my_rows.csv --metadata my_rows_metadata.json --write-xds-dir grond_portable_bridge
 ```
 
-Validate a table:
+The first writes a template pair, the second checks a table, and the third also writes a directory GROND can read. It contains an `INTEGRATE.HKL` with the header `FORMAT=GROND_PORTABLE_XDS_COMPAT` and `GROND_ROW_CONTRACT_MANIFEST.json`. The file is in GROND's own format; it does not claim the data came from XDS. GROND writes it only when every row has a finite intensity and a positive sigma. Use the directory like an XDS directory:
 
 ```bash
-GROND row-validate \
-  --rows my_rows.csv \
-  --metadata my_rows_metadata.json
-```
-
-Write the current engine compatibility directory:
-
-```bash
-GROND row-validate \
-  --rows my_rows.csv \
-  --metadata my_rows_metadata.json \
-  --write-xds-dir grond_portable_bridge
-```
-
-The compatibility directory contains an `INTEGRATE.HKL` whose header declares `FORMAT=GROND_PORTABLE_XDS_COMPAT`, plus `GROND_ROW_CONTRACT_MANIFEST.json`. This file is XDS-like only as an internal compatibility layer. It is not claiming that the data were processed by XDS. GROND will not write this bridge unless all rows have finite intensities and positive sigmas. Once the bridge exists, it can be used as the row-preserving dataset path in the same way as an XDS directory:
-
-```bash
-GROND auto \
+grond auto \
   --xds-dir grond_portable_bridge \
   --structure solved_model.res \
   --baseline-hkl solved_model.hkl \
+  --config grond.config.json \
   --out-dir grond_out
 ```
 
-## Endpoint Contract
+## Refinement endpoints
 
-GROND separates Bloch regularization from the model-update program. The default implemented endpoint is SHELXL because it accepts the corrected HKLF-style reflection files GROND already writes, can perform a single least-squares cycle cleanly, and returns an updated `RES` model that GROND can simulate again. If no external refiner is available, `bloch_only` remains useful: GROND still runs the Bloch simulation, nuisance and thickness decisions, row/MR residuals, corrected-reflection diagnostics, and hand checks from the supplied model.
+GROND keeps the Bloch calculation separate from the program that refines the model. `grond auto` uses SHELXL: it reads the corrected `HKLF 4` files GROND writes and returns a `.res` that GROND can calculate again. Each round, SHELXL is run to convergence (`L.S. 10` per call, converged weights, at most 20 calls); see [USAGE.md](USAGE.md).
 
-For small-molecule SHELXL endpoints, the current public contract is corrected `HKLF 4` intensities. Source models that were solved or refined as `HKLF 3` amplitudes can be used as starting coordinate models, but GROND-generated endpoint files are forced to `HKLF 4`. `ACTA` is stripped from generated endpoint inputs. `HKLF 5`, `TWIN`, `BASF`, `SWAT`, and SQUEEZE/solvent-mask corrected SHELX models are not supported yet; GROND rejects them early instead of producing misleading corrected endpoints.
+For SHELXL, GROND writes corrected `HKLF 4` intensities. A model refined against `HKLF 3` can be the start model, but GROND's files are always `HKLF 4`. `ACTA` is removed from the files GROND writes. Models with `HKLF 5`, `TWIN`, `BASF`, `SWAT` or a SQUEEZE/solvent mask are not supported and are rejected before the run starts.
 
-The general endpoint contract is deliberately simple. A refiner receives the current model, a corrected reflection target, an output directory, and a small cycle count. It must write a refined model that GROND can read again as `RES`, `CIF`, `PDB`, or mmCIF. For a one-cycle feedback loop, the endpoint should update coordinates and displacement parameters against the current corrected target without adding an empirical extinction correction unless the user explicitly requested a diagnostic comparison.
-
-GROND exposes the endpoint registry:
+`grond endpoints` lists the registry:
 
 ```bash
-GROND endpoints --config grond.config.json
-GROND endpoints --config grond.config.json --json
+grond endpoints --config grond.config.json
+grond endpoints --config grond.config.json --json
 ```
-
-The registry distinguishes production support, no-refiner fallback support, diagnostic native update support, and the generic adapter:
 
 ```text
 shelxl          implemented_default
@@ -121,9 +101,9 @@ servalcat       macromolecular_adapter
 custom          adapter_template
 ```
 
-`shelxl` is wired into the full automatic feedback loop. `bloch_only` is the no-refiner fallback. `native_gradient` is the slow row-space diagnostic. `phenix_refine`, `refmac5`, and `servalcat` are macromolecular command-template adapters for corrected MTZ files with fixed FreeR flags. `custom` is the escape hatch for anything else: if a lab can turn GROND's corrected reflections and model into a one-cycle external update and back into a readable model, the command template can describe it without changing GROND's input readers.
+`shelxl` is the refinement program of `grond auto`. `bloch_only` describes a calculation without model refinement. `native_gradient` is a slow finite-difference update in observation space, for diagnostics. `phenix_refine`, `refmac5` and `servalcat` are command templates for corrected MTZ files with fixed FreeR flags, run by `grond protein-ls1` ([MACROMOLECULES.md](MACROMOLECULES.md)). `custom` is a command template for any other program.
 
-For a custom endpoint, add a block to `grond.config.json`:
+A custom endpoint receives the current model, a corrected reflection file, an output directory and a cycle count, and must write a refined model that GROND can read (`RES`, `CIF`, `PDB` or mmCIF). Add it to `grond.config.json`:
 
 ```json
 {
@@ -139,6 +119,6 @@ For a custom endpoint, add a block to `grond.config.json`:
 }
 ```
 
-The placeholders are `{model}`, `{reflections}`, `{out_dir}`, and `{cycles}`. GROND can probe and report this adapter now. Fully automatic replacement of the SHELXL feedback loop requires a tested adapter for the chosen file format and will be enabled endpoint by endpoint rather than assumed globally. Programs that prefer MTZ, PDB/mmCIF, or their own restraint dictionaries can still be used through `custom` if the wrapper script performs the conversion and writes a model file GROND can parse again.
+The placeholders are `{model}`, `{reflections}`, `{out_dir}` and `{cycles}`. `grond endpoints` probes and reports the adapter. `grond auto` does not use custom endpoints; it always refines with SHELXL. A wrapper script can convert to MTZ, PDB/mmCIF or its own restraint files as long as it writes a model GROND can read.
 
-For macromolecular work, use the MTZ layer instead of forcing a protein through HKLF4. `GROND make-free-flags` assigns FreeR labels at unique-HKL level, `GROND export-mtz` writes corrected `IMEAN` and `SIGIMEAN` values with `FreeR_flag`, and `GROND protein-ls1` runs one configured endpoint macrocycle. The row-level work/free split remains a GROND row-contract validation split; it is not a substitute for macromolecular Rfree. The full macromolecular wrapper contract is documented in [docs/MACROMOLECULES.md](MACROMOLECULES.md).
+For macromolecules, use the MTZ commands instead of HKLF 4: `grond make-free-flags` assigns FreeR flags to unique reflections, `grond export-mtz` writes corrected `IMEAN`/`SIGIMEAN` with `FreeR_flag`, and `grond protein-ls1` runs one configured refinement macrocycle ([MACROMOLECULES.md](MACROMOLECULES.md)).

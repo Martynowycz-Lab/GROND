@@ -1,69 +1,87 @@
-# Multi-Dataset Runs
+# Several crystals
 
-GROND treats each crystal as its own row-level experiment until the last possible step. That is the safest default because thickness, frame offset, scan scale, detector-position scale, sigma behavior, row completeness, and integration quality are properties of an individual dataset. A weak crystal should not set the thickness or sigma scale for a good crystal, and a good crystal should not erase a weak crystal that contributes otherwise missing reflections.
+GROND treats each crystal as its own experiment until the last step. Thickness, frame offset, frame scales, mosaic spread, damage and uncertainties belong to one crystal. A weak crystal should not set the thickness or the error model of a good one, and a good crystal should not hide a weak crystal that adds reflections nobody else measured.
 
-The command-line entry point is still `GROND auto`. Put one row-preserving dataset per line in a prep file:
+Put one integration per crystal in a preparation file and run `grond auto` on it:
 
 ```bash
-GROND prep \
+grond prep \
   --structure model.res \
   --baseline-hkl model.hkl \
-  --dataset crystal_a=/data/project/crystal_a/no_prf \
-  --dataset crystal_b=/data/project/crystal_b/no_prf \
+  --dataset crystal_a=/data/project/crystal_a/xds_noprf \
+  --dataset crystal_b=/data/project/crystal_b/xds_noprf \
   --out prep_multi.json
 
-GROND auto \
+grond auto \
   --prep prep_multi.json \
+  --config grond.config.json \
   --out-dir grond_multi
 ```
 
-That is the current gold-standard path. For XDS, give the directory that contains `INTEGRATE.HKL` plus `XPARM.XDS` or `GXPARM.XDS`; do not copy `INTEGRATE.HKL` away from its geometry sidecars. A direct `INTEGRATE.HKL` path is accepted only as shorthand when the XDS metadata files remain in the same parent directory. Do not concatenate `INTEGRATE.HKL` files, merge DIALS tables, or make one artificial HKL before GROND. The row-level Bloch prediction needs the signed row identity and the scan geometry from each dataset. The combined endpoint is made only after every accepted dataset has its own final `native_dyn_calc.csv`.
+For XDS, give the directory that contains `INTEGRATE.HKL` and `XPARM.XDS` or `GXPARM.XDS`. For DIALS, convert each crystal once with `grond import-dials` and give the converted directory ([DIALS_WORKFLOW.md](DIALS_WORKFLOW.md)). XDS and DIALS crystals can be mixed. Do not concatenate `INTEGRATE.HKL` files or merge the data before GROND: the Bloch calculation needs each crystal's signed observations and scan geometry.
 
-For each dataset, GROND runs the same row-contract checks and nuisance searches it uses for one crystal. Transform scouting, thickness, thickness-gradient, frame offset, row-resolution terms, absorption-like terms, Sg jitter, detector-position scales, and sigma behavior are fitted independently. Transform and hand selection are not combined. Calibration-grade scouting enumerates all 24 proper signed-axis permutations, retains candidates only through a unit-cell metric filter, and ranks every retained operator on one candidate-invariant set of matched-Born work rows without using expected chemistry. All operator candidates in one scout stage must reproduce the same numerical fidelity, row support, nuisance, and Bloch-kernel contract. The selected proper operator is then fixed. Hand selection is deliberately deferred until the final shared structure and every dataset's thickness and nuisance model are complete. Each acentric dataset evaluates the supplied and inverse coordinate hands together with the exact elastic negative-thickness identity, sharing each eigendecomposition and retaining identical signed rows, N/Q, thickness, jitter, scale grouping, and work/free split. Absorption alone is set to zero for this decision because the identity requires a Hermitian elastic matrix; absorptive terms are restored unchanged for the selected final hand. GROND does not rerun hand-specific nuisance grids. The shared decision combines the per-crystal adjusted reflection-count components. It flips the one shared model when every participating dataset has a complete exact row pair and the combined all-row Klar--Palatinus adjusted Z favors the inverse by at least 3.5. Held-out ZKP remains a warning diagnostic rather than a veto. Weak or incomplete all-row evidence keeps the input representation and is labeled ambiguous. The selected shared structure, including its symmetry translations, supplies the atomic scattering factors for every downstream dataset, while the nuisance model remains dataset-specific.
+## What is per crystal and what is shared
 
-The resulting shared hand is still conditional on the recorded acquisition/import sign. A calibrated absolute-configuration study should reserve one known crystal per setup, determine its operator without using the known configuration, and attach the sign mapping only after its matched hand result is immutable. That crystal is calibration, not validation. The current final-elastic `auto` artifact is not yet accepted by the legacy branch-symmetric/common-sigma parity-calibration replay, so the setup mapping and known-chemistry assignment must remain externally documented for now. Report validation crystals separately, and identify XDS/DIALS reimports of the same physical crystal as paired pipeline controls rather than independent observations.
+Per crystal:
 
-After the per-dataset passes, `dataset_policy/structure_update/` decides which datasets are safe to use in the shared-model update. Primary datasets keep full row weight. Downweighted datasets remain in the row target, but their effective sigmas are inflated so they cannot dominate the model. Completeness-only datasets are excluded from row-level structure statistics and shared-model gradients, but they can still contribute endpoint reflections if they add real coverage. Excluded datasets are kept in the reports and left out of the combined endpoint.
+- the indexing transform (all 24 proper signed-axis permutations that pass the unit-cell metric filter, ranked by matched Born predictions on working observations);
+- the thickness distribution, mosaic spread, damage and frame-scale smoothness, chosen by cross-validation within the working observations;
+- the frame scales and the error model, fitted on working observations.
 
-The production shared-model update for multi-dataset jobs is the same lagged LS1 idea used for one dataset. GROND recomputes Bloch rows for every dataset from the current shared model, applies the dataset-policy row weights, merges the corrected rows into one endpoint HKL, runs one shared SHELXL least-squares update, then sends that updated model back through every dataset. The nuisance terms remain per dataset; only the atomic model is shared. The native finite-difference updater in `native_multi_structure_update.py` remains available with `--structure-update native_gradient`, but it is a slower diagnostic path rather than the default production route.
+Shared:
 
-The final combination happens only after each dataset has its own corrected row table. GROND first applies per-dataset endpoint sigma calibration when requested. In the automatic multi-dataset path this defaults to `uniform_z_rms`, with a held-out floor so a dataset is not made overconfident just because its work rows fit well. It then estimates one overlap scale per dataset from common corrected reflections using model symmetry. Friedel opposites remain separate by default in acentric groups; the diagnostic `model_symmetry_friedel` mode pairs them. This scale is applied after the Bloch/Born correction, so arbitrary raw integration scale differences are not mistaken for structure or thickness differences.
+- the free set: one salted hash of the unique reflection, so a reflection is free in every crystal or in none. `decisions/cross_crystal_split_check.json` records the check, and the run stops before any refinement if a reflection would be free in one crystal and working in another. Give every crystal the same transform candidates (`--transform-candidates`) or verified transforms (`--hkl-transform ... --trust-hkl-transform`) if this happens;
+- the hand: the held-out sign test pools the evidence of all crystals;
+- the structural model.
 
-The combined endpoint also audits how strongly those operations reshape individual intensities. It multiplies each row's Bloch, scale-field, and median-rescale correction by that dataset's fitted overlap scale, removes one shared global intensity gauge, and reports the 95th-percentile symmetric fold change as `combined_endpoint.mod_p95`. This makes relative scale disagreements visible without penalizing an arbitrary common scale. A missing value or one above `--publication-endpoint-max-modulation-p95` produces a visible warning. It does not by itself imply invalid mathematics, block promotion, or stop a shared LS1/Bloch macrocycle.
+A crystal whose cell matches the model under no transform is left out and recorded in `decisions/metric_excluded_datasets.json` (`--metric-incompatible-datasets exclude`, the default; `fail` stops the run instead).
 
-Corrected rows are then merged into a single endpoint HKL before the shared LS1 model update. The default endpoint merge key is `model_symmetry`, which means symmetry-equivalent corrected observations are inverse-variance merged by GROND while Friedel opposites remain separate in acentric space groups. The diagnostic `model_symmetry_friedel` mode also merges Friedel mates, and `exact_signed_hkl` reproduces the older signed-row-only endpoint merge. The default merge-sigma policy is `chisq_overdispersion`: if several corrected endpoint rows contribute to the same written reflection and they disagree more than their propagated sigmas predict, the merged sigma is inflated. This is the second sigma layer. The first layer makes each dataset internally self-consistent; the merge layer prevents a bad inter-dataset disagreement from entering SHELXL or another endpoint program with overconfident weights. The combined endpoint report states both the overlap-scale key and the endpoint merge key so this step is auditable.
+## Dataset policy
 
-The shared corrected-HKL endpoint uses the same SHELXL contract as the single-dataset production endpoint. GROND writes a fresh HKLF4 file, strips EXTI from the generated endpoint input, forces one internal `L.S.` or `CGLS` cycle by default, and uses `WGHT 0 0` unless the user explicitly requests `--endpoint-wght-mode inherit` or `--endpoint-wght-mode promote` for a diagnostic run. This matters because the corrected HKL sigmas have already been transformed by GROND's per-dataset sigma calibration, merge overdispersion, and optional post-merge sigma calibration. Letting an old kinematic `WGHT` line or a SHELXL recommendation leak into the combined endpoint would mix two different uncertainty models.
+`dataset_policy/structure_update/` and `dataset_policy/final/` give each crystal a role, computed from working observations only:
 
-After the final per-dataset rows are fixed, the default `--multi-scale-contract-selection auto` path asks whether the scale fields can be made smaller without weakening that physics contract. GROND materializes a full-scale control and compact candidates, then evaluates immutable row identity, per-dataset and pooled all/work/free `Rall`, held-out Born-to-Bloch `Rall` gain, and merged coverage. The smallest candidate that preserves those row criteria and produces complete NPD/split-free endpoint artifacts becomes canonical. Fitted-variance BIC and SHELXL `R1`, `wR2`, and GooF are reported as diagnostics but do not select scale topology. This prevents a highly flexible row correction from winning merely because it manufactures a lower merged endpoint residual. Missing row evidence or failed coverage/pathology gates leaves the full contract in place. The complete decision is written under `scale_contract_selection/`.
+| Role | Effect |
+|---|---|
+| `primary` | full weight |
+| `downweight` | stays in, with inflated uncertainties so it cannot dominate |
+| `completeness_only` | left out of the model update; its reflections can still add coverage to the merged HKL |
+| `exclude` | left out, and reported with the reason |
 
-`--endpoint-min-d-spacing` applies a paper-facing resolution cutoff to the combined corrected endpoint independently of the earlier row-search cutoff. Membership is recomputed from the shared RES cell, not trusted from cached per-row d-spacing values, and the report records the requested cutoff, the discrete highest-resolution retained native row, the merged-endpoint limit, and the retained/dropped row counts. This is useful for matched comparisons with a conventional refinement, but it does not make two processing methods share identical reflection values or uncertainty models.
+`--dataset-policy off` gives every crystal full weight.
 
-The shared LS1 updater uses row-level weights from the per-dataset sigma model and the dataset-policy weight before the corrected rows are merged. This is the fast production route. If you request `--structure-update native_gradient`, the finite-difference shared-model updater uses the same per-dataset sigma and dataset-policy weights directly in the native row target. Use that mode when you specifically want a diagnostic check on whether the LS1 approximation is leaving a native row-level downhill direction.
+## Each round
 
-Completed multi-dataset `auto` runs write `grond_continue_checkpoint.json`. Use it when you have manually edited the shared model, removed restraints, or want to push the same endpoint for more macrocycles without redoing transform scouting, hand checks, thickness search, or nuisance gates:
+Each round recalculates every crystal from the current shared model with its own settings, corrects its working observations, and gives them the crystal's error model, σ'² = k²(σ² + (uP)²). The corrected observations of all crystals are put on one absolute scale (κ|F|² · Iobs/Icalc), so no inter-crystal scale is fitted; `combined_summary.json` reports an overlap estimate as `interdataset_scale_diagnostic`, which should be close to 1. Symmetry-equivalent observations are merged with inverse-variance weights (`--multi-endpoint-merge-key model_symmetry`; Friedel mates stay separate in acentric groups). Where merged observations disagree more than their uncertainties allow, the merged uncertainty is inflated (`chisq_overdispersion`). The merged HKL is not rescaled again.
+
+SHELXL then refines one shared model against the merged HKL to convergence: `L.S. 10` per call, weights converged from `WGHT 0 0`, at most 20 calls, stopping when |max shift/esd| < 0.01. The new model goes back to every crystal. Rounds repeat until no non-hydrogen atom moves by more than 0.002 Å, at most five times. Next to the merged HKL, GROND also refines an unmerged HKL with one batch per crystal and refined `BASF` (`--unmerged-endpoint on`).
+
+With the default `--free-set off`, the chosen model is refined once more against all reflections, working and free, into `final_all_data/`.
+
+`--endpoint-min-d-spacing` applies an additional resolution cutoff to the merged HKL and the combined row statistics, for example to match a conventional refinement. Membership is recalculated from the model cell.
+
+## Continuing from your own model
+
+Completed runs write `grond_continue_checkpoint.json`. After editing the shared model, send it back with `grond refine` ([USAGE.md](USAGE.md)):
 
 ```bash
-GROND push-endpoint \
+grond refine \
   --checkpoint grond_multi/grond_continue_checkpoint.json \
-  --start-res edited_joint_model.res \
-  --out-dir grond_multi/push_edited_joint_model \
-  --cycles 10
+  --start-res edited_model.res \
+  --out-dir refine_edited \
+  --cycles 3
 ```
 
-The continuation keeps the recorded per-dataset nuisance contracts and dataset-policy weights. Each push macrocycle recomputes Bloch rows for every dataset from the edited shared model, merges the corrected endpoint observations using the checkpoint merge key, runs one shared SHELXL LS step, and feeds that one model back to all datasets. The output report is `MULTI_ENDPOINT_PUSH_REPORT.md`; it lists the row-level dynamical and matched Born metrics, merged endpoint size, endpoint R values, GooF, and selected cycle for the push.
+`grond refine` (also called `grond push-endpoint`) keeps each crystal's settings, dataset-policy weights and merge key from the checkpoint. Each of its `--cycles` (default 3) recalculates every crystal for the current model, merges the corrected observations and runs SHELXL, and it keeps the last cycle. The report is `MULTI_ENDPOINT_PUSH_REPORT.md`.
 
-For safety, a multi-dataset push refits coefficients in the pinned full scale grouping recorded by the checkpoint. A compact contract selected for the earlier model is retained as provenance only and is not assumed to remain optimal after the atomic model changes. Select the safe push cycle first, then rerun compact-scale selection on that cycle before describing the changed-model endpoint as the smallest publication scale contract. The push summary and report record that compact reselection was not performed automatically.
-
-The files to read first are:
+## Files to read first
 
 ```text
-dataset_policy/structure_update/POLICY.md
-dataset_policy/final/POLICY.md
-runs/<dataset>/final/summary.json
+FINAL_SUMMARY.md
+HELDOUT_VALIDATION.md
+dataset_policy/final/REPORT.md
 runs/combined/combined_summary.json
 resolution_limits/combined/REPORT.md
 endpoint_chooser/PUBLICATION_ENDPOINT_CHOOSER.md
 ```
 
-The practical interpretation is simple. Per-dataset row metrics answer whether each crystal has a believable row-level dynamical correction. The combined endpoint answers whether the accepted datasets refine one shared model better than the individual-crystal alternatives. A lower residual from one single crystal should not automatically replace the combined endpoint; the combined endpoint is promoted when it passes the physical, sigma, and endpoint gates.
+In a multi-crystal run, the merged model of all accepted crystals is the result. A single crystal with a lower residual does not replace it.

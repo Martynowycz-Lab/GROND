@@ -6,7 +6,7 @@ from __future__ import annotations
 import csv
 import json
 import math
-from dataclasses import asdict, fields
+from dataclasses import MISSING, asdict, fields
 from pathlib import Path
 
 import numpy as np
@@ -25,18 +25,17 @@ from grond.regularize.prediction_cache import external_geometry_fingerprints
 
 
 def save_json(path: Path, value) -> None:
+    """Write ``value`` as indented JSON (NaN allowed) through a temporary file, creating parent directories."""
+
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(value, indent=2, allow_nan=True) + "\n")
     temporary.replace(path)
 
 
-def read_rows(path: Path) -> list[dict]:
-    with path.open(newline="") as handle:
-        return list(csv.DictReader(handle))
-
-
 def write_rows(path: Path, rows: list[dict]) -> None:
+    """Write dict rows to a CSV file with the first row's field order, creating parent directories."""
+
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
@@ -45,7 +44,11 @@ def write_rows(path: Path, rows: list[dict]) -> None:
 
 
 class ReferencePaths:
+    """Resolve recorded reference paths after applying ``--path-map OLD_PREFIX=NEW_PREFIX`` rewrites."""
+
     def __init__(self, replacements):
+        """Parse the ``OLD_PREFIX=NEW_PREFIX`` replacements; raise ValueError on a malformed one."""
+
         self.replacements = []
         for item in replacements:
             old, separator, new = item.partition("=")
@@ -54,6 +57,8 @@ class ReferencePaths:
             self.replacements.append((old.rstrip("/"), new.rstrip("/")))
 
     def __call__(self, value) -> Path:
+        """Return the existing path for a recorded value (longest matching prefix rewritten); raise when missing."""
+
         text = str(value)
         for old, new in sorted(self.replacements, key=lambda pair: -len(pair[0])):
             if text == old or text.startswith(old + "/"):
@@ -65,13 +70,31 @@ class ReferencePaths:
         return path
 
 
+def _field_default(field):
+    """Dataclass default that also resolves default_factory fields."""
+
+    if field.default is not MISSING:
+        return field.default
+    if field.default_factory is not MISSING:
+        return field.default_factory()
+    return None
+
+
 def frozen_config(summary: dict, paths: ReferencePaths) -> Config:
+    """Rebuild the exact Bloch Config of a reference run from its summary and selected nuisance.
+
+    The row-plan cache is off so every basis is rebuilt from the fixed reference beam pool.
+    """
+
     config, nuisance = summary["config"], summary["best_native"]["nuisance"]
     missing = {"n_basis", "n_points", "thickness_points", "topup_d_min", "max_support_sg"} - config.keys()
     missing |= {"thickness_A", "thickness_model", "frame_offset", "absorption_mode", "sg_jitter_mode"} - nuisance.keys()
     if missing:
         raise ValueError(f"Incomplete reference physics: {sorted(missing)}")
-    values = {field.name: nuisance.get(field.name, config.get(field.name, field.default)) for field in fields(Config)}
+    values = {
+        field.name: nuisance.get(field.name, config.get(field.name, _field_default(field)))
+        for field in fields(Config)
+    }
     values["topup_d_min"] = min(float(config["topup_d_min"]), float(config["min_d_spacing"]))
     geometry = nuisance.get("geometry_path_file") or config.get("geometry_path")
     values["geometry_path_file"] = str(paths(geometry)) if geometry else ""
@@ -82,6 +105,12 @@ def frozen_config(summary: dict, paths: ReferencePaths) -> Config:
 
 
 def load_reference(root: Path, paths: ReferencePaths) -> dict:
+    """Load and verify a finished multi-crystal full-H run as the never-h reference.
+
+    Every summary, row table and model must match its recorded hash; returns the model, combined summary and per-dataset
+    rows, frozen Config and provenance.
+    """
+
     result = json.loads((root / "grond_summary.json").read_text())
     if not result.get("combined"):
         raise ValueError("never-h currently requires a completed multi-crystal combined endpoint.")
@@ -157,6 +186,11 @@ def reference_endpoint_rows(reference: dict) -> dict[str, list]:
         if len(endpoint_rows) != len(selected):
             raise ValueError(f"{ds['name']}: invalid reference endpoint observations")
         sigma = endpoint["dataset_sigma"][ds["name"]]
+        if str(sigma.get("policy", "")) == "error_model":
+            raise ValueError(
+                f"{ds['name']}: the reference endpoint used per-row error-model sigmas; this replay reproduces only "
+                "uniform_z_rms or unscaled sigmas (rerun the reference with --dataset-sigma-policy auto)"
+            )
         sigma_factor = float(sigma.get("sigma_scale", 1)) if str(sigma.get("status", "")).startswith("ok") else 1.0
         factor = float(inter[ds["name"]])
         weight = ds["endpoint_weight"]
@@ -166,6 +200,11 @@ def reference_endpoint_rows(reference: dict) -> dict[str, list]:
 
 
 def frozen_merge_contract(reference: dict) -> dict:
+    """Recover the reference endpoint's contributions and per-reflection sigma multipliers, and check them.
+
+    Remerging the contributions must reproduce the written endpoint HKL intensities and reflection set.
+    """
+
     model = parse_model(Path(reference["model"]))
     key = endpoint_key_function(reference["combined"]["combined_endpoint"]["merge_key"], model["symmetry_ops"])
     contributions = reference_endpoint_rows(reference)

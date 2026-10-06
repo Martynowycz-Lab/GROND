@@ -1,3 +1,5 @@
+"""Rank HKL transform candidates by intensity overlap with a solved HKL file, to shorten the Bloch transform scout."""
+
 from __future__ import annotations
 
 import math
@@ -7,6 +9,7 @@ from pathlib import Path
 import numpy as np
 
 from grond.legacy.engine.bloch_engine import parse_hkl_transform
+from grond.legacy.engine.shelx_hkl import parse_hkl_observation_line
 
 
 def read_hkl_intensity_rows(path: str | Path, *, max_rows: int = 0) -> list[tuple[int, int, int, float, float]]:
@@ -21,13 +24,9 @@ def read_hkl_intensity_rows(path: str | Path, *, max_rows: int = 0) -> list[tupl
             stripped = line.strip()
             if not stripped or stripped.startswith(("!", "#")):
                 continue
-            parts = stripped.split()
-            if len(parts) < 5:
-                continue
             try:
-                h, k, ell = (int(float(parts[0])), int(float(parts[1])), int(float(parts[2])))
-                iobs = float(parts[3])
-                sigma = abs(float(parts[4]))
+                h, k, ell, iobs, sigma = parse_hkl_observation_line(line)
+                sigma = abs(sigma)
             except ValueError:
                 continue
             if (h, k, ell) == (0, 0, 0):

@@ -15,6 +15,8 @@ from grond.manual.state import _load_workflow, _stage
 
 
 def manual_status(args) -> int:
+    """Print the recorded stages with status and elapsed time, and the next command (JSON with ``--json``)."""
+
     workflow_path, workflow = _load_workflow(args)
     rows = []
     for name, stage in workflow.get("stages", {}).items():
@@ -62,6 +64,8 @@ def manual_status(args) -> int:
 
 
 def run_manual_stage(args) -> int:
+    """Run the ``grond manual`` stage named by ``args.stage`` and return its exit code."""
+
     handlers = {
         "setup": manual_setup,
         "status": manual_status,

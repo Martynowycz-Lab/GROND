@@ -21,6 +21,7 @@ from grond.reports.progress import _quick_progress_finish_info
 from grond.reports.quick_stats import write_quick_stats
 from grond.reports.terminal import _format_terminal_finish_summary
 from grond.runtime import auto_chunksize, auto_worker_count
+from grond.workflows.all_data_refinement import all_data_console_line, run_all_data_refinement
 from grond.workflows.auto_crystal_parameters import configure_auto_crystals
 from grond.workflows.checkpoints import write_continue_checkpoint
 from grond.workflows.conventional_baseline import run_fresh_conventional_baseline
@@ -29,15 +30,23 @@ from grond.workflows.endpoint_selection import (
     run_publication_endpoint_chooser,
     run_publication_report,
 )
+from grond.workflows.leak_free_start import prep_with_leak_free_start, run_leak_free_start
 from grond.workflows.model_selection import resolve_structure_update_strategy
 from grond.workflows.multi import run_multi
+from grond.workflows.nested_nuisance import validate_nested_nuisance_policy
 from grond.workflows.nuisance_policy import (
     apply_speed_profile,
+    refuse_sigma_weight_startup_conflicts,
     resolved_dataset_sigma_policy,
     resolved_merge_sigma_policy,
     resolved_post_bloch_sigma_policy,
+    warn_missing_cell_esd_source,
 )
+from grond.workflows.run_presets import apply_run_preset, preset_console_lines
+from grond.workflows.scale_model_policy import validate_scale_model_policy
 from grond.workflows.single import run_single
+from grond.workflows.split_record import announce_run_split
+from grond.workflows.transform_selection import exclude_metric_incompatible_datasets_at_start
 
 
 def _finalize_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argparse.Namespace) -> dict:
@@ -99,7 +108,7 @@ def _configure_static_pets_auto(
     if bool(bridge.get("virtual_frames")):
         raise SystemExit(
             "PETS *_dyn.cif_pets virtual-frame occurrences are correlated row-space data, "
-            "not a static LS1 endpoint. Import the ordinary cif_pets plus its companion "
+            "not a static SHELXL endpoint. Import the ordinary cif_pets plus its companion "
             ".hkl and PETS-exported SHELX HKLF4 instead."
         )
     static_contract = bridge.get("static_endpoint_contract")
@@ -116,7 +125,7 @@ def _configure_static_pets_auto(
     actual_hash = sha256_file(baseline)
     if not expected_hash or actual_hash != expected_hash:
         raise SystemExit(
-            "PETS static HKLF4 hash changed after import; refusing q/LS1 AUTO "
+            "PETS static HKLF4 hash changed after import; refusing the AUTO run "
             f"(expected {expected_hash or 'missing'}, observed {actual_hash})"
         )
     dataset = prep.datasets[0]
@@ -127,6 +136,7 @@ def _configure_static_pets_auto(
     changes: dict[str, dict[str, object]] = {}
 
     def force(name: str, value: object) -> None:
+        """Set one option on ``args`` and record the old and new value when it changes."""
         old = getattr(args, name)
         setattr(args, name, value)
         if old != value:
@@ -138,12 +148,19 @@ def _configure_static_pets_auto(
     force("detector_scale_bins", "0")
     force("scale_polish", "off")
     force("scale_polish_detector_bins", "0")
+    # PETS exact rows have no continuous scan angle for P-spline scales; keep compact angular groups.
+    force("scale_model", "per-frame")
     force("row_resolution_b_grid", "0.0")
     force("sigma_c_peak_grid", "0.0")
     force("sg_jitter_mode_grid", "none")
     force("sg_jitter_sigma0_grid", "0.0")
     force("sg_jitter_sigma_d_inv_grid", "0.0")
     force("sg_jitter_sigma_frame_grid", "0.0")
+    # PETS exact rows have no mosaic-cone implementation; the engine refuses it.
+    force("mosaicity_mode", "none")
+    # The nested nuisance stage scores with P-spline scales in scan angle, which PETS exact rows do not have.
+    force("nuisance_selection", "sequential")
+    force("feedback_thickness_update", "off")
     force("thickness_model_grid", "single,uniform_gradient")
     force("thickness_grad_grid", "0.0,0.4,1.0")
     force("profile_quadrature", "uniform")
@@ -168,7 +185,7 @@ def _configure_static_pets_auto(
         "automatic_overrides": changes,
         "selection": (
             "AUTO chooses screen/final beam bases, quadrature count, thickness, compact "
-            "angular frame scales, hand, and q/LS1 feedback; detector scales remain disabled "
+            "angular frame scales, hand, and the SHELXL rounds; detector scales remain disabled "
             "because cif_pets has no detector coordinates"
         ),
     }
@@ -187,6 +204,10 @@ def cmd_run(args: argparse.Namespace) -> int:
     Path(args.out_dir).mkdir(parents=True, exist_ok=True)
     logs = Path(args.out_dir) / "logs"
     python = choose_python(args.python)
+    # A named preset fills the options the user did not give, before anything reads them.
+    preset = apply_run_preset(args)
+    for line in preset_console_lines(preset):
+        print(line, flush=True)
     prep = prep_from_args(args)
     _configure_static_pets_auto(prep, args)
     try:
@@ -225,6 +246,19 @@ def cmd_run(args: argparse.Namespace) -> int:
             + f" Report: {sfac_check_path}"
         )
     raise_for_missing_external_tools(args, structure=prep.structure, multi_dataset=len(prep.datasets) > 1)
+    try:
+        scale_model_policy = validate_scale_model_policy(args, multi_dataset=len(prep.datasets) > 1, prep=prep)
+        refuse_sigma_weight_startup_conflicts(args)
+        warn_missing_cell_esd_source(prep.structure, prep.datasets, args)
+        nuisance_selection_policy = validate_nested_nuisance_policy(args, prep)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    from grond.commands.final_polish import refuse_unused_polish_options, validate_final_polish
+
+    refuse_unused_polish_options(args)
+    if str(getattr(args, "final_polish", "off") or "off") != "off":
+        # Refuse bad options and models the polish cannot represent before the run, not after it.
+        validate_final_polish(args, structure=prep.structure)
     configure_progress(
         logs,
         resume=bool(args.resume),
@@ -254,6 +288,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         "fast": args.fast,
         "full_fast": args.full_fast,
         "speed_profile": profile,
+        "preset": preset,
         "datasets": [ds.__dict__ for ds in prep.datasets],
         "structure": prep.structure,
         "original_structure": original_structure,
@@ -300,6 +335,8 @@ def cmd_run(args: argparse.Namespace) -> int:
             "merge_policy": args.merge_sigma_policy,
             "resolved_merge_policy": resolved_merge_sigma_policy(args, multi_dataset=len(prep.datasets) > 1),
         },
+        "scale_model": scale_model_policy,
+        "nuisance_selection": nuisance_selection_policy,
         "scale_polish": {
             "mode": args.scale_polish,
             "frame_models": args.scale_polish_frame_models,
@@ -371,11 +408,19 @@ def cmd_run(args: argparse.Namespace) -> int:
             "r1_scale": args.dataset_policy_r1_scale,
             "cc_scale": args.dataset_policy_cc_scale,
         },
+        "free_set": str(getattr(args, "free_set", "on")),
+        "final_polish": {
+            "mode": str(getattr(args, "final_polish", "off")),
+            "max_iterations": getattr(args, "final_polish_max_iterations", None),
+            "thickness": getattr(args, "final_polish_thickness", None),
+            "shelxl": getattr(args, "final_polish_shelxl", None),
+        },
         "publication_endpoint_chooser": {
             "enabled": args.publication_endpoint_chooser,
             "min_hkl_safe_factor": args.publication_endpoint_min_hkl_safe_factor,
             "max_modulation_p95": args.publication_endpoint_max_modulation_p95,
             "allow_npd": args.publication_allow_npd,
+            "feedback_cycles": str(getattr(args, "publication_feedback_cycles", "all") or "all"),
         },
         "endpoint_calibration": {
             "mode": args.endpoint_calibration,
@@ -395,16 +440,33 @@ def cmd_run(args: argparse.Namespace) -> int:
         },
     }
     (Path(args.out_dir) / "run_config.json").write_text(json.dumps(config, indent=2) + "\n")
+    # a crystal whose cell no transform reconciles with the model is left out, recorded, before any split is planned
+    prep = exclude_metric_incompatible_datasets_at_start(prep, args, Path(args.out_dir))
+    # the free set, the excluded (lockbox) orbits and their counts, before any fit (decisions/split_summary.json)
+    split_plan = announce_run_split(prep, args, Path(args.out_dir))
     conventional_baseline = run_fresh_conventional_baseline(prep, args, python, logs)
+    # every stage starts from the work-orbit refinement of the supplied model (free rows never shaped it)
+    leak_free_start = run_leak_free_start(prep, args, logs, split_plan=split_plan)
+    prep = prep_with_leak_free_start(prep, leak_free_start)
     result = run_single(prep, args, python, logs) if len(prep.datasets) == 1 else run_multi(prep, args, python, logs)
     result["conventional_baseline"] = conventional_baseline
+    result["leak_free_start"] = leak_free_start
     result["endpoint_calibration"] = run_endpoint_calibration(prep, result, args, python, logs)
     result["publication_endpoint_chooser"] = run_publication_endpoint_chooser(prep, result, args)
+    # --free-set off: the published endpoint refined once more against work and free reflections
+    result["final_all_data_refinement"] = run_all_data_refinement(prep, result, args)
+    print(all_data_console_line(result["final_all_data_refinement"]), flush=True)
     result["publication_tables"] = run_publication_report(python, prep, result, args, logs)
     result["continue_checkpoint"] = write_continue_checkpoint(prep, result, args)
     if bool(getattr(args, "dry_run", False)):
         result["status"] = "dry_run"
     quick = _write_run_completion_artifacts(prep, result, args)
+    if str(getattr(args, "final_polish", "off") or "off") != "off":
+        # Optional last stage on the finished run; its outputs are additional and fail closed.
+        from grond.commands.final_polish import run_final_polish_stage
+
+        result["final_polish"] = run_final_polish_stage(args, python, logs, result)
+        (Path(args.out_dir) / "grond_summary.json").write_text(json.dumps(result, indent=2) + "\n")
     finished = (
         execution._PROGRESS.mark_finished(str(result.get("status", "ok")))
         if execution._PROGRESS

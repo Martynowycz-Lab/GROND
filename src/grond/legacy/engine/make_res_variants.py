@@ -17,6 +17,8 @@ else:  # pragma: no cover - direct script execution
 
 
 def sfac_elements(lines: list[str]) -> dict[int, str]:
+    """Map each SFAC card's 1-based index to its element symbol."""
+
     out: dict[int, str] = {}
     idx = 1
     for line in lines:
@@ -28,6 +30,8 @@ def sfac_elements(lines: list[str]) -> dict[int, str]:
 
 
 def is_atom_line(parts: list[str]) -> bool:
+    """Return whether the split tokens of a RES line form an atom record rather than a control card."""
+
     if len(parts) < 6 or not parts[1].lstrip("-").isdigit():
         return False
     # SHELX control records such as UNIT can also have a numeric second token.
@@ -57,6 +61,8 @@ def is_atom_line(parts: list[str]) -> bool:
 
 
 def is_h_atom_line(line: str, sfac: dict[int, str]) -> bool:
+    """Return whether a RES line is a hydrogen atom, by its SFAC element or an H label."""
+
     parts = line.strip().split()
     if not is_atom_line(parts):
         return False
@@ -69,6 +75,8 @@ def is_h_atom_line(line: str, sfac: dict[int, str]) -> bool:
 
 
 def strip_hydrogens(src: Path, dst: Path) -> None:
+    """Copy a RES file without hydrogen atoms, BOND $H cards or AFIX blocks that held only hydrogens."""
+
     lines = src.read_text(errors="replace").splitlines()
     sfac = sfac_elements(lines)
     out: list[str] = []
@@ -187,6 +195,8 @@ def write_alternate_hand_variant(src: Path, dst: Path) -> dict:
 
 
 def main() -> None:
+    """Write the alternate-hand and/or hydrogen-free RES variant, or a plain copy, to --output."""
+
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--input", required=True, help="Input RES path.")
     ap.add_argument("--output", required=True, help="Output RES path.")
@@ -197,12 +207,10 @@ def main() -> None:
     src = Path(args.input)
     dst = Path(args.output)
     dst.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dst
     if args.alternate_hand:
         write_alternate_hand_variant(src, dst)
-        tmp = dst
     if args.remove_h:
-        src_for_strip = dst if tmp == dst and args.alternate_hand else src
+        src_for_strip = dst if args.alternate_hand else src
         strip_hydrogens(src_for_strip, dst)
     if not args.alternate_hand and not args.remove_h:
         dst.write_text(src.read_text(errors="replace"))

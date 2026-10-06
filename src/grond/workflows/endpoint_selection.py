@@ -23,8 +23,10 @@ from grond.workflows.endpoint_candidates import (
     _publication_model_endpoint_candidate,
 )
 from grond.workflows.endpoint_chooser import write_publication_endpoint_choice
+from grond.workflows.endpoint_commands import legacy_handoff_conflicts
 from grond.workflows.nuisance_policy import resolved_post_bloch_sigma_policy
 from grond.workflows.report_commands import publication_report_cmd
+from grond.workflows.scale_model_policy import resolved_endpoint_calibration_mode, resolved_scale_polish_mode
 
 
 def run_publication_report(python: str, prep: PrepConfig, result: dict, args: argparse.Namespace, logs: Path) -> dict:
@@ -155,7 +157,11 @@ def run_publication_endpoint_chooser(prep: PrepConfig, result: dict, args: argpa
     model_candidate = _publication_model_endpoint_candidate(result)
     if model_candidate:
         extra_candidates.append(model_candidate)
-    extra_candidates.extend(_multi_feedback_endpoint_candidates(result, Path(getattr(args, "out_dir", "."))))
+    extra_candidates.extend(
+        _multi_feedback_endpoint_candidates(
+            result, Path(getattr(args, "out_dir", ".")), str(getattr(args, "publication_feedback_cycles", "all") or "all")
+        )
+    )
     combined_baseline = _validated_fresh_conventional_baseline(result) if result.get("combined") else {}
     global_publication_blockers = _multi_hand_publication_blockers(result)
     return write_publication_endpoint_choice(
@@ -240,9 +246,9 @@ def _multi_endpoint_calibration_not_applicable(result: Mapping[str, object]) -> 
 def run_endpoint_calibration(prep: PrepConfig, result: dict, args: argparse.Namespace, python: str, logs: Path) -> dict:
     """Replay the final frozen row table through the endpoint-calibration chooser."""
 
-    mode = getattr(args, "endpoint_calibration", "auto")
+    mode, off_reason = resolved_endpoint_calibration_mode(args)
     if mode == "off":
-        return {"status": "disabled"}
+        return {"status": "disabled", **({"reason": off_reason} if off_reason else {})}
     if mode == "auto" and getattr(args, "fast", False):
         return {"status": "disabled_fast_mode"}
     if args.dry_run:
@@ -255,6 +261,23 @@ def run_endpoint_calibration(prep: PrepConfig, result: dict, args: argparse.Name
                 "Use --endpoint-calibration auto (safe explicit skip) or calibrate each dataset separately."
             )
         return _multi_endpoint_calibration_not_applicable(result)
+    conflicts = legacy_handoff_conflicts(args)
+    if conflicts:
+        reason = (
+            "The endpoint-calibration replay writes its corrected HKL and runs SHELXL with the legacy handoff "
+            "contract and cannot honour: " + "; ".join(conflicts) + ". The feedback-loop model endpoint and the "
+            "publication chooser remain authoritative."
+        )
+        if mode == "on":
+            raise RuntimeError(
+                f"--endpoint-calibration on: {reason} To calibrate, select the single-step handoff with "
+                "--shelxl-feedback-shelxl-iterations 1 --shelxl-feedback-endpoint-ls-cycles 1 "
+                "--shelxl-convergence-shift-esd 0 --shelxl-feedback-xyz-tol 0 --shelxl-npd-recovery damp "
+                "--shelxl-carry-damp --endpoint-include-free-rows --endpoint-q-policy clip "
+                "--endpoint-intensity-scale median-iobs --endpoint-wght-mode freeze-zero --dataset-sigma-policy auto, "
+                "or use --endpoint-calibration auto (explicit skip)."
+            )
+        return {"status": "not_applicable_handoff_contract", "reason": reason, "conflicts": conflicts}
     label = "combined"
     run_dir: Path | None = None
     if result.get("combined"):
@@ -343,6 +366,8 @@ def run_endpoint_calibration(prep: PrepConfig, result: dict, args: argparse.Name
         "--detector-max-field-log-rms",
         f"{getattr(args, 'detector_scale_max_field_log_rms', 0.10):g}",
     ]
+    if bool(getattr(args, "shelxl_carry_damp", False)):
+        cmd.append("--keep-damp")
     if bool(getattr(args, "publication_allow_npd", False)):
         cmd.append("--publication-allow-npd")
     if bool(getattr(args, "detector_scale_independent_calibration", False)):
@@ -386,9 +411,9 @@ def run_scale_window_polish(
 ) -> dict:
     """Run the post-hoc scale-window compression gate for a finished row table."""
 
-    mode = getattr(args, "scale_polish", "auto")
+    mode, off_reason = resolved_scale_polish_mode(args)
     if mode == "off":
-        return {"status": "disabled"}
+        return {"status": "disabled", **({"reason": off_reason} if off_reason else {})}
     row_table = run_dir / "native_dyn_calc.csv"
     summary = run_dir / "summary.json"
     if args.dry_run:

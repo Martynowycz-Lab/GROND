@@ -16,6 +16,13 @@ from grond.workflows.matched_reference import save_json, write_rows
 
 
 def prediction_port(dataset: dict, model: Path, reference_model: Path, cache: Path) -> XDSBlochPort:
+    """Build a Bloch prediction port for ``model`` on a reference dataset's fixed rows and beam pool.
+
+    The HKL, row table and scan geometry must still match their recorded hashes. For a model other than the reference,
+    the beam pool must be identical and only the pool structure factors that rank the beam support come from the
+    reference model; every prediction still comes from ``model``.
+    """
+
     cfg = Config(**dataset["config"])
     for field, path in (("hkl_sha256", dataset["hkl"]), ("row_table_sha256", dataset["row_table"])):
         if sha256_file(Path(path)) != dataset["provenance"][field]:
@@ -39,6 +46,12 @@ def prediction_port(dataset: dict, model: Path, reference_model: Path, cache: Pa
 
 
 def update_predictions(dataset: dict, pred: dict, *, check_reference: bool = False) -> list[dict]:
+    """Replace the dynamical and Born predictions of a reference dataset's rows; scales and sigmas are kept.
+
+    Beam membership, Sg window, jitter and Bragg angle must not change. Scaled values reuse each row's recorded scale.
+    ``check_reference`` also requires the new raw values to equal the recorded ones.
+    """
+
     old_by_index = {int(row["row_index"]): row for row in dataset["rows"]}
     output = []
     for pos, index in enumerate(pred["indices"]):
@@ -69,6 +82,12 @@ def update_predictions(dataset: dict, pred: dict, *, check_reference: bool = Fal
 
 
 def predict_dataset(dataset: dict, model: Path, reference_model: Path, out: Path, *, workers: int, smoke: bool = False) -> list[dict]:
+    """Predict a reference dataset's rows for ``model`` and write native_dyn_calc.csv and summary.json in ``out``.
+
+    ``smoke`` predicts only a few rows (spread, largest basis, brightest) and checks them against the reference. Returns
+    the updated rows.
+    """
+
     port = prediction_port(dataset, model, reference_model, out.parent / "ug_cache")
     rows = dataset["rows"]
     positions = np.arange(len(rows))

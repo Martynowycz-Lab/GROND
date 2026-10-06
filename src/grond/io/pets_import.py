@@ -28,30 +28,21 @@ import numpy as np
 
 from grond.hkl_transform import parse_hkl_transform_info
 from grond.io.pets_contract import (
-    _loop_columns as _loop_columns,
-    _operation_key as _operation_key,
     _read_jana_reflistout as _read_jana_reflistout,
-    _read_pets_hkl_sidecar as _read_pets_hkl_sidecar,
-    _read_static_shelx_hkl as _read_static_shelx_hkl,
     _sha256 as _sha256,
     _validate_static_endpoint_hkl as _validate_static_endpoint_hkl,
     _validate_structure_setting as _validate_structure_setting,
     read_pets_contract as read_pets_contract,
 )
 from grond.io.pets_geometry import (
-    _AXIS_POSITION as _AXIS_POSITION,
-    _axis_position as _axis_position,
     _busing_levy as _busing_levy,
-    _cell_matrix as _cell_matrix,
-    _continuous_rotation_contract as _continuous_rotation_contract,
-    _number as _number,
-    _required_pair as _required_pair,
-    _rotation as _rotation,
 )
 
 
 @dataclass(frozen=True)
 class PetsImportOutput:
+    """Paths written by the PETS importer: the row directory, HKL, scan points, summary and optional prep."""
+
     out_dir: Path
     hkl: Path
     scan_points: Path
@@ -421,6 +412,8 @@ def import_pets_to_grond(
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Build the argument parser of the stand-alone PETS importer (``python -m grond.io.pets_import``)."""
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cif-pets", type=Path, required=True)
     parser.add_argument("--pets-hkl", type=Path)
@@ -451,6 +444,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Import a PETS file from the command line and print the output paths as JSON; return 0."""
+
     args = build_parser().parse_args(argv)
     output = import_pets_to_grond(
         args.cif_pets,

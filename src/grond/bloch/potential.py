@@ -21,12 +21,23 @@ from grond.bloch.cache import (
 )
 from grond.bloch.constants import UG_CACHE_SCHEMA
 from grond.bloch.model import fcalc_res_grid, inv_d2_from_hkl_array, model_content_hash
+from grond.bloch.thickness import (
+    config_cf_parameters,
+    config_table_nodes,
+    gamma_cf_born,
+    resolved_config_evaluator,
+    uniform_grid_spec,
+)
 
 
 class PotentialMixin:
     """One cohesive part of XDSBlochPort; initialized by the public facade."""
 
     def ug_cache_key(self):
+        """Return (16-hex key, payload) naming the dense U_g cube and every input that changes it.
+
+        The payload holds the cache schema, .res and model hashes, cell, HKL limits, gamma and ug_d_min.
+        """
         cell = self.model["cell"]
         payload = {
             "cache_schema": UG_CACHE_SCHEMA,
@@ -43,6 +54,11 @@ class PotentialMixin:
         return hashlib.sha256(text.encode()).hexdigest()[:16], payload
 
     def load_or_build_ug_cube(self):
+        """Return the dense U_g cube, from a validated cache file when possible, else built and written to the cache.
+
+        Sets ``ug_cache_status`` to disabled, hit, built or rebuilt; a rebuild records why the existing file was
+        rejected.
+        """
         if self.cache_dir is None:
             cube = self.build_ug_cube()
             self.ug_cache_status = {
@@ -90,6 +106,11 @@ class PotentialMixin:
         return cube
 
     def build_ug_cube(self):
+        """Build the dense U_g cube for h, k, l in [-lim, lim] (complex128) after the memory-limit check.
+
+        U_g = gamma * F(g) / (pi * V), with gamma the relativistic factor, F the model's electron structure factor
+        (fcalc_res_grid) and V the cell volume in Å³; index [h + h_lim, k + k_lim, l + l_lim].
+        """
         plan = dense_ug_memory_plan(self.h_lim, self.k_lim, self.l_lim)
         self.ug_allocation_status = enforce_dense_ug_memory_limit(plan, operation="build")
         h_vals = np.arange(-self.h_lim, self.h_lim + 1, dtype=float)
@@ -100,45 +121,46 @@ class PotentialMixin:
         cube = factor * fcalc_res_grid(self.model, hh, kk, ll)
         return validate_ug_cube(cube, tuple(int(value) for value in plan["shape"]))
 
+    def calculate_ug_array(self, hkls):
+        """Evaluate requested coefficients directly from the current model."""
+
+        hkls = np.asarray(hkls, dtype=int)
+        shape = hkls.shape[:-1]
+        flat = hkls.reshape(-1, 3)
+        factor = float(self.gamma) / (math.pi * self.data.cell.volume)
+        values = factor * fcalc_res_grid(self.model, flat[:, 0], flat[:, 1], flat[:, 2])
+        return np.asarray(values, dtype=np.complex128).reshape(shape)
+
     def ug(self, hkl):
+        """Return U_g of one HKL, from the dense cube inside its limits, else computed directly from the model."""
         h, k, l = (int(v) for v in hkl)
         i, j, m = h + self.h_lim, k + self.k_lim, l + self.l_lim
-        if i < 0 or j < 0 or m < 0 or i > 2 * self.h_lim or j > 2 * self.k_lim or m > 2 * self.l_lim:
-            return 0.0 + 0.0j
-        if self.ug_cube is None:
-            factor = float(self.gamma) / (math.pi * self.data.cell.volume)
-            value = fcalc_res_grid(
-                self.model,
-                np.asarray([h], dtype=float),
-                np.asarray([k], dtype=float),
-                np.asarray([l], dtype=float),
-            )
-            return complex(factor * np.asarray(value).reshape(-1)[0])
-        return self.ug_cube[i, j, m]
+        if self.ug_cube is not None and (
+            0 <= i <= 2 * self.h_lim and 0 <= j <= 2 * self.k_lim and 0 <= m <= 2 * self.l_lim
+        ):
+            return self.ug_cube[i, j, m]
+        return complex(self.calculate_ug_array(np.asarray([[h, k, l]], dtype=int))[0])
 
     def ug_array(self, hkls):
+        """Return U_g for HKLs along the last axis of ``hkls``: cube values where covered, else computed directly."""
         hkls = np.asarray(hkls, dtype=int)
+        if self.ug_cube is None:
+            return self.calculate_ug_array(hkls)
         shape = hkls.shape[:-1]
         flat = hkls.reshape(-1, 3)
         i = flat[:, 0] + self.h_lim
         j = flat[:, 1] + self.k_lim
         m = flat[:, 2] + self.l_lim
         ok = (i >= 0) & (j >= 0) & (m >= 0) & (i <= 2 * self.h_lim) & (j <= 2 * self.k_lim) & (m <= 2 * self.l_lim)
-        out = np.zeros(len(flat), dtype=np.complex128)
-        if self.ug_cube is None:
-            if np.any(ok):
-                factor = float(self.gamma) / (math.pi * self.data.cell.volume)
-                out[ok] = factor * fcalc_res_grid(
-                    self.model,
-                    flat[ok, 0],
-                    flat[ok, 1],
-                    flat[ok, 2],
-                )
-        else:
-            out[ok] = self.ug_cube[i[ok], j[ok], m[ok]]
+        out = np.empty(len(flat), dtype=np.complex128)
+        out[ok] = self.ug_cube[i[ok], j[ok], m[ok]]
+        # The cache boundary is a storage limit. It must not zero a real coupling.
+        if np.any(~ok):
+            out[~ok] = self.calculate_ug_array(flat[~ok])
         return out.reshape(shape)
 
     def inv_d2_for_hkls(self, hkls):
+        """Return 1/d^2 = |A h|^2 (Å⁻²) for one HKL (float) or HKL rows (array), A the orientation matrix."""
         hkls = np.asarray(hkls, dtype=float)
         if hkls.ndim == 1:
             g = self.data.A @ hkls
@@ -147,6 +169,7 @@ class PotentialMixin:
         return np.sum(g * g, axis=1)
 
     def row_delta_b(self, row_idx):
+        """Return a row's dose-damage B increase (Å²): dose_b_per_frame times frames past the reference frame."""
         mode = str(getattr(self.cfg, "dose_b_mode", "none") or "none").lower()
         if mode == "none" or abs(float(getattr(self.cfg, "dose_b_per_frame", 0.0))) <= 0.0:
             return 0.0
@@ -156,6 +179,7 @@ class PotentialMixin:
         return float(getattr(self.cfg, "dose_b_per_frame", 0.0)) * dz
 
     def dose_attenuation(self, hkl, row_idx):
+        """Return the dose Debye-Waller factor exp(-DeltaB/(4 d^2)) of one HKL for a row (1.0 without dose damage)."""
         delta_b = self.row_delta_b(row_idx)
         if delta_b == 0.0:
             return 1.0
@@ -163,15 +187,18 @@ class PotentialMixin:
         return float(math.exp(-0.25 * delta_b * inv_d2))
 
     def dose_attenuation_for_inv_d2(self, inv_d2, row_idx):
+        """Return exp(-DeltaB * inv_d2 / 4) elementwise for precomputed 1/d^2 values (Å⁻²) and one row."""
         delta_b = self.row_delta_b(row_idx)
         if delta_b == 0.0:
             return np.ones_like(inv_d2, dtype=float)
         return np.exp(-0.25 * delta_b * np.asarray(inv_d2, dtype=float))
 
     def ug_for_row(self, hkl, row_idx):
+        """Return U_g of one HKL with the row's dose attenuation applied."""
         return self.ug(hkl) * self.dose_attenuation(hkl, row_idx)
 
     def ug_for_row_array(self, hkls, row_idx):
+        """Return ug_array(hkls) with the row's dose attenuation exp(-DeltaB/(4 d^2)) applied."""
         vals = self.ug_array(hkls)
         delta_b = self.row_delta_b(row_idx)
         if delta_b == 0.0:
@@ -180,6 +207,7 @@ class PotentialMixin:
         return vals * np.exp(-0.25 * delta_b * inv_d2)
 
     def build_pool(self):
+        """Return the top-up beam pool: every nonzero HKL with d >= topup_d_min (Å) and its complex128 U_g."""
         h_lim, k_lim, l_lim = self.data.cell.get_hkl_limits(float(self.cfg.topup_d_min))
         k_grid, l_grid = np.meshgrid(
             np.arange(-k_lim, k_lim + 1, dtype=int),
@@ -203,6 +231,19 @@ class PotentialMixin:
         return np.concatenate(hkls, axis=0), np.concatenate(uvals)
 
     def thickness_grid(self):
+        """Return thickness nodes (Å) and weights for the configured thickness model and evaluator.
+
+        ``table`` gives the support-table nodes and ``cf`` gives (None, None), since the gamma average is then closed
+        form. The legacy quadrature uses Gauss-Legendre nodes (uniform_gradient), Gauss-Hermite nodes (gaussian) or
+        their product (gaussian_gradient), drops nonpositive thicknesses and renormalises the weights to sum 1.
+        """
+        evaluator = resolved_config_evaluator(self.cfg)
+        if evaluator == "table":
+            # Exact hat-function weights of the support-renormalised distribution (grond.bloch.thickness).
+            return config_table_nodes(self.cfg)
+        if evaluator == "cf":
+            # No nodes: every propagation and Born average uses the closed-form gamma average instead.
+            return None, None
         model = str(getattr(self.cfg, "thickness_model", "uniform_gradient") or "uniform_gradient").lower()
         n = max(1, int(self.cfg.thickness_points))
         t0 = float(self.cfg.thickness_A)
@@ -240,7 +281,38 @@ class PotentialMixin:
         w = np.asarray(w, dtype=float)[ok]
         return t, w / np.sum(w)
 
+    def thickness_cf_parameters(self):
+        """Gamma (shape, theta) when the thickness evaluator resolves to cf, else None (resolved once per port)."""
+        try:
+            return self._thickness_cf
+        except AttributeError:
+            self._thickness_cf = config_cf_parameters(self.cfg)
+            return self._thickness_cf
+
+    def thickness_uniform_grid(self):
+        """(t0, dt, n) of the table evaluator's uniform support nodes, else None (legacy quadrature, cf)."""
+        try:
+            return self._thickness_uniform
+        except AttributeError:
+            self._thickness_uniform = (
+                uniform_grid_spec(self.thick) if resolved_config_evaluator(self.cfg) == "table" else None
+            )
+            return self._thickness_uniform
+
+    def born_thickness_average(self, h10_born, delta):
+        """Thickness-averaged Born row term (2*pi)^2 |H10|^2 t^2 sinc^2(delta*t) for one profile point."""
+        cf = self.thickness_cf_parameters()
+        if cf is not None:
+            return float(gamma_cf_born(abs(h10_born) ** 2, float(delta), cf["shape"], cf["theta"]))
+        sinc = np.sinc(delta * self.thick)
+        born_t = (2.0 * math.pi) ** 2 * (abs(h10_born) ** 2) * (self.thick**2) * (sinc**2)
+        return float(np.sum(self.thick_w * born_t))
+
     def make_groups(self):
+        """Return a scale-group index per row: rounded frame - 1 for PETS exact orientations, else omega bins.
+
+        Omega bins are group_width_deg degrees wide, counted from the lowest omega.
+        """
         if getattr(self.data, "pets_exact_a_center", None) is not None:
             return np.rint(np.asarray(self.data.zcal, dtype=float)).astype(int) - 1
         omegas = np.array([self.omega_from_z(z) for z in self.data.zcal])

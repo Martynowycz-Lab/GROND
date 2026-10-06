@@ -1,3 +1,9 @@
+"""Choose the publication endpoint among a run's verified endpoint candidates.
+
+Candidates come from native, combined and observation-polish summaries; each one's RES/HKL/LST provenance is
+hash-verified. Writes publication_endpoint_choice.json with Markdown and LaTeX reports.
+"""
+
 from __future__ import annotations
 
 import hashlib
@@ -62,6 +68,50 @@ def _is_combined_candidate(candidate: Mapping) -> bool:
     """Return whether an endpoint came from a merged multi-dataset row table."""
 
     return str(candidate.get("source_kind", "")).startswith("combined_")
+
+
+# The unmerged multi-crystal SHELXL endpoint (batch = crystal, MERG 0, BASF).  Its R1 is over unmerged rows,
+# a different denominator from the merged endpoints, so among physical endpoints it ranks after them.
+UNMERGED_SOURCE_KIND = "combined_unmerged_corrected_hkl"
+
+
+def _publication_rank_key(candidate: Mapping) -> tuple:
+    """Sort key for physical endpoints: merged endpoints before the unmerged batch endpoint, then ``_metric_key``."""
+
+    return (str(candidate.get("source_kind", "")) == UNMERGED_SOURCE_KIND, *_metric_key(candidate))
+
+
+def candidate_wght_convergence(candidate: Mapping) -> dict[str, object]:
+    """Applied versus SHELXL-suggested WGHT of one endpoint (from its hash-verified LST when available)."""
+
+    shelxl = candidate.get("shelxl") if isinstance(candidate.get("shelxl"), Mapping) else {}
+    recorded = shelxl.get("wght_convergence") if isinstance(shelxl.get("wght_convergence"), Mapping) else {}
+    applied = suggested = None
+    lst_text = str(candidate.get("lst") or "").strip()
+    if lst_text and candidate.get("artifact_provenance_ok") is True and Path(lst_text).is_file():
+        from grond.refine.shelxl_diagnostics import parse_lst, parse_recommended_wght
+
+        live = parse_lst(Path(lst_text))
+        if live.get("active_wght_a") is not None:
+            applied = [float(live["active_wght_a"]), float(live.get("active_wght_b", 0.0))]
+        recommended = parse_recommended_wght(Path(lst_text))
+        if recommended is not None:
+            suggested = [float(recommended[0]), float(recommended[1])]
+    if applied is None and shelxl.get("active_wght_a") is not None:
+        applied = [_float(shelxl.get("active_wght_a")), _float(shelxl.get("active_wght_b"), 0.0)]
+    if suggested is None and shelxl.get("recommended_wght_a") is not None:
+        suggested = [_float(shelxl.get("recommended_wght_a")), _float(shelxl.get("recommended_wght_b"), 0.0)]
+    from grond.refine.shelxl_iterations import WGHT_CONVERGE_TOL_A, WGHT_CONVERGE_TOL_B
+
+    if applied is None or suggested is None:
+        return {"status": "unknown", "applied": applied, "suggested": suggested, "recorded": dict(recorded)}
+    agree = abs(suggested[0] - applied[0]) < WGHT_CONVERGE_TOL_A and abs(suggested[1] - applied[1]) < WGHT_CONVERGE_TOL_B
+    return {
+        "status": "converged" if agree else "not_converged",
+        "applied": applied,
+        "suggested": suggested,
+        "recorded": dict(recorded),
+    }
 
 
 def _validated_combined_baseline(
@@ -311,12 +361,6 @@ def endpoint_artifact_provenance(endpoint: Mapping) -> dict[str, object]:
     return out
 
 
-def endpoint_res_provenance(endpoint: Mapping) -> dict[str, object]:
-    """Compatibility alias for the full endpoint artifact provenance audit."""
-
-    return endpoint_artifact_provenance(endpoint)
-
-
 def endpoint_lst_metric_consistency(recorded: Mapping, provenance: Mapping) -> dict[str, object]:
     """Compare stored endpoint statistics with the hash-verified LST values."""
 
@@ -376,6 +420,8 @@ def endpoint_lst_metric_consistency(recorded: Mapping, provenance: Mapping) -> d
 
 
 def _bool_value(value: object) -> bool | None:
+    """Read a bool, 0/1 or yes/no/true/false/on/off text as a bool; None when it is none of these."""
+
     if isinstance(value, bool):
         return value
     if isinstance(value, (int, float)) and value in {0, 1}:
@@ -534,6 +580,7 @@ def _normalize_endpoint(label: str, endpoint: Mapping, *, run_dir: Path | None, 
         "promotion_fields_ok": promotion_fields.get("passed") is True,
         "promotion_field_contract": promotion_fields,
         "shelxl": dict(shelxl),
+        "wght_mode": endpoint.get("wght_mode") or endpoint.get("endpoint_wght_mode") or shelxl.get("wght_mode"),
     }
     if accepted_polish is not None:
         candidate["observation_polish_accepted"] = bool(accepted_polish)
@@ -556,7 +603,7 @@ def _collect_native_candidates(runs: Mapping[str, Path]) -> list[dict]:
 
 
 def _collect_combined_candidate(combined_run: Path | None) -> list[dict]:
-    """Collect the merged multi-dataset endpoint candidate, when present."""
+    """Collect the merged multi-dataset endpoint candidate and, when written, the unmerged batch endpoint."""
 
     if not combined_run:
         return []
@@ -565,7 +612,17 @@ def _collect_combined_candidate(combined_run: Path | None) -> list[dict]:
     endpoint = summary.get("combined_endpoint") or {}
     if not endpoint:
         return []
-    return [_normalize_endpoint("combined", endpoint, run_dir=run_dir, source_kind="combined_corrected_hkl", index=1)]
+    candidates = [_normalize_endpoint("combined", endpoint, run_dir=run_dir, source_kind="combined_corrected_hkl", index=1)]
+    unmerged = summary.get("combined_unmerged_endpoint") or {}
+    if isinstance(unmerged, Mapping) and unmerged.get("shelxl"):
+        candidate = _normalize_endpoint(
+            "combined_unmerged", unmerged, run_dir=run_dir, source_kind=UNMERGED_SOURCE_KIND, index=1
+        )
+        candidate["basf"] = unmerged.get("basf")
+        candidate["basf_sanity"] = unmerged.get("basf_sanity")
+        candidate["batches"] = unmerged.get("batches")
+        candidates.append(candidate)
+    return candidates
 
 
 def _observation_polish_summary_path(forensic_summary: Mapping) -> Path | None:
@@ -692,6 +749,15 @@ def classify_publication_endpoint(
         if isinstance(atoms, list) and atoms:
             atom_text = f" ({', '.join(str(atom) for atom in atoms[:6])}{', ...' if len(atoms) > 6 else ''})"
         reasons.append(f"endpoint has {npd_count} NPD atom(s){atom_text}; publication endpoints require NPD == 0")
+    wght = candidate_wght_convergence(candidate)
+    if wght["status"] == "not_converged":
+        warnings.append(
+            f"applied WGHT {wght['applied'][0]:.4f} {wght['applied'][1]:.4f} differs from SHELXL's suggested "
+            f"{wght['suggested'][0]:.4f} {wght['suggested'][1]:.4f}; Olex2 flags this as an unconverged weighting scheme"
+        )
+    basf_sanity = candidate.get("basf_sanity") if isinstance(candidate.get("basf_sanity"), Mapping) else None
+    if basf_sanity is not None and not basf_sanity.get("ok", False):
+        warnings.append("batch scale factors (BASF) failed the sanity check: " + "; ".join(basf_sanity.get("problems") or []))
     goof = _float(candidate.get("GooF"))
     if not math.isfinite(goof):
         reasons.append("endpoint GooF is unavailable; publication endpoints must have conventional SHELXL GooF")
@@ -712,6 +778,7 @@ def classify_publication_endpoint(
         "warnings": warnings,
         "safety": safety,
         "hkl_precision": hkl_precision,
+        "wght_convergence": wght,
     }
 
 
@@ -773,7 +840,7 @@ def choose_publication_endpoints(
                 decision["promotable"] = False
         classified.append({**candidate, **decision})
 
-    physical = sorted([c for c in classified if c.get("promotable")], key=_metric_key)
+    physical = sorted([c for c in classified if c.get("promotable")], key=_publication_rank_key)
     combined_physical = [c for c in physical if _is_combined_candidate(c)]
     if prefer_combined:
         best_physical = combined_physical[0] if combined_physical else {}
@@ -859,7 +926,8 @@ def choose_publication_endpoints(
             ],
             "ranking": (
                 "multi-dataset runs require a passing combined endpoint and never substitute a single-dataset endpoint; "
-                "within the eligible class rank endpoint R1(F)all, R1(F)gt, and wR2(F^2)all"
+                "within the eligible class merged endpoints rank before the unmerged batch endpoint (its R1 is over "
+                "unmerged rows), then by endpoint R1(F)all, R1(F)gt, and wR2(F^2)all"
                 if prefer_combined
                 else "rank endpoint R1(F)all, R1(F)gt, and wR2(F^2)all"
             ),
@@ -976,7 +1044,7 @@ def _write_markdown(out_dir: Path, decision: Mapping) -> Path:
 
 
 def _write_tex(out_dir: Path, decision: Mapping) -> Path:
-    """Write a small LaTeX table for supplemental reports."""
+    """Write the endpoint candidates as a small LaTeX table."""
 
     rows = []
     for candidate in decision.get("candidates", []):

@@ -32,6 +32,8 @@ class GeometryMixin:
         )
 
     def omega_from_z(self, z):
+        """Return the rotation angle (degrees) of nominal frame ``z``, after frame_offset and any geometry-path slew."""
+
         nominal_z = float(z)
         if getattr(self, "geometry_path", None) is None:
             return self.data.omega_from_z(nominal_z + float(self.cfg.frame_offset))
@@ -39,21 +41,26 @@ class GeometryMixin:
         return self.data.omega_from_z(nominal_z + float(self.cfg.frame_offset) + float(slew_frames))
 
     def nominal_z_from_corrected_omega(self, omega_deg):
-        """Invert the smooth slew map for profile samples by fixed-point iteration."""
+        """Invert the strictly increasing slew map within its declared displacement bound."""
 
         base = float(self.data.z_from_omega(omega_deg)) - float(self.cfg.frame_offset)
         if getattr(self, "geometry_path", None) is None:
             return base
-        z = base
-        for _ in range(8):
+        extent = float(self.geometry_path["bounds"]["max_abs_slew_frames"]) + 1e-10
+
+        def residual(z):
             slew_frames, _, _ = self.geometry_path_at_z(z)
-            updated = base - float(slew_frames)
-            if abs(updated - z) <= 1e-10:
-                break
-            z = updated
-        return float(z)
+            return z - base + float(slew_frames)
+
+        return float(brentq(residual, base - extent, base + extent, xtol=1e-12))
 
     def gvecs(self, hkls, omega_deg):
+        """Return lab-frame reciprocal vectors g = S R(omega) F A h (Å⁻¹) of HKL rows at ``omega_deg`` degrees.
+
+        R is the right-handed rotation about the scan axis. With a geometry path, A is taken at the nominal frame of
+        ``omega_deg`` and the path's two tilts (about tilt axis x, then y) rotate the result.
+        """
+
         if getattr(self, "geometry_path", None) is None:
             A = self.data.A_for_omega(omega_deg)
         else:
@@ -118,6 +125,11 @@ class GeometryMixin:
         return (correction @ g.T).T
 
     def sg_for_hkls(self, hkls, omega_deg):
+        """Return excitation errors S_g = (k^2 - |s0 + g|^2)/(2k) in Å⁻¹ of HKL rows at ``omega_deg``.
+
+        S_g is positive when s0 + g lies inside the Ewald sphere.
+        """
+
         g = self.gvecs(hkls, omega_deg)
         return (self.data.k**2 - np.sum((self.data.s0 + g) ** 2, axis=1)) / (2.0 * self.data.k)
 
@@ -128,6 +140,11 @@ class GeometryMixin:
         mosaic_along_deg=0.0,
         mosaic_transverse_deg=0.0,
     ):
+        """Return S_g (Å⁻¹) after extra mosaic rotations (degrees) about the along-scan and transverse axes.
+
+        With both angles zero this is sg_for_hkls.
+        """
+
         if float(mosaic_along_deg) == 0.0 and float(mosaic_transverse_deg) == 0.0:
             return self.sg_for_hkls(hkls, omega_deg)
         g = self.gvecs_at_orientation(
@@ -228,6 +245,8 @@ class GeometryMixin:
         hkl_array = np.asarray([hkl], dtype=int)
 
         def residual(omega):
+            """Return S_g(omega) minus the target S_g for this row's HKL."""
+
             return float(self.sg_for_hkls(hkl_array, float(omega))[0]) - target_sg
 
         offsets = np.linspace(-max_delta_deg, max_delta_deg, 65)
@@ -258,6 +277,84 @@ class GeometryMixin:
             )
         return omega
 
+    def _fast_analytic_newton_omega_for_sg(
+        self,
+        hkl,
+        omega0,
+        target_sg,
+        max_delta_deg,
+    ):
+        """Return the local angle (degrees) where one HKL reaches ``target_sg``: closed form, then Newton steps.
+
+        The closed-form crossing uses A frozen at ``omega0``; up to three Newton steps on the full, possibly
+        scan-varying, geometry remove the residual. Raises NotImplementedError without fixed-rotation fields or with a
+        geometry path, and LocalSgCrossingError when no crossing lies within ``max_delta_deg`` or the final residual
+        exceeds 1e-9.
+        """
+
+        data = getattr(self, "data", None)
+        if data is None:
+            raise NotImplementedError
+        required = ("fixed_rotation", "setting_rotation", "axis", "s0", "k")
+        if any(not hasattr(data, name) for name in required) or getattr(self, "geometry_path", None) is not None:
+            raise NotImplementedError
+
+        A_local = data.A_for_omega(omega0) if hasattr(data, "A_for_omega") else getattr(data, "A", None)
+        if A_local is None:
+            raise NotImplementedError
+
+        hkl_array = np.asarray(hkl, dtype=float)
+        g0 = np.asarray(data.fixed_rotation, dtype=float) @ np.asarray(A_local, dtype=float) @ hkl_array
+        axis = np.asarray(data.axis, dtype=float)
+        beam = np.asarray(data.setting_rotation, dtype=float).T @ np.asarray(data.s0, dtype=float)
+        parallel = axis * float(np.dot(axis, g0))
+        perpendicular = g0 - parallel
+        cross = np.cross(axis, g0)
+        constant = float(np.dot(beam, parallel))
+        cosine = float(np.dot(beam, perpendicular))
+        sine = float(np.dot(beam, cross))
+        radius = math.hypot(cosine, sine)
+        if radius <= 1e-15:
+            raise LocalSgCrossingError("geometry has no orientation-dependent Sg crossing")
+        right_hand_side = -float(data.k) * float(target_sg) - 0.5 * float(np.dot(g0, g0)) - constant
+        ratio = right_hand_side / radius
+        if ratio < -1.0 - 1e-12 or ratio > 1.0 + 1e-12:
+            raise LocalSgCrossingError("geometry has no real Sg crossing")
+        ratio = float(np.clip(ratio, -1.0, 1.0))
+        phase = math.atan2(sine, cosine)
+        offset = math.acos(ratio)
+        omega0_radians = math.radians(float(omega0))
+        candidates = []
+        for base in (phase - offset, phase + offset):
+            central_turn = round((omega0_radians - base) / (2.0 * math.pi))
+            for turn in (central_turn - 1, central_turn, central_turn + 1):
+                candidate = math.degrees(base + 2.0 * math.pi * turn)
+                if abs(candidate - float(omega0)) <= float(max_delta_deg) + 1e-10:
+                    candidates.append(candidate)
+        if not candidates:
+            raise LocalSgCrossingError("geometry has no crossing on the requested local branch")
+        omega = float(min(candidates, key=lambda value: abs(value - float(omega0))))
+
+        # Newton refinement for scan-varying geometry or residual polishing
+        hkl_arr = np.asarray([hkl], dtype=int)
+        for _ in range(3):
+            sg_val = float(self.sg_for_hkls(hkl_arr, omega)[0])
+            res = sg_val - target_sg
+            if abs(res) <= 1e-10:
+                break
+            deriv = float(self.sg_derivative_per_deg(hkl, omega))
+            if abs(deriv) < 1e-9:
+                break
+            step = res / deriv
+            if abs(step) > float(max_delta_deg):
+                break
+            omega -= step
+
+        final_residual = float(self.sg_for_hkls(hkl_arr, omega)[0]) - target_sg
+        if abs(final_residual) > 1e-9 or abs(omega - float(omega0)) > float(max_delta_deg) + 1e-10:
+            raise LocalSgCrossingError("fast solver failed tolerance")
+        return omega
+
     def solve_omega_for_sg(self, hkl, omega0, target_sg, max_delta_deg=None):
         """Solve one local Ewald crossing without jumping to another branch."""
 
@@ -266,6 +363,8 @@ class GeometryMixin:
         target_sg = float(target_sg)
 
         def residual(omega):
+            """Return S_g(omega) minus the target S_g for this row's HKL."""
+
             return float(self.sg_for_hkls(hkl_array, float(omega))[0]) - target_sg
 
         initial = residual(omega0)
@@ -277,6 +376,16 @@ class GeometryMixin:
         max_delta_deg = float(max_delta_deg)
         if not math.isfinite(max_delta_deg) or max_delta_deg <= 0.0:
             raise ValueError("local Sg root-search range must be finite and positive")
+
+        try:
+            return self._fast_analytic_newton_omega_for_sg(
+                hkl,
+                omega0,
+                target_sg,
+                max_delta_deg,
+            )
+        except (NotImplementedError, LocalSgCrossingError):
+            pass
 
         try:
             omega = self._analytic_fixed_xds_omega_for_sg(
@@ -293,9 +402,6 @@ class GeometryMixin:
                 max_delta_deg,
             )
         except LocalSgCrossingError:
-            # Preserve the established numerical boundary behavior close to a
-            # tangency or a rounded XDS limit.  Ordinary reachable roots never
-            # enter this slow path.
             return self._numerical_omega_for_sg(
                 hkl,
                 omega0,
@@ -554,6 +660,11 @@ class GeometryMixin:
         return per_radian * (math.pi / 180.0)
 
     def sg_derivative_per_deg(self, hkl, omega_deg):
+        """Return dS_g/domega (Å⁻¹ per degree): analytic for fixed XDS geometry, else a central difference.
+
+        The finite-difference step is 1e-4 degree.
+        """
+
         try:
             return self._analytic_fixed_xds_sg_derivative_per_deg(hkl, omega_deg)
         except NotImplementedError:

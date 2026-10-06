@@ -567,20 +567,6 @@ def is_shelx_model(path: str) -> bool:
     return Path(path).suffix.lower() in {".res", ".ins"}
 
 
-def infer_cbf_dir_from_hkl(hkl: str) -> str:
-    """Guess the raw CBF directory near an HKL file for optional raw polish."""
-
-    path = Path(hkl).expanduser().resolve()
-    for parent in [path.parent, *path.parents]:
-        candidate = parent / "cbf"
-        if candidate.is_dir() and any(candidate.glob("*.cbf")):
-            return str(candidate)
-        sibling = parent.parent / "cbf" if parent.parent != parent else parent / "cbf"
-        if sibling.is_dir() and any(sibling.glob("*.cbf")):
-            return str(sibling)
-    return ""
-
-
 def make_noh_model(python: str, structure: str, out_dir: Path, logs: Path, dry_run: bool) -> Path:
     """Create or reuse a hydrogen-stripped model variant."""
 

@@ -10,6 +10,8 @@ from grond.manual.state import _read_json, _stage
 
 
 def _finite_float(value: object) -> float | None:
+    """Return ``value`` as a float, or None when it is missing or not finite."""
+
     try:
         number = float(value)
     except (TypeError, ValueError):
@@ -18,11 +20,15 @@ def _finite_float(value: object) -> float | None:
 
 
 def _percent(value: object) -> str:
+    """Format a fraction as a percentage with two decimals; ``n/a`` when not finite."""
+
     number = _finite_float(value)
     return "n/a" if number is None else f"{100.0 * number:.2f}%"
 
 
 def _number(value: object, digits: int = 2, *, signed: bool = False) -> str:
+    """Format a number with ``digits`` decimals (with a sign when ``signed``); ``n/a`` when not finite."""
+
     number = _finite_float(value)
     if number is None:
         return "n/a"
@@ -31,6 +37,8 @@ def _number(value: object, digits: int = 2, *, signed: bool = False) -> str:
 
 
 def _selected_hand_summary(workflow: Mapping[str, object]) -> dict[str, object]:
+    """Summarize the hand stage's adjusted ZKP per crystal and combined, signed for the selected coordinates."""
+
     hand = _stage(workflow, "hand")
     outputs = hand.get("outputs") if isinstance(hand.get("outputs"), Mapping) else {}
     choice = str(outputs.get("choice") or "unknown")
@@ -97,6 +105,8 @@ def _selected_hand_summary(workflow: Mapping[str, object]) -> dict[str, object]:
 
 
 def _manual_row_statistics(row_runs: Mapping[str, Path], model: Path) -> tuple[dict[str, object], dict[str, object]]:
+    """Return the combined and per-crystal row R statistics of the selected rows for ``model``."""
+
     from grond.legacy.engine.bloch_engine import parse_model
     from grond.legacy.engine.row_mr_report import (
         compute_per_dataset_row_mr,
@@ -118,6 +128,8 @@ def _manual_scale_summary(
     workflow: Mapping[str, object],
     row_runs: Mapping[str, Path],
 ) -> dict[str, object]:
+    """Summarize the applied full scale parameters per crystal and the compact scale audit (not applied)."""
+
     datasets: dict[str, object] = {}
     frame_total = 0
     detector_total = 0
@@ -172,6 +184,8 @@ def _manual_scale_summary(
 
 
 def _manual_markdown_summary(payload: Mapping[str, object]) -> str:
+    """Render the final manual-workflow summary payload as Markdown."""
+
     endpoint = payload.get("endpoint") if isinstance(payload.get("endpoint"), Mapping) else {}
     baseline = payload.get("starting_endpoint") if isinstance(payload.get("starting_endpoint"), Mapping) else {}
     row_stats = payload.get("row_statistics") if isinstance(payload.get("row_statistics"), Mapping) else {}

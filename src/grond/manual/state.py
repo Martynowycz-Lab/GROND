@@ -20,6 +20,8 @@ STAGE_ORDER = ("setup", "scout", "thickness", "hand", "feedback", "scales", "fin
 
 
 def _sha256(path: Path) -> str:
+    """Return the SHA-256 hex digest of a file."""
+
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         for block in iter(lambda: handle.read(1024 * 1024), b""):
@@ -28,10 +30,14 @@ def _sha256(path: Path) -> str:
 
 
 def _read_json(path: Path) -> dict[str, Any]:
+    """Return the parsed contents of a JSON file."""
+
     return json.loads(path.read_text())
 
 
 def _write_json(path: Path, payload: Mapping[str, object]) -> None:
+    """Write ``payload`` as indented JSON through a temporary file, creating parent directories."""
+
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(payload, indent=2, allow_nan=True) + "\n")
@@ -39,6 +45,8 @@ def _write_json(path: Path, payload: Mapping[str, object]) -> None:
 
 
 def _workflow_path(args) -> Path:
+    """Return the manual_workflow.json path (``--workflow``, else ./manual_workflow.json); exit if missing."""
+
     text = str(getattr(args, "workflow", "") or "").strip()
     path = Path(text).expanduser().resolve() if text else (Path.cwd() / "manual_workflow.json").resolve()
     if not path.is_file():
@@ -51,6 +59,8 @@ def _workflow_path(args) -> Path:
 
 
 def _load_workflow(args) -> tuple[Path, dict[str, Any]]:
+    """Load the workflow state; fill workers, python, config and shelxl from its runtime defaults when not given."""
+
     path = _workflow_path(args)
     workflow = _read_json(path)
     if workflow.get("kind") != WORKFLOW_KIND:
@@ -68,6 +78,8 @@ def _load_workflow(args) -> tuple[Path, dict[str, Any]]:
 
 
 def _save_workflow(path: Path, workflow: dict[str, Any]) -> None:
+    """Stamp ``updated_at`` and write the workflow state."""
+
     workflow["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
     _write_json(path, workflow)
 
@@ -79,6 +91,8 @@ def _next_command(
     *,
     workflow: Mapping[str, object] | None = None,
 ) -> str:
+    """Return the ``grond manual <stage>`` command line to run next, with the recorded runtime defaults."""
+
     parts = ["grond", "manual", stage, "--workflow", str(workflow_path)]
     defaults = (
         workflow.get("runtime_defaults")
@@ -110,6 +124,11 @@ def _record_stage(
     next_command: str = "",
     warnings: list[str] | None = None,
 ) -> dict[str, Any]:
+    """Record one stage's handoff in its output directory and in the workflow state; return the handoff.
+
+    Recording a stage drops every later recorded stage; scout and thickness also clear the chosen model.
+    """
+
     stages = workflow.setdefault("stages", {})
     invalidated: list[str] = []
     if name in STAGE_ORDER:
@@ -144,6 +163,8 @@ def _record_stage(
 
 
 def _print_handoff(handoff: Mapping[str, object]) -> None:
+    """Print a stage's result: headline, warnings and next command, then a JSON summary."""
+
     outputs = handoff.get("outputs") if isinstance(handoff.get("outputs"), Mapping) else {}
     headline = outputs.get("headline") if isinstance(outputs.get("headline"), Mapping) else {}
     print(f"\nRESULT {handoff.get('stage')}: {handoff.get('status')}")
@@ -183,12 +204,16 @@ def _print_handoff(handoff: Mapping[str, object]) -> None:
 
 
 def _stage(workflow: Mapping[str, object], name: str) -> dict[str, Any]:
+    """Return the recorded handoff of one stage, or {} when it has not run."""
+
     stages = workflow.get("stages")
     value = stages.get(name) if isinstance(stages, Mapping) else None
     return dict(value) if isinstance(value, Mapping) else {}
 
 
 def _require_stage(workflow: Mapping[str, object], name: str) -> dict[str, Any]:
+    """Return one stage's handoff; exit unless its status is ready, complete, skipped or needs_choice."""
+
     stage = _stage(workflow, name)
     if not stage or stage.get("status") not in {"ready", "complete", "skipped", "needs_choice"}:
         raise SystemExit(
@@ -198,6 +223,8 @@ def _require_stage(workflow: Mapping[str, object], name: str) -> dict[str, Any]:
 
 
 def _summary_nuisance(path: Path) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Return a native summary, its best-native nuisance and its config; exit when it has no nuisance."""
+
     summary = _read_json(path)
     best = summary.get("best_native") if isinstance(summary.get("best_native"), Mapping) else {}
     nuisance = best.get("nuisance") if isinstance(best.get("nuisance"), Mapping) else {}

@@ -110,6 +110,16 @@ def add_execution(ap: argparse.ArgumentParser) -> None:
 
     ap.add_argument("--mode", choices=["bloch", "regularize", "auto"], default="auto")
     ap.add_argument(
+        "--preset",
+        choices=["standard", "fast"],
+        default="standard",
+        help=(
+            "Named AUTO settings. standard: the AUTO defaults. fast: lower fidelity and search breadth for a quick "
+            "answer, with every validation step kept. A preset fills only "
+            "options not given on the command line and is recorded in run_config.json and the reports."
+        ),
+    )
+    ap.add_argument(
         "--fast", action="store_true", help="Use N=20/Q=5, no absorption/non-Hermitian terms, and no structure moves."
     )
     ap.add_argument(

@@ -21,6 +21,8 @@ from grond.bloch.constants import ELECTRON_COMPTON_WAVELENGTH_A, SITE_SYMMETRY_T
 
 
 def join_shelx_continuations(lines):
+    """Return SHELX records with continuation lines joined; a trailing ``=`` continues a record on the next line."""
+
     out, pending = [], ""
     for raw in lines:
         line = raw.rstrip()
@@ -36,6 +38,12 @@ def join_shelx_continuations(lines):
 
 
 def parse_sfac(tokens):
+    """Parse a numeric SFAC record into {element, pairs, c, raw}: four Gaussian (a, b) pairs and the constant c.
+
+    The electron scattering factor is f = sum a_i exp(-b_i s^2) + c with s = sin(theta)/lambda in Å⁻¹. Numbers after c
+    (SHELX f', f'', mu, radius, weight) are kept only in ``raw``.
+    """
+
     if len(tokens) < 10:
         raise ValueError(
             "SFAC records used for Bloch calculations must include an element and "
@@ -56,6 +64,8 @@ def parse_sfac(tokens):
 
 
 def gemmi_op_record(text: str):
+    """Parse a symmetry triplet (e.g. ``-x,y+1/2,-z``) into {rot, trans, triplet}, translations in [0, 1)."""
+
     op = gemmi.Op(str(text).strip().replace(" ", "").lower())
     den = float(op.DEN)
     rot = (np.asarray(op.rot, dtype=float) / den).tolist()
@@ -65,6 +75,8 @@ def gemmi_op_record(text: str):
 
 
 def lattice_translations_from_latt(latt_abs: int):
+    """Return the centring translations of SHELX LATT code 1-7 (P, I, R, F, A, B, C); other codes give P."""
+
     # SHELX LATT codes. Most data here are primitive, but keeping centering
     # explicit prevents silent errors when this tool is reused.
     mapping = {
@@ -80,6 +92,8 @@ def lattice_translations_from_latt(latt_abs: int):
 
 
 def unique_symmetry_records(records):
+    """Return the symmetry records without duplicates, comparing rotations and translations (mod 1) on a 1/24 grid."""
+
     out = []
     seen = set()
     for rec in records:
@@ -94,6 +108,12 @@ def unique_symmetry_records(records):
 
 
 def shelx_symmetry_records(latt: int, symm_texts):
+    """Return all symmetry operations of a SHELX model as {rot, trans, triplet} records.
+
+    Identity and the SYMM cards, their inverted copies when LATT is positive (centrosymmetric), each combined with the
+    centring translations of |LATT|.
+    """
+
     base = [gemmi_op_record("x,y,z")]
     base.extend(gemmi_op_record(text) for text in symm_texts)
     if int(latt) > 0:
@@ -125,6 +145,13 @@ def shelx_symmetry_records(latt: int, symm_texts):
 
 
 def cif_symmetry_records(block):
+    """Return a CIF block's symmetry operations: its symop loop, else its declared space group, else identity.
+
+    Declarations must agree on the space-group type. Without an operation loop,
+    Hall takes precedence over H-M, and a named setting over the IT number alone.
+    An unusable symop loop or an unknown group raises ValueError.
+    """
+
     rows = []
     for tag in ("_space_group_symop_operation_xyz", "_symmetry_equiv_pos_as_xyz"):
         _, rows = loop_rows(block, tag)
@@ -147,10 +174,10 @@ def cif_symmetry_records(block):
         parsed_number = cif_number(number)
         if not math.isfinite(parsed_number) or parsed_number != round(parsed_number):
             raise ValueError(f"CIF declares an invalid space-group number {number!r}")
-        sg = gemmi.find_spacegroup_by_number(int(parsed_number))
-        if sg is None:
+        space_group = gemmi.find_spacegroup_by_number(int(parsed_number))
+        if space_group is None:
             raise ValueError(f"CIF declares unknown space-group number {number!r}")
-        declared_groups.append(("IT number", sg))
+        declared_groups.append(("IT number", space_group))
 
     for tag in (
         "_space_group_name_H-M_alt",
@@ -161,28 +188,42 @@ def cif_symmetry_records(block):
         if not raw:
             continue
         name = str(raw).strip().strip("'\"")
-        sg = gemmi.find_spacegroup_by_name(name)
-        if sg is None:
+        space_group = gemmi.find_spacegroup_by_name(name)
+        if space_group is None:
             raise ValueError(f"CIF declares an unrecognized space-group name {name!r} in {tag}")
-        declared_groups.append((tag, sg))
+        declared_groups.append((tag, space_group))
 
     for tag in ("_space_group_name_Hall", "_symmetry_space_group_name_Hall"):
         raw = block.find_value(tag)
         if not raw:
             continue
         name = str(raw).strip().strip("'\"")
-        sg = next((candidate for candidate in gemmi.spacegroup_table() if candidate.hall == name), None)
-        if sg is None:
+        space_group = next((candidate for candidate in gemmi.spacegroup_table() if candidate.hall == name), None)
+        if space_group is None:
             raise ValueError(f"CIF declares an unrecognized Hall space-group name {name!r} in {tag}")
-        declared_groups.append((tag, sg))
+        declared_groups.append((tag, space_group))
 
     if declared_groups:
         numbers = {int(group.number) for _source, group in declared_groups}
         if len(numbers) != 1:
             declarations = ", ".join(f"{source}={group.xhm()}" for source, group in declared_groups)
             raise ValueError(f"CIF space-group declarations disagree: {declarations}")
-        sg = declared_groups[0][1]
-        return unique_symmetry_records(gemmi_op_record(op.triplet()) for op in sg.operations())
+        # The IT number identifies a group type, not its axes or origin. For
+        # example, number 14 permits both P21/c and P21/n. Using its default
+        # setting would silently discard the setting declared by the model.
+        # Hall specifies the coordinate system fully; an H-M name may leave
+        # an origin choice implicit. A reference-setting name is a fallback
+        # when neither the actual setting nor Hall has been supplied.
+        setting_priority = {
+            "_space_group_name_Hall": 0,
+            "_symmetry_space_group_name_Hall": 0,
+            "_space_group_name_H-M_alt": 1,
+            "_symmetry_space_group_name_H-M": 1,
+            "_space_group_name_H-M_ref": 2,
+            "IT number": 3,
+        }
+        _source, space_group = min(declared_groups, key=lambda item: setting_priority[item[0]])
+        return unique_symmetry_records(gemmi_op_record(op.triplet()) for op in space_group.operations())
     return [gemmi_op_record("x,y,z")]
 
 
@@ -265,6 +306,13 @@ SHELX_NON_ATOM_RECORDS = {
 }
 
 
+def shelx_encoded(value: float) -> bool:
+    """True when a SHELX numeric token uses the ``10*m+p`` fixed or free-variable encoding."""
+
+    mode = math.trunc(float(value) / 10.0)
+    return mode != 0 and abs(float(value) - 10.0 * mode) < 5.0
+
+
 def shelx_parameter(value: float, free_variables: list[float], *, field: str) -> float:
     """Resolve SHELX's ``10*m+p`` parameter encoding.
 
@@ -306,6 +354,8 @@ def is_shelx_q_peak(label: str) -> bool:
 
 
 def cif_number(value, default=float("nan")):
+    """Return a CIF value as float without its ``(esd)``; empty, ``.``, ``?`` or non-numeric text gives ``default``."""
+
     text = str(value).strip().strip("'\"")
     if not text or text in {".", "?"}:
         return float(default)
@@ -318,6 +368,13 @@ def cif_number(value, default=float("nan")):
 
 
 def parse_res(path: Path):
+    """Parse a SHELX .res/.ins file into the engine's model dict: cell, electron SFAC records, atoms and symmetry.
+
+    Free-variable references are resolved and Q peaks skipped. A negative Uiso is |Uiso| times the Ueq (Å²) of the
+    preceding anisotropic or non-H atom. Atom ``occ`` becomes the physical site occupancy, the SOF times the
+    site-symmetry order; the SOF itself is kept as ``shelx_sof``.
+    """
+
     lines = join_shelx_continuations(path.read_text(errors="replace").splitlines())
     cell = None
     sfac = []
@@ -451,6 +508,8 @@ def parse_res(path: Path):
 
 
 def loop_rows(block, required_tag):
+    """Return (tags, rows) of the CIF loop holding ``required_tag``, rows as {tag: value}; ([], []) without it."""
+
     col = block.find_loop(required_tag)
     if not col:
         return [], []
@@ -463,6 +522,13 @@ def loop_rows(block, required_tag):
 
 
 def parse_cif(path: Path):
+    """Parse a CIF model with explicit electron scattering-factor coefficients into the engine's model dict.
+
+    The block must declare its coefficients as electron factors and give Cromer-Mann a1-a4, b1-b4 and c per atom type.
+    Bij and Biso are converted to U by dividing by 8*pi^2, and an atom without any ADP gets Uiso = 0.05 Å². CIF
+    occupancies are already site occupancies.
+    """
+
     doc = gemmi.cif.read_file(str(path))
     block = doc.sole_block()
     cell = (
@@ -582,6 +648,8 @@ def parse_cif(path: Path):
         }
 
         def adp_label(tag, values=values_by_tag):
+            """Return the lower-case value of an ADP-type tag, or an empty string when it is missing, ``.`` or ``?``."""
+
             value = str(values.get(tag, "")).strip().strip("'\"").lower()
             return "" if value in {"", ".", "?"} else value
 
@@ -656,12 +724,16 @@ def parse_cif(path: Path):
 
 
 def parse_model(path: Path):
+    """Parse a structural model file: ``.cif`` with parse_cif, anything else as SHELX .res/.ins."""
+
     if path.suffix.lower() == ".cif":
         return parse_cif(path)
     return parse_res(path)
 
 
 def alternate_hand_model(model):
+    """Return the other-hand copy of the model: coordinates and symmetry translations negated modulo 1."""
+
     out = copy.deepcopy(model)
     for atom in out["atoms"]:
         atom["x"] = (-float(atom["x"])) % 1.0
@@ -673,48 +745,51 @@ def alternate_hand_model(model):
 
 
 def model_content_hash(model):
+    """Return a SHA-256 of the model's numerical physics content; atom labels are excluded.
+
+    Float values retain their full round-trip precision. Rounding here can reuse a stale potential for a small
+    in-memory refinement step even when no RES file changes. Callable scattering factors cannot be bound to a
+    reproducible content hash; use explicit coefficients for cached calculations.
+    """
+
+    if any(isinstance(sf, dict) and "evaluator" in sf for sf in model.get("sfac", [])):
+        raise ValueError("model caching requires explicit scattering factors, not callable evaluators")
     payload = {
-        "cell": [round(float(v), 8) for v in model.get("cell", [])],
+        "hash_schema": 2,
+        "cell": [float(v) for v in model.get("cell", [])],
         "sfac": model.get("sfac", []),
         "atoms": [
             {
                 "sfac_index": int(a["sfac_index"]),
-                "x": round(float(a["x"]), 8),
-                "y": round(float(a["y"]), 8),
-                "z": round(float(a["z"]), 8),
-                "occ": round(float(a["occ"]), 8),
+                "x": float(a["x"]),
+                "y": float(a["y"]),
+                "z": float(a["z"]),
+                "occ": float(a["occ"]),
                 "adp_type": a.get("adp_type", ""),
-                "uiso": round(float(a.get("uiso", 0.0)), 8),
-                "u11": round(float(a.get("u11", 0.0)), 8),
-                "u22": round(float(a.get("u22", 0.0)), 8),
-                "u33": round(float(a.get("u33", 0.0)), 8),
-                "u23": round(float(a.get("u23", 0.0)), 8),
-                "u13": round(float(a.get("u13", 0.0)), 8),
-                "u12": round(float(a.get("u12", 0.0)), 8),
+                "uiso": float(a.get("uiso", 0.05)),
+                "u11": float(a.get("u11", 0.0)),
+                "u22": float(a.get("u22", 0.0)),
+                "u33": float(a.get("u33", 0.0)),
+                "u23": float(a.get("u23", 0.0)),
+                "u13": float(a.get("u13", 0.0)),
+                "u12": float(a.get("u12", 0.0)),
             }
             for a in model.get("atoms", [])
         ],
         "symmetry_ops": [
             {
-                "rot": [[round(float(v), 8) for v in row] for row in op.get("rot", [])],
-                "trans": [round(float(v) % 1.0, 8) for v in op.get("trans", [])],
+                "rot": [[float(v) for v in row] for row in op.get("rot", [])],
+                "trans": [float(v) % 1.0 for v in op.get("trans", [])],
             }
             for op in model.get("symmetry_ops", [])
         ],
     }
-    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
-
-
-def symmetry_ops_p212121():
-    return [
-        (np.diag([1.0, 1.0, 1.0]), np.array([0.0, 0.0, 0.0])),
-        (np.diag([-1.0, -1.0, 1.0]), np.array([0.5, 0.0, 0.5])),
-        (np.diag([-1.0, 1.0, -1.0]), np.array([0.0, 0.5, 0.5])),
-        (np.diag([1.0, -1.0, -1.0]), np.array([0.5, 0.5, 0.0])),
-    ]
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, allow_nan=False).encode()).hexdigest()
 
 
 def model_symmetry_ops(model):
+    """Return the model's symmetry operations as (rotation, translation) arrays; identity alone when it has none."""
+
     records = model.get("symmetry_ops") or []
     if not records:
         return [(np.eye(3), np.zeros(3))]
@@ -722,12 +797,16 @@ def model_symmetry_ops(model):
 
 
 def reciprocal_lengths(cell_tuple):
+    """Return the reciprocal cell lengths a*, b*, c* (Å⁻¹) of a cell given as (a, b, c in Å, angles in degrees)."""
+
     uc = gemmi.UnitCell(*[float(v) for v in cell_tuple[:6]])
     rec = uc.reciprocal()
     return float(rec.a), float(rec.b), float(rec.c)
 
 
 def inv_d2_from_hkl_array(h, k, l, cell_tuple):
+    """Return 1/d^2 (Å⁻²) of Miller indices from the reciprocal metric of a cell; h, k and l may be arrays."""
+
     uc = gemmi.UnitCell(*[float(v) for v in cell_tuple[:6]])
     rec = uc.reciprocal()
     ast, bst, cst = float(rec.a), float(rec.b), float(rec.c)
@@ -743,10 +822,18 @@ def inv_d2_from_hkl_array(h, k, l, cell_tuple):
 
 
 def sfac_value(sfac, s2):
+    """Return f at s^2 = (sin(theta)/lambda)^2 in Å⁻²: the record's evaluator, else sum a*exp(-b*s^2) + c."""
+
+    if "evaluator" in sfac:
+        return float(sfac["evaluator"](s2))
     return float(sum(a * math.exp(-b * s2) for a, b in sfac["pairs"]) + sfac.get("c", 0.0))
 
 
 def sfac_value_array(sfac, s2):
+    """Return sfac_value elementwise for an array of s^2 values."""
+
+    if "evaluator" in sfac:
+        return np.asarray(sfac["evaluator"](s2), dtype=float)
     out = np.zeros_like(s2, dtype=float) + float(sfac.get("c", 0.0))
     for a, b in sfac["pairs"]:
         out += float(a) * np.exp(-float(b) * s2)
@@ -794,6 +881,12 @@ def shelx_u_cart_matrix(atom, cell_tuple):
 
 
 def atom_dw(atom, hkl, cell_tuple):
+    """Return an atom's Debye-Waller factor for one HKL.
+
+    Anisotropic: exp(-2*pi^2 * q.U.q) with q = (h a*, k b*, l c*) and crystallographic Uij (Å²).
+    Isotropic: exp(-8*pi^2 * Uiso * s^2) with s^2 = 1/(4 d^2).
+    """
+
     h, k, l = (float(v) for v in hkl)
     if atom.get("adp_type") == "anis":
         ast, bst, cst = reciprocal_lengths(cell_tuple)
@@ -805,6 +898,8 @@ def atom_dw(atom, hkl, cell_tuple):
 
 
 def atom_dw_array(atom, h, k, l, s2, cell_tuple):
+    """Return atom_dw elementwise for arrays of h, k and l, with precomputed s^2 = 1/(4 d^2)."""
+
     if atom.get("adp_type") == "anis":
         ast, bst, cst = reciprocal_lengths(cell_tuple)
         u11, u22, u33 = float(atom["u11"]), float(atom["u22"]), float(atom["u33"])
@@ -845,6 +940,12 @@ def unique_symmetry_mates(atom, model):
 
 
 def fcalc_res(model, hkl):
+    """Return the complex electron structure factor F(hkl) of the model.
+
+    F = sum over atoms and their unique symmetry mates of occ * f(s) * T * exp(+2*pi*i h.x), each mate's Debye-Waller
+    factor T evaluated at the rotated index R^T h.
+    """
+
     h, k, l = (int(v) for v in hkl)
     s2 = 0.25 * inv_d2_from_hkl_array(h, k, l, model["cell"])
     total = 0.0 + 0.0j
@@ -859,6 +960,8 @@ def fcalc_res(model, hkl):
 
 
 def fcalc_res_grid(model, h, k, l):
+    """Return fcalc_res for arrays of h, k and l (complex128, same shape)."""
+
     h = np.asarray(h, dtype=float)
     k = np.asarray(k, dtype=float)
     l = np.asarray(l, dtype=float)

@@ -158,6 +158,12 @@ def dials_sg_statistics(arrays: dict[str, np.ndarray], metadata: dict[str, Any],
     starting_frame, _ = _scan_array_range(metadata)
 
     def sg_values(a_scan: np.ndarray) -> np.ndarray:
+        """Return the excitation error Sg (1/A) of every kept row for one set of scan-point A matrices.
+
+        Sg = (k^2 - |s0 + g|^2) / (2k), where g is the rotated reciprocal-lattice vector at
+        the row's calculated frame and k = |s0|.
+        """
+
         sg = []
         for i in np.where(keep)[0]:
             scan_z = float(xyzcal[i, 2]) - float(starting_frame)
@@ -169,6 +175,8 @@ def dials_sg_statistics(arrays: dict[str, np.ndarray], metadata: dict[str, Any],
         return np.asarray(sg, dtype=float)
 
     def p95_abs_sg(a_scan: np.ndarray) -> float:
+        """Return the 95th percentile of abs(Sg) in 1/A, or infinity when no row gives a finite value."""
+
         values = sg_values(a_scan)
         finite = values[np.isfinite(values)]
         return float(np.percentile(np.abs(finite), 95)) if len(finite) else math.inf
@@ -223,6 +231,8 @@ def _real_space_axes_from_a(a_static: np.ndarray) -> np.ndarray:
 
 
 def _format_header_vector(values: list[float] | np.ndarray) -> str:
+    """Format numbers as space-separated ``%.10g`` text for an INTEGRATE.HKL header line."""
+
     return " ".join(f"{float(v): .10g}" for v in values)
 
 

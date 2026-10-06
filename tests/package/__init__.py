@@ -1,1 +1,0 @@
-"""GROND package regression tests."""

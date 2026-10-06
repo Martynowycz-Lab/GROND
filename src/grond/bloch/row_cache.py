@@ -6,9 +6,9 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 import os
 import time
+import zipfile
 from pathlib import Path
 
 import numpy as np
@@ -16,8 +16,8 @@ import numpy as np
 from grond.bloch.cache import row_plan_cache_validation_errors
 from grond.bloch.constants import ROW_PLAN_CACHE_SCHEMA
 from grond.bloch.hamiltonian import validate_passive_absorption
-from grond.bloch.model import fcalc_res_grid, model_content_hash
-from grond.bloch.numerics import _rotation_matrix_axis_angle, sha256
+from grond.bloch.model import model_content_hash
+from grond.bloch.numerics import _rotation_matrix_axis_angle, sha256, validate_row_indices
 
 
 class RowCacheMixin:
@@ -45,10 +45,15 @@ class RowCacheMixin:
         frozen-basis behavior for native finite-difference experiments.
         """
 
-        indices = np.asarray(indices, dtype=np.int64)
+        indices = validate_row_indices(indices, row_count=len(self.data.iobs))
+        source_hashes = self.data.verify_source_files()
+        if self.geometry_path is not None:
+            path = Path(self.geometry_path["path"])
+            if sha256(path) != self.geometry_path["sha256"]:
+                raise ValueError(f"loaded geometry path changed after reading: {path}; reload the Bloch port")
         cfg_fields = {
             "cache_schema": ROW_PLAN_CACHE_SCHEMA,
-            "hkl_sha256": sha256(self.data.path),
+            "hkl_sha256": source_hashes["hkl"],
             "hkl_transform": self.data.hkl_transform_spec,
             "indices_sha256": hashlib.sha256(indices.tobytes()).hexdigest(),
             "n_basis": int(self.cfg.n_basis),
@@ -89,17 +94,12 @@ class RowCacheMixin:
             "dose_b_ref_frame": float(self.dose_ref_frame),
             "cell": [float(v) for v in self.model["cell"]],
             "wavelength": float(self.data.wavelength),
-            "scan_matrix_sha256": (
-                sha256(self.data.a_scan_points_path)
-                if self.data.a_scan_points_path is not None and self.data.a_scan_points_path.exists()
-                else ""
-            ),
-            "pets_exact_geometry_sha256": (
-                sha256(self.data.pets_exact_geometry_path)
-                if self.data.pets_exact_geometry_path is not None and self.data.pets_exact_geometry_path.exists()
-                else ""
-            ),
+            "scan_matrix_sha256": source_hashes.get("scan_matrix", ""),
+            "pets_exact_geometry_sha256": source_hashes.get("pets_exact_geometry", ""),
         }
+        if getattr(self.data, "zcal_frame_convention", "scan_start") != "scan_start":
+            # Keys of files read in the legacy scan-start mapping are unchanged; XDS-convention rows get their own.
+            cfg_fields["zcal_frame_convention"] = str(self.data.zcal_frame_convention)
         if self.row_plan_cache_mode() == "exact":
             cfg_fields.update(
                 {
@@ -112,6 +112,8 @@ class RowCacheMixin:
         return hashlib.sha256(text.encode()).hexdigest()[:20], cfg_fields
 
     def row_plan_cache_path(self, key: str) -> Path:
+        """Return the .npz path of a row-plan cache key under ``cache_dir/row_plans`` (requires cache_dir)."""
+
         if self.cache_dir is None:
             raise ValueError("row-plan cache requires cache_dir")
         return self.cache_dir / "row_plans" / f"row_plan_{key}.npz"
@@ -119,7 +121,7 @@ class RowCacheMixin:
     def build_row_plan_cache(self, indices):
         """Build immutable row geometry and basis plans for later reuse."""
 
-        indices = np.asarray(indices, dtype=int)
+        indices = validate_row_indices(indices, row_count=len(self.data.iobs))
         key, meta = self.row_plan_cache_key(indices)
         meta = dict(meta)
         meta.update(
@@ -320,6 +322,8 @@ class RowCacheMixin:
 
         unique_diffs_arr = np.asarray(unique_diffs, dtype=np.int32).reshape(-1, 3)
         unique_inv_d2 = self.inv_d2_for_hkls(unique_diffs_arr) if len(unique_diffs_arr) else np.zeros(0, dtype=float)
+        if self.row_plan_cache_key(indices)[0] != key:
+            raise ValueError("row-plan inputs changed during construction; refusing to return the result")
         return {
             "meta": meta,
             "indices": indices.astype(np.int64),
@@ -365,6 +369,8 @@ class RowCacheMixin:
         }
 
     def save_row_plan_cache(self, path: Path, cache: dict) -> None:
+        """Write a row-plan cache as compressed .npz via a temporary file and rename, with ``meta`` as JSON."""
+
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_name(f"{path.stem}.{os.getpid()}.tmp.npz")
         save = {k: v for k, v in cache.items() if k != "meta"}
@@ -372,12 +378,22 @@ class RowCacheMixin:
         os.replace(tmp, path)
 
     def load_row_plan_cache_file(self, path: Path) -> dict:
+        """Read a row-plan cache .npz written by save_row_plan_cache, decoding ``meta`` from JSON."""
+
         with np.load(path, allow_pickle=False) as loaded:
+            if "meta_json" not in loaded.files:
+                raise ValueError(f"row-plan cache {path} has no metadata")
             cache = {k: loaded[k] for k in loaded.files if k != "meta_json"}
             cache["meta"] = json.loads(str(loaded["meta_json"]))
         return cache
 
     def load_or_build_row_plan_cache(self, indices):
+        """Return the row-plan cache for ``indices``, or None when the cache is off.
+
+        exact and readwrite reuse a valid file; a stale, incomplete or unreadable one is reported and rebuilt, and
+        rebuild mode always rebuilds. ``status`` records hit, built or rebuilt.
+        """
+
         mode = self.row_plan_cache_mode()
         if mode == "off":
             return None
@@ -386,8 +402,16 @@ class RowCacheMixin:
         if mode in {"exact", "readwrite"} and path.exists():
             try:
                 cache = self.load_row_plan_cache_file(path)
+            except (OSError, ValueError, TypeError, EOFError, zipfile.BadZipFile) as exc:
+                print(
+                    f"Ignoring unreadable row-plan cache {path}: {type(exc).__name__}: {exc}",
+                    flush=True,
+                )
+            else:
                 errors = row_plan_cache_validation_errors(cache, indices, key, meta)
                 if not errors:
+                    if self.row_plan_cache_key(indices)[0] != key:
+                        raise ValueError("row-plan inputs changed while loading the cache")
                     cache["status"] = {
                         "status": "hit",
                         "mode": mode,
@@ -400,12 +424,9 @@ class RowCacheMixin:
                     f"{path}: {'; '.join(errors[:4])}{'; ...' if len(errors) > 4 else ''}",
                     flush=True,
                 )
-            except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
-                print(
-                    f"Ignoring unreadable row-plan cache {path}: {type(exc).__name__}: {exc}",
-                    flush=True,
-                )
         cache = self.build_row_plan_cache(indices)
+        if self.row_plan_cache_key(indices)[0] != key:
+            raise ValueError("row-plan inputs changed during construction; refusing to cache the result")
         self.save_row_plan_cache(path, cache)
         cache["status"] = {
             "status": "built" if mode in {"exact", "readwrite"} else "rebuilt",
@@ -422,33 +443,29 @@ class RowCacheMixin:
         out = np.zeros(len(unique_diffs), dtype=np.complex128)
         if len(unique_diffs) == 0:
             return out
-        h = unique_diffs[:, 0]
-        k = unique_diffs[:, 1]
-        l = unique_diffs[:, 2]
-        ok = (
-            (h >= -self.h_lim)
-            & (h <= self.h_lim)
-            & (k >= -self.k_lim)
-            & (k <= self.k_lim)
-            & (l >= -self.l_lim)
-            & (l <= self.l_lim)
-        )
-        if np.any(ok):
-            factor = float(self.gamma) / (math.pi * self.data.cell.volume)
-            out[ok] = factor * fcalc_res_grid(self.model, h[ok], k[ok], l[ok])
-        return out
+        # Active differences may extend beyond the optional dense cache.
+        return self.calculate_ug_array(unique_diffs)
 
     def cached_static_hamiltonian(
         self, basis, diff_idx, unique_diffs, unique_inv_d2, unique_ug, row_idx, absorb: bool, dose_delta_b=None
     ):
+        """Return a row's static Hamiltonian from cached beam-difference lookups (see hamiltonian_static_part).
+
+        ``diff_idx`` maps the n*n beam differences into ``unique_diffs``, ``unique_inv_d2`` and ``unique_ug``. Dose
+        attenuation uses ``dose_delta_b`` when given, else the row's current value; absorption terms and the passivity
+        check are those of hamiltonian_static_part.
+        """
+
         n = len(basis)
-        H = np.zeros((n, n), dtype=np.complex128)
+        double_prec = bool(getattr(self.cfg, "double_precision", False))
+        h_dtype = np.complex128 if double_prec else np.complex64
+        H = np.zeros((n, n), dtype=h_dtype)
         mode = str(getattr(self.cfg, "absorption_mode", "none") or "none").lower()
         if absorb and mode in {"mean", "midgley_like", "midgley"}:
             H[np.diag_indices(n)] += 1j * float(getattr(self.cfg, "absorption_mu", 0.0))
         elif absorb and mode == "beam_dependent":
             H[np.diag_indices(n)] += 1j * self.beam_absorption_mu(basis)
-        u_mat = np.asarray(unique_ug[diff_idx], dtype=np.complex128).reshape(n, n).copy()
+        u_mat = np.asarray(unique_ug[diff_idx], dtype=h_dtype).reshape(n, n).copy()
         delta_b = float(self.row_delta_b(row_idx) if dose_delta_b is None else dose_delta_b)
         if delta_b != 0.0:
             inv_d2 = np.asarray(unique_inv_d2[diff_idx], dtype=float).reshape(n, n)
@@ -465,6 +482,12 @@ class RowCacheMixin:
         return H
 
     def row_prediction_from_cache(self, cache: dict, pos: int, unique_ug: np.ndarray):
+        """Return (row index, result) for cache position ``pos``, predicted with the current U_g values.
+
+        Profile-weighted thickness averages of the cached profile points give ``dyn`` and ``born`` (and ``dyn_inverse``
+        with paired_inverse_hand); the other fields are the cached row geometry, as in row_prediction.
+        """
+
         row_idx = int(cache["indices"][pos])
         b0, b1 = int(cache["basis_offsets"][pos]), int(cache["basis_offsets"][pos + 1])
         p0, p1 = int(cache["profile_offsets"][pos]), int(cache["profile_offsets"][pos + 1])
@@ -511,9 +534,7 @@ class RowCacheMixin:
             else:
                 dyn_vals.append(self.propagate_direct_to_target_thickness_average(H))
             delta = float(np.real(sg_basis[1] - sg_basis[0]))
-            sinc = np.sinc(delta * self.thick)
-            born_t = (2.0 * math.pi) ** 2 * (abs(h10_born) ** 2) * (self.thick**2) * (sinc**2)
-            born_vals.append(float(np.sum(self.thick_w * born_t)))
+            born_vals.append(self.born_thickness_average(h10_born, delta))
         dyn = float(np.sum(weights * np.asarray(dyn_vals, dtype=float)))
         born = float(np.sum(weights * np.asarray(born_vals, dtype=float)))
         support = [[int(v) for v in row] for row in basis.tolist()]
@@ -558,4 +579,6 @@ class RowCacheMixin:
         return row_idx, result
 
     def row_prediction_from_active_cache(self, pos: int):
+        """Return row_prediction_from_cache for position ``pos`` of the active cache and its current U_g values."""
+
         return self.row_prediction_from_cache(self._active_row_plan_cache, int(pos), self._active_unique_ug)

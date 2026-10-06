@@ -24,6 +24,12 @@ from grond.manual.state import (
 
 
 def _manual_checkpoint(workflow: Mapping[str, object], output: Path) -> dict[str, object]:
+    """Write a continue checkpoint for ``grond refine`` from the thickness-stage summaries; return it.
+
+    Each crystal keeps its selected summary's nuisance and prediction settings; the start model is the workflow's chosen
+    model.
+    """
+
     prep = load_prep(Path(str(workflow["prep"])))
     thickness = _stage(workflow, "thickness")
     selected = dict(thickness["outputs"]["selected_summaries"])
@@ -87,6 +93,12 @@ def _manual_checkpoint(workflow: Mapping[str, object], output: Path) -> dict[str
 
 
 def manual_feedback(args) -> int:
+    """Run the ``feedback`` stage: SHELXL feedback macro-cycles from the chosen model, then its final rows.
+
+    The selected cycle must be clean (no NPD atoms). Its rows are recomputed with ``--cycles 0`` so later stages read
+    rows of exactly that model.
+    """
+
     workflow_path, workflow = _load_workflow(args)
     hand = _require_stage(workflow, "hand")
     if hand.get("status") == "needs_choice" or not workflow.get("chosen_model"):
@@ -101,6 +113,9 @@ def manual_feedback(args) -> int:
     checkpoint = _manual_checkpoint(workflow, checkpoint_path)
     single_dataset = int(checkpoint.get("dataset_count", 0) or 0) == 1
     ignore_source_baseline = single_dataset and not str(checkpoint.get("baseline_hkl") or "").strip()
+    # Several crystals: each crystal's error model (--dataset-sigma-policy error_model, the AUTO default) sets the
+    # merged HKL's sigmas and the combine refuses a second uniform rescale of it, as in AUTO's shared loop.
+    post_bloch_sigma_policy = "uniform_z_rms" if single_dataset else "none"
     command_line = [
         *_child_base(args),
         "refine",
@@ -125,7 +140,7 @@ def manual_feedback(args) -> int:
         "--endpoint-ls-cycles",
         "1",
         "--post-bloch-sigma-policy",
-        "uniform_z_rms",
+        post_bloch_sigma_policy,
         "--lambda-grid",
         "1.0",
         "--row-plan-cache",
@@ -271,6 +286,8 @@ def manual_feedback(args) -> int:
 
 
 def manual_scales(args) -> int:
+    """Run the ``scales`` stage: audit compact scale models per crystal; the full pinned scales stay applied."""
+
     workflow_path, workflow = _load_workflow(args)
     feedback = _require_stage(workflow, "feedback")
     root = Path(workflow["root"])

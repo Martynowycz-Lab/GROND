@@ -1,93 +1,67 @@
-# XDS Workflow For GROND
+# XDS workflow
 
-GROND is designed to start from integrated observations and a solved structure. In practice, the cleanest workflow is to keep the conventional structure-solution path separate from the GROND no-profile-fitting integration path. The starting `RES` or `CIF` can be solved from any reasonable intensities, including the best profile-fitted XDS/XSCALE/XDSCONV/SHELXT/SHELXL path. The Bloch-wave row calculations should use summation intensities from a separate no-profile-fitting XDS pass.
+GROND starts from integrated observations and a solved structure. Keep two products from the same frames: the conventional structure solution, which can use the best profile-fitted XDS/XSCALE/XDSCONV/SHELXT/SHELXL path, and a separate summation integration without profile fitting for the Bloch calculation.
 
-## 1. Solve The Structure Conventionally
+## 1. Solve the structure conventionally
 
-Use your ordinary small-molecule electron-diffraction path to obtain a chemically sensible starting model. A typical XDS/SHELX route is:
+A typical route is:
 
 ```text
-XDS with PROFILE_FITTING= TRUE or the local default
+XDS (profile fitting on, or the local default)
 XSCALE
-XDSCONV to SHELX HKLF4
+XDSCONV to SHELX HKLF 4
 SHELXT
-SHELXL initial regularization
+SHELXL
 ```
 
-The output from this path should include a starting `model.res` or `model.ins` with explicit electron scattering coefficients. A CIF is also suitable for `GROND run` when it embeds the complete SHELX instruction block. It is fine, and usually preferred, if this model was solved against profile-fitted intensities with the best conventional XDS statistics. If you have a solved-model HKL file from XDSCONV/SHELX, keep it even when it came from that profile-fitted path. GROND uses that file as `--baseline-hkl` to compare signed HKLs and intensity overlap before it spends time on expensive Bloch transform scouts.
+The result is a `model.res` or `model.ins` with numeric electron scattering factors on its SFAC lines. A CIF also works when it embeds the SHELX instructions (`_shelx_res_file`). Keep the HKL file the model was refined against and pass it as `--baseline-hkl`. GROND compares it with the summation observations to order the indexing candidates, and the leak-free start refines the model against it with the free reflections removed. Without it the leak-free start is skipped with a warning, and the free-set R factors are optimistic.
 
-Check the saved model with `GROND sfac-check --structure model.res`. If it has
-only `SFAC C H N O`, return to the electron-scattering Olex2/SHELXL refinement
-that produced the model and export/save its explicit numeric electron SFAC
-records. Do not substitute coefficients from a different element or an X-ray
-table.
+Check the model with `grond sfac-check --structure model.res`. If it has only `SFAC C H N O`, return to the electron-scattering Olex2/SHELXL refinement that produced it and save the numeric electron SFAC records. Do not take coefficients from another element or an X-ray table.
 
-## 2. Make A Separate GROND Integration Directory
+## 2. Make a separate summation integration
 
-Copy the XDS processing directory to a new directory, for example:
+Copy the XDS directory:
 
 ```bash
 cp -R xds xds_noprf
 cd xds_noprf
 ```
 
-Edit `XDS.INP` in the copied directory. Reuse the updated geometry and indexing from the successful conventional processing, but turn off profile fitting for the rows GROND will model. The usual GROND input integration is:
+In the copy, keep the refined geometry and indexing and turn profile fitting off:
 
 ```text
 PROFILE_FITTING= FALSE
 MINPK= 90.0
 ```
 
-Then rerun XDS in that copied directory:
+Then rerun XDS (`xds` or `xds_par`). If the copy already holds the accepted geometry, rerunning the integration and correction steps is usually enough; rerunning everything is slower but avoids mixing files from two reductions.
+
+GROND reads `INTEGRATE.HKL`, whose header carries the detector, beam, rotation axis and cell, and `CORRECT.LP` (cell e.s.d.s) when it is in the same directory. Point GROND at the directory and keep it intact; do not copy `INTEGRATE.HKL` away on its own.
+
+The summation pass can look slightly worse by ordinary integration statistics, especially at high resolution. That is expected. GROND predicts the rocking curve and partiality itself, so it needs intensities close to summation counts. A profile-fitted `INTEGRATE.HKL` will often run, but the input check warns about it, and the corrected intensities are usually worse.
+
+The input check also reports alternative row counts and geometry tails, but it does not lower the requested `MINPK`/partiality floor (90) or geometry percentile on its own. Change those only in a separately named run.
+
+### Indexing setting
+
+XDS often keeps `INTEGRATE.HKL` in the primitive P1 integration setting while `CORRECT` reindexes and constrains the cell in the model's space group. GROND handles this. It first applies the strict reciprocal-cell metric filter (`--transform-metric-tolerance`, 2%). If that rejects every candidate, and only when the file declares `SPACE_GROUP_NUMBER=1` and the model has higher symmetry, it allows a bounded fallback: the reciprocal metric must agree within 5% and every transformed axis length within 3%. The candidates then go to the normal transform scout. The fallback, its limits, the cells and the kept candidates are recorded in `decisions/<dataset>/transform_decision.json`.
+
+### Frame coordinate
+
+XDS numbers images from `STARTING_FRAME`, and its frame coordinate (`ZCAL`, `ZOBS`, `ZD`) puts image n on z from n − 1 to n. GROND therefore reads the spindle angle of an observation as `STARTING_ANGLE + (ZCAL - STARTING_FRAME + 1) * OSCILLATION_RANGE` when the header names an XDS writer (`!Generated by INTEGRATE`, `CORRECT`, `XSCALE` or `dials.export`). Files written by GROND itself (the DIALS bridge, the PETS2 import, the portable row format) use `z = STARTING_FRAME` at the scan start, and so does a file with no recognised writer line. A header line `!GROND_ZCAL_CONVENTION= xds` or `scan_start` states the convention explicitly. The convention used is recorded in each screen's `summary.json` (`xds_frame_datum.zcal_frame_convention`).
+
+## 3. Check the setup
 
 ```bash
-xds
+grond doctor --workflow small-molecule --config grond.config.json --probe-bloch --strict
 ```
 
-or, on a machine configured for parallel XDS:
+This checks the Python packages and that SHELXL can be found.
+
+## 4. One crystal
 
 ```bash
-xds_par
-```
-
-If the copied directory already contains the accepted geometry and indexing from the profile-fitted solution run, it is usually enough to rerun the integration/correction part of XDS after changing the profile-fitting flags. When in doubt, rerunning the full copied XDS directory is slower but safer than mixing files from two different reductions.
-
-The important output is `INTEGRATE.HKL`, but GROND also benefits from nearby XDS metadata such as `XDS.INP`, `XPARM.XDS`, `GXPARM.XDS`, `INTEGRATE.LP`, `CORRECT.LP`, and `XSCALE.LP` when available. Keep the directory intact rather than copying `INTEGRATE.HKL` alone.
-
-XDS commonly keeps `INTEGRATE.HKL` in the primitive P1 integration basis even when `CORRECT` reindexes the reflections and constrains the cell in the solved-model space group. GROND handles this automatically. It first applies the ordinary strict reciprocal-cell metric filter. If that rejects every candidate, and only when the row table explicitly declares `SPACE_GROUP_NUMBER=1` while the model has higher symmetry, GROND permits a bounded P1-distortion fallback: the full reciprocal metric must agree within 5% and every transformed axis length within 3%. All compatible determinant-positive sign variants then enter the normal chemistry-blind Bloch transform scout. The fallback, limits, source/model cells, and retained operators are recorded in `decisions/<dataset>/transform_decision.json`; genuine cell mismatches still fail closed.
-
-This no-profile-fitting pass may look slightly worse by ordinary integration statistics, especially at high resolution, because profile fitting is designed to improve conventional intensity estimates. That is expected. GROND needs intensities that are closer to raw summation counts for each observation row, because the Bloch calculation is trying to predict the rocking/partiality behavior itself. A profile-fitted `INTEGRATE.HKL` will often run, but it can double-count or distort partiality assumptions and usually gives poorer dynamical endpoint behavior.
-
-Preflight reports a visible warning when the XDS header declares profile
-fitting. It also reports possible row-count or geometry-tail alternatives, but
-automatic execution does not silently lower an explicitly requested
-`min_peak=90`/partiality floor or change the requested geometry percentile.
-Change those values only in a separately named diagnostic run.
-
-## 3. Check The Inputs
-
-At minimum, you should know these paths:
-
-```text
-/path/to/xds_noprf/INTEGRATE.HKL
-/path/to/solved/model.res
-/path/to/solved/model.hkl
-```
-
-The `model.hkl` path is optional but strongly recommended. Without it, GROND can still run transform scouts, but it may spend more time testing possible HKL alignments.
-
-Run:
-
-```bash
-GROND doctor --config grond.config.json --probe-bloch
-```
-
-before launching a long regularization. This confirms the Python dependencies and reports whether SHELXL is visible for endpoint refinement. `shelx2map` is shown only as an optional quick endpoint-map tool; native dynamical maps do not need it.
-
-## 4. Run One Dataset
-
-```bash
-GROND auto \
+grond auto \
   --config grond.config.json \
   --xds-dir /path/to/xds_noprf \
   --structure /path/to/solved/model.res \
@@ -95,50 +69,32 @@ GROND auto \
   --out-dir /path/to/grond_out
 ```
 
-Use `--fast` first if you are checking a new dataset, a new detector setup, or a questionable integration:
+For a new data set or detector setup, try `--preset fast` first. It runs every stage at lower fidelity.
+
+## 5. Several crystals
 
 ```bash
-GROND auto \
-  --config grond.config.json \
-  --xds-dir /path/to/xds_noprf \
-  --structure /path/to/solved/model.res \
-  --baseline-hkl /path/to/solved/model.hkl \
-  --out-dir /path/to/grond_fast \
-  --fast
-```
-
-## 5. Run Multiple Datasets
-
-For several crystals of the same structure, create a prep file:
-
-```bash
-GROND prep \
+grond prep \
   --structure /path/to/solved/model.res \
   --baseline-hkl /path/to/solved/model.hkl \
   --dataset crystal_001=/data/project/001/xds_noprf \
   --dataset crystal_002=/data/project/002/xds_noprf \
   --dataset crystal_003=/data/project/003/xds_noprf \
   --out prep.json
+
+grond auto --config grond.config.json --prep prep.json --out-dir grond_multi
 ```
 
-Then run:
+GROND writes per-crystal decisions, the dataset policy, the merged result and summary tables ([MULTI_DATASET.md](MULTI_DATASET.md)). Maps come from `grond finish --run-dir grond_multi` afterwards.
 
-```bash
-GROND auto --config grond.config.json --prep prep.json --out-dir grond_multi
-```
+## Common input problems
 
-GROND writes per-dataset decisions, dataset inclusion/downweighting reports, combined endpoint reports, maps when possible, and publication-style tables.
+If GROND stops during the input check, open `decisions/<dataset>/preflight.json`. Common causes are missing numeric rows, missing sigmas, too few positive observations, badly tailed geometry columns, the wrong directory, or the profile-fitted integration given where the summation integration was meant. The model and `--baseline-hkl` may come from the profile-fitted path; `--xds-dir` should point to the summation integration.
 
-## Common Input Problems
+If transform scouting is slow, provide `--baseline-hkl`. By default (`--transform-metadata-prefilter auto`) the baseline overlap only orders the candidates; every candidate that passes the unit-cell metric filter still goes to the scout. Automatic scouting uses only proper (determinant +1) transforms and ranks them with matched Born predictions on working observations, which do not depend on the hand. The transform is fixed before the hand is compared. Do not add a sign inversion to make a known molecule come out in its expected hand.
 
-If GROND stops during preflight, inspect `decisions/<dataset>/preflight.json`. Common causes are missing numeric reflection rows, absent sigmas, too few positive observations, badly tailed geometry columns, wrong input directory, or accidentally using a profile-fitted integration when the intended GROND input was the no-profile-fitting directory. The solved structure and `--baseline-hkl` may come from the profile-fitted path; the GROND `--xds-dir` should point to the no-profile-fitting summation path.
+If the model and the summation `INTEGRATE.HKL` are known to be in the same signed setting, use `--hkl-transform identity --trust-hkl-transform`; for another known proper reindexing give it instead of `identity`, for example `l,-k,h`. This skips only the transform scout. A SHELXT header that says `Orientation as input` supports this choice when the solution, the summation integration and the model all come from the same indexing.
 
-If transform scouting is slow, provide `--baseline-hkl`. In the default `--transform-metadata-prefilter auto` mode, GROND uses baseline-HKL overlap only to order the proper candidates; every candidate retained by the independent unit-cell metric filter still reaches the matched-Born work-row scout. The explicit `--transform-metadata-prefilter on` mode may eliminate candidates and is therefore diagnostic rather than calibration-grade. Automatic scouting is restricted to determinant-positive transforms. It ranks the setting choices with matched-Born work rows, which are invariant to coordinate inversion, and fixes that operator before any dynamical hand comparison. Do not add or remove a sign inversion merely to make a known molecule come out in its expected hand.
+An operator with determinant −1 is not another indexing setting: applying it is the same as inverting the coordinates. The default `--transform-parity-policy proper-only` therefore rejects improper candidates; `all-diagnostic` exists only for auditing and leaves the hand unresolved. A named absolute configuration needs evidence beyond the residual sign, for example a crystal of known configuration measured on the same setup.
 
-If you know the solved structure and the summation `INTEGRATE.HKL` are already in the same signed HKL basis, use `--hkl-transform identity --trust-hkl-transform`. For a non-identity known proper reindexing, replace `identity` with the transform, for example `l,-k,h`. This skips only the transform scout. The rest of `GROND auto` still runs, including preflight, thickness and nuisance decisions, hand checks, endpoint polishing, maps, and reports. A SHELXT header that says `Orientation as input` is useful evidence for this choice, but it should be paired with ordinary provenance: the profile-fitted solve, summation re-integration, XDSCONV/XSCALE path, and model should all come from the same indexing setting.
-
-An operator with determinant `-1` is not an alternative indexing setting for an absolute-configuration test. It is the exact gauge partner of coordinate inversion: `(model,T)` and `(inverted model,-T)` give the same physical prediction. The default proper-only policy therefore rejects an explicitly supplied improper candidate. `--transform-parity-policy all-diagnostic` exists only to audit legacy work and leaves the configuration status unresolved.
-
-For a named sign claim, reserve one known crystal for every distinct acquisition/import setup. Select its proper operator without using the known configuration, freeze the matched hand comparison, and only then attach the known sign as the setup calibration. All remaining crystals are validation. The current final negative-thickness `auto` artifact is a conditional inversion result and is not yet accepted by the older `create-parity-calibration`/`apply-parity-calibration` replay, which supports only the legacy branch-symmetric/common-sigma format. Preserve the setup identity and external known-chemistry assignment rather than inferring a named configuration from the current residual sign. When the same physical crystal is imported through XDS and DIALS, the two backend controls are useful pipeline checks but are not independent biological or chemical observations.
-
-If endpoint statistics or maps are missing, run `GROND doctor --config grond.config.json --probe-bloch`. Full corrected-HKL endpoint polishing requires SHELXL. Native dynamical map generation uses `GROND finish --run-dir grond_out` and requires no external map executable; only the optional `--map-mode shelx2map` check requires `shelx2map`.
+If SHELXL statistics are missing, run `grond doctor --workflow small-molecule --config grond.config.json --probe-bloch`. The native maps come from `grond finish --run-dir grond_out` and need no external program; only `--map-mode shelx2map` needs `shelx2map`.

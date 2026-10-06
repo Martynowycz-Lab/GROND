@@ -1,3 +1,9 @@
+"""Find, read and write the external-tool config (SHELXL, SHELX2MAP and macromolecular refiners).
+
+Each tool is taken from the config file, then its environment variable, then its default
+aliases on PATH.
+"""
+
 from __future__ import annotations
 
 import json
@@ -107,7 +113,10 @@ def load_tool_config(path: str | Path | None) -> dict[str, Any]:
         try:
             import yaml  # type: ignore[import-not-found]
         except ModuleNotFoundError as exc:
-            raise RuntimeError("YAML GROND config files require PyYAML; use JSON or install grond[config].") from exc
+            raise RuntimeError(
+                "YAML GROND config files require PyYAML; use JSON, or run `python -m pip install PyYAML` "
+                '(or `python -m pip install ".[config]"` from the repository).'
+            ) from exc
         data = yaml.safe_load(config_path.read_text()) or {}
     else:
         raise ValueError(f"Unsupported GROND config suffix {suffix!r}; use .json, .yaml, or .yml")
@@ -164,6 +173,8 @@ def resolve_path(
     checked: list[str] = []
 
     def resolve_candidate(candidate: str, source: str) -> dict[str, Any]:
+        """Return an availability record for one candidate path, noting where it came from."""
+
         text = _expand_path_text(candidate)
         checked.append(text)
         path = Path(text)
@@ -210,6 +221,10 @@ def resolve_executable(
     checked: list[str] = []
 
     def resolve_candidate(candidate: str, source: str) -> dict[str, Any]:
+        """Return an availability record for one candidate: a path when it contains ``/`` or
+        starts with ``.``, else a PATH lookup.
+        """
+
         text = _expand_path_text(candidate)
         checked.append(text)
         if "/" in text or text.startswith("."):
@@ -281,7 +296,7 @@ def config_template(*, include_optional_endpoints: bool = False) -> dict[str, An
     data: dict[str, Any] = {
         "tools": {"shelxl": "", "shelx2map": ""},
         "notes": (
-            "SHELXL is needed for the default small-molecule LS1 endpoint. "
+            "SHELXL is needed for the default small-molecule SHELXL endpoint. "
             "shelx2map is optional and is used only for quick corrected-HKL endpoint maps; "
             "GROND finish makes native dynamical maps without it. Empty values use environment variables and PATH."
         ),
@@ -370,7 +385,7 @@ def write_config_template(
             )
         lines.extend(
             [
-                'notes: "SHELXL is needed for the default small-molecule LS1 endpoint. shelx2map is optional and only makes quick corrected-HKL endpoint maps; GROND finish makes native dynamical maps without it."',
+                'notes: "SHELXL is needed for the default small-molecule SHELXL endpoint. shelx2map is optional and only makes quick corrected-HKL endpoint maps; GROND finish makes native dynamical maps without it."',
                 "",
             ]
         )

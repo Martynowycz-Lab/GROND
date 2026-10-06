@@ -1,3 +1,10 @@
+"""Endpoint promotion checks and resolution limits decided from per-shell evidence.
+
+classify_endpoint_candidate separates promotable corrected-HKL endpoints from diagnostic ones. suggest_resolution_limit
+and promote_resolution_limit walk the shells from low to high resolution (d in Å) and stop at the first shell that
+fails.
+"""
+
 from __future__ import annotations
 
 import math
@@ -6,6 +13,8 @@ from dataclasses import asdict, dataclass
 
 
 def _float(value, fallback: float = float("nan")) -> float:
+    """Return ``value`` as a finite float, or ``fallback`` when it is missing, not numeric or not finite."""
+
     try:
         out = float(value)
     except (TypeError, ValueError):
@@ -25,23 +34,6 @@ class EndpointSafetyDecision:
     wR2_all: float
     R1_all: float
     R1_gt: float
-
-    def to_dict(self) -> dict:
-        """Return a JSON-friendly representation."""
-
-        return asdict(self)
-
-
-@dataclass
-class ResolutionLimitDecision:
-    """Strict and exploratory resolution limits inferred from shell evidence."""
-
-    strict_min_d_spacing: float
-    exploratory_min_d_spacing: float
-    strict_last_shell: int | None
-    exploratory_last_shell: int | None
-    first_strict_rejection: dict
-    shell_count: int
 
     def to_dict(self) -> dict:
         """Return a JSON-friendly representation."""
@@ -121,116 +113,6 @@ def classify_endpoint_candidate(
     )
 
 
-def _shell_passes(
-    shell: Mapping,
-    *,
-    min_split_cc: float,
-    min_mean_i_over_sigma: float,
-    min_common_pairs: int,
-    min_rows: int,
-    min_strong_fraction: float,
-) -> tuple[bool, list[str]]:
-    rows = int(_float(shell.get("n_rows"), 0.0))
-    strong = int(_float(shell.get("n_strong"), 0.0))
-    common = int(_float(shell.get("split_common"), 0.0))
-    cc = _float(shell.get("split_cc"))
-    isig = _float(shell.get("mean_I_over_sigma"))
-    reasons: list[str] = []
-    if rows < min_rows:
-        reasons.append(f"rows {rows} < {min_rows}")
-    if common < min_common_pairs:
-        reasons.append(f"split pairs {common} < {min_common_pairs}")
-    if not math.isfinite(cc) or cc < min_split_cc:
-        reasons.append(f"split CC {cc:.4g} < {min_split_cc:.4g}")
-    strong_fraction = strong / max(rows, 1)
-    isig_fails = not math.isfinite(isig) or isig < min_mean_i_over_sigma
-    strong_fails = min_strong_fraction > 0.0 and strong_fraction < min_strong_fraction
-    if isig_fails and (min_strong_fraction <= 0.0 or strong_fails):
-        if min_strong_fraction > 0.0:
-            reasons.append(
-                f"mean I/sigma {isig:.4g} < {min_mean_i_over_sigma:.4g} "
-                f"and strong fraction {strong_fraction:.4g} < {min_strong_fraction:.4g}"
-            )
-        else:
-            reasons.append(f"mean I/sigma {isig:.4g} < {min_mean_i_over_sigma:.4g}")
-    return not reasons, reasons
-
-
-def suggest_resolution_limit(
-    shells: Sequence[Mapping],
-    *,
-    strict_split_cc: float = 0.30,
-    strict_mean_i_over_sigma: float = 0.50,
-    exploratory_split_cc: float = 0.30,
-    exploratory_mean_i_over_sigma: float = 0.25,
-    min_common_pairs: int = 20,
-    min_rows: int = 100,
-    min_strong_fraction: float = 0.005,
-) -> ResolutionLimitDecision:
-    """Suggest strict and exploratory d_min cutoffs from shell diagnostics.
-
-    Shells should run from low resolution to high resolution. The strict limit
-    stops at the first shell that lacks independent signal. The exploratory
-    limit is deliberately looser and is useful when maps or geometry benefit
-    from weak high-angle rows, but it should be reported as such.
-    """
-
-    ordered = sorted(
-        [dict(s) for s in shells],
-        key=lambda s: _float(s.get("d_high"), float("inf")),
-        reverse=True,
-    )
-    strict_limit = float("nan")
-    exploratory_limit = float("nan")
-    strict_last_shell: int | None = None
-    exploratory_last_shell: int | None = None
-    first_rejection: dict = {}
-
-    for shell in ordered:
-        d_low = _float(shell.get("d_low"))
-        shell_no = int(_float(shell.get("shell"), len(ordered)))
-        ok, reasons = _shell_passes(
-            shell,
-            min_split_cc=strict_split_cc,
-            min_mean_i_over_sigma=strict_mean_i_over_sigma,
-            min_common_pairs=min_common_pairs,
-            min_rows=min_rows,
-            min_strong_fraction=min_strong_fraction,
-        )
-        if ok:
-            strict_limit = d_low
-            strict_last_shell = shell_no
-        else:
-            first_rejection = {"shell": shell_no, "d_low": d_low, "d_high": _float(shell.get("d_high")), "reasons": reasons}
-            break
-
-    for shell in ordered:
-        d_low = _float(shell.get("d_low"))
-        shell_no = int(_float(shell.get("shell"), len(ordered)))
-        ok, _ = _shell_passes(
-            shell,
-            min_split_cc=exploratory_split_cc,
-            min_mean_i_over_sigma=exploratory_mean_i_over_sigma,
-            min_common_pairs=min_common_pairs,
-            min_rows=min_rows,
-            min_strong_fraction=0.0,
-        )
-        if ok:
-            exploratory_limit = d_low
-            exploratory_last_shell = shell_no
-        else:
-            break
-
-    return ResolutionLimitDecision(
-        strict_min_d_spacing=strict_limit,
-        exploratory_min_d_spacing=exploratory_limit,
-        strict_last_shell=strict_last_shell,
-        exploratory_last_shell=exploratory_last_shell,
-        first_strict_rejection=first_rejection,
-        shell_count=len(ordered),
-    )
-
-
 def _row_mr_shell_reasons(
     shell: Mapping,
     *,
@@ -240,6 +122,12 @@ def _row_mr_shell_reasons(
     max_cumulative_mwr_penalty: float,
     best_cumulative_mwrall: float,
 ) -> list[str]:
+    """Return the reasons one shell fails the row MR tests.
+
+    The tests are the shell's dynamic MwRall, its cumulative MwRall penalty over the best so far, and the free-work
+    MwRall gap when both sets have at least ``min_free_rows`` rows.
+    """
+
     reasons: list[str] = []
     shell_mwr = _float(shell.get("dynamic_MwRall"))
     if not math.isfinite(shell_mwr):
@@ -270,6 +158,8 @@ def _basic_signal_reasons(
     min_mean_i_over_sigma: float,
     min_strong_fraction: float,
 ) -> list[str]:
+    """Return the reasons one shell lacks signal: too few rows, or low mean I/sigma (and too few strong rows)."""
+
     rows = int(_float(shell.get("n_rows"), 0.0))
     strong = int(_float(shell.get("n_strong"), 0.0))
     isig = _float(shell.get("mean_I_over_sigma"))
@@ -298,6 +188,12 @@ def _heldout_stability_reasons(
     min_free_rows: int,
     max_free_work_mwr_gap: float,
 ) -> list[str]:
+    """Return the reason one shell is unstable on held-out data, or an empty list.
+
+    The split CC is tested when there are enough split pairs; otherwise the free-work MwRall gap is, when both sets have
+    at least ``min_free_rows`` rows.
+    """
+
     common = int(_float(shell.get("split_common"), 0.0))
     cc = _float(shell.get("split_cc"))
     if common >= min_common_pairs:

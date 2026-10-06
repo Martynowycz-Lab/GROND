@@ -88,11 +88,22 @@ def _apply_source_physics_to_hand_args(
     for key in keys:
         if key in source_config and hasattr(args, key):
             setattr(args, key, source_config[key])
+    # The free-split scheme belongs to the source row contract; summaries that
+    # predate the option used the legacy per-dataset split.
+    args.split_scheme = str(source_config.get("split_scheme") or "legacy")
+    if str(source_config.get("split_salt") or ""):
+        args.split_salt = str(source_config["split_salt"])
+    args.exclude_orbits_json = str(source_config.get("exclude_orbits_json") or "")
     args.compute_backend = "scipy"
     args.fast = False
     args.native_only = True
     args.make_maps = False
     args.production_scales = str(source_config.get("scale_fit_split") or "work") == "all"
+    # Replay the source frame-scale family; summaries that predate the option used per-frame scales.
+    args.scale_model = str(source_config.get("scale_model") or "per-frame")
+    for key in ("scale_spline_n_basis_grid", "scale_spline_lambda_grid"):
+        if key in source_config:
+            setattr(args, key, source_config[key])
 
 
 def cmd_hand_check(args: argparse.Namespace) -> int:

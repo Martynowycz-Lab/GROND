@@ -10,9 +10,42 @@ import itertools
 from dataclasses import asdict
 from pathlib import Path
 
+from grond.bloch.config import resolve_double_precision
 from grond.legacy.engine.bloch_engine import Config, InfeasibleSgJitterProfileError, NonPassiveAbsorptionError
 
-from .contracts import Nuisance, absorption_parameter_grid, parse_float_grid
+from .contracts import (
+    Nuisance,
+    absorption_parameter_grid,
+    parse_float_grid,
+    thickness_shape_grids,
+    thickness_support_fields,
+)
+
+MOSAICITY_MODES = {"none", "gaussian_omega", "gaussian_cone", "transverse_target"}
+
+
+def mosaicity_candidate_grid(args) -> list[tuple[str, float]]:
+    """Return the declared (mosaicity_mode, mosaicity_sigma_deg) candidates.
+
+    Without --mosaicity-mode-grid/--mosaicity-sigma-deg-grid the scalar options
+    are used exactly as given, so single-candidate runs keep their established
+    configuration.  In a grid, mode none is one candidate with sigma 0.
+    """
+
+    mode_text = str(getattr(args, "mosaicity_mode_grid", "") or "").strip()
+    sigma_text = str(getattr(args, "mosaicity_sigma_deg_grid", "") or "").strip()
+    if not mode_text and not sigma_text:
+        return [(str(args.mosaicity_mode), float(args.mosaicity_sigma_deg))]
+    modes = [m.strip() for m in mode_text.replace(",", " ").split() if m.strip()] if mode_text else [str(args.mosaicity_mode)]
+    sigmas = parse_float_grid(sigma_text) if sigma_text else [float(args.mosaicity_sigma_deg)]
+    candidates: list[tuple[str, float]] = []
+    for mode in modes:
+        if mode not in MOSAICITY_MODES:
+            raise ValueError(f"unknown mosaicity_mode {mode!r}")
+        for sigma in [0.0] if mode == "none" else sigmas:
+            if (mode, float(sigma)) not in candidates:
+                candidates.append((mode, float(sigma)))
+    return candidates
 
 
 def populate_nuisance_trials(
@@ -48,13 +81,12 @@ def populate_nuisance_trials(
 ) -> None:
     """Append predictions, evaluated trials, and rejected-candidate records."""
 
+    mosaicity_candidates = mosaicity_candidate_grid(args)
+    support_fields = thickness_support_fields(args)
     for thickness in parse_float_grid(args.thickness_grid):
         for thickness_model in thickness_models:
-            if thickness_model not in {"single", "uniform_gradient", "gaussian", "gaussian_gradient"}:
-                raise ValueError(f"unknown thickness_model {thickness_model!r}")
-            grad_values = parse_float_grid(args.thickness_grad_grid) if thickness_model in {"uniform_gradient", "gaussian_gradient"} else [0.0]
-            sigma_values = parse_float_grid(args.thickness_sigma_frac_grid) if thickness_model in {"gaussian", "gaussian_gradient"} else [0.0]
-            for grad in grad_values:
+            grad_values, sigma_values, shape_values = thickness_shape_grids(args, thickness_model)
+            for grad, thickness_gamma_shape in itertools.product(grad_values, shape_values):
                 for thickness_sigma_frac in sigma_values:
                     for frame_offset in frame_offset_values:
                         for sg_jitter_mode in sg_jitter_modes:
@@ -72,7 +104,9 @@ def populate_nuisance_trials(
                                                     if dose_b_mode not in {"none", "linear_frame"}:
                                                         raise ValueError(f"unknown dose_b_mode {dose_b_mode!r}")
                                                     dose_b_values = parse_float_grid(args.dose_b_per_frame_grid) if dose_b_mode == "linear_frame" else [0.0]
-                                                    for dose_b_per_frame in dose_b_values:
+                                                    for dose_b_per_frame, (mosaicity_mode, mosaicity_sigma_deg) in itertools.product(
+                                                        dose_b_values, mosaicity_candidates
+                                                    ):
                                                         cfg = Config(
                                                             n_basis=args.n_basis,
                                                             n_points=args.n_points,
@@ -89,8 +123,8 @@ def populate_nuisance_trials(
                                                             sg_jitter_points=args.sg_jitter_points,
                                                             sg_jitter_student_df=args.sg_jitter_student_df,
                                                             sg_jitter_width_factor=args.sg_jitter_width_factor,
-                                                            mosaicity_mode=args.mosaicity_mode,
-                                                            mosaicity_sigma_deg=args.mosaicity_sigma_deg,
+                                                            mosaicity_mode=mosaicity_mode,
+                                                            mosaicity_sigma_deg=mosaicity_sigma_deg,
                                                             mosaicity_max_sigma_deg=args.mosaicity_max_sigma_deg,
                                                             mosaicity_points=args.mosaicity_points,
                                                             mosaicity_support_sigma_deg=args.mosaicity_support_sigma_deg,
@@ -109,6 +143,8 @@ def populate_nuisance_trials(
                                                             thickness_grad_frac=grad,
                                                             thickness_sigma_frac=thickness_sigma_frac,
                                                             thickness_points=args.thickness_points,
+                                                            thickness_gamma_shape=thickness_gamma_shape,
+                                                            **support_fields,
                                                             group_width_deg=group_width_values[0],
                                                             frame_offset=frame_offset,
                                                             dose_b_mode=dose_b_mode,
@@ -124,21 +160,51 @@ def populate_nuisance_trials(
                                                             matrix_convention=args.matrix_convention,
                                                             row_plan_cache=str(row_plan_cache_decision["resolved"]),
                                                             paired_inverse_hand=args.paired_inverse_hand,
+                                                            double_precision=resolve_double_precision(
+                                                                getattr(args, "double_precision", False)
+                                                            ),
                                                             free_fraction=args.free_fraction,
                                                             split_seed=args.split_seed,
                                                             **abs_par,
                                                         )
                                                         print(
                                                             f"predict t={thickness:g} thickness_model={thickness_model} grad={grad:g} "
-                                                            f"sigma_frac={thickness_sigma_frac:g} frame_offset={frame_offset:g} "
+                                                            + (
+                                                                f"gamma_shape={thickness_gamma_shape:g} "
+                                                                f"evaluator={support_fields['thickness_evaluator']} "
+                                                                if thickness_model == "gamma" or support_fields["thickness_evaluator"] != "quadrature"
+                                                                else ""
+                                                            )
+                                                            + f"sigma_frac={thickness_sigma_frac:g} frame_offset={frame_offset:g} "
                                                             f"sg_jitter={sg_jitter_mode} sigma0={sg_jitter_sigma0:g} "
                                                             f"sigma_d_inv={sg_jitter_sigma_d_inv:g} sigma_frame={sg_jitter_sigma_frame:g} "
                                                             f"abs={abs_par['absorption_mode']} mu={abs_par['absorption_mu']:g} "
                                                             f"frac={abs_par['absorption_frac']:g} mu_g2={abs_par['absorption_mu_g2']:g} "
                                                             f"mu_theta2={abs_par['absorption_mu_theta2']:g} tds_b={abs_par['absorption_tds_b']:g} "
-                                                            f"dose_b={dose_b_mode} per_frame={dose_b_per_frame:g}",
+                                                            f"dose_b={dose_b_mode} per_frame={dose_b_per_frame:g} "
+                                                            f"mosaicity={mosaicity_mode} sigma_deg={mosaicity_sigma_deg:g}",
                                                             flush=True,
                                                         )
+                                                        if mosaicity_mode == "transverse_target" and sg_jitter_mode != "none" and any(
+                                                            abs(float(value)) > 0.0
+                                                            for value in (sg_jitter_sigma0, sg_jitter_sigma_d_inv, sg_jitter_sigma_frame)
+                                                        ):
+                                                            # The re-centred cone solves each block on the untilted
+                                                            # target-Sg samples; a target-Sg jitter convolution has
+                                                            # no defined meaning inside it.
+                                                            rejection = {
+                                                                "status": "rejected",
+                                                                "reason": "transverse_target_with_sg_jitter",
+                                                                "message": "transverse_target mosaicity cannot be combined with target-Sg jitter",
+                                                                "config": asdict(cfg),
+                                                            }
+                                                            rejected_prediction_candidates.append(rejection)
+                                                            print(
+                                                                "rejected nuisance candidate: "
+                                                                f"{rejection['reason']}: {rejection['message']}",
+                                                                flush=True,
+                                                            )
+                                                            continue
                                                         try:
                                                             pred = predict_with_cache(
                                                                 data,
@@ -182,6 +248,8 @@ def populate_nuisance_trials(
                                                                 "thickness_model": thickness_model,
                                                                 "grad": grad,
                                                                 "thickness_sigma_frac": thickness_sigma_frac,
+                                                                "thickness_gamma_shape": thickness_gamma_shape,
+                                                                **support_fields,
                                                                 "frame_offset": frame_offset,
                                                                 "sg_jitter_mode": sg_jitter_mode,
                                                                 "sg_jitter_sigma0": sg_jitter_sigma0,
@@ -189,6 +257,8 @@ def populate_nuisance_trials(
                                                                 "sg_jitter_sigma_frame": sg_jitter_sigma_frame,
                                                                 "dose_b_mode": dose_b_mode,
                                                                 "dose_b_per_frame": dose_b_per_frame,
+                                                                "mosaicity_mode": mosaicity_mode,
+                                                                "mosaicity_sigma_deg": mosaicity_sigma_deg,
                                                                 **abs_par,
                                                             }
                                                         )
@@ -225,8 +295,8 @@ def populate_nuisance_trials(
                                                                 sg_jitter_points=args.sg_jitter_points,
                                                                 sg_jitter_student_df=args.sg_jitter_student_df,
                                                                 sg_jitter_width_factor=args.sg_jitter_width_factor,
-                                                                mosaicity_mode=args.mosaicity_mode,
-                                                                mosaicity_sigma_deg=args.mosaicity_sigma_deg,
+                                                                mosaicity_mode=mosaicity_mode,
+                                                                mosaicity_sigma_deg=mosaicity_sigma_deg,
                                                                 mosaicity_points=args.mosaicity_points,
                                                                 mosaicity_support_sigma_deg=args.mosaicity_support_sigma_deg,
                                                                 mosaicity_support_points=args.mosaicity_support_points,
@@ -243,6 +313,8 @@ def populate_nuisance_trials(
                                                                 detector_scale_ridge=args.detector_scale_ridge,
                                                                 detector_scale_smoothness=args.detector_scale_smoothness,
                                                                 detector_scale_min_rows=args.detector_scale_min_rows,
+                                                                thickness_gamma_shape=thickness_gamma_shape,
+                                                                **support_fields,
                                                                 **abs_par,
                                                             )
                                                             ev = evaluate_trial(data, target, base_sig, pred, indices, masks, nui, wght_a, wght_b, scale_fit_split=args.scale_fit_split, q_control_args=args)

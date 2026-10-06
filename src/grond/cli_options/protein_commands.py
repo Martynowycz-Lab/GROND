@@ -1,4 +1,4 @@
-"""Build the public command grammar in its established display order."""
+"""Register the macromolecular commands: make-free-flags, export-mtz, protein-ls1 and endpoints."""
 
 from __future__ import annotations
 

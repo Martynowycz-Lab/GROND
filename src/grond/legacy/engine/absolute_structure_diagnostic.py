@@ -410,6 +410,12 @@ def block(
     paired_t = float(mean_d / (sd / math.sqrt(n))) if n > 1 and sd > 0 else float("nan")
 
     def prediction_metrics(index: int) -> dict[str, float | int]:
+        """Return n, R1_all, wR2_all and rms_z of one hand's predictions on the joined rows.
+
+        Each metric row is (target I, selected prediction, other prediction, source sigma), so index 1 scores
+        the selected hand and index 2 the other hand.
+        """
+
         if not metric_rows:
             return {"n": 0, "R1_all": float("nan"), "wR2_all": float("nan")}
         amplitude_denom = sum(math.sqrt(max(row[0], 0.0)) for row in metric_rows)
@@ -455,6 +461,8 @@ def block(
 
 
 def main() -> None:
+    """Compare the selected-hand and other-hand row tables and write the hand diagnostic JSON to --out."""
+
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--best", required=True, help="Native row CSV for the active/best hand assignment.")
     ap.add_argument("--other", required=True, help="Native row CSV for the alternate-hand comparison.")

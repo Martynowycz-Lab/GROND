@@ -1,1 +1,1 @@
-"""Cli options support for GROND."""
+"""Argument parsers of the GROND command-line interface."""

@@ -27,6 +27,8 @@ else:  # pragma: no cover - direct script execution
 
 
 def read_rows(path: Path) -> list[dict[str, str]]:
+    """Read a CSV file into a list of row dicts; raise if it has no rows."""
+
     with path.open() as f:
         rows = list(csv.DictReader(f))
     if not rows:
@@ -35,6 +37,8 @@ def read_rows(path: Path) -> list[dict[str, str]]:
 
 
 def col(rows, name: str, default=float("nan")) -> np.ndarray:
+    """Return one column as a float array, with default for missing or unparsable cells."""
+
     out = []
     for r in rows:
         try:
@@ -45,10 +49,14 @@ def col(rows, name: str, default=float("nan")) -> np.ndarray:
 
 
 def str_col(rows, name: str, default: str = "") -> np.ndarray:
+    """Return one column as a string array, with default for missing cells."""
+
     return np.asarray([str(r.get(name, default)) for r in rows])
 
 
 def int_col(rows, name: str, default: int = -1) -> np.ndarray:
+    """Return one column as an int array, with default for missing or unparsable cells."""
+
     out = []
     for r in rows:
         try:
@@ -59,6 +67,8 @@ def int_col(rows, name: str, default: int = -1) -> np.ndarray:
 
 
 def parse_models(text: str, rows: list[dict[str, str]]) -> list[tuple[str, str]]:
+    """Parse --model name=column pairs, defaulting to dyn_scaled and born_scaled; raise on unknown columns."""
+
     available = set(rows[0].keys())
     if not text:
         models = []
@@ -85,6 +95,8 @@ def parse_models(text: str, rows: list[dict[str, str]]) -> list[tuple[str, str]]
 
 
 def quantile_bins(values: np.ndarray, n_bins: int) -> list[np.ndarray]:
+    """Split the finite values into n_bins equal-count bins of row indices, in increasing order."""
+
     values = np.asarray(values, dtype=float)
     finite = np.isfinite(values)
     idx = np.where(finite)[0]
@@ -92,19 +104,6 @@ def quantile_bins(values: np.ndarray, n_bins: int) -> list[np.ndarray]:
         return []
     order = idx[np.argsort(values[idx], kind="mergesort")]
     return [b for b in np.array_split(order, max(1, int(n_bins))) if len(b)]
-
-
-def fixed_bins(values: np.ndarray, edges: list[float]) -> list[np.ndarray]:
-    values = np.asarray(values, dtype=float)
-    bins = []
-    for lo, hi in zip(edges[:-1], edges[1:], strict=False):
-        if hi == edges[-1]:
-            m = np.where(np.isfinite(values) & (values >= lo) & (values <= hi))[0]
-        else:
-            m = np.where(np.isfinite(values) & (values >= lo) & (values < hi))[0]
-        if len(m):
-            bins.append(m)
-    return bins
 
 
 def metric_row(
@@ -123,6 +122,12 @@ def metric_row(
     total_weighted_residual: float,
     total_rows: int,
 ):
+    """Return one model's metrics and residual shares in one axis bin.
+
+    Shares are relative to the model's totals over all rows; enrichment is a share divided by the bin's row
+    fraction.
+    """
+
     mask = np.zeros(len(obs), dtype=bool)
     mask[np.asarray(idx, dtype=int)] = True
     metrics = native_metrics(obs, sig, pred, mask, wght_a, wght_b, n_params=0)
@@ -171,6 +176,8 @@ def metric_row(
 
 
 def q_summary(q: np.ndarray, q_min: float, q_max: float, log_tail: float) -> dict:
+    """Return percentiles of q = Idyn/Iborn and the fractions outside [q_min, q_max] or beyond |log q| > log_tail."""
+
     good = np.isfinite(q) & (q > 0)
     if not np.any(good):
         return {"n_positive_q": 0}
@@ -195,6 +202,8 @@ def q_summary(q: np.ndarray, q_min: float, q_max: float, log_tail: float) -> dic
 
 
 def add_xds_axes(rows, hkl_path: Path):
+    """Return XDS xcal, ycal, zcal and detector radius (px from the median) per row, by row_index."""
+
     row_index = int_col(rows, "row_index")
     data = XDSData(hkl_path)
     good = (row_index >= 0) & (row_index < len(data.hkl))
@@ -210,6 +219,11 @@ def add_xds_axes(rows, hkl_path: Path):
 
 
 def optional_axis(rows: list[dict[str, str]], names: list[str]) -> tuple[str | None, np.ndarray | None]:
+    """Return (column name, values) for the first usable candidate column, or (None, None).
+
+    A column needs at least max(20, 1% of rows) finite values.
+    """
+
     available = set(rows[0].keys()) if rows else set()
     for name in names:
         if name not in available:
@@ -221,6 +235,8 @@ def optional_axis(rows: list[dict[str, str]], names: list[str]) -> tuple[str | N
 
 
 def write_csv(path: Path, rows: list[dict]) -> None:
+    """Write rows to a CSV file with the first row's keys as header; an empty list writes an empty file."""
+
     if not rows:
         path.write_text("")
         return
@@ -232,14 +248,20 @@ def write_csv(path: Path, rows: list[dict]) -> None:
 
 
 def pct(v) -> float:
+    """Return a fraction as a percentage, or NaN if it is not finite."""
+
     return 100.0 * float(v) if np.isfinite(v) else float("nan")
 
 
 def valid_prediction_mask(obs, sig, pred):
+    """Return the mask of rows with finite Iobs, sigma and prediction."""
+
     return np.isfinite(obs) & np.isfinite(sig) & np.isfinite(pred)
 
 
 def residual_totals(obs, sig, pred, wght_a: float, wght_b: float) -> tuple[float, float]:
+    """Return the total amplitude residual |√Iobs - √Icalc| and the SHELXL-weighted squared residual."""
+
     m = valid_prediction_mask(obs, sig, pred)
     if not np.any(m):
         return 0.0, 0.0
@@ -250,6 +272,11 @@ def residual_totals(obs, sig, pred, wght_a: float, wght_b: float) -> tuple[float
 
 
 def fit_global_scale(obs, sig, pred, wght_a: float, wght_b: float, n_iter: int = 6) -> tuple[np.ndarray, float]:
+    """Fit one SHELXL-weighted scale of pred to obs and return (scaled prediction, scale).
+
+    Starts from the 1/sigma² least-squares scale and refits n_iter times; NaN with fewer than two usable rows.
+    """
+
     good = valid_prediction_mask(obs, sig, pred) & (pred > 0)
     if np.count_nonzero(good) < 2:
         return np.full_like(pred, np.nan, dtype=float), float("nan")
@@ -268,6 +295,8 @@ def fit_global_scale(obs, sig, pred, wght_a: float, wght_b: float, n_iter: int =
 
 
 def pearson(x, y) -> float:
+    """Return the Pearson correlation of the finite pairs, or NaN with fewer than three pairs or no spread."""
+
     x = np.asarray(x, dtype=float)
     y = np.asarray(y, dtype=float)
     m = np.isfinite(x) & np.isfinite(y)
@@ -282,6 +311,8 @@ def pearson(x, y) -> float:
 
 
 def scale_pressure(rows, raw_col: str, scaled_col: str, axes: dict[str, tuple[np.ndarray, list[np.ndarray]]]) -> dict:
+    """Summarize the row scale scaled/raw: percentiles, per-group medians and log-scale correlations with row axes."""
+
     raw = col(rows, raw_col)
     scaled = col(rows, scaled_col)
     good = np.isfinite(raw) & np.isfinite(scaled) & (raw > 0) & (scaled > 0)
@@ -333,6 +364,8 @@ def top_residual_rows(
     wght_b: float,
     limit: int,
 ) -> list[dict]:
+    """Return the limit rows with the largest SHELXL-weighted residuals, with their shares and row context."""
+
     m = valid_prediction_mask(obs, sig, pred)
     res = np.full(len(rows), np.nan, dtype=float)
     res[m] = obs[m] - pred[m]
@@ -384,6 +417,8 @@ def top_residual_rows(
 
 
 def concentration_summary(obs, sig, pred, wght_a: float, wght_b: float) -> dict:
+    """Return the share of amplitude and weighted residual carried by the top 1, 5 and 10% of rows."""
+
     m = valid_prediction_mask(obs, sig, pred)
     if not np.any(m):
         return {}
@@ -392,6 +427,8 @@ def concentration_summary(obs, sig, pred, wght_a: float, wght_b: float) -> dict:
     weighted = shelx_weights(obs[m], np.maximum(sig[m], 1e-12), pred[m], wght_a, wght_b) * res * res
 
     def frac_at(values, row_frac):
+        """Return the share of the total carried by the largest row_frac of values."""
+
         n = max(1, int(math.ceil(len(values) * row_frac)))
         v = np.sort(values)[::-1]
         return float(np.sum(v[:n]) / max(float(np.sum(v)), 1e-30))
@@ -407,11 +444,18 @@ def concentration_summary(obs, sig, pred, wght_a: float, wght_b: float) -> dict:
 
 
 def model_driver_rows(binned_rows: list[dict], model_name: str, key: str, limit: int = 8) -> list[dict]:
+    """Return up to limit bins of one model with the largest value of key."""
+
     candidates = [r for r in binned_rows if r.get("model") == model_name and np.isfinite(float(r.get(key, float("nan"))))]
     return sorted(candidates, key=lambda r: float(r[key]), reverse=True)[:limit]
 
 
 def main() -> None:
+    """Bin each model's residuals along resolution, intensity, quality, detector, frame and q axes.
+
+    Writes the bin, top-row and scale-group CSVs, summary.json and REPORT.md to --out-dir.
+    """
+
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--row-table", required=True)
     ap.add_argument("--hkl", default=str(DEFAULT_HKL), help="INTEGRATE.HKL used to add detector x/y/frame axes from row_index.")

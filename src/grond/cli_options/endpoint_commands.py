@@ -1,4 +1,4 @@
-"""Build the public command grammar in its established display order."""
+"""Register the endpoint commands: push-endpoint (alias refine), check-shelx, validate-endpoint, finish, publish."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from grond.runtime import auto_worker_count
 def register_push(sub: argparse._SubParsersAction) -> None:
     """Register push commands."""
 
+    from grond.cli_options.run_endpoints import add_final_polish
     from grond.cli_options.run_physics import add_crystal_overrides
     from grond.cli_support.tools import add_tool_config_args, default_shelxl_executable
     from grond.cli_support.values import FULL_Q_LAMBDA
@@ -72,6 +73,18 @@ def register_push(sub: argparse._SubParsersAction) -> None:
     add_crystal_overrides(p_push)
     p_push.add_argument("--shelxl", default=default_shelxl_executable())
     p_push.add_argument("--shelxl-iterations", type=int, default=1, help="SHELXL executable calls per macrocycle.")
+    p_push.add_argument(
+        "--shelxl-feedback-xyz-tol",
+        type=float,
+        default=0.0,
+        help="Stop once the max non-H coordinate shift between successive models is below this value in A. Default 0 runs every requested cycle; a shift test is only meaningful with converged SHELXL calls per cycle.",
+    )
+    p_push.add_argument(
+        "--shelxl-feedback-keep",
+        choices=["best-free", "last"],
+        default="last",
+        help="Continuation model to keep: last (default) or the output with the lowest free-row R_obs.",
+    )
     p_push.add_argument(
         "--endpoint-ls-cycles",
         type=int,
@@ -172,7 +185,76 @@ def register_push(sub: argparse._SubParsersAction) -> None:
         default=FULL_Q_LAMBDA,
         help="Diagnostic q-exponent grid. Production auto uses the full Bloch/Born correction with lambda_q=1.0.",
     )
-    p_push.add_argument("--rescale", choices=["median-iobs", "none"], default="median-iobs")
+    # Continuation contract: by default every value below is replayed from the checkpoint/source summary (the
+    # historical value when a summary predates the key), never taken from the current AUTO defaults.
+    p_push.add_argument(
+        "--rescale",
+        choices=["median-iobs", "none", "absolute"],
+        default=None,
+        help="Corrected-intensity scale of the endpoint HKL. Default: the source summary's value (median-iobs if unrecorded).",
+    )
+    p_push.add_argument(
+        "--endpoint-include-free-rows",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Write split=free rows into the corrected HKL. Default: the source summary's value (included if unrecorded).",
+    )
+    p_push.add_argument(
+        "--endpoint-q-policy",
+        choices=["clip", "exclude"],
+        default=None,
+        help="Pathological correction ratios: clip or exclude. Default: the source summary's value (clip if unrecorded).",
+    )
+    p_push.add_argument(
+        "--shelxl-npd-recovery",
+        choices=["damp", "isor"],
+        default=None,
+        help="NPD recovery of the SHELXL handoff. Default: the source summary's value (damp if unrecorded).",
+    )
+    p_push.add_argument(
+        "--shelxl-convergence-shift-esd",
+        type=float,
+        default=None,
+        help="Stop the SHELXL calls once |max shift/esd| is below this value. Default: the source summary's value (0 if unrecorded).",
+    )
+    p_push.add_argument(
+        "--endpoint-wght-mode",
+        choices=["freeze-zero", "inherit", "promote", "promote-gold", "converge"],
+        default=None,
+        help="SHELXL WGHT policy of the endpoints. Default: the source summary's value (freeze-zero if unrecorded).",
+    )
+    p_push.add_argument(
+        "--keep-damp",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Carry an active DAMP into later SHELXL calls. Default: the source summary's value (carried if unrecorded).",
+    )
+    p_push.add_argument(
+        "--split-scheme",
+        choices=["orbit-hash", "legacy"],
+        default=None,
+        help="Free-split scheme. Default: the source summaries' value (legacy if unrecorded). Single-dataset pushes only replay it.",
+    )
+    p_push.add_argument(
+        "--split-salt", default=None, help="Orbit-hash free-set salt. Default: the source summaries' value."
+    )
+    p_push.add_argument(
+        "--exclude-orbits-json",
+        default=None,
+        help="Lockbox file of orbits held back from every stage. Default: the source summaries' value (none if unrecorded).",
+    )
+    p_push.add_argument(
+        "--scale-model",
+        choices=["pspline", "per-frame"],
+        default=None,
+        help="Frame-scale family. Default: the source summaries' value (per-frame if unrecorded).",
+    )
+    p_push.add_argument(
+        "--scale-spline-n-basis-grid", default=None, help="P-spline basis grid. Default: the source summaries' value."
+    )
+    p_push.add_argument(
+        "--scale-spline-lambda-grid", default=None, help="P-spline penalty grid. Default: the source summaries' value."
+    )
     p_push.add_argument("--prediction-cache-compression", choices=["compressed", "none"], default="none")
     p_push.add_argument("--make-maps-on-final", action="store_true")
     p_push.add_argument(
@@ -196,7 +278,100 @@ def register_push(sub: argparse._SubParsersAction) -> None:
         default=1,
         help="Rewrite L.S. to this value in the prepared start model. Use 0 to preserve it.",
     )
+    p_push.add_argument(
+        "--run-dir",
+        default="",
+        help="Finished GROND auto/run directory to polish with --final-polish diffbloch (its grond_summary.json, final row "
+        "tables and SHELXL publication model; --start-res overrides the model).",
+    )
+    add_final_polish(p_push)
     p_push.set_defaults(func=cmd_push_endpoint)
+
+
+def register_check_shelx(sub: argparse._SubParsersAction) -> None:
+    """Register the SHELXL endpoint readiness checker."""
+
+    from grond.cli_support.tools import default_shelxl_executable
+    from grond.commands.check_shelx import cmd_check_shelx
+
+    p_check = sub.add_parser(
+        "check-shelx",
+        help=(
+            "Run SHELXL once on a copy of an endpoint (.res/.hkl) and report WGHT convergence, GooF, NPD atoms, "
+            "BASF sanity and .res/.hkl/.fcf consistency, as Olex2 and SHELXLE users will see them."
+        ),
+    )
+    p_check.add_argument("path", help="Endpoint directory (one .res with a matching .hkl) or the .res file.")
+    p_check.add_argument("--stem", default="", help="Endpoint file stem when the directory holds several.")
+    p_check.add_argument("--shelxl", default=default_shelxl_executable(), help="SHELXL executable.")
+    p_check.add_argument(
+        "--out-dir",
+        default="",
+        help="Empty or new directory for the check run (default: PATH/check_shelx_<timestamp>); the endpoint is never modified.",
+    )
+    p_check.add_argument("--acta", action="store_true", help="Add ACTA so SHELXL also writes a CIF of the endpoint.")
+    p_check.add_argument("--json", action="store_true", help="Print the JSON report instead of the summary.")
+    p_check.set_defaults(func=cmd_check_shelx)
+
+
+def register_validate_endpoint(sub: argparse._SubParsersAction) -> None:
+    """Register the post-hoc held-out SHELXL validation of a finished run."""
+
+    from grond.commands.validate_endpoint import cmd_validate_endpoint
+
+    p_validate = sub.add_parser(
+        "validate-endpoint",
+        help=(
+            "Held-out SHELXL validation of a finished AUTO run, written to a new directory (the run is only read): "
+            "by default the endpoint the run published, scored at L.S. 0 on its rebuilt HKL without re-refinement "
+            "(--endpoint final re-runs combine_final instead), and the leak-free conventional model scored on the "
+            "free orbits; reporting only."
+        ),
+    )
+    p_validate.add_argument("--run-dir", required=True, help="Finished AUTO run directory (read only).")
+    p_validate.add_argument("--out-dir", required=True, help="New (or empty) directory outside the run for every output.")
+    p_validate.add_argument(
+        "--endpoint",
+        choices=["published", "final"],
+        default="published",
+        help="published (default): the endpoint the run published (the endpoint chooser's best physical endpoint in "
+        "grond_summary.json, e.g. the kept feedback cycle's combine). The combine command that wrote it is replayed "
+        "without refining: its rows are rebuilt with the recorded recipe, the rebuilt work HKL must equal the "
+        "published HKL byte for byte, and the published .res itself is scored at L.S. 0 with the WGHT its last "
+        "refinement applied; merged endpoint only. final: re-run the last recorded combine_final and score its "
+        "re-refined runs/combined endpoints, which must reproduce the recorded ones exactly (the behaviour before "
+        "this option; runs/combined is the published endpoint only when the chooser published the final combine).",
+    )
+    p_validate.add_argument(
+        "--shelxl", default="", help="SHELXL executable (default: the one the run recorded for combine_final)."
+    )
+    p_validate.add_argument("--python", default="", help="Python for the combine engine (default: this interpreter).")
+    p_validate.add_argument(
+        "--unmerged",
+        choices=["recorded", "on"],
+        default="recorded",
+        help="--endpoint final only. recorded (default): validate the endpoints the run wrote. on: also write, refine "
+        "and validate the unmerged batch endpoint when the run had none (the merged endpoint is unchanged by it).",
+    )
+    p_validate.set_defaults(func=cmd_validate_endpoint)
+
+
+def add_model_box_args(parser: argparse.ArgumentParser) -> None:
+    """Options for the model-covering box maps written beside every unit-cell map."""
+
+    parser.add_argument(
+        "--model-box-maps",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Also write, beside every unit-cell map, a CCP4 map boxed around the whole model plus a margin "
+        "(<map>_model_box.map; the unit-cell maps are kept). On by default.",
+    )
+    parser.add_argument(
+        "--model-box-margin",
+        type=float,
+        default=3.0,
+        help="Margin in Angstroms around the model for the model-box maps (default 3).",
+    )
 
 
 def register_finish(sub: argparse._SubParsersAction) -> None:
@@ -208,6 +383,13 @@ def register_finish(sub: argparse._SubParsersAction) -> None:
     p_finish = sub.add_parser(
         "finish",
         help="Regenerate final summaries, native dynamical maps, and the GROND dynamic CIF from a completed run.",
+    )
+    p_finish.add_argument(
+        "--publication-feedback-cycles",
+        choices=["kept", "all"],
+        default=None,
+        help="SHELXL feedback cycles the refreshed publication chooser may pick: kept (default; also for runs whose "
+        "run_config predates the setting) or all (every adopted cycle, ranked by in-sample R1).",
     )
     p_finish.add_argument(
         "--run-dir", default=".", help="Completed GROND auto/run output directory. Defaults to the current directory."
@@ -262,6 +444,7 @@ def register_finish(sub: argparse._SubParsersAction) -> None:
         default=8_000_000,
         help="Safety cap on native dynamical map grid points.",
     )
+    add_model_box_args(p_finish)
     p_finish.add_argument("--json", action="store_true", help="Print the compact JSON payload used by automation.")
     p_finish.set_defaults(func=cmd_finish)
 
@@ -292,5 +475,6 @@ def register_finish(sub: argparse._SubParsersAction) -> None:
     p_publish.add_argument("--native-map-d-min", type=float, default=0.0)
     p_publish.add_argument("--native-map-min-i-over-sigma", type=float, default=0.0)
     p_publish.add_argument("--native-map-max-grid-points", type=int, default=8_000_000)
+    add_model_box_args(p_publish)
     p_publish.add_argument("--json", action="store_true")
     p_publish.set_defaults(func=cmd_finish)

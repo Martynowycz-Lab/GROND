@@ -1,3 +1,5 @@
+"""Worker counts, chunk sizes and BLAS/OpenMP thread limits for parallel Bloch runs."""
+
 from __future__ import annotations
 
 import math

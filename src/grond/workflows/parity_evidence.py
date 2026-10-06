@@ -12,19 +12,12 @@ from typing import Any
 
 import numpy as np
 
-from grond.legacy.engine.absolute_structure_diagnostic import (
-    adjusted_hand_missing_columns,
-    klar_palatinus_adjusted_hand_z,
-)
-from grond.legacy.engine.native_row_regularize import (
-    Nuisance,
-    fit_frame_detector_scales,
-    fit_group_scales,
-    native_metrics,
-)
+from grond.legacy.engine.native_row_regularize import native_metrics
 
 
 def _sha256(path: Path) -> str:
+    """Return the SHA-256 hex digest of a file."""
+
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         for block in iter(lambda: handle.read(1024 * 1024), b""):
@@ -33,6 +26,8 @@ def _sha256(path: Path) -> str:
 
 
 def _json_hashable(value: object) -> object:
+    """Return ``value`` with NaN and infinities replaced by tagged objects, so it hashes as strict JSON."""
+
     if isinstance(value, Mapping):
         return {str(key): _json_hashable(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
@@ -76,6 +71,8 @@ def _json_safe_contract(value: object, *, field: str = "") -> object:
 
 
 def _json_sha256(value: object) -> str:
+    """Return the SHA-256 of ``value`` as canonical JSON (sorted keys, no spaces, tagged non-finite floats)."""
+
     return hashlib.sha256(
         json.dumps(
             _json_hashable(value),
@@ -88,6 +85,8 @@ def _json_sha256(value: object) -> str:
 
 
 def _finite_float(value: object) -> float:
+    """Return ``value`` as a float, or NaN when it is missing or not finite."""
+
     try:
         result = float(value)
     except (TypeError, ValueError):
@@ -98,6 +97,11 @@ def _finite_float(value: object) -> float:
 def _read_summary_and_rows(
     summary_path: Path,
 ) -> tuple[dict[str, Any], Path, list[dict[str, str]], dict[str, str]]:
+    """Read a native summary and its hash-checked row table; return the summary, table path, rows and binding.
+
+    The binding records both files' paths and SHA-256. Missing evidence columns raise ValueError.
+    """
+
     summary_path = Path(summary_path).expanduser().resolve()
     if not summary_path.is_file():
         raise ValueError(f"native summary is missing: {summary_path}")
@@ -148,6 +152,8 @@ def _read_summary_and_rows(
 
 
 def _declared_nuisance_contract(config: Mapping[str, object]) -> dict[str, str]:
+    """Return the nuisance grid options a native run was given, keyed by nuisance field."""
+
     mapping = {
         "thickness_A": "thickness_grid",
         "thickness_model": "thickness_model_grid",
@@ -206,6 +212,8 @@ def _grid_physics_contract(config: Mapping[str, object]) -> dict[str, object]:
         "max_support_sg",
         "free_fraction",
         "split_seed",
+        "split_scheme",
+        "split_salt",
         "scale_fit_split",
         "selection_metric",
         "compute_backend",
@@ -223,6 +231,12 @@ def _grid_physics_contract(config: Mapping[str, object]) -> dict[str, object]:
 
 
 def _job_contract(summary: Mapping[str, object]) -> dict[str, object]:
+    """Return the identity of one native run: inputs, split, row counts, declared grids and selected nuisance.
+
+    The source HKL, model and split contract must still match their recorded SHA-256; each contract block carries its
+    own canonical JSON hash.
+    """
+
     inputs = summary.get("inputs")
     inputs = inputs if isinstance(inputs, Mapping) else {}
     config = summary.get("config")
@@ -289,6 +303,8 @@ def _job_contract(summary: Mapping[str, object]) -> dict[str, object]:
         "n_points": int(config.get("n_points") or 0),
         "max_rows": int(config.get("max_rows") or 0),
         "split_seed": int(config.get("split_seed") or 0),
+        "split_scheme": str(config.get("split_scheme") or "legacy"),
+        "split_salt": str(config.get("split_salt") or ""),
         "free_fraction": float(config.get("free_fraction") or 0.0),
         "declared_nuisance_contract": declared_nuisance,
         "declared_nuisance_contract_sha256": _json_sha256(
@@ -305,283 +321,16 @@ def _job_contract(summary: Mapping[str, object]) -> dict[str, object]:
     }
 
 
-_NUISANCE_CATEGORICAL_FIELDS = {
-    "thickness_model",
-    "sg_jitter_mode",
-    "mosaicity_mode",
-    "geometry_path_file",
-    "absorption_mode",
-    "dose_b_mode",
-    "matrix_convention",
-}
-_NUISANCE_INTEGER_FIELDS = {
-    "detector_scale_bins",
-    "detector_scale_min_rows",
-    "sg_jitter_points",
-    "mosaicity_points",
-    "mosaicity_support_points",
-}
 _NUISANCE_NULLABLE_FIELDS = {
     "dose_b_ref_frame",
     "native_wght_a",
     "native_wght_b",
 }
-_NUISANCE_FIELDS = tuple(Nuisance.__dataclass_fields__)
-_OPTIONAL_NUISANCE_DEFAULTS = {
-    "detector_scale_ridge": 0.05,
-    "detector_scale_smoothness": 0.10,
-    "detector_scale_min_rows": 20,
-    "mosaicity_mode": "none",
-    "mosaicity_sigma_deg": 0.0,
-    "mosaicity_points": 1,
-    "mosaicity_support_sigma_deg": 0.0,
-    "mosaicity_support_points": 5,
-    "mosaicity_support_width_sigma": 4.0,
-    "geometry_path_file": "",
-}
-
-
-def _canonical_nuisance_value(field: str, value: object) -> object:
-    if field in _NUISANCE_CATEGORICAL_FIELDS:
-        text = str(value).strip()
-        if not text and field != "geometry_path_file":
-            raise ValueError(f"nuisance field {field!r} is empty")
-        return text
-    if (
-        field in _NUISANCE_NULLABLE_FIELDS
-        and (
-            value is None
-            or not str(value).strip()
-            or str(value).strip().lower() in {"nan", "none", "null"}
-        )
-    ):
-        return "nan"
-    try:
-        numeric = float(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(
-            f"nuisance field {field!r} is not numeric: {value!r}"
-        ) from exc
-    if math.isnan(numeric) and field in _NUISANCE_NULLABLE_FIELDS:
-        return "nan"
-    if not math.isfinite(numeric):
-        raise ValueError(
-            f"nuisance field {field!r} is not finite: {value!r}"
-        )
-    if field in _NUISANCE_INTEGER_FIELDS:
-        integer = int(numeric)
-        if float(integer) != numeric:
-            raise ValueError(
-                f"nuisance field {field!r} is not integral: {value!r}"
-            )
-        return integer
-    # One deterministic text representation avoids differences caused only by
-    # CSV formatting while retaining exact IEEE-754 round trips.
-    return format(numeric, ".17g")
-
-
-def _nuisance_contract_from_row(
-    row: Mapping[str, object],
-) -> tuple[dict[str, object], dict[str, object], str]:
-    canonical = {
-        field: _canonical_nuisance_value(
-            field,
-            row.get(field, _OPTIONAL_NUISANCE_DEFAULTS.get(field)),
-        )
-        for field in _NUISANCE_FIELDS
-    }
-    typed: dict[str, object] = {}
-    for field, value in canonical.items():
-        if field in _NUISANCE_CATEGORICAL_FIELDS:
-            typed[field] = value
-        elif field in _NUISANCE_INTEGER_FIELDS:
-            typed[field] = int(value)
-        elif value == "nan" and field in _NUISANCE_NULLABLE_FIELDS:
-            typed[field] = None
-        else:
-            typed[field] = float(value)
-    return canonical, typed, _json_sha256(canonical)
-
-
-def _nuisance_grid_artifact(
-    summary_path: Path,
-) -> tuple[
-    dict[str, object],
-    dict[str, object],
-    dict[str, dict[str, object]],
-]:
-    summary_path = Path(summary_path).expanduser().resolve()
-    if not summary_path.is_file():
-        raise ValueError(f"native summary is missing: {summary_path}")
-    summary = json.loads(summary_path.read_text())
-    if not isinstance(summary, dict):
-        raise ValueError(
-            f"native summary must contain one JSON object: {summary_path}"
-        )
-    job = _job_contract(summary)
-    trials_path = (summary_path.parent / "nuisance_trials.csv").resolve()
-    if not trials_path.is_file():
-        raise ValueError(f"native nuisance-trial table is missing: {trials_path}")
-    with trials_path.open(newline="") as handle:
-        reader = csv.DictReader(handle)
-        fields = set(reader.fieldnames or [])
-        required_fields = set(_NUISANCE_FIELDS) - set(_OPTIONAL_NUISANCE_DEFAULTS)
-        missing = sorted(required_fields.union({"work_dyn_wR2"}) - fields)
-        if missing:
-            raise ValueError(
-                f"native nuisance-trial table {trials_path} lacks required "
-                "columns: " + ", ".join(missing)
-            )
-        rows = list(reader)
-    if not rows:
-        raise ValueError(f"native nuisance-trial table is empty: {trials_path}")
-    candidates: dict[str, dict[str, object]] = {}
-    for row in rows:
-        canonical, typed, candidate_sha256 = _nuisance_contract_from_row(row)
-        work_dyn_wr2 = _finite_float(row.get("work_dyn_wR2"))
-        if not math.isfinite(work_dyn_wr2):
-            raise ValueError(
-                "native nuisance-trial table contains a nonfinite work-row "
-                f"dynamical wR2 for candidate {candidate_sha256}"
-            )
-        if candidate_sha256 in candidates:
-            raise ValueError(
-                "native nuisance-trial table contains a duplicate nuisance "
-                f"candidate: {candidate_sha256}"
-            )
-        candidates[candidate_sha256] = {
-            "candidate_sha256": candidate_sha256,
-            "canonical_nuisance": canonical,
-            "typed_nuisance": typed,
-            "work_dyn_wR2": work_dyn_wr2,
-        }
-    artifact = {
-        "summary_path": str(summary_path),
-        "summary_sha256": _sha256(summary_path),
-        "nuisance_trials_path": str(trials_path),
-        "nuisance_trials_sha256": _sha256(trials_path),
-    }
-    return artifact, job, candidates
-
-
-def select_branch_symmetric_nuisance(
-    original_summary_path: Path,
-    alternate_summary_path: Path,
-) -> dict[str, object]:
-    """Select one nuisance state by a hand-label-invariant paired objective.
-
-    Both branches must have evaluated the exact same predeclared nuisance
-    candidates on one immutable work/free split.  The selected common nuisance
-    minimizes the arithmetic mean of the two work-row dynamical wR2 values.
-    Exact objective ties are resolved by the SHA-256 of the canonical nuisance
-    payload, never by branch label, free rows, known chemistry, or CSV order.
-    """
-
-    original_artifact, original_job, original_candidates = (
-        _nuisance_grid_artifact(original_summary_path)
-    )
-    alternate_artifact, alternate_job, alternate_candidates = (
-        _nuisance_grid_artifact(alternate_summary_path)
-    )
-    paired_job_fields = (
-        "source_hkl_sha256",
-        "source_model_sha256",
-        "hkl_transform",
-        "split_contract_sha256",
-        "split_membership_sha256",
-        "selected_rows",
-        "work_rows",
-        "free_rows",
-        "scale_fit_split",
-        "n_basis",
-        "n_points",
-        "max_rows",
-        "split_seed",
-        "free_fraction",
-        "declared_nuisance_contract_sha256",
-        "grid_physics_contract_sha256",
-    )
-    mismatches = {
-        field: {
-            "original": original_job.get(field),
-            "alternate": alternate_job.get(field),
-        }
-        for field in paired_job_fields
-        if original_job.get(field) != alternate_job.get(field)
-    }
-    original_role = str(original_job.get("model_tag") or "").split(";", 1)[0]
-    alternate_role = str(alternate_job.get("model_tag") or "").split(";", 1)[0]
-    if mismatches:
-        raise ValueError(
-            f"original/alternate nuisance-grid job contracts differ: {mismatches}"
-        )
-    if (
-        original_job.get("alternate_hand") is not False
-        or original_role != "original"
-        or alternate_job.get("alternate_hand") is not True
-        or alternate_role != "alternate_fractional_xyz"
-        or original_job.get("scale_fit_split") != "work"
-    ):
-        raise ValueError(
-            "paired nuisance selection requires original and alternate-only "
-            "branches under one work-scale contract"
-        )
-    if set(original_candidates) != set(alternate_candidates):
-        raise ValueError(
-            "original/alternate hand branches did not evaluate the exact same "
-            "predeclared nuisance candidate grid"
-        )
-    candidate_hashes = sorted(original_candidates)
-    candidate_grid_sha256 = _json_sha256(candidate_hashes)
-    records = []
-    for candidate_sha256 in candidate_hashes:
-        original = original_candidates[candidate_sha256]
-        alternate = alternate_candidates[candidate_sha256]
-        paired_mean = 0.5 * (
-            float(original["work_dyn_wR2"])
-            + float(alternate["work_dyn_wR2"])
-        )
-        records.append(
-            {
-                "candidate_sha256": candidate_sha256,
-                "canonical_nuisance": original["canonical_nuisance"],
-                "original_work_dyn_wR2": original["work_dyn_wR2"],
-                "alternate_work_dyn_wR2": alternate["work_dyn_wR2"],
-                "paired_mean_work_dyn_wR2": paired_mean,
-            }
-        )
-    selected = min(
-        records,
-        key=lambda record: (
-            float(record["paired_mean_work_dyn_wR2"]),
-            str(record["candidate_sha256"]),
-        ),
-    )
-    selected_candidate = original_candidates[str(selected["candidate_sha256"])]
-    return {
-        "schema_version": 1,
-        "status": "selected",
-        "selection_rule": "min_paired_mean_work_dyn_wR2_then_nuisance_sha256_v1",
-        "selection_objective": "paired_mean_work_dyn_wR2",
-        "hand_label_invariant": True,
-        "free_rows_used_for_selection": False,
-        "known_configuration_used": False,
-        "candidate_count": len(records),
-        "candidate_grid_sha256": candidate_grid_sha256,
-        "selected_candidate_sha256": selected["candidate_sha256"],
-        "selected_paired_mean_work_dyn_wR2": selected[
-            "paired_mean_work_dyn_wR2"
-        ],
-        "selected_nuisance": selected_candidate["typed_nuisance"],
-        "paired_candidate_records": records,
-        "original_artifact_binding": original_artifact,
-        "alternate_artifact_binding": alternate_artifact,
-        "original_job_contract": original_job,
-        "alternate_job_contract": alternate_job,
-    }
 
 
 def _row_arrays(rows: list[dict[str, str]]) -> dict[str, np.ndarray]:
+    """Return the numeric columns, groups, detector bins and work/free masks of native row-table rows."""
+
     return {
         "target": np.asarray(
             [_finite_float(row.get("target_I")) for row in rows], dtype=float
@@ -622,41 +371,6 @@ def _row_arrays(rows: list[dict[str, str]]) -> dict[str, np.ndarray]:
             [str(row.get("split") or "").strip() == "free" for row in rows],
             dtype=bool,
         ),
-    }
-
-
-def _score_from_metrics(metrics: Mapping[str, object]) -> dict[str, object]:
-    all_block = metrics["all"]
-    free_block = metrics.get("free", {})
-    all_block = all_block if isinstance(all_block, Mapping) else {}
-    free_block = free_block if isinstance(free_block, Mapping) else {}
-    dyn = all_block.get("dyn")
-    born = all_block.get("born")
-    free_dyn = free_block.get("dyn")
-    dyn = dyn if isinstance(dyn, Mapping) else {}
-    born = born if isinstance(born, Mapping) else {}
-    free_dyn = free_dyn if isinstance(free_dyn, Mapping) else {}
-    dyn_w = float(dyn["wR2_all"])
-    free_w = float(free_dyn.get("wR2_all", float("nan")))
-    dyn_r1 = float(dyn["R1_all"])
-    born_r1gt = float(born["R1_gt"])
-    born_cc = float(born["CC"])
-    score = (
-        dyn_w
-        + 0.10 * dyn_r1
-        + max(0.0, born_r1gt - 0.35)
-        + max(0.0, 0.5 - born_cc)
-    )
-    return {
-        "score": score,
-        "dyn_wR2_all": dyn_w,
-        "free_dyn_wR2_all": free_w,
-        "dyn_R1_all": dyn_r1,
-        "dyn_R1_gt": float(dyn["R1_gt"]),
-        "born_R1_gt": born_r1gt,
-        "born_CC": born_cc,
-        "dyn_CC": float(dyn["CC"]),
-        "selection_scope": "all_rows_free_diagnostic_only",
     }
 
 
@@ -719,322 +433,4 @@ def replay_transform_work_born(summary_path: Path) -> dict[str, object]:
         "score": score,
         "coordinate_hand_sensitive_terms_used": False,
         "free_rows_used_for_transform_selection": False,
-    }
-
-
-def _ordered_rows(
-    rows: list[dict[str, str]],
-) -> dict[tuple[str, str, str, str], dict[str, str]]:
-    result: dict[tuple[str, str, str, str], dict[str, str]] = {}
-    for row in rows:
-        key = tuple(
-            str(row.get(field) or "").strip()
-            for field in ("row_index", "h", "k", "l")
-        )
-        if key in result:
-            raise ValueError(f"duplicate signed-row evidence key: {key}")
-        result[key] = row
-    return result
-
-
-def _refit_branch(
-    arrays: Mapping[str, np.ndarray],
-    *,
-    sigma: np.ndarray,
-) -> tuple[dict[str, dict[str, dict[str, float]]], np.ndarray, np.ndarray]:
-    target = arrays["target"]
-    groups = arrays["groups"]
-    detector_bins = arrays["detector_bins"]
-    valid = (
-        np.isfinite(target)
-        & np.isfinite(sigma)
-        & (sigma > 0.0)
-        & np.isfinite(arrays["dyn_raw"])
-        & np.isfinite(arrays["born_raw"])
-        & (arrays["dyn_raw"] > 0.0)
-        & (arrays["born_raw"] > 0.0)
-    )
-    work = arrays["work"] & valid
-    if np.count_nonzero(work) < 2:
-        raise ValueError("common-sigma hand replay has fewer than two work rows")
-    if len(np.unique(detector_bins[valid])) > 1:
-        dyn_scaled, _, _ = fit_frame_detector_scales(
-            target,
-            sigma,
-            arrays["dyn_raw"],
-            groups,
-            detector_bins,
-            work,
-            0.0,
-            0.0,
-            scale_smoothness=0.0,
-        )
-        born_scaled, _, _ = fit_frame_detector_scales(
-            target,
-            sigma,
-            arrays["born_raw"],
-            groups,
-            detector_bins,
-            work,
-            0.0,
-            0.0,
-            scale_smoothness=0.0,
-        )
-    else:
-        dyn_scaled, _ = fit_group_scales(
-            target,
-            sigma,
-            arrays["dyn_raw"],
-            groups,
-            work,
-            0.0,
-            0.0,
-            scale_smoothness=0.0,
-        )
-        born_scaled, _ = fit_group_scales(
-            target,
-            sigma,
-            arrays["born_raw"],
-            groups,
-            work,
-            0.0,
-            0.0,
-            scale_smoothness=0.0,
-        )
-    metrics: dict[str, dict[str, dict[str, float]]] = {}
-    for label, mask in (
-        ("all", np.ones(len(target), dtype=bool)),
-        ("work", arrays["work"]),
-        ("free", arrays["free"]),
-    ):
-        metrics[label] = {
-            "dyn": native_metrics(
-                target, sigma, dyn_scaled, mask & valid, 0.0, 0.0
-            ),
-            "born": native_metrics(
-                target, sigma, born_scaled, mask & valid, 0.0, 0.0
-            ),
-        }
-    return metrics, dyn_scaled, born_scaled
-
-
-def build_common_sigma_hand_evidence(
-    original_summary_path: Path,
-    alternate_summary_path: Path,
-    *,
-    minimum_abs_adjusted_z: float,
-) -> dict[str, object]:
-    """Replay both hands with one immutable source-sigma and scale-design rule."""
-
-    original_summary, _, original_rows, original_binding = _read_summary_and_rows(
-        original_summary_path
-    )
-    alternate_summary, _, alternate_rows, alternate_binding = _read_summary_and_rows(
-        alternate_summary_path
-    )
-    original_job = _job_contract(original_summary)
-    alternate_job = _job_contract(alternate_summary)
-    paired_job_fields = (
-        "source_hkl_sha256",
-        "source_model_sha256",
-        "hkl_transform",
-        "split_contract_sha256",
-        "split_membership_sha256",
-        "selected_rows",
-        "work_rows",
-        "free_rows",
-        "scale_fit_split",
-        "n_basis",
-        "n_points",
-        "max_rows",
-        "split_seed",
-        "free_fraction",
-        "declared_nuisance_contract_sha256",
-        "selected_nuisance_sha256",
-        "bloch_kernel_contract_sha256",
-    )
-    job_mismatches = {
-        field: {
-            "original": original_job.get(field),
-            "alternate": alternate_job.get(field),
-        }
-        for field in paired_job_fields
-        if original_job.get(field) != alternate_job.get(field)
-    }
-    if job_mismatches:
-        raise ValueError(
-            f"original/alternate hand job contracts differ: {job_mismatches}"
-        )
-    original_model_role = str(original_job["model_tag"]).split(";", 1)[0]
-    alternate_model_role = str(alternate_job["model_tag"]).split(";", 1)[0]
-    if (
-        original_job["alternate_hand"] is not False
-        or original_model_role != "original"
-        or alternate_job["alternate_hand"] is not True
-        or alternate_model_role != "alternate_fractional_xyz"
-        or original_job["scale_fit_split"] != "work"
-    ):
-        raise ValueError(
-            "hand evidence does not bind original and alternate-only model "
-            "branches under one work-scale contract"
-        )
-    original_by_key = _ordered_rows(original_rows)
-    alternate_by_key = _ordered_rows(alternate_rows)
-    if set(original_by_key) != set(alternate_by_key):
-        raise ValueError(
-            "original/alternate hand row artifacts do not contain the same signed rows"
-        )
-    keys = sorted(original_by_key)
-    paired_original: list[dict[str, str]] = []
-    paired_alternate: list[dict[str, str]] = []
-    contract_fields = (
-        "target_I",
-        "xds_sigma",
-        "group",
-        "detector_bin",
-        "split",
-    )
-    for key in keys:
-        left = original_by_key[key]
-        right = alternate_by_key[key]
-        for field in contract_fields:
-            if str(left.get(field) or "").strip() != str(
-                right.get(field) or ""
-            ).strip():
-                raise ValueError(
-                    f"hand row contract mismatch for {key}, column {field}"
-                )
-        paired_original.append(left)
-        paired_alternate.append(right)
-    original_arrays = _row_arrays(paired_original)
-    alternate_arrays = _row_arrays(paired_alternate)
-    common_sigma = original_arrays["xds_sigma"]
-    if (
-        not np.all(np.isfinite(common_sigma))
-        or np.any(common_sigma <= 0.0)
-        or not np.array_equal(common_sigma, alternate_arrays["xds_sigma"])
-    ):
-        raise ValueError(
-            "source XDS sigma is not one exact positive finite vector across hands"
-        )
-    if not np.array_equal(original_arrays["target"], alternate_arrays["target"]):
-        raise ValueError("target intensity vector differs between hand branches")
-    if not np.array_equal(original_arrays["groups"], alternate_arrays["groups"]):
-        raise ValueError("scale-group design differs between hand branches")
-    if not np.array_equal(
-        original_arrays["detector_bins"], alternate_arrays["detector_bins"]
-    ):
-        raise ValueError("detector-scale design differs between hand branches")
-    if not np.array_equal(original_arrays["work"], alternate_arrays["work"]):
-        raise ValueError("work/free membership differs between hand branches")
-
-    original_metrics, original_dyn, _ = _refit_branch(
-        original_arrays, sigma=common_sigma
-    )
-    alternate_metrics, alternate_dyn, _ = _refit_branch(
-        alternate_arrays, sigma=common_sigma
-    )
-    original_score = _score_from_metrics(original_metrics)
-    alternate_score = _score_from_metrics(alternate_metrics)
-    delta = float(original_score["score"] - alternate_score["score"])
-
-    original_z_rows: list[dict[str, str]] = []
-    alternate_z_rows: list[dict[str, str]] = []
-    for index, (left, right) in enumerate(
-        zip(paired_original, paired_alternate, strict=True)
-    ):
-        original_z_rows.append(
-            {
-                **left,
-                "sigma_eff": f"{common_sigma[index]:.17g}",
-                "dyn_scaled": f"{original_dyn[index]:.17g}",
-            }
-        )
-        alternate_z_rows.append(
-            {
-                **right,
-                "sigma_eff": f"{common_sigma[index]:.17g}",
-                "dyn_scaled": f"{alternate_dyn[index]:.17g}",
-            }
-        )
-    missing = adjusted_hand_missing_columns(
-        list(original_z_rows[0]) if original_z_rows else [],
-        list(alternate_z_rows[0]) if alternate_z_rows else [],
-        "dyn_scaled",
-    )
-
-    def adjusted(mask_label: str) -> dict[str, Any]:
-        joined = [
-            (left, right)
-            for left, right in zip(
-                original_z_rows, alternate_z_rows, strict=True
-            )
-            if mask_label == "all"
-            or str(left.get("split") or "").strip() == mask_label
-        ]
-        return klar_palatinus_adjusted_hand_z(joined, missing, "dyn_scaled")
-
-    adjusted_all = adjusted("all")
-    adjusted_free = adjusted("free")
-    z_original = _finite_float(adjusted_all.get("z"))
-    preferred = "alternate" if delta > 0.0 else "original"
-    branch_aligned_z = z_original if preferred == "original" else -z_original
-    minimum_z = float(minimum_abs_adjusted_z)
-    sign_agrees = bool(math.isfinite(branch_aligned_z) and branch_aligned_z > 0.0)
-    threshold_passed = bool(
-        sign_agrees and abs(branch_aligned_z) >= minimum_z
-    )
-    sigma_payload = [
-        {
-            "row_key": list(key),
-            "sigma": f"{common_sigma[index]:.17g}",
-        }
-        for index, key in enumerate(keys)
-    ]
-    scale_design_payload = [
-        {
-            "row_key": list(key),
-            "group": int(original_arrays["groups"][index]),
-            "detector_bin": int(original_arrays["detector_bins"][index]),
-            "split": (
-                "work" if bool(original_arrays["work"][index]) else "free"
-            ),
-        }
-        for index, key in enumerate(keys)
-    ]
-    return {
-        "schema_version": 1,
-        "status": "replayed",
-        "comparison_rule": "matched_rows_common_source_sigma_refit_scales_v1",
-        "common_sigma_rule": "immutable_source_sigma_in_target_units_exact_matched_rows_v2",
-        "common_sigma_sha256": _json_sha256(sigma_payload),
-        "common_sigma_row_count": len(keys),
-        "scale_design_rule": (
-            "same_group_detector_split_design; independent inverse-variance "
-            "work-row nuisance-scale fit per hand; WGHT a=b=0"
-        ),
-        "scale_design_sha256": _json_sha256(scale_design_payload),
-        "original_artifact_binding": original_binding,
-        "alternate_artifact_binding": alternate_binding,
-        "original_job_contract": original_job,
-        "alternate_job_contract": alternate_job,
-        "original_summary_selection_metric": str(
-            original_summary.get("selection_metric") or ""
-        ),
-        "alternate_summary_selection_metric": str(
-            alternate_summary.get("selection_metric") or ""
-        ),
-        "original_score": original_score,
-        "alternate_score": alternate_score,
-        "score_delta_original_minus_alternate": delta,
-        "adjusted_hand_z_original_favored": {
-            "all": adjusted_all,
-            "free": adjusted_free,
-        },
-        "residual_preferred_branch": preferred,
-        "branch_aligned_adjusted_z": branch_aligned_z,
-        "minimum_abs_adjusted_z": minimum_z,
-        "branch_z_sign_agreement": sign_agrees,
-        "adjusted_z_threshold_passed": threshold_passed,
-        "known_configuration_used": False,
     }

@@ -14,7 +14,6 @@ from grond.io.config import DATASET_NAME_RE
 from grond.legacy.engine.bloch_engine import (
     Config,
     XDSData,
-    split_masks,
 )
 from grond.legacy.engine.native_structure_update import (
     apply_row_resolution_to_prediction,
@@ -30,6 +29,8 @@ from grond.regularize.scales import native_metrics
 
 @dataclass
 class DatasetState:
+    """One crystal's observations, row selections, split masks, nuisance, Bloch configs and weights."""
+
     name: str
     hkl: Path
     data: XDSData
@@ -54,12 +55,16 @@ class DatasetState:
 
 
 def parse_bool(text: str | None, default: bool = False) -> bool:
+    """Parse CSV yes/no text (1, true, yes, y and on are True); blank gives ``default``."""
+
     if text is None or str(text).strip() == "":
         return default
     return str(text).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
 def parse_float(row: dict, key: str, default: float) -> float:
+    """Return a CSV field as a float; blank or missing gives ``default``."""
+
     val = row.get(key, "")
     if val is None or str(val).strip() == "":
         return float(default)
@@ -67,6 +72,8 @@ def parse_float(row: dict, key: str, default: float) -> float:
 
 
 def parse_int(row: dict, key: str, default: int) -> int:
+    """Return a CSV field as an int; blank or missing gives ``default``."""
+
     val = row.get(key, "")
     if val is None or str(val).strip() == "":
         return int(default)
@@ -74,6 +81,8 @@ def parse_int(row: dict, key: str, default: int) -> int:
 
 
 def parse_text(row: dict, key: str, default: str) -> str:
+    """Return a CSV field as stripped text; blank or missing gives ``default``."""
+
     val = row.get(key, "")
     if val is None or str(val).strip() == "":
         return str(default)
@@ -81,6 +90,13 @@ def parse_text(row: dict, key: str, default: str) -> str:
 
 
 def choose_objective_rows(data: XDSData, indices, masks, target, sig, n_rows: int, n_bins: int, seed: int):
+    """Return a reproducible subset of ``n_rows`` work rows for the objective, stratified by resolution.
+
+    Rows are split into ``n_bins`` equal-count resolution bins, each contributing in
+    proportion, with draws weighted by sqrt(max(I/sigma, 0) + 1). All candidates are
+    returned when ``n_rows`` <= 0 or ``n_rows`` >= their number.
+    """
+
     candidates = np.asarray(
         [i for i in indices if masks["work"][i] and target[i] > 0 and np.isfinite(target[i]) and np.isfinite(sig[i])],
         dtype=int,
@@ -99,8 +115,6 @@ def choose_objective_rows(data: XDSData, indices, masks, target, sig, n_rows: in
             continue
         quota = int(round(n_rows * len(b) / max(len(candidates), 1)))
         quota = max(1, min(quota, len(b), remaining))
-        if quota <= 0:
-            continue
         remaining -= quota
         isigi = np.maximum(target[b] / np.maximum(sig[b], 1e-12), 0.0)
         prob = np.sqrt(isigi + 1.0)
@@ -117,6 +131,8 @@ def choose_objective_rows(data: XDSData, indices, masks, target, sig, n_rows: in
 
 
 def read_datasets_csv(path: Path) -> list[dict]:
+    """Read the included rows of a datasets CSV; dataset names must be safe and unique ignoring case."""
+
     with path.open(newline="") as f:
         rows = [dict(r) for r in csv.DictReader(f)]
     rows = [r for r in rows if parse_bool(r.get("include"), True)]
@@ -135,6 +151,8 @@ def read_datasets_csv(path: Path) -> list[dict]:
 
 
 def stable_name_seed(name: str) -> int:
+    """Return a deterministic seed (0 to 99999) from a dataset name, independent of Python's hash seed."""
+
     total = 0
     for ch in str(name):
         total = (total * 131 + ord(ch)) % 100000
@@ -142,6 +160,12 @@ def stable_name_seed(name: str) -> int:
 
 
 def build_dataset_state(row: dict, args, wght_a: float, wght_b: float, symmetry_ops=None) -> DatasetState:
+    """Build one crystal's DatasetState from its datasets-CSV row and the command-line defaults.
+
+    CSV columns override the command-line values per crystal. Lockbox-excluded orbits are
+    dropped before any fit, and a ``dataset_weight`` below 1 divides sigma by sqrt(weight).
+    """
+
     name = row.get("name") or row.get("dataset") or Path(row["hkl"]).parent.parent.name
     if not DATASET_NAME_RE.fullmatch(str(name)):
         raise ValueError(f"unsafe dataset name {name!r}")
@@ -156,12 +180,22 @@ def build_dataset_state(row: dict, args, wght_a: float, wght_b: float, symmetry_
     geometry_percentile = parse_float(row, "geometry_percentile", args.geometry_percentile)
     include_nonpositive = parse_bool(row.get("include_nonpositive"), args.include_nonpositive)
     target_indices = row_selection(data, target, not include_nonpositive, min_d, min_peak, 0, geometry_percentile)
-    masks = split_masks(
-        data.hkl,
-        args.free_fraction,
-        args.split_seed,
-        symmetry_ops=symmetry_ops,
+    from grond.bloch.splits import resolve_split_masks
+
+    split_scheme = str(getattr(args, "split_scheme", "legacy"))
+    masks, excluded_rows, _split_contract, _split_scheme = resolve_split_masks(
+        data,
+        {"symmetry_ops": symmetry_ops},
+        # Legacy runs keep the historical per-dataset split; orbit-hash runs bind the dataset's contract.
+        split_contract=str(row.get("split_contract") or "") if split_scheme != "legacy" else "",
+        free_fraction=args.free_fraction,
+        split_seed=args.split_seed,
+        split_scheme=split_scheme,
+        split_salt=str(getattr(args, "split_salt", "")),
+        exclude_orbits_json=str(getattr(args, "exclude_orbits_json", "") or ""),
     )
+    # Excluded (lockbox) orbits leave the row set before any fit.
+    target_indices = np.asarray([i for i in target_indices if not excluded_rows[int(i)]], dtype=int)
     selected_mask = np.zeros(len(target), dtype=bool)
     selected_mask[target_indices] = True
     masks = {k: v & selected_mask for k, v in masks.items()}
@@ -288,12 +322,16 @@ def build_dataset_state(row: dict, args, wght_a: float, wght_b: float, symmetry_
 
 
 def predict_state(state: DatasetState, model, indices, cache_root: Path, tag: str, workers: int, chunksize: int, objective: bool = False):
+    """Predict Bloch intensities for rows of one crystal, with its objective or validation config."""
+
     cfg = state.objective_cfg if objective else state.cfg
     ds_cache = cache_root / state.name
     return prediction_for_model(state.data, model, cfg, np.asarray(indices, dtype=int), ds_cache, tag, workers, chunksize)
 
 
 def fit_frozen_scale_contract(state: DatasetState, model, cache_root: Path, tag: str, workers: int, chunksize: int):
+    """Fit the crystal's frame (and detector) scales once at ``model`` and return them as a frozen contract."""
+
     pred = predict_state(state, model, state.objective_indices, cache_root, f"{tag}_{state.name}_scale_anchor", workers, chunksize, objective=True)
     full = np.full(len(state.target), np.nan, dtype=float)
     full[pred["indices"]] = pred["dyn"]
@@ -315,6 +353,8 @@ def fit_frozen_scale_contract(state: DatasetState, model, cache_root: Path, tag:
 
 
 def state_residual_vector(state: DatasetState, model, cache_root: Path, tag: str, workers: int, chunksize: int, scale_contract=None):
+    """Return the weighted residuals of the crystal's objective rows at ``model``, optionally with frozen scales."""
+
     pred = predict_state(state, model, state.objective_indices, cache_root, f"{tag}_{state.name}_moving", workers, chunksize, objective=True)
     _, scaled, _, _, _ = scaled_prediction(
         state.data,
@@ -333,6 +373,8 @@ def state_residual_vector(state: DatasetState, model, cache_root: Path, tag: str
 
 
 def evaluate_state(state: DatasetState, model, cache_root: Path, tag: str, workers: int, chunksize: int):
+    """Predict and scale all target rows at ``model`` and return R1/wR2 metrics for each split."""
+
     pred = predict_state(state, model, state.target_indices, cache_root, f"{tag}_{state.name}_validation", workers, chunksize, objective=False)
     _, scaled, _, _, scale_count = scaled_prediction(
         state.data,
@@ -361,12 +403,16 @@ def evaluate_state(state: DatasetState, model, cache_root: Path, tag: str, worke
 
 
 def score_eval(eval_result: dict, metric: str) -> float:
+    """Return the metric named ``<split>_<wR2|R1>`` (for example ``free_wR2``) from an evaluation."""
+
     split, value = metric.split("_", 1)
     key = "wR2_all" if value == "wR2" else "R1_all"
     return float(eval_result["splits"][split][key])
 
 
 def compact_eval(eval_result: dict) -> dict:
+    """Return an evaluation without its per-row arrays, for JSON output."""
+
     return {
         "splits": eval_result["splits"],
         "datasets": [
@@ -377,6 +423,8 @@ def compact_eval(eval_result: dict) -> dict:
 
 
 def write_dataset_rows(out: Path, states: list[DatasetState]):
+    """Write ``datasets_used.csv``: one row per crystal with its row counts and nuisance values."""
+
     with (out / "datasets_used.csv").open("w", newline="") as f:
         fields = [
             "name",

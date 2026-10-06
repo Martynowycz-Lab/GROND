@@ -78,6 +78,7 @@ def prepare_push_endpoint_model(args: argparse.Namespace, out_dir: Path) -> tupl
                 sfac_elements.append(element_tokens[0])
 
     def atom_element(toks: list[str]) -> str:
+        """Return an atom line's element from its SFAC index, else from its label."""
         try:
             sfac_index = int(toks[1])
         except (IndexError, ValueError):
@@ -109,12 +110,14 @@ def prepare_push_endpoint_model(args: argparse.Namespace, out_dir: Path) -> tupl
         i += 1
 
     def distance2(p: tuple[float, float, float], q: tuple[float, float, float]) -> float:
+        """Return the squared distance (A^2) between fractional positions, nearest lattice image, cell angles ignored."""
         dx = ((p[0] - q[0] + 0.5) % 1.0) - 0.5
         dy = ((p[1] - q[1] + 0.5) % 1.0) - 0.5
         dz = ((p[2] - q[2] + 0.5) % 1.0) - 0.5
         return (dx * cell[0]) ** 2 + (dy * cell[1]) ** 2 + (dz * cell[2]) ** 2
 
     def nearest_heavy_u(xyz: tuple[float, float, float]) -> tuple[float, str | None]:
+        """Return the Ueq (A^2) and label of the nearest heavy atom; 0.03 and None when there are none."""
         if not heavy:
             return 0.03, None
         rec = min(heavy, key=lambda item: distance2(xyz, item["xyz"]))  # type: ignore[arg-type]
@@ -148,6 +151,7 @@ def prepare_push_endpoint_model(args: argparse.Namespace, out_dir: Path) -> tupl
     inserted_adp_stabilizers = False
 
     def add_adp_stabilizers() -> None:
+        """Append the ADP-stabilizing lines once: REM notes, RIGU, SIMU and ISOR on NPD atoms, unless present."""
         nonlocal inserted_adp_stabilizers
         if inserted_adp_stabilizers or not adp_stabilized:
             return
@@ -172,6 +176,7 @@ def prepare_push_endpoint_model(args: argparse.Namespace, out_dir: Path) -> tupl
         inserted_adp_stabilizers = True
 
     def isotropic_atom_line(toks: list[str], u_value: float) -> str:
+        """Return a SHELX isotropic atom line with U clamped to [0.006, 0.08] A^2."""
         label = toks[0]
         sfac = int(toks[1])
         x, y, z = [float(v) for v in toks[2:5]]

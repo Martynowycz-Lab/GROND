@@ -28,6 +28,13 @@ def _hand_evidence(
     min_z_free: float = 3.5,
     min_free_rows: int = 10,
 ) -> dict[str, object]:
+    """Combine the per-crystal hand diagnostics into one recommendation: input, inverse or ambiguous.
+
+    The combined adjusted ZKP is sum(2 k_eff - n) / sqrt(sum(n - w)) over crystals, positive when the input hand fits
+    better. Only the all-row value decides (|z| >= ``min_z_all``); the held-out value and the free-row count only add
+    warnings.
+    """
+
     min_z_all = float(min_z_all)
     if not math.isfinite(min_z_all) or min_z_all <= 0.0:
         raise ValueError("all-row hand threshold must be finite and positive")
@@ -163,6 +170,12 @@ def _hand_evidence(
 
 
 def manual_hand(args) -> int:
+    """Run the ``hand`` stage: check both hands of each crystal, then record the user's choice.
+
+    ``--choice report`` writes the evidence and waits for ``input`` or ``inverse``; those reuse a complete report
+    instead of recalculating. ``--skip`` keeps the input coordinates.
+    """
+
     workflow_path, workflow = _load_workflow(args)
     thickness = _require_stage(workflow, "thickness")
     root = Path(workflow["root"])

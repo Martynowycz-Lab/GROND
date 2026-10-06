@@ -22,15 +22,8 @@ if not __package__:
 
 import numpy as np
 
-from grond.legacy.engine.detector_scale_regularization import (
-    detector_field_diagnostics as detector_field_diagnostics,
-    infer_square_grid_size as infer_square_grid_size,
-    solve_regularized_detector_field as solve_regularized_detector_field,
-)
 from grond.regularize.arguments_compression import build_parser as build_compression_parser
 from grond.regularize.compression_policy import (
-    _field_agreement as _field_agreement,
-    _stable_detector_split_masks as _stable_detector_split_masks,
     candidate_row as candidate_row,
     detector_scale_policy_diagnostics as detector_scale_policy_diagnostics,
     metric_delta as metric_delta,
@@ -48,30 +41,23 @@ from grond.regularize.compression_topology import (
     infer_detector_base as infer_detector_base,
     infer_group_width_deg as infer_group_width_deg,
     log_scale_step_rms as log_scale_step_rms,
-    parse_csv_ints as parse_csv_ints,
     split_masks as split_masks,
-    str_col as str_col,
 )
 from grond.regularize.compression_weights import (
     col as col,
-    fit_global_scale as fit_global_scale,
     fit_group_detector_scales as fit_group_detector_scales,
     fit_group_scales as fit_group_scales,
     information_criteria as information_criteria,
-    jana_adjusted_observations as jana_adjusted_observations,
     native_metrics as native_metrics,
-    objective_weights as objective_weights,
-    require_scale_coverage as require_scale_coverage,
     row_mr_metrics as row_mr_metrics,
-    row_sqrt_weights as row_sqrt_weights,
     safe_float as safe_float,
-    shelx_weights as shelx_weights,
-    solve_scale as solve_scale,
     source_sigma_array as source_sigma_array,
 )
 
 
 def read_rows(path: Path) -> list[dict[str, str]]:
+    """Read a CSV file into a list of row dicts; raise if it has no rows."""
+
     with path.open(newline="") as f:
         rows = list(csv.DictReader(f))
     if not rows:
@@ -80,6 +66,8 @@ def read_rows(path: Path) -> list[dict[str, str]]:
 
 
 def write_rows(path: Path, rows: list[dict[str, object]], fieldnames: list[str]) -> None:
+    """Write rows to a CSV with the given header, ignoring extra keys; create the parent folder."""
+
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
@@ -133,12 +121,16 @@ def materialize_candidate_rows(
 
 
 def read_json(path: Path) -> dict:
+    """Read a JSON file, or return an empty dict if it does not exist."""
+
     if not path.exists():
         return {}
     return json.loads(path.read_text())
 
 
 def parse_csv_metrics(text: str) -> tuple[str, ...]:
+    """Parse the comma-separated selection metrics, defaulting to Robs, Rall and wRall; raise on unknown names."""
+
     metrics = tuple(part.strip() for part in str(text).split(",") if part.strip())
     allowed = {
         "Robs",
@@ -218,11 +210,18 @@ def parse_detector_targets(text: str, detector_base: int) -> list[int]:
 
 
 def fmt(value: object, digits: int = 4) -> str:
+    """Format a number with the given decimals, or 'n/a' if it is not finite."""
+
     v = safe_float(value)
     return "n/a" if not np.isfinite(v) else f"{v:.{digits}f}"
 
 
 def load_baseline_counts(summary: dict, n_rows: int) -> tuple[int, int, int]:
+    """Return the baseline (scale, total, physical) parameter counts from the native summary.
+
+    The total is the row count minus the recorded degrees of freedom when present, else the scale count.
+    """
+
     best = summary.get("best_native") or {}
     scale_count = int(safe_float(best.get("scale_count"), 0.0))
     dof = safe_float((((best.get("metrics") or {}).get("all") or {}).get("dyn") or {}).get("dof"), float("nan"))
@@ -232,6 +231,8 @@ def load_baseline_counts(summary: dict, n_rows: int) -> tuple[int, int, int]:
 
 
 def native_weight_from_summary(summary: dict, cli_a: float, cli_b: float) -> tuple[float, float]:
+    """Return the native WGHT (a, b): finite command-line values, else the summary's, else 0."""
+
     weight = (summary.get("best_native") or {}).get("native_weight") or {}
     a = cli_a if np.isfinite(cli_a) else safe_float(weight.get("a"), 0.0)
     b = cli_b if np.isfinite(cli_b) else safe_float(weight.get("b"), 0.0)
@@ -239,6 +240,8 @@ def native_weight_from_summary(summary: dict, cli_a: float, cli_b: float) -> tup
 
 
 def write_report(path: Path, payload: dict) -> None:
+    """Write the Markdown report: baseline, strict, widest-strict, R-only and information-criterion selections."""
+
     baseline = payload["baseline"]
     selected = payload["selected"]
     widest = payload.get("selected_widest")
@@ -330,6 +333,12 @@ def write_report(path: Path, payload: dict) -> None:
 
 
 def main() -> None:
+    """Refit simpler frame and detector scale models on the frozen Bloch rows and pick compact ones.
+
+    Writes the candidate CSV, the selected compact and strict runs, scale_compression_summary.json and
+    REPORT.md to --out-dir.
+    """
+
     ap = build_compression_parser(
         description=__doc__,
     )
@@ -444,6 +453,12 @@ def main() -> None:
         window_deg: float,
         adaptive_segments: int | str = "",
     ) -> None:
+        """Fit scales for one frame grouping at each target detector grid and append the scored candidates.
+
+        Each candidate carries row/MR and native metrics, information criteria, the detector policy, its
+        deltas against the baseline and the strict and R-only tolerance flags.
+        """
+
         fit_good = fit_mask & np.isfinite(obs) & np.isfinite(sig) & np.isfinite(raw_dyn) & (sig > 0) & (raw_dyn > 0)
         for det_bins_target in target_detector_bins:
             if det_bins_target <= 1:
@@ -636,6 +651,8 @@ def main() -> None:
     write_rows(candidate_csv, candidate_rows, list(candidate_rows[0].keys()))
 
     def arrays_for_candidate(candidate: dict) -> dict[str, np.ndarray]:
+        """Rebuild one candidate's groups and detector bins, refit its Born scales and return the arrays."""
+
         if candidate.get("frame_model") == "adaptive":
             candidate_groups, _ = adaptive_segment_groups(
                 groups0,
@@ -674,6 +691,8 @@ def main() -> None:
         }
 
     def materialize_candidate_run(run_dir: Path, candidate: dict) -> None:
+        """Write one candidate as a native run: its native_dyn_calc.csv and a summary.json with the new scales."""
+
         arrays = arrays_for_candidate(candidate)
         run_dir.mkdir(parents=True, exist_ok=True)
         updated_rows, fieldnames = materialize_candidate_rows(

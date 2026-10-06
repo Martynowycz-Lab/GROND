@@ -109,6 +109,8 @@ def _format_protein_output_model_template(
     cycles: int,
     free_label: str,
 ) -> str:
+    """Fill the protein ``output_model`` template's placeholders; raise ValueError on an unknown placeholder."""
+
     values = {
         "model": str(model),
         "mtz": str(mtz),

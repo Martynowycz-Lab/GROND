@@ -1,40 +1,25 @@
-# Simple staged workflow
+# Stage by stage: `grond manual`
 
-`grond manual` exposes a simplified expert workflow as short, resumable stages. Setup
-writes one `manual_workflow.json`; every later command reads that file, writes
-its own `handoff.json`, updates the workflow state, and prints the next command.
-No paths, transforms, thicknesses, or nuisance grids need to be copied by hand.
+`grond manual` runs a simplified calculation as short, resumable stages. Setup writes one `manual_workflow.json`; every later stage reads it, writes its own `handoff.json`, updates the workflow state and prints the next command. No paths, transforms or thicknesses need to be copied by hand.
 
-This interface is for inspecting and handing off individual decisions. It is
-not a stage-for-stage reimplementation of `grond auto`: it does not run every
-feature gate, dataset policy, resolution/endpoint calibration, final
-post-feedback shared-hand selection, or compact-scale promotion. Use `auto` for
-the canonical production endpoint and use the manual path for controlled expert
-experiments.
+Use it to look inside the calculation and to try one decision at a time. It is not a stage-for-stage copy of `grond auto`, and its results are not the reported result. Compared with `grond auto` it:
 
-The normal sequence is:
+- has no leak-free start and no cross-validated choice of thickness distribution, mosaic spread and damage;
+- recommends the hand from the all-observation Klar–Palatinus statistic before refinement, where `grond auto` decides it from held-out reflections ([USAGE.md](USAGE.md));
+- makes one SHELXL least-squares cycle per round, where `grond auto` refines SHELXL to convergence every round;
+- has no dataset policy, resolution-limit gate or final all-data refinement.
+
+The stages are:
 
 ```text
 setup -> scout -> thickness -> hand -> feedback -> scales -> finish
 ```
 
-`grond manual status --workflow RUN/manual_workflow.json` reports what ran,
-elapsed times, selected model, the final summary, and the next command. Add
-`--json` for the machine-readable form.
-
-Every stage has its own short help page. For example:
-
-```bash
-grond manual thickness --help
-grond manual feedback --help
-```
-
-The thickness help shows only thickness controls. The feedback help also says
-explicitly which work is per crystal and which coordinate update is shared.
+`grond manual status --workflow RUN/manual_workflow.json` shows what has run, the timings, the chosen model, the final summary and the next command. Add `--json` for the machine-readable form. Every stage has its own help page, for example `grond manual thickness --help`.
 
 ## Setup
 
-For two existing XDS or GROND bridge directories:
+For two XDS directories or converted DIALS directories:
 
 ```bash
 grond manual setup \
@@ -48,43 +33,25 @@ grond manual setup \
   --workers 10
 ```
 
-The command prints the only state path needed later. It also stores the Python,
-worker, config, and SHELXL defaults, so subsequent printed commands retain the
-same runtime on that machine. When a baseline HKL and explicit SHELXL path are
-available, setup writes a fresh one-cycle conventional control for the final
-comparison.
+Setup checks the model's SFAC lines and stores the Python, worker count, config and SHELXL path, so the printed commands of later stages use the same settings. When a baseline HKL and an explicit `--shelxl` path are given, setup also runs a fresh conventional SHELXL refinement in `00_setup/fresh_conventional_baseline/` for the final comparison. For DIALS, convert each experiment first with `grond import-dials` and give the converted directories.
 
-```text
-manual_run/manual_workflow.json
-```
-
-For DIALS, first make one bridge per experiment with `grond import-dials`, then
-use those bridge directories as the dataset paths.
-
-## Scout proper transforms
+## Indexing transform
 
 ```bash
 grond manual scout --workflow manual_run/manual_workflow.json
 ```
 
-This runs chemistry-blind, determinant-positive transform scouting independently
-for every dataset. To assert that transforms already recorded during setup are
-correct, use `--skip`; the handoff records that user assertion. Skip mode still
-rejects improper transforms, runs input preflight, and preserves the requested
-MINPK/partiality and geometry support rather than silently relaxing it.
+This ranks the proper (determinant +1) transforms for every crystal without using the hand or known chemistry. `--skip` keeps the transforms given at setup and records that choice. Skip mode still rejects improper transforms, runs the input check, and keeps the requested partiality and geometry limits.
 
-## Select effective thickness
+## Thickness
 
 ```bash
 grond manual thickness --workflow manual_run/manual_workflow.json
 ```
 
-The default is the compact primary experiment: all accepted rows, detector-free
-frame scales, no absorption or Sg jitter, N=24 then N=48 confirmation, and a
-broad thickness/gradient grid. `--expanded` also runs the sensitivity branches.
+The default uses all accepted observations, frame scales without detector terms, no absorption or Sg jitter, and a thickness with a uniform gradient (wedge). It searches the thickness and gradient grids at N=24 beams, then confirms at N=48 within 30 nm of the first choice. `--thickness-grid-nm`, `--gradient-grid`, `--n-basis-grid` and `--n-points` change the search; a single `--thickness-grid-nm` value fixes the thickness at every basis size. `--expanded` adds sensitivity branches.
 
-Thickness cannot be silently skipped because feedback needs a pinned nuisance
-contract. An expert can reuse existing audited summaries explicitly:
+The thickness cannot be skipped silently, because the feedback stage needs fixed settings. To reuse existing summaries:
 
 ```bash
 grond manual thickness --workflow manual_run/manual_workflow.json --skip \
@@ -92,55 +59,27 @@ grond manual thickness --workflow manual_run/manual_workflow.json --skip \
   --summary crystal_2=/path/to/summary.json
 ```
 
-Every reused summary must match the named dataset's current HKL, proper
-transform, resolution cutoff, PEAK/partiality floor, and geometry percentile.
-When the summary records its original source-HKL SHA256, that hash must also
-match the current files; editing an HKL at the same path therefore fails before
-feedback. Older summaries without a saved source hash remain usable, but the
-handoff explicitly marks historical identity as unverified and prints a
-warning. Matching two current files cannot prove what an older calculation
-read. Preserve the original inputs and use a new setup when observations change.
+Each reused summary must match its crystal's current HKL, transform, resolution cutoff, partiality floor and geometry percentile. When the summary records the SHA-256 of its source HKL, that must match too, so an HKL edited at the same path fails before feedback. A summary without a recorded hash is accepted with a warning. Use a new setup when the observations change.
 
-## Check the pre-feedback hand and pause for a choice
+## Hand
 
 ```bash
 grond manual hand --workflow manual_run/manual_workflow.json
 ```
 
-This evaluates the thickness-stage model with the exact elastic
-negative-thickness identity, writes per-dataset diagnostics plus
-`combined_hand_evidence.json`, and pauses. Known chemistry is never used. The
-recommendation uses the combined all-row Klar--Palatinus adjusted Z with a
-default threshold of 3.5. Held-out Z and row count remain visible and generate
-warnings when weak or conflicting, but do not veto a decisive all-row
-recommendation. Weak all-row evidence defaults to an ambiguous report. Record the deliberate
-coordinate choice with one short command:
+This compares the thickness-stage model and its inverse with the negative-thickness identity, writes per-crystal evidence and `combined_hand_evidence.json`, and stops. Known chemistry is never used. The recommendation follows the combined all-observation Klar–Palatinus adjusted Z with a threshold of 3.5 (`--min-adjusted-z-all`); held-out Z and the number of held-out observations are shown and give warnings, but do not veto it. Weak evidence gives an ambiguous report. Record your choice:
 
 ```bash
 grond manual hand --workflow manual_run/manual_workflow.json --choice input
-```
-
-or:
-
-```bash
 grond manual hand --workflow manual_run/manual_workflow.json --choice inverse
+grond manual hand --workflow manual_run/manual_workflow.json --skip      # centrosymmetric, or no hand test
 ```
 
-For a centrosymmetric structure or an explicitly omitted hand experiment:
+The inverse choice is accepted only when every crystal produced the same inverted model.
 
-```bash
-grond manual hand --workflow manual_run/manual_workflow.json --skip
-```
+`grond auto` decides the hand differently: right after the screen, from held-out reflections, switching only when the orbit sign test favours the inverse with z ≥ 3 and the 95% interval of ΔR_obs lies below zero; the all-observation statistic is only reported.
 
-The inverse choice is accepted only when every dataset handoff materialized the
-same hash-identical inverted coordinate model.
-
-This manual hand check occurs before feedback. It is not `auto`'s authoritative
-final post-feedback shared-hand selector. If the final hand is scientifically
-important, use the `auto` decision or run a separate final `grond hand-check`
-against the selected final row summaries.
-
-## Shared Bloch/LS1 feedback
+## Feedback
 
 ```bash
 grond manual feedback \
@@ -150,97 +89,40 @@ grond manual feedback \
   --shelxl /path/to/shelxl
 ```
 
-The controller creates a hash-bound multi-dataset checkpoint from the selected
-thickness summaries and hand. During each macrocycle it recomputes Bloch/Born
-rows and pinned nuisance scales separately for each crystal. Those jobs do not
-run SHELXL and do not create separate coordinate models. GROND then determines
-the cross-dataset overlap scales, merges model-symmetry equivalents with
-inverse-variance weights, and performs exactly one shared SHELXL LS1 update.
-It does not rescout transforms or refit thickness. Every cycle is preserved.
-The earliest clean no-NPD cycle within the row-residual tolerance is selected,
-and its rows are recomputed without another coordinate step so maps and row
-statistics use the same model. A best-native cycle containing an NPD atom is
-diagnostic only and is never used as the manual handoff fallback.
+Each round recalculates every crystal with its fixed thickness and settings, merges the corrected observations of all crystals, and makes one shared SHELXL least-squares cycle. Transforms and thickness are not refitted. Every round is kept. The earliest round without NPD atoms that is within the observation-residual tolerance of the best is chosen, and its observations are recalculated without another SHELXL step so that maps and statistics describe the same model. A round with NPD atoms is never chosen. `grond auto` instead refines SHELXL to convergence every round, for up to five rounds, and stops when no non-hydrogen atom moves by more than 0.002 Å.
 
-For a one-crystal sensitivity or leave-one-out workflow, setup may omit
-`--baseline-hkl`. The controller then prevents a larger-cohort baseline stored
-inside a reused thickness summary from entering the one-crystal endpoint. If a
-genuine conventional HKL for that crystal is available, supply it at setup and
-it overrides the summary provenance. With an explicit configured SHELXL path,
-setup runs and hashes a fresh one-cycle conventional control; final reporting
-uses that control instead of relying on an unrelated sibling LST.
+For a one-crystal run, setup may omit `--baseline-hkl`; a baseline stored in a reused thickness summary is then not used for the one-crystal comparison. `--n-basis N` fixes the number of beams (0, the default, keeps the adaptive choice). `--n-points` defaults to 20.
 
-Use `--n-basis N` only for a deliberate fixed-basis experiment. Zero retains
-adaptive production basis selection. `--n-points` defaults to 20.
-
-## Audit scale compression
+## Scales
 
 ```bash
 grond manual scales --workflow manual_run/manual_workflow.json
 ```
 
-This audits each frozen final row table independently and records frame and
-detector parameter counts. Compact scales are not applied to the shared
-endpoint by this simplified workflow. Use `--skip` to keep the full pinned scale
-grouping without running the audit. Run production `auto` when the smallest
-validated compact scale contract is required.
+This audits compact frame and detector scale models on each crystal's final observations and reports their parameter counts. Nothing is applied to the model. `--skip` skips the audit. `grond auto` fits P-spline frame scales; compact per-frame scale models are used only with `--scale-model per-frame`.
 
-## Write maps and the final handoff
+## Finish
 
 ```bash
 grond manual finish --workflow manual_run/manual_workflow.json
 ```
 
-This writes `06_finish/MANUAL_FINAL_SUMMARY.md`, a machine-readable JSON summary,
-the selected RES/HKL/LST paths, per-dataset row summaries, the native dynamical
-Fo, 2Fo-Fc, and Fo-Fc maps, a dynamical CIF, and a final `handoff.json`. Use
-`--map-mode off` or `--skip` when maps are not wanted.
+This writes `06_finish/MANUAL_FINAL_SUMMARY.md` with a JSON companion, the chosen RES/HKL/LST paths, per-crystal statistics, the native Fo, 2Fo−Fc and Fo−Fc maps, a CIF and a final `handoff.json`. Use `--map-mode off` or `--skip` to leave out the maps. The summary is copied to `RUN/MANUAL_TOP_LEVEL_SUMMARY.md`. It shows the start and chosen SHELXL statistics, the observation statistics per crystal and combined, the hand evidence, the thickness and transform of each crystal, and the chosen round.
 
-The same report is copied to `RUN/MANUAL_TOP_LEVEL_SUMMARY.md` so it is the
-first result visible in the workflow root. It includes starting-versus-selected
-SHELXL endpoint statistics, combined and per-crystal JANA/PETS-style row
-statistics, selected-coordinate hand evidence, thickness/gradient and
-transform per crystal, the feedback-cycle decision, and separate applied frame
-and detector parameter counts. The scale section says explicitly whether a
-compact model was merely audited or actually applied.
+## Directories and rerunning
 
-## Status and resuming
-
-At any point:
-
-```bash
-grond manual status --workflow manual_run/manual_workflow.json
-```
-
-Each stage has a fixed numbered directory:
+Each stage writes one numbered directory:
 
 ```text
-00_setup/
-01_scout/
-02_thickness/
-03_hand/
-04_feedback/
-05_scales/
-06_finish/
+00_setup/  01_scout/  02_thickness/  03_hand/  04_feedback/  05_scales/  06_finish/
 ```
 
-Every directory contains `handoff.json`. Child GROND calculations retain their
-normal command and progress ledgers; the manual controller keeps their complete
-terminal output in a named `manual_*.log` and prints only milestones, warnings,
-the stage result, and the next command. Add `--verbose-child-output` to a
-computational stage when the complete child stream is wanted interactively.
-Repeating an unchanged stage resumes its fingerprint-matching calculations.
+Every directory contains `handoff.json`. The full output of each child calculation is in a `manual_*.log` file; the terminal shows milestones, warnings, the result and the next command. Add `--verbose-child-output` to see everything. Repeating an unchanged stage reuses its completed calculations.
 
-Going backward is safe. Rerunning a stage removes later stages from the active
-workflow state and lists them under `invalidated_downstream_stages`; their files
-remain on disk for audit. Run forward again to regenerate them. A changed input
-model or observation set requires a new setup workflow rather than editing an
-old handoff in place.
+Rerunning a stage marks the later stages as out of date (`invalidated_downstream_stages`); their files stay on disk. The rerun stage rewrites its own directory, so copy it first if you want to compare. A new model or new observations need a new setup.
 
-## Advanced low-level interface
+To refine a manual result yourself and send it back ([USAGE.md](USAGE.md)), rerun the feedback stage's own `grond refine` command (`command.feedback.command_text` in `04_feedback/handoff.json`) with the new `--start-res` and a new `--out-dir`. `04_feedback/input_checkpoint.json` alone does not carry the feedback options (`--n-basis`, `--n-points`, the sigma policy).
 
-The original expert commands remain available for unusual experiments:
-`grond scout`, `grond thickness`, `grond hand-check`, `grond refine`,
-`grond scale-polish`, `grond calibrate-endpoint`, and `grond finish`. They are
-the implementation boundaries used by the manual controller, not the expected
-day-to-day user interface.
+## Lower-level commands
+
+`grond scout`, `grond thickness`, `grond hand-check`, `grond refine`, `grond scale-polish`, `grond calibrate-endpoint` and `grond finish` are the commands the manual stages call. They remain available for unusual cases.

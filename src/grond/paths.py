@@ -1,3 +1,5 @@
+"""Locations of the installed package, its engine scripts and the runtime cache."""
+
 from __future__ import annotations
 
 import os
@@ -9,14 +11,8 @@ LEGACY_ROOT = PACKAGE_ROOT / "legacy"
 ENGINE_ROOT = LEGACY_ROOT / "engine"
 
 
-def legacy_script(*parts: str) -> Path:
-    """Return a path inside the vendored compatibility-script tree."""
-
-    return LEGACY_ROOT.joinpath(*parts)
-
-
 def engine_script(name: str) -> Path:
-    """Return a path to a vendored command-line engine script."""
+    """Return the path of a command-line engine script in grond/legacy/engine."""
 
     return ENGINE_ROOT / name
 
@@ -42,7 +38,3 @@ def runtime_cache_dir(*parts: str) -> Path:
         xdg_cache_home = os.environ.get("XDG_CACHE_HOME", "").strip()
         root = (Path(xdg_cache_home).expanduser() if xdg_cache_home else Path.home() / ".cache") / "grond"
     return root.joinpath(*parts)
-
-
-# Backward-compatible internal alias used by the first CLI implementation.
-port_script = engine_script

@@ -8,6 +8,7 @@ __pycache__/
 .venv/
 build/
 dist/
+dist-check/
 outputs/
 grond_out/
 paper/

@@ -10,6 +10,8 @@ from pathlib import Path
 import gemmi
 import numpy as np
 
+from grond.bloch.model import join_shelx_continuations
+
 from .parameters import atom_is_refinable, atom_ueq
 
 COVALENT_RADII_A = {
@@ -27,6 +29,8 @@ COVALENT_RADII_A = {
 
 
 def frac_xyz(atom):
+    """Return an atom's fractional coordinates as an array."""
+
     return np.asarray([float(atom["x"]), float(atom["y"]), float(atom["z"])], dtype=float)
 
 
@@ -57,6 +61,8 @@ def frac_delta_min_image(atom_i, atom_j, cell_tuple):
     candidate = np.zeros(3, dtype=int)
 
     def search(index: int, partial_distance2: float) -> None:
+        """Depth-first search over integer translations for the lattice vector nearest the target (sphere decoding)."""
+
         nonlocal best_distance2, best_translation
         if index < 0:
             if partial_distance2 < best_distance2:
@@ -82,6 +88,8 @@ def frac_delta_min_image(atom_i, atom_j, cell_tuple):
 
 
 def cart_delta(cell_tuple, frac_delta):
+    """Convert a fractional-coordinate difference to a Cartesian vector in A."""
+
     a, b, c, alpha, beta, gamma = (float(v) for v in cell_tuple)
     if abs(alpha - 90.0) < 1e-6 and abs(beta - 90.0) < 1e-6 and abs(gamma - 90.0) < 1e-6:
         return np.asarray([frac_delta[0] * a, frac_delta[1] * b, frac_delta[2] * c], dtype=float)
@@ -92,11 +100,21 @@ def cart_delta(cell_tuple, frac_delta):
 
 
 def atom_distance_A(model, ai: int, aj: int) -> float:
+    """Return the shortest periodic distance in A between atoms ``ai`` and ``aj``."""
+
     dfrac = frac_delta_min_image(model["atoms"][ai], model["atoms"][aj], model["cell"])
     return float(np.linalg.norm(cart_delta(model["cell"], dfrac)))
 
 
 def build_start_restraints(model, selection: str, label_text: str, tolerance_A: float, max_distance_A: float):
+    """Return bond restraints for atom pairs that are bonded in the starting model.
+
+    A pair is bonded when its distance is between 0.45 A and the smaller of
+    ``max_distance_A`` and the sum of covalent radii plus ``tolerance_A``, and at least one
+    atom is refined. Q peaks are skipped. Each restraint keeps the starting distance and the
+    starting Ueq difference.
+    """
+
     labels = {x.strip() for x in re.split(r"[,\s]+", label_text or "") if x.strip()}
     atoms = model["atoms"]
     bonds = []
@@ -137,6 +155,8 @@ def build_start_restraints(model, selection: str, label_text: str, tolerance_A: 
 
 
 def bond_restraint_residuals(model, restraints, sigma_A: float):
+    """Return (d - d_start) / sigma_A for each bond restraint, or an empty array when sigma_A <= 0."""
+
     if sigma_A <= 0.0 or not restraints:
         return np.zeros(0, dtype=float)
     out = []
@@ -147,6 +167,10 @@ def bond_restraint_residuals(model, restraints, sigma_A: float):
 
 
 def adp_similarity_residuals(model, restraints, sigma_u: float):
+    """Return the change in Ueq difference of each non-H bonded pair divided by ``sigma_u``
+    (empty when sigma_u <= 0).
+    """
+
     if sigma_u <= 0.0 or not restraints:
         return np.zeros(0, dtype=float)
     out = []
@@ -162,6 +186,8 @@ def adp_similarity_residuals(model, restraints, sigma_u: float):
 
 
 def write_restraints_csv(path: Path, restraints):
+    """Write the bond restraints as a CSV table."""
+
     with path.open("w", newline="") as f:
         fieldnames = ["atom_i", "atom_j", "element_i", "element_j", "target_A", "start_ueq_diff", "updates_i", "updates_j"]
         w = csv.DictWriter(f, fieldnames=fieldnames)
@@ -180,16 +206,25 @@ def write_cctbx_restraint_view(src: Path, dst: Path) -> None:
     """
     elems = []
     lines = []
-    for line in src.read_text(errors="replace").splitlines():
-        if line.upper().startswith("SFAC"):
-            parts = line.split()
-            if len(parts) > 1:
+    for line in join_shelx_continuations(src.read_text(errors="replace").splitlines()):
+        parts = line.split("!", 1)[0].split()
+        if parts and parts[0].upper() == "SFAC":
+            if len(parts) < 2:
+                raise ValueError("SFAC record has no element labels")
+            # A numeric record defines one indexed scattering factor; an
+            # element-only record defines one per label, in the listed order.
+            try:
+                float(parts[2])
+            except (IndexError, ValueError):
+                elems.extend(parts[1:])
+            else:
                 elems.append(parts[1])
             continue
         lines.append(line)
     insert_at = 0
     for i, line in enumerate(lines):
-        if line.upper().startswith("LATT"):
+        parts = line.split()
+        if parts and parts[0].upper() == "LATT":
             insert_at = i + 1
             break
     lines.insert(insert_at, "SFAC  " + " ".join(elems))
