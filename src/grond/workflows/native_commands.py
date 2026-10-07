@@ -143,8 +143,9 @@ def native_stage_cmd(
         mosaicity_options += ["--mosaicity-points", str(points)]
     mosaicity_options += ["--mosaicity-max-sigma-deg", f"{float(getattr(args, 'mosaicity_max_sigma_deg', 0.5)):g}"]
     for field in ("mosaicity_support_sigma_deg", "mosaicity_support_points", "mosaicity_support_width_sigma"):
-        if field in pinned:
-            mosaicity_options += ["--" + field.replace("_", "-"), grid_from_nuisance(pinned, field, "")]
+        value = pinned.get(field, getattr(args, field, None))
+        if value is not None:
+            mosaicity_options += ["--" + field.replace("_", "-"), str(value)]
     cmd = [
         python,
         str(engine_script("native_row_regularize.py")),
@@ -220,6 +221,14 @@ def native_stage_cmd(
         grid_from_nuisance(pinned, "sg_jitter_sigma_frame", "0.0") if pinned else "0.0",
         "--sg-jitter-points",
         str(int(float(pinned.get("sg_jitter_points", args.sg_jitter_points if not fast else 1)))),
+        "--profile-coordinate",
+        str(getattr(args, "profile_coordinate", "target_sg") or "target_sg"),
+        "--profile-normalization",
+        str(getattr(args, "profile_normalization", "legacy") or "legacy"),
+        "--profile-angle-max-half-width-deg",
+        str(getattr(args, "profile_angle_max_half_width_deg", 2.0) or 2.0),
+        "--profile-basis-mode",
+        str(getattr(args, "profile_basis_mode", "center") or "center"),
         "--profile-quadrature",
         args.profile_quadrature,
         "--profile-accumulation",

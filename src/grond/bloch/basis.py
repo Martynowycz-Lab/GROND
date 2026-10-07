@@ -56,7 +56,7 @@ class BasisMixin:
                 break
         return np.asarray(basis, dtype=int)
 
-    def cone_support_orientations(self, hkl, omega_center, sg_window_i):
+    def cone_support_orientations(self, hkl, omega_center, sg_window_i, row_idx=None):
         """Return a fixed orientation envelope for common-basis selection.
 
         The envelope depends on the declared maximum cone width, not the
@@ -73,9 +73,17 @@ class BasisMixin:
         raw_half_width = 0.5 * float(sg_window_i) / derivative
         maximum = float(getattr(self.cfg, "profile_angle_max_half_width_deg", 2.0))
         half_width = min(raw_half_width, maximum)
+        lower, upper = float(omega_center) - half_width, float(omega_center) + half_width
+        if str(getattr(self.cfg, "profile_normalization", "legacy")) == "target_sg_equivalent_v1":
+            center_sg = float(self.sg_for_hkls(np.asarray([hkl]), omega_center)[0])
+            lower, upper, _residuals = self.target_sg_angular_interval(
+                row_idx, hkl, omega_center, center_sg, sg_window_i,
+                {"sg_jitter_mode": "none", "sg_jitter_sigma_inv_A": 0.0},
+            )
+            half_width = 0.5 * (upper - lower)
         omega_points = np.linspace(
-            float(omega_center) - half_width,
-            float(omega_center) + half_width,
+            lower,
+            upper,
             n,
         )
         cone_axis = np.asarray([0.0], dtype=float) if sigma <= 0.0 else np.linspace(-width * sigma, width * sigma, n)
@@ -90,6 +98,7 @@ class BasisMixin:
                 "mosaicity_support_width_sigma": width,
                 "mosaicity_support_orientation_count": int(len(omega_points) * len(cone_points)),
                 "mosaicity_support_profile_half_width_deg": float(half_width),
+                "mosaicity_support_angle_interval_deg": [lower, upper],
             },
         )
 
@@ -98,7 +107,10 @@ class BasisMixin:
 
         if str(getattr(self.cfg, "mosaicity_mode", "none")).lower() != "gaussian_cone":
             return self.select_basis(target_hkl, omega_center, row_idx=row_idx), {}
-        omega_points, cone_points, meta = self.cone_support_orientations(target_hkl, omega_center, sg_window_i)
+        if str(getattr(self.cfg, "profile_normalization", "legacy")) == "target_sg_equivalent_v1":
+            omega_points, cone_points, meta = self.cone_support_orientations(target_hkl, omega_center, sg_window_i, row_idx=row_idx)
+        else:
+            omega_points, cone_points, meta = self.cone_support_orientations(target_hkl, omega_center, sg_window_i)
         if row_idx is None:
             pool_ug = self.pool_ug
         else:

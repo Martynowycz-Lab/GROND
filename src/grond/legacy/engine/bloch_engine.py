@@ -627,6 +627,12 @@ def main():
         help="Integrate through solved target-Sg points or directly in recorded scan angle.",
     )
     ap.add_argument(
+        "--profile-normalization",
+        choices=["legacy", "target_sg_equivalent_v1"],
+        default="legacy",
+        help="Explicit direct-angle measure; target_sg_equivalent_v1 preserves target-Sg row normalization and endpoints.",
+    )
+    ap.add_argument(
         "--profile-angle-max-half-width-deg",
         type=float,
         default=2.0,
@@ -840,6 +846,7 @@ def main():
         geometry_path_file=args.geometry_path,
         profile_basis_mode=args.profile_basis_mode,
         profile_coordinate=args.profile_coordinate,
+        profile_normalization=args.profile_normalization,
         profile_angle_max_half_width_deg=args.profile_angle_max_half_width_deg,
         profile_quadrature=args.profile_quadrature,
         profile_accumulation=args.profile_accumulation,

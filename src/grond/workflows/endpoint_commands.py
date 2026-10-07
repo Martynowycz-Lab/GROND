@@ -117,6 +117,10 @@ def structure_cmd(
 ) -> list[str]:
     """Build the optional restrained structure-update command."""
 
+    if (getattr(args, "profile_coordinate", "target_sg") != "target_sg"
+            or getattr(args, "profile_normalization", "legacy") != "legacy"):
+        raise ValueError("native_structure_update does not represent the direct-angle observation measure; "
+                         "use the SHELXL feedback workflow, which preserves its row contract")
     refuse_unrepresented_structure_update_physics(ds.name, nui, dose_supported=False)
     return [
         python,

@@ -25,9 +25,16 @@ PREDICTION_FIELDS = (
     "sg_window_max",
     "sg_window_scale",
     "sg_window_frame_floor",
+    "profile_coordinate",
+    "profile_normalization",
+    "profile_angle_max_half_width_deg",
+    "profile_basis_mode",
     "profile_quadrature",
     "profile_accumulation",
     "mosaicity_points",
+    "mosaicity_support_sigma_deg",
+    "mosaicity_support_points",
+    "mosaicity_support_width_sigma",
 )
 
 
@@ -109,6 +116,11 @@ def resolve_crystal_parameters(
         # from that crystal's source summary, not from another crystal or a default.
         config = {**config, **saved}
         settings = {key: config[key] for key in PREDICTION_FIELDS if config.get(key) is not None}
+        for key in ("profile_coordinate", "profile_normalization", "profile_angle_max_half_width_deg",
+                    "profile_basis_mode", "profile_quadrature", "profile_accumulation"):
+            override = getattr(args, key, None)
+            if override is not None:
+                settings[key] = override
         defaulted = [key for key in PREDICTION_FIELDS if key not in settings]
         if args.n_points is not None and "n_points" in defaulted:
             defaulted.remove("n_points")

@@ -83,6 +83,7 @@ def build_parser(description: str, *, default_hkl, default_res, default_baseline
     ap.add_argument("--geometry-path", default="", help="Fixed geometry-only slew/two-axis tilt contract fitted without intensities.")
     ap.add_argument("--profile-basis-mode", choices=["center", "common_profile"], default="center", help="Use the center-orientation basis or one fixed beam union over the complete rocking-profile support.")
     ap.add_argument("--profile-coordinate", choices=["target_sg", "direct_angle"], default="target_sg", help="Integrate through solved target-Sg points or directly in recorded scan angle.")
+    ap.add_argument("--profile-normalization", choices=["legacy", "target_sg_equivalent_v1"], default="legacy", help="Explicit direct-angle measure; target_sg_equivalent_v1 preserves target-Sg row normalization and endpoints.")
     ap.add_argument("--profile-angle-max-half-width-deg", type=float, default=2.0, help="Hard half-width bound for direct-angle integration.")
     ap.add_argument("--profile-quadrature", choices=["uniform", "trapezoid", "gauss_legendre"], default="uniform", help="Rocking-profile Sg quadrature rule.")
     ap.add_argument("--profile-accumulation", choices=["sum", "mean"], default="sum", help="Accumulate rocking-profile samples as summed detector sub-exposures or legacy normalized means.")

@@ -207,6 +207,7 @@ def physics_record(problem: PolishProblem) -> dict:
             "sg_window_max": cfg.sg_window_max,
             "n_points": cfg.n_points,
             "profile_coordinate": cfg.profile_coordinate,
+            "profile_normalization": cfg.profile_normalization,
             "mosaicity_mode": cfg.mosaicity_mode,
             "mosaicity_sigma_deg": cfg.mosaicity_sigma_deg,
             "mosaicity_points": cfg.mosaicity_points,

@@ -75,6 +75,7 @@ def _apply_source_physics_to_hand_args(
         "sg_window_scale",
         "sg_window_frame_floor",
         "profile_coordinate",
+        "profile_normalization",
         "profile_angle_max_half_width_deg",
         "profile_quadrature",
         "profile_accumulation",

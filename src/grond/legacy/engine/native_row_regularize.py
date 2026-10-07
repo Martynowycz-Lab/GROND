@@ -1942,6 +1942,7 @@ def main():
                 profile_basis_mode=args.profile_basis_mode,
                 mosaicity_max_sigma_deg=args.mosaicity_max_sigma_deg,
                 profile_coordinate=args.profile_coordinate,
+                profile_normalization=args.profile_normalization,
                 profile_angle_max_half_width_deg=args.profile_angle_max_half_width_deg,
                 profile_quadrature=args.profile_quadrature,
                 profile_accumulation=args.profile_accumulation,

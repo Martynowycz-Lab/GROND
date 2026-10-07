@@ -773,6 +773,19 @@ def auto_mosaicity_grid(args: argparse.Namespace) -> tuple[str, str]:
         raise ValueError(
             "--mosaicity-sigma-grid must include 0, the no-cone reference every cone width is compared with"
         )
+    if mode == "gaussian_cone":
+        if getattr(args, "nuisance_selection", "nested") != "nested":
+            raise ValueError("AUTO gaussian_cone currently requires nested selection so its zero-width reference "
+                             "uses the same common beam envelope; fixed native/refine replays remain available")
+        if (getattr(args, "profile_coordinate", "target_sg") != "direct_angle"
+                or getattr(args, "profile_normalization", "legacy") != "target_sg_equivalent_v1"):
+            raise ValueError("AUTO gaussian_cone needs --profile-coordinate direct_angle and "
+                             "--profile-normalization target_sg_equivalent_v1 for comparable row intensities")
+        support = float(getattr(args, "mosaicity_support_sigma_deg", 0.0))
+        if support < max(sigmas):
+            raise ValueError("--mosaicity-support-sigma-deg must cover the entire two-axis cone sigma grid")
+        # Retain the cone selector at zero width so the reference uses the same declared maximum beam envelope.
+        return "gaussian_cone", ",".join(f"{value:.15g}" for value in dict.fromkeys(sigmas))
     modes = (["none"] if any(value == 0.0 for value in sigmas) else []) + ([mode] if positive else [])
     return ",".join(modes), (",".join(f"{value:.15g}" for value in positive) or "0.0")
 

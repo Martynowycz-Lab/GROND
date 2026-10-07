@@ -96,6 +96,7 @@ class Config:
     geometry_path_file: str = ""
     profile_basis_mode: str = "center"
     profile_coordinate: str = "target_sg"
+    profile_normalization: str = "legacy"
     profile_angle_max_half_width_deg: float = 2.0
     profile_quadrature: str = "uniform"
     profile_accumulation: str = "sum"
@@ -240,6 +241,8 @@ class Config:
                 "gaussian_cone currently requires profile_coordinate=direct_angle; "
                 "this keeps the physical scan interval explicit and avoids extra Sg roots"
             )
+        if str(self.profile_normalization).lower() != "legacy" and str(self.profile_coordinate).lower() != "direct_angle":
+            raise ValueError("profile_normalization=target_sg_equivalent_v1 requires profile_coordinate=direct_angle")
 
         choices = {
             "sg_window_mode": (
@@ -255,6 +258,7 @@ class Config:
                 self.profile_coordinate,
                 {"target_sg", "direct_angle"},
             ),
+            "profile_normalization": (self.profile_normalization, {"legacy", "target_sg_equivalent_v1"}),
             "profile_basis_mode": (
                 self.profile_basis_mode,
                 {"center", "common_profile"},
@@ -379,6 +383,7 @@ def frozen_kernel_contract(cfg: Config | None = None):
             "Sg": "(k^2 - |s0 + g(alpha)|^2) / (2*k)",
             "profile_mode": "target_sg_to_angle or explicit direct-angle integration",
             "profile_coordinate": (None if cfg is None else str(getattr(cfg, "profile_coordinate", "target_sg"))),
+            "profile_normalization": None if cfg is None else str(getattr(cfg, "profile_normalization", "legacy")),
             "profile_quadrature": None if cfg is None else str(getattr(cfg, "profile_quadrature", "uniform")),
             "profile_accumulation": None if cfg is None else str(getattr(cfg, "profile_accumulation", "sum")),
             "profile_weight_mode": "rocking-profile samples are summed by default; legacy normalized averaging is available as profile_accumulation=mean",
