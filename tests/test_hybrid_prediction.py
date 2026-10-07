@@ -72,11 +72,11 @@ def _fork_gpu_workers(monkeypatch, device_row):
     monkeypatch.setattr(prediction, "_pool_context_names", lambda: ["fork"])
 
 
-def _tagged_device_row(port, row):
+def _tagged_device_row(port, row, **_options):
     return {**port.row_prediction(row), "computed_on": "gpu"}
 
 
-def _failing_device_row(port, row):
+def _failing_device_row(port, row, **_options):
     raise RuntimeError("CUDA_ERROR_OUT_OF_MEMORY")
 
 
