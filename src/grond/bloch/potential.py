@@ -122,14 +122,21 @@ class PotentialMixin:
         return validate_ug_cube(cube, tuple(int(value) for value in plan["shape"]))
 
     def calculate_ug_array(self, hkls):
-        """Evaluate requested coefficients directly from the current model."""
+        """Evaluate each distinct integer HKL once, restoring the requested shape and order.
+
+        A dense Hamiltonian repeats many pair differences. This is an exact
+        lookup within one call; no coefficients persist across model changes.
+        """
 
         hkls = np.asarray(hkls, dtype=int)
         shape = hkls.shape[:-1]
         flat = hkls.reshape(-1, 3)
+        if not len(flat):
+            return np.empty(shape, dtype=np.complex128)
+        unique_hkls, inverse = np.unique(flat, axis=0, return_inverse=True)
         factor = float(self.gamma) / (math.pi * self.data.cell.volume)
-        values = factor * fcalc_res_grid(self.model, flat[:, 0], flat[:, 1], flat[:, 2])
-        return np.asarray(values, dtype=np.complex128).reshape(shape)
+        values = factor * fcalc_res_grid(self.model, unique_hkls[:, 0], unique_hkls[:, 1], unique_hkls[:, 2])
+        return np.asarray(values, dtype=np.complex128)[inverse.reshape(-1)].reshape(shape)
 
     def ug(self, hkl):
         """Return U_g of one HKL, from the dense cube inside its limits, else computed directly from the model."""
