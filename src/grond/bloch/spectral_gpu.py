@@ -15,6 +15,29 @@ from grond.bloch.backends import _elastic_matrix_dtype, _jax_devices, _jax_modul
 _SOLVERS = {}
 
 
+def spectral_host_chunk_size(n, n_rows, backend, batch_size, host_budget_bytes):
+    """Bound dense host buffers and keep complete chunks divisible across active devices.
+
+    Four complex buffers conservatively cover retained matrices and validation
+    temporaries. Device solver workspaces and the source row plan are additional.
+    """
+    requested = int(batch_size or 0)
+    if requested < 0:
+        raise ValueError("spectral batch size must be nonnegative")
+    devices = len(_jax_devices(backend))
+    active = min(devices, int(n_rows), requested or devices)
+    if int(n) < 1 or active < 1:
+        raise ValueError("spectral chunks need a positive matrix size, row count and device count")
+    capacity = int(host_budget_bytes) // (4 * int(n) * int(n) * np.dtype(complex).itemsize)
+    if capacity < active:
+        required = 4 * active * int(n) * int(n) * np.dtype(complex).itemsize
+        raise MemoryError(
+            f"spectral host budget cannot feed {active} active devices; need at least {required} bytes, "
+            "increase GROND_JAX_HOST_BUFFER_GIB or explicitly reduce devices/batch size"
+        )
+    return min(int(n_rows), capacity // active * active)
+
+
 def hermitian_spectra(matrices, backend: str, batch_size: int = 0):
     """Return eigenvalues and V[1,j] conj(V[0,j]) on the requested JAX devices.
 
@@ -45,24 +68,26 @@ def hermitian_spectra(matrices, backend: str, batch_size: int = 0):
     device_count = len(devices)
     chunk = max(device_count, requested // device_count * device_count)
     chunk = min(chunk, math.ceil(n_rows / device_count) * device_count)
-    per_device = chunk // device_count
-    key = (backend, H.dtype.str, n, per_device, tuple(str(d) for d in devices))
-    if key not in _SOLVERS:
-        def solve(shard):
-            values, vectors = jnp.linalg.eigh(shard)
-            return values, vectors[:, 1, :] * jnp.conj(vectors[:, 0, :])
-
-        _SOLVERS[key] = jax.pmap(solve, devices=devices)
     values = np.empty((n_rows, n), dtype=float)
     coupling = np.empty((n_rows, n), dtype=complex)
     for start in range(0, n_rows, chunk):
         batch = H[start:start + chunk]
         count = len(batch)
-        if count < chunk:
-            batch = np.concatenate((batch, np.repeat(batch[-1:], chunk - count, axis=0)))
+        # A smaller final batch needs only device-count padding, not a full nominal batch.
+        per_device = math.ceil(count / device_count)
+        solved_count = per_device * device_count
+        if count < solved_count:
+            batch = np.concatenate((batch, np.repeat(batch[-1:], solved_count - count, axis=0)))
+        key = (backend, H.dtype.str, n, per_device, tuple(str(d) for d in devices))
+        if key not in _SOLVERS:
+            def solve(shard):
+                eigenvalues, vectors = jnp.linalg.eigh(shard)
+                return eigenvalues, vectors[:, 1, :] * jnp.conj(vectors[:, 0, :])
+
+            _SOLVERS[key] = jax.pmap(solve, devices=devices)
         lam, c = _SOLVERS[key](batch.reshape(device_count, per_device, n, n))
-        values[start:start + count] = np.asarray(lam).reshape(chunk, n)[:count]
-        coupling[start:start + count] = np.asarray(c).reshape(chunk, n)[:count]
+        values[start:start + count] = np.asarray(lam).reshape(solved_count, n)[:count]
+        coupling[start:start + count] = np.asarray(c).reshape(solved_count, n)[:count]
     if not np.all(np.isfinite(values)) or not np.all(np.isfinite(coupling)):
         raise FloatingPointError("GPU spectra contain non-finite eigenvalues or couplings")
     return values, coupling

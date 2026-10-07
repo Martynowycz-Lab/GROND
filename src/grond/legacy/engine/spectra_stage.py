@@ -157,17 +157,14 @@ def _device_matrix_spectra(matrices, keys, donor, absorptive, backend, batch_siz
     and rocking nodes. Nonuniform absorption still fails the v2 contract.
     """
     from grond.bloch.backends import _jax_host_buffer_bytes
-    from grond.bloch.spectral_gpu import hermitian_spectra
+    from grond.bloch.spectral_gpu import hermitian_spectra, spectral_host_chunk_size
 
     parts = [donor.get(key) for key in keys]
     missing = [i for i, value in enumerate(parts) if value is None]
     if not missing:
         return parts
     n = np.asarray(matrices[missing[0]]).shape[0]
-    # Include room for the source, Hermitian split, and contiguous device input.
-    count = _jax_host_buffer_bytes() // (3 * n * n * np.dtype(complex).itemsize)
-    if count < 1:
-        raise MemoryError("one spectral matrix exceeds GROND_JAX_HOST_BUFFER_GIB; increase the explicit host budget")
+    count = spectral_host_chunk_size(n, len(missing), backend, batch_size, _jax_host_buffer_bytes())
     for start in range(0, len(missing), count):
         indices = missing[start:start + count]
         H0, details = [], []
