@@ -23,7 +23,8 @@ def test_reused_spectra_equal_solved_spectra(tmp_path, monkeypatch):
     narrow = _port(static, untilted)  # zero-width cone: the untilted points only
     wide = _port(static, np.vstack([untilted, rng.normal(size=(2, 6)) * 1e-3]))  # adds two tilted points
     donor = tmp_path / "donor.npz"
-    S.write_spectra(donor, S.pack_spectra([S.row_spectrum(narrow, 0)]), {"schema": S.SPECTRA_SCHEMA})
+    S.write_spectra(donor, S.pack_spectra([S.row_spectrum(narrow, 0)]),
+                    {"schema": S.SPECTRA_SCHEMA, "engine_sha256": S.engine_source_sha256()})
 
     solved = S.row_spectrum(wide, 0)
     real_solver, calls = S.matrix_spectrum, []

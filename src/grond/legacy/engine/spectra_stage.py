@@ -11,7 +11,10 @@ V[1, j] conj(V[0, j]), the Born terms |H10|^2 and Re(H11 - H00), and mu. Spectra
 thickness distribution, uniform absorption strength or hand, so one spectra set serves every thickness candidate
 of grond.regularize.nested_selection.
 
-Rows are computed in parallel (one port per worker process) and cached by a hash of the Config (thickness fields
+CPU rows are computed in parallel (one port per worker process). Device spectra use one spawned process, which
+exits before CPU nuisance evaluation begins; the calling process never initializes JAX through this stage.
+Standalone scripts calling compute_spectra with a device backend must use an ``if __name__ == "__main__":`` guard.
+Spectra are cached by a hash of the Config (thickness fields
 excluded), the model file, the reflection file, the transform, the row list and the engine sources. Every profile
 point also stores a digest of its matrix bytes, so a later Config can reuse an identical matrix's spectrum exactly
 (every nonzero cone width solves the same untilted block).
@@ -44,7 +47,7 @@ if not __package__:
 import numpy as np  # noqa: E402
 
 from grond.bloch.config import Config  # noqa: E402
-from grond.bloch.constants import BETHE_BACKENDS  # noqa: E402
+from grond.bloch.constants import BETHE_BACKENDS, JAX_BACKENDS, JAX_PADDED_BACKENDS  # noqa: E402
 from grond.bloch.model import alternate_hand_model, parse_model  # noqa: E402
 from grond.bloch.numerics import hermitian_eigh  # noqa: E402
 from grond.bloch.source import physics_source_files  # noqa: E402
@@ -136,10 +139,47 @@ def row_spectrum(port, row: int, donor: dict | None = None):
     matrices = plan["_dyn_matrices"]
     keys = matrix_digests(matrices, absorptive)
     donor = donor or {}
-    parts = [donor.get(key) or matrix_spectrum(matrices[i], absorptive) for i, key in enumerate(keys)]
+    backend = str(getattr(getattr(port, "cfg", None), "compute_backend", "scipy") or "scipy").lower()
+    if backend in JAX_BACKENDS | JAX_PADDED_BACKENDS:
+        parts = _device_matrix_spectra(matrices, keys, donor, absorptive, backend,
+                                       int(getattr(port.cfg, "jax_batch_size", 0) or 0))
+    else:
+        parts = [donor.get(key) or matrix_spectrum(matrices[i], absorptive) for i, key in enumerate(keys)]
     return (int(row), w, np.asarray([p[0] for p in parts]), np.asarray([p[1] for p in parts]),
             np.asarray([p[2] for p in parts]), np.asarray([p[3] for p in parts]),
             float(np.mean([p[4] for p in parts])), keys, sum(key in donor for key in keys))
+
+
+def _device_matrix_spectra(matrices, keys, donor, absorptive, backend, batch_size):
+    """Solve missing spectra on the requested device, retaining exact donor entries.
+
+    Dense host buffers are bounded independently of the total number of cone
+    and rocking nodes. Nonuniform absorption still fails the v2 contract.
+    """
+    from grond.bloch.backends import _jax_host_buffer_bytes
+    from grond.bloch.spectral_gpu import hermitian_spectra
+
+    parts = [donor.get(key) for key in keys]
+    missing = [i for i, value in enumerate(parts) if value is None]
+    if not missing:
+        return parts
+    n = np.asarray(matrices[missing[0]]).shape[0]
+    # Include room for the source, Hermitian split, and contiguous device input.
+    count = _jax_host_buffer_bytes() // (3 * n * n * np.dtype(complex).itemsize)
+    if count < 1:
+        raise MemoryError("one spectral matrix exceeds GROND_JAX_HOST_BUFFER_GIB; increase the explicit host budget")
+    for start in range(0, len(missing), count):
+        indices = missing[start:start + count]
+        H0, details = [], []
+        for i in indices:
+            H = np.asarray(matrices[i], dtype=complex)
+            hermitian, mu = split_uniform_absorption(H) if absorptive else (0.5 * (H + H.conj().T), 0.0)
+            H0.append(hermitian)
+            details.append((float(abs(H[1, 0]) ** 2), float(np.real(H[1, 1] - H[0, 0])), mu))
+        lam, coupling = hermitian_spectra(np.asarray(H0), backend, batch_size)
+        for j, i in enumerate(indices):
+            parts[i] = (lam[j], coupling[j], *details[j])
+    return parts
 
 
 def load_donor(paths) -> dict:
@@ -147,6 +187,9 @@ def load_donor(paths) -> dict:
     donor = {}
     for path in paths:
         with np.load(path, allow_pickle=False) as z:
+            identity = json.loads(str(z["identity_json"]))
+            if identity.get("schema") != SPECTRA_SCHEMA or identity.get("engine_sha256") != engine_source_sha256():
+                raise ValueError(f"donor spectra {path} have a different or missing schema/engine identity")
             n_p, n_b, lam, c, h10, delta, mu, digest = (z[k] for k in ("n_p", "n_b", "lam", "c", "h10", "delta", "mu",
                                                                         "digest"))
         a = p = 0
@@ -311,6 +354,9 @@ def compute_spectra(hkl, res, cfg: Config, rows, *, hkl_transform: str = "identi
     Rows must be unique and nonnegative. A cached file is used only when its stored identity equals the request; an unreadable
     or mismatched cache file is recomputed and replaced (recorded in the provenance). ``reuse`` lists spectra files of
     this engine whose byte-identical matrices are taken over instead of solved again.
+
+    Device backends always use one spawned worker, even when workers=1. This keeps JAX and its threads out of the
+    caller so later CPU stages can safely create process pools. Standalone callers need the usual main guard.
     """
     rows = np.asarray(rows, dtype=int)
     if rows.ndim != 1 or len(rows) == 0:
@@ -341,11 +387,20 @@ def compute_spectra(hkl, res, cfg: Config, rows, *, hkl_transform: str = "identi
             print(f"warning: spectra cache {path} not usable ({info['cache_rebuild_reason']}); recomputing", flush=True)
     t0 = time.perf_counter()
     workers = max(1, int(workers))
-    if workers > 1 and len(rows) > 1:
-        chunks = [c for c in np.array_split(rows, max(1, min(len(rows), 4 * workers))) if len(c)]
+    device_spectra = backend in JAX_BACKENDS | JAX_PADDED_BACKENDS
+    if device_spectra:
+        # JAX is initialized only in the spawned child, which closes before CPU nuisance evaluation can fork.
+        workers = 1
+    if device_spectra or (workers > 1 and len(rows) > 1):
+        if device_spectra:
+            context = mp.get_context("spawn")
+            chunks = [rows[start:start + 32] for start in range(0, len(rows), 32)]
+        else:
+            context = _pool_context()
+            chunks = [c for c in np.array_split(rows, max(1, min(len(rows), 4 * workers))) if len(c)]
         # A worker that dies (or cannot start, e.g. a spawned child re-running an unguarded caller script) raises
         # BrokenProcessPool here instead of hanging the stage.
-        with ProcessPoolExecutor(max_workers=min(workers, len(chunks)), mp_context=_pool_context(),
+        with ProcessPoolExecutor(max_workers=min(workers, len(chunks)), mp_context=context,
                                  initializer=_init_worker,
                                  initargs=(str(hkl), str(hkl_transform), str(res), cfg, bool(alternate_hand),
                                            None if ug_cache_dir is None else str(ug_cache_dir),
@@ -365,7 +420,9 @@ def compute_spectra(hkl, res, cfg: Config, rows, *, hkl_transform: str = "identi
         write_spectra(path, spec, ident)
         status = "rebuilt" if "cache_rebuild_reason" in info else "built"
     return spec, {**info, "cache_status": status if path is not None else "disabled", "seconds": seconds,
-                  "workers": workers, "reused_points": int(sum(r[8] for r in records)), **_summary(spec)}
+                  "workers": workers, "spectral_backend": backend if device_spectra else "scipy",
+                  "device_process": "spawn" if device_spectra else None,
+                  "reused_points": int(sum(r[8] for r in records)), **_summary(spec)}
 
 
 def _summary(spec: dict) -> dict:

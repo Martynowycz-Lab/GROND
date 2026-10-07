@@ -79,55 +79,62 @@ def _a_scan_points_for_current_scan(
 ) -> tuple[np.ndarray, dict[str, Any]]:
     """Return scan-point A matrices in the cropped scan's local frame convention.
 
-    DIALS can retain the full scan-varying crystal model when an experiment's
-    ``Scan`` is cropped.  Reflection z and the scan origin remain in the
-    original array coordinate, while GROND's sidecar is indexed locally after
-    subtracting ``STARTING_FRAME``.  In that case select the inclusive
-    ``[array_start, array_stop]`` A-matrix slice.  Already-local and static
-    models are preserved unchanged.
+    DIALS can retain a longer scan-varying crystal model after cropping the
+    experiment's Scan. Its first retained A matrix need not describe frame zero,
+    or the first surviving image. Compare every possible contiguous slice with
+    the predicted Bragg geometry; a permissive gross-error limit cannot identify
+    the correct origin. Static and already-local models need no origin search.
+    An explicit offset replays a previously established source contract.
     """
 
     raw = np.asarray(metadata["A_scan_points"], dtype=float)
     if raw.ndim != 3 or raw.shape[1:] != (3, 3) or len(raw) == 0:
         raise ValueError("DIALS A_scan_points must be a non-empty N x 3 x 3 array")
+    if not np.all(np.isfinite(raw)):
+        raise ValueError("DIALS A_scan_points contain nonfinite values")
     start, stop = _scan_array_range(metadata)
     local_point_count = max(stop - start + 1, 1)
+    if 1 < len(raw) < local_point_count:
+        raise ValueError("DIALS scan-point model does not cover the complete scan range")
     source = "static" if len(raw) == 1 else "already_local"
     origin = 0
     selected = raw
     tested_offsets: list[dict[str, float | int]] = []
-    if len(raw) > local_point_count:
-        maximum_offset = len(raw) - local_point_count
-        if source_index_offset is not None:
-            origin = int(source_index_offset)
-            if origin < 0 or origin > maximum_offset:
-                raise ValueError(f"DIALS A-scan source offset {origin} is outside [0, {maximum_offset}]")
+    maximum_offset = max(len(raw) - local_point_count, 0)
+    if source_index_offset is not None:
+        origin = int(source_index_offset)
+        if origin != source_index_offset or origin < 0 or origin > maximum_offset:
+            raise ValueError(f"DIALS A-scan source offset {source_index_offset} is outside integer [0, {maximum_offset}]")
+        if len(raw) > local_point_count:
             selected = raw[origin : origin + local_point_count]
             source = "replayed_geometry_selected_offset"
-        elif scorer is not None:
-            preferred_offsets = []
-            for candidate in (min(max(start, 0), maximum_offset), 0, maximum_offset):
-                if candidate not in preferred_offsets:
-                    preferred_offsets.append(candidate)
-            scored: list[tuple[float, int]] = []
-            for candidate in preferred_offsets:
-                score = float(scorer(raw[candidate : candidate + local_point_count]))
+    elif len(raw) > local_point_count:
+        if scorer is None:
+            raise ValueError("Cropped DIALS scan model needs predicted-row geometry or an explicit source offset")
+        scored: list[tuple[float, int]] = []
+        for candidate in range(maximum_offset + 1):
+            score = float(scorer(raw[candidate : candidate + local_point_count]))
+            if math.isfinite(score) and score >= 0:
                 scored.append((score, candidate))
-                tested_offsets.append({"source_index_offset": candidate, "p95_abs_Sg_inv_A": score})
-            if min(score for score, _ in scored) > DIALS_SG_P95_ABS_LIMIT_INV_A:
-                for candidate in range(maximum_offset + 1):
-                    if candidate in preferred_offsets:
-                        continue
-                    score = float(scorer(raw[candidate : candidate + local_point_count]))
-                    scored.append((score, candidate))
-                    tested_offsets.append({"source_index_offset": candidate, "p95_abs_Sg_inv_A": score})
-            _, origin = min(scored)
-            selected = raw[origin : origin + local_point_count]
-            source = "geometry_selected_cropped_scan_model"
-        elif start > 0:
-            origin = min(start, maximum_offset)
-            selected = raw[origin : origin + local_point_count]
-            source = "cropped_from_full_scan_model"
+            tested_offsets.append({"source_index_offset": candidate, "p95_abs_Sg_inv_A": score})
+        if not scored:
+            raise ValueError("No DIALS scan origin produced a finite nonnegative geometry score")
+        scored.sort()
+        best_score, origin = scored[0]
+        selected = raw[origin : origin + local_point_count]
+        # Scores closer than numerical discrimination allow no justified choice.
+        # Identical slices are equivalent, so a constant longer model is harmless.
+        for score, candidate in scored[1:]:
+            if not math.isclose(score, best_score, rel_tol=1e-3, abs_tol=1e-10):
+                break
+            other = raw[candidate : candidate + local_point_count]
+            if not np.allclose(selected, other, rtol=1e-12, atol=1e-14):
+                raise ValueError(
+                    "Ambiguous cropped DIALS scan origin: distinct A-matrix slices at offsets "
+                    f"{origin} and {candidate} have indistinguishable predicted-geometry scores "
+                    f"({best_score:.6g}, {score:.6g} A^-1). Supply a verified explicit source offset."
+                )
+        source = "geometry_selected_cropped_scan_model"
     return selected, {
         "source": source,
         "raw_scan_points": int(len(raw)),
