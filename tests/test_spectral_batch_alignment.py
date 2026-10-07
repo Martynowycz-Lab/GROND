@@ -74,7 +74,7 @@ def test_device_tail_is_smaller_than_nominal_batch_and_preserves_order(three_dev
 
 
 def test_host_chunks_do_not_repeat_padding_and_donor_holes_keep_original_order(three_devices, monkeypatch):
-    matrices = profile(31, True)
+    matrices = list(profile(31, True))  # Exercise the retained generic dense fallback.
     weights = np.linspace(.2, 1.1, 31)
     cfg = SimpleNamespace(compute_backend='jax_cuda', jax_batch_size=6)
     port = SimpleNamespace(cfg=cfg, absorption_enabled=lambda: False,

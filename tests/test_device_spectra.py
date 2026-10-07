@@ -29,9 +29,9 @@ def device_stub(monkeypatch):
     def pmap(function, *, devices):
         calls["compiled"] += 1
 
-        def mapped(shards):
-            assert len(shards) == len(devices)
-            parts = [function(shard) for shard in shards]
+        def mapped(*shards):
+            assert all(len(shard) == len(devices) for shard in shards)
+            parts = [function(*(shard[i] for shard in shards)) for i in range(len(devices))]
             return tuple(np.stack([part[i] for part in parts]) for i in range(2))
 
         return mapped
@@ -42,6 +42,16 @@ def device_stub(monkeypatch):
     monkeypatch.setattr(spectral_gpu, "_jax_modules", lambda backend: (jax, jnp))
     monkeypatch.setattr(spectral_gpu, "_jax_devices", lambda backend: devices)
     monkeypatch.setattr(spectral_gpu, "_SOLVERS", {})
+    monkeypatch.setattr(spectral_gpu, "_put_static_on_devices",
+                        lambda jax, static, devices: np.broadcast_to(static, (len(devices), *static.shape)))
+
+    def assemble(jnp, static, diagonals):
+        matrices = np.broadcast_to(static, (len(diagonals), *static.shape)).copy()
+        index = np.arange(len(static))
+        matrices[:, index, index] = diagonals
+        return matrices
+
+    monkeypatch.setattr(spectral_gpu, "_assemble_profile_matrices", assemble)
     return calls
 
 

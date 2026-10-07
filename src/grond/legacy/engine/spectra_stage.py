@@ -150,6 +150,54 @@ def row_spectrum(port, row: int, donor: dict | None = None):
             float(np.mean([p[4] for p in parts])), keys, sum(key in donor for key in keys))
 
 
+def _compact_spectral_inputs(matrices, indices, absorptive):
+    """Static off-diagonal matrix and the selected profile diagonals, prepared exactly as the dense path would.
+
+    The diagonal addition keeps the matrices' native precision, and the Hermitian split and uniform-loss checks
+    are those of split_uniform_absorption. Returns (off_diagonal, diagonals[len(indices), N], h10, delta, mu).
+    """
+    from grond.bloch.backends import _jax_host_buffer_bytes
+
+    n = len(matrices.static)
+    working_bytes = (8 * n * n + 4 * len(indices) * n) * np.dtype(complex).itemsize
+    if working_bytes > _jax_host_buffer_bytes():
+        raise MemoryError("compact spectral working buffers exceed GROND_JAX_HOST_BUFFER_GIB")
+    # Select the points before adding, so a partial donor does not build every profile diagonal.
+    native_diagonal = np.diag(matrices.static)[None, :] + matrices.excitation[indices]
+    diagonal = np.asarray(native_diagonal, dtype=complex)
+    static = np.array(matrices.static, dtype=complex, copy=True)
+    if not np.all(np.isfinite(static)) or not np.all(np.isfinite(diagonal)):
+        raise ValueError("Bloch matrices must be finite")
+    h10 = float(abs(static[1, 0]) ** 2)
+    delta = np.real(diagonal[:, 1] - diagonal[:, 0])
+    np.fill_diagonal(static, 0)
+    scale = np.maximum(np.max(np.abs(static)), np.max(np.abs(diagonal), axis=1))
+    hermitian = 0.5 * (static + static.conj().T)
+    hermitian_diagonal = 0.5 * (diagonal + diagonal.conj())
+    mu = 0.0
+    if absorptive:
+        anti = 0.5 * (static - static.conj().T)
+        anti_diagonal = 0.5 * (diagonal - diagonal.conj())
+        if not np.all(np.isfinite(anti)) or not np.all(np.isfinite(anti_diagonal)):
+            raise ValueError("absorptive matrix split must be finite")
+        # Real excitation errors leave the imaginary diagonal unchanged; mu is its mean, as in the dense split.
+        if not np.array_equal(anti_diagonal, np.broadcast_to(anti_diagonal[0], anti_diagonal.shape)):
+            raise ValueError("real profile excitation changed the imaginary diagonal")
+        np.fill_diagonal(anti, anti_diagonal[0])
+        mu_diagonal = np.imag(np.diag(anti))
+        mu = float(np.mean(mu_diagonal))
+        variation = float(np.max(np.abs(mu_diagonal - mu)))
+        np.fill_diagonal(anti, 0)
+        off_diagonal = float(np.max(np.abs(anti)))
+        bound = UNIFORM_ABSORPTION_RTOL * np.maximum(scale, 1e-30)
+        if np.any(off_diagonal > bound) or np.any(variation > bound):
+            raise ValueError("spectra need a Hermitian Hamiltonian plus uniform loss; "
+                             "this absorption model is non-uniform or off-diagonal")
+    if not np.all(np.isfinite(hermitian)) or not np.all(np.isfinite(hermitian_diagonal)):
+        raise ValueError("Hermitian matrix split must be finite")
+    return hermitian, np.ascontiguousarray(hermitian_diagonal.real), h10, delta, mu
+
+
 def _device_matrix_spectra(matrices, keys, donor, absorptive, backend, batch_size):
     """Solve missing spectra on the requested device, retaining exact donor entries.
 
@@ -157,11 +205,18 @@ def _device_matrix_spectra(matrices, keys, donor, absorptive, backend, batch_siz
     and rocking nodes. Nonuniform absorption still fails the v2 contract.
     """
     from grond.bloch.backends import _jax_host_buffer_bytes
-    from grond.bloch.spectral_gpu import hermitian_spectra, spectral_host_chunk_size
+    from grond.bloch.hamiltonian import ProfileHamiltonians
+    from grond.bloch.spectral_gpu import hermitian_spectra, hermitian_spectra_from_static, spectral_host_chunk_size
 
     parts = [donor.get(key) for key in keys]
     missing = [i for i, value in enumerate(parts) if value is None]
     if not missing:
+        return parts
+    if isinstance(matrices, ProfileHamiltonians):
+        static, diagonal, h10, delta, mu = _compact_spectral_inputs(matrices, missing, absorptive)
+        lam, coupling = hermitian_spectra_from_static(static, diagonal, backend, batch_size)
+        for j, i in enumerate(missing):
+            parts[i] = (lam[j], coupling[j], h10, float(delta[j]), mu)
         return parts
     n = np.asarray(matrices[missing[0]]).shape[0]
     count = spectral_host_chunk_size(n, len(missing), backend, batch_size, _jax_host_buffer_bytes())
