@@ -20,7 +20,7 @@ from grond.bloch.cache import (
     write_ug_cache_atomic,
 )
 from grond.bloch.constants import UG_CACHE_SCHEMA
-from grond.bloch.model import fcalc_res_grid, inv_d2_from_hkl_array, model_content_hash
+from grond.bloch.model import fcalc_res_grid, inv_d2_from_hkl_array, lattice_translations_from_latt, model_content_hash
 from grond.bloch.thickness import (
     config_cf_parameters,
     config_table_nodes,
@@ -28,6 +28,18 @@ from grond.bloch.thickness import (
     resolved_config_evaluator,
     uniform_grid_spec,
 )
+
+
+def centring_coset_mask(hkls, latt) -> np.ndarray:
+    """True for the HKLs in the lattice-centring coset of the direct beam: g . t is an integer for every centring
+    translation t of SHELX LATT code ``latt`` (all True for a primitive lattice)."""
+
+    hkls = np.asarray(hkls, dtype=float).reshape(-1, 3)
+    keep = np.ones(len(hkls), dtype=bool)
+    for translation in lattice_translations_from_latt(abs(int(latt))):
+        phase = hkls @ np.asarray(translation, dtype=float)
+        keep &= np.abs(phase - np.round(phase)) < 1e-9
+    return keep
 
 
 class PotentialMixin:
@@ -235,7 +247,11 @@ class PotentialMixin:
             uvals.append(np.asarray(self.ug_array(block), dtype=np.complex128))
         if not hkls:
             return np.zeros((0, 3), dtype=int), np.zeros(0, dtype=np.complex128)
-        return np.concatenate(hkls, axis=0), np.concatenate(uvals)
+        pool, ug = np.concatenate(hkls, axis=0), np.concatenate(uvals)
+        if bool(getattr(self.cfg, "basis_centring_coset", False)):
+            keep = centring_coset_mask(pool, self.model.get("shelx_latt", 1))
+            pool, ug = pool[keep], ug[keep]
+        return pool, ug
 
     def thickness_grid(self):
         """Return thickness nodes (Å) and weights for the configured thickness model and evaluator.

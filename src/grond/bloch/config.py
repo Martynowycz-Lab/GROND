@@ -145,6 +145,10 @@ class Config:
     thickness_min_A: float = DEFAULT_THICKNESS_MIN_A
     thickness_max_A: float = DEFAULT_THICKNESS_MAX_A
     thickness_table_dt_A: float = DEFAULT_TABLE_DT_A
+    # Keep only top-up beams in the direct beam's lattice-centring coset (g . t integer for every centring
+    # translation t of the model). Beams of other cosets have no potential coupling to it (U of their difference
+    # is a centring absence), so the propagated amplitudes are unchanged while the matrices shrink. Off: legacy pool.
+    basis_centring_coset: bool = False
 
     def __post_init__(self):
         """Raise ValueError for an out-of-range value or an unsupported combination of modes; fields are not changed."""
