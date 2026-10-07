@@ -398,6 +398,15 @@ class XDSBlochPort(
             return None
         return np.abs(uniform_grid_amplitudes(vals, coupling, *grid, inverse=inverse)[0]) ** 2
 
+    def elastic_spectrum_thickness_average(self, vals, coupling):
+        """Thickness average of the target intensity from one elastic eigensystem (eigenvalues, V[1] conj(V[0]))."""
+
+        per_t = self._uniform_table_intensities(vals, coupling)
+        if per_t is None:
+            phase = np.exp((2j * np.pi) * vals[:, None] * self.thick[None, :])
+            per_t = np.abs(np.sum(coupling[:, None] * phase, axis=0)) ** 2
+        return float(np.sum(self.thick_w * per_t))
+
     def propagate_direct_to_target_thickness_average(self, H):
         """Propagate one Bloch matrix and average over the configured thickness quadrature."""
 
@@ -425,14 +434,8 @@ class XDSBlochPort(
                     per_t = np.abs(np.sum(coupling[:, None] * phase, axis=0)) ** 2
                 per_t *= np.exp(-4.0 * np.pi * mu * self.thick)
                 return float(np.sum(self.thick_w * per_t))
-            else:
-                vals, vecs = hermitian_eigh(H)
-                coupling = vecs[1, :] * np.conj(vecs[0, :])
-            per_t = self._uniform_table_intensities(vals, coupling)
-            if per_t is None:
-                phase = np.exp((2j * np.pi) * vals[:, None] * self.thick[None, :])
-                per_t = np.abs(np.sum(coupling[:, None] * phase, axis=0)) ** 2
-            return float(np.sum(self.thick_w * per_t))
+            vals, vecs = hermitian_eigh(H)
+            return self.elastic_spectrum_thickness_average(vals, vecs[1, :] * np.conj(vecs[0, :]))
         if backend in {"scipy_expm", "expm", "scipy_expm_multiply", "expm_multiply"}:
             psi0 = np.zeros(H.shape[0], dtype=np.complex128)
             psi0[0] = 1.0 + 0.0j

@@ -41,6 +41,16 @@ _NON_RETRYABLE_ERRORS = (
 )
 
 _WORKER_PORT = None
+# Opt-in GPU row workers next to the CPU pool, e.g. "0,1,2"; a repeated id starts another process on that device.
+# GROND_HYBRID_GPU_BATCH sets the matrices per device call (default: sized from the matrix dimension).
+HYBRID_GPU_ENV = "GROND_HYBRID_GPU_DEVICES"
+
+
+def hybrid_gpu_devices() -> list[str]:
+    """Device ids of the opt-in GPU row workers named by GROND_HYBRID_GPU_DEVICES (empty when unset)."""
+
+    value = os.environ.get(HYBRID_GPU_ENV, "").strip()
+    return [item.strip() for item in value.split(",") if item.strip()]
 
 
 def _pool_context_names():
@@ -69,6 +79,36 @@ def _predict_row_worker(row_index):
     if _WORKER_PORT is None:
         raise RuntimeError("prediction worker was not initialized")
     return int(row_index), _WORKER_PORT.row_prediction(int(row_index))
+
+
+def _gpu_pool_context():
+    """Start method of GPU row workers: spawn, so that JAX is first imported after the device is chosen."""
+
+    return multiprocessing.get_context("spawn")
+
+
+def _init_gpu_prediction_worker(port, device):
+    """GPU pool initializer: pin this process to one CUDA device before JAX loads, then keep the port."""
+
+    import sys
+
+    if "jax" in sys.modules:
+        raise RuntimeError("a GPU prediction worker must select its device before JAX is imported")
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(device)
+    os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+    os.environ.setdefault("GROND_JAX_HOST_BUFFER_GIB", "4")  # one full-cone row's compact buffers
+    _init_prediction_worker(port)
+
+
+def _predict_row_gpu_worker(row_index):
+    """Return (row index, row prediction) with the row's eigensystems solved on this worker's GPU."""
+
+    from grond.legacy.engine.spectra_stage import device_row_prediction
+
+    if _WORKER_PORT is None:
+        raise RuntimeError("prediction worker was not initialized")
+    batch = int(os.environ.get("GROND_HYBRID_GPU_BATCH", "0") or 0)  # matrices per device call; 0 sizes it from N
+    return int(row_index), device_row_prediction(_WORKER_PORT, int(row_index), batch_size=batch)
 
 
 def _predict_row_cache_worker(row_position):
@@ -225,6 +265,72 @@ class PredictionMixin:
               f"max_input_batch_MiB={diagnostics['max_input_batch_bytes'] / 2**20:.2f} "
               f"wall={output['seconds']:.2f}s", flush=True)
         return output
+
+    def _hybrid_gpu_devices(self):
+        """GPU row-worker devices, when this port's rows can use them (elastic SciPy rows, node thickness average)."""
+
+        devices = hybrid_gpu_devices()
+        backend = str(getattr(self.cfg, "compute_backend", "scipy") or "scipy").lower()
+        if (not devices or backend not in {"scipy", "numpy_scipy_cpu"} or self.absorption_enabled()
+                or self.thickness_cf_parameters() is not None or bool(getattr(self.cfg, "paired_inverse_hand", False))):
+            return []
+        return devices
+
+    def _predict_rows_hybrid(self, indices, workers, devices):
+        """(row, prediction) of every row from the CPU pool and one process per listed GPU, fed from one queue.
+
+        A GPU worker that fails for a non-physical reason (device, memory, process) is retired and its rows go back
+        to the queue for the CPU workers; physical row errors and CPU failures are raised.
+        """
+
+        from collections import deque
+        from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
+
+        cpu = ProcessPoolExecutor(max_workers=int(workers), mp_context=multiprocessing.get_context(_pool_context_names()[0]),
+                                  initializer=_init_prediction_worker, initargs=(self,))
+        pools = [(cpu, _predict_row_worker, int(workers) + max(1, int(workers) // 4))]
+        for device in devices:
+            gpu = ProcessPoolExecutor(max_workers=1, mp_context=_gpu_pool_context(),
+                                      initializer=_init_gpu_prediction_worker, initargs=(self, device))
+            pools.append((gpu, _predict_row_gpu_worker, 2))
+        pending = deque(int(v) for v in indices)
+        running, retired, results = {}, set(), []
+        counts = [0] * len(pools)
+
+        def refill(slot):
+            pool, worker, depth = pools[slot]
+            while pending and slot not in retired and sum(s == slot for s, _ in running.values()) < depth:
+                row = pending.popleft()
+                running[pool.submit(worker, row)] = (slot, row)
+
+        try:
+            for slot in range(len(pools)):
+                refill(slot)
+            while running:
+                done, _ = wait(list(running), return_when=FIRST_COMPLETED)
+                for future in done:
+                    slot, row = running.pop(future)
+                    try:
+                        results.append(future.result())
+                        counts[slot] += 1
+                    except _NON_RETRYABLE_ERRORS:
+                        raise
+                    except Exception as error:
+                        if slot == 0:
+                            raise
+                        if slot not in retired:
+                            print(f"GPU row worker on device {devices[slot - 1]} failed ({type(error).__name__}: {error}); "
+                                  "its rows go to the CPU workers", flush=True)
+                        retired.add(slot)
+                        pending.appendleft(row)
+                    for target in sorted({slot, 0}):
+                        refill(target)
+        finally:
+            for pool, _, _ in pools:
+                pool.shutdown(wait=True, cancel_futures=True)
+        print(f"hybrid prediction: {counts[0]} rows on {int(workers)} CPU workers, {sum(counts[1:])} rows on GPU devices "
+              f"{','.join(devices)}" + (f" ({len(retired)} GPU workers retired)" if retired else ""), flush=True)
+        return results
 
     def predict_rows_with_row_cache(self, indices, workers=1, chunksize=8):
         """Predict rows from an immutable row-geometry cache.
@@ -477,7 +583,10 @@ class PredictionMixin:
         t0 = time.perf_counter()
 
         results = None
-        if int(workers) > 1 and len(indices) > 1:
+        devices = self._hybrid_gpu_devices() if int(workers) > 1 and len(indices) > 1 else []
+        if devices:
+            results = _ordered_prediction_attempt(indices, self._predict_rows_hybrid(indices, workers, devices))
+        elif int(workers) > 1 and len(indices) > 1:
             for context_name in _pool_context_names():
                 try:
                     ctx = multiprocessing.get_context(context_name)

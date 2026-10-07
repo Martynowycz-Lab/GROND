@@ -234,6 +234,29 @@ def _device_matrix_spectra(matrices, keys, donor, absorptive, backend, batch_siz
     return parts
 
 
+def device_row_prediction(port, row: int, backend: str = "jax_cuda", batch_size: int = 0) -> dict:
+    """One row's prediction with its profile eigensystems solved on a device; otherwise port.row_prediction.
+
+    For elastic profile Hamiltonians and a node-based thickness average (no gamma cf, no paired inverse hand). The
+    eigensolve keeps the matrices' native precision (float32 for complex64 matrices, as hermitian_eigh does) and the
+    thickness average is the port's own CPU code, so the row equals the CPU row to eigensolver rounding.
+    """
+    from grond.bloch.hamiltonian import ProfileHamiltonians
+    from grond.bloch.spectral_gpu import hermitian_spectra_from_static
+
+    plan = port.row_prediction_plan(int(row))
+    matrices = plan["_dyn_matrices"]
+    if not isinstance(matrices, ProfileHamiltonians):
+        return port.row_prediction(int(row))
+    single = np.dtype(matrices.static.dtype) == np.complex64
+    static, diagonal, _h10, _delta, _mu = _compact_spectral_inputs(matrices, list(range(len(matrices))), False)
+    lam, coupling = hermitian_spectra_from_static(static, diagonal, backend, batch_size, single_precision=single)
+    if single:  # the CPU solver returns float32 eigenvalues and complex64 eigenvectors for these matrices
+        lam, coupling = lam.astype(np.float32), coupling.astype(np.complex64)
+    values = [port.elastic_spectrum_thickness_average(lam[i], coupling[i]) for i in range(len(lam))]
+    return port.finish_row_prediction_plan(plan, values)
+
+
 def load_donor(paths) -> dict:
     """Digest -> (lam, c, h10, delta, mu) of every profile point in earlier spectra files of this engine."""
     donor = {}

@@ -108,12 +108,16 @@ def _assemble_profile_matrices(jnp, off_diagonal, profile_diagonals):
     return matrices.at[:, index, index].set(profile_diagonals)
 
 
-def hermitian_spectra_from_static(static, diagonals, backend: str, batch_size: int = 0):
+def hermitian_spectra_from_static(static, diagonals, backend: str, batch_size: int = 0, single_precision: bool = False):
     """Solve a Hermitian profile from one off-diagonal matrix and exact assembled real diagonals.
 
-    Diagonals have already undergone the source matrix"s native-precision
+    Diagonals have already undergone the source matrix's native-precision
     addition and Hermitian split. Device construction only sets their values;
     it must not repeat that addition in a different precision.
+
+    ``single_precision`` solves in float32/complex64, as the CPU solver does for complex64 source matrices (whose
+    values float32 represents exactly); the realness test then uses the float32 resolution, as hermitian_eigh does.
+    Results are returned in float64/complex128 either way.
     """
     static = np.asarray(static)
     diagonals = np.asarray(diagonals)
@@ -135,8 +139,12 @@ def hermitian_spectra_from_static(static, diagonals, backend: str, batch_size: i
     if np.any(error > 8 * np.finfo(static.real.dtype).eps * norms):
         raise ValueError("Hermitian GPU spectra received a non-Hermitian matrix")
     real_norms = np.maximum(np.max(np.abs(static.real)), np.max(np.abs(diagonal_values), axis=1))
-    real = np.all(np.max(np.abs(static.imag)) <= 8 * np.finfo(static.real.dtype).eps * real_norms)
-    H = np.ascontiguousarray(static.real if real else static, dtype=np.float64 if real else np.complex128)
+    resolution = np.finfo(np.float32 if single_precision else static.real.dtype).eps
+    real = np.all(np.max(np.abs(static.imag)) <= 8 * resolution * real_norms)
+    real_type, complex_type = (np.float32, np.complex64) if single_precision else (np.float64, np.complex128)
+    H = np.ascontiguousarray(static.real if real else static, dtype=real_type if real else complex_type)
+    if single_precision:
+        diagonal_values = diagonal_values.astype(np.float32)
     jax, jnp = _jax_modules(backend)
     devices = _jax_devices(backend)
     requested = int(batch_size or 0)

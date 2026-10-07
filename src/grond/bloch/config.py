@@ -38,6 +38,17 @@ def _default_double_precision() -> bool:
     raise ValueError(f"GROND_PRECISION must be float32 or float64, got {value!r}")
 
 
+def _default_centring_coset() -> bool:
+    """Default of Config.basis_centring_coset: GROND_BASIS_CENTRING_COSET=1 (or true/on/yes) turns it on."""
+
+    value = os.environ.get("GROND_BASIS_CENTRING_COSET", "0").strip().lower()
+    if value in {"1", "true", "on", "yes"}:
+        return True
+    if value in {"0", "false", "off", "no", ""}:
+        return False
+    raise ValueError(f"GROND_BASIS_CENTRING_COSET must be 0 or 1, got {value!r}")
+
+
 def resolve_double_precision(double_flag: bool | None = None) -> bool:
     """Prediction precision of the row engines: complex128 if --double is given, else from GROND_PRECISION."""
 
@@ -147,8 +158,9 @@ class Config:
     thickness_table_dt_A: float = DEFAULT_TABLE_DT_A
     # Keep only top-up beams in the direct beam's lattice-centring coset (g . t integer for every centring
     # translation t of the model). Beams of other cosets have no potential coupling to it (U of their difference
-    # is a centring absence), so the propagated amplitudes are unchanged while the matrices shrink. Off: legacy pool.
-    basis_centring_coset: bool = False
+    # is a centring absence), so the propagated amplitudes are unchanged while the matrices shrink. Default from
+    # GROND_BASIS_CENTRING_COSET (off: legacy pool), so that every stage of a run inherits one setting.
+    basis_centring_coset: bool = field(default_factory=_default_centring_coset)
 
     def __post_init__(self):
         """Raise ValueError for an out-of-range value or an unsupported combination of modes; fields are not changed."""
