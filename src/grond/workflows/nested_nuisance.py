@@ -157,8 +157,11 @@ def nested_evaluator(args: argparse.Namespace) -> tuple[str, str]:
     ``auto`` resolves a gamma pick with less than 1e-6 of its mass outside the support to the exact ``cf`` average,
     which the engine computes only on the SciPy backend; with any other --compute-backend the stage requests
     ``table`` (the same support model to its 2 A interpolation error), so no pick can be one the later stages refuse.
+    Response tables (--nested-response-tables) keep no spectra, so they always request ``table``.
     """
 
+    if bool(getattr(args, "nested_response_tables", False)):
+        return "table", "response_tables_keep_no_spectra"
     backend = str(getattr(args, "compute_backend", "scipy") or "scipy").lower()
     if backend in CF_BACKENDS:
         return "auto", "cf_available_scipy_backend"
@@ -321,6 +324,7 @@ def nested_request(args: argparse.Namespace, ds: DatasetSpec, *, model: str, row
         "support": ThicknessSupport().to_dict(),
         "evaluator": nested_evaluator(args)[0],
         "score_with": "table",
+        **({"response_tables": True} if getattr(args, "nested_response_tables", False) else {}),
         "clamp": bool(contract.clamp),
         "objective": str(contract.objective),
         "salt": INNER_CV_SALT,

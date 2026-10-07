@@ -527,6 +527,15 @@ def add_nuisance(ap: argparse.ArgumentParser) -> None:
         help="Thickness-distribution families of the nested selection: uniform_gradient (t0, gradient) and/or gamma (mean, shape).",
     )
     ap.add_argument(
+        "--nested-response-tables",
+        action="store_true",
+        help=(
+            "Build the nested selection's thickness tables row by row and keep only the tables, not the spectra "
+            "(memory: the tables plus one row's spectra per worker; needed for large beam supports and full cones). "
+            "Every candidate and the pick are then evaluated on the 2 A table, never with the exact gamma average."
+        ),
+    )
+    ap.add_argument(
         "--feedback-thickness-update",
         choices=["on", "off"],
         default=None,
