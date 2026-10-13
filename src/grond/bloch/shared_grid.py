@@ -93,6 +93,16 @@ def precision() -> str:
     return value
 
 
+def table_precision() -> str:
+    """CPU solve precision for response tables (GROND_SHARED_GRID_TABLE_PRECISION, default as predictions)."""
+    value = str(os.environ.get("GROND_SHARED_GRID_TABLE_PRECISION", "") or "").strip().lower()
+    if not value:
+        return precision()
+    if value not in {"double", "single"}:
+        raise ValueError("GROND_SHARED_GRID_TABLE_PRECISION must be double or single")
+    return value
+
+
 def gpu_devices() -> list[str]:
     """CUDA device ids for GPU grid workers (GROND_SHARED_GRID_GPUS, e.g. "0,1,2"); predictions only."""
     value = str(os.environ.get(ENV_GPUS, "") or "").strip()
@@ -227,11 +237,21 @@ def light_plan(port, row: int, step: float, support_t=None):
     pair = np.asarray([[0, 0, 0], hkl], dtype=int)
     h10 = port.hamiltonian_static_part(pair, absorb=False, row_idx=row)[1, 0]
     deltas = np.empty(len(omegas))
-    born_vals = np.empty(len(omegas))
     for i, (omega, (along, transverse)) in enumerate(zip(omegas, tilts, strict=True)):
         sg = port.sg_for_hkls_at_orientation(pair, omega, along, transverse)
         deltas[i] = float(np.real(sg[1] - sg[0]))
-        born_vals[i] = port.born_thickness_average(h10, deltas[i]) if support_t is None else 0.0
+    born_vals = np.zeros(len(omegas))
+    if support_t is None:
+        # XDSBlochPort.born_thickness_average for every point at once (same expressions).
+        cf = port.thickness_cf_parameters()
+        if cf is not None:
+            from grond.bloch.thickness import gamma_cf_born
+
+            born_vals = np.asarray(gamma_cf_born(abs(h10) ** 2, deltas, cf["shape"], cf["theta"]), dtype=float)
+        else:
+            thick, thick_w = np.asarray(port.thick), np.asarray(port.thick_w)
+            sinc = np.sinc(deltas[:, None] * thick[None, :])
+            born_vals = ((2.0 * math.pi) ** 2 * (abs(h10) ** 2) * (thick[None, :] ** 2) * (sinc ** 2)) @ thick_w
     blocks = {}
     for tau in np.unique(tilts[:, 1]):
         sel = tilts[:, 1] == tau
@@ -470,8 +490,7 @@ class _GpuSolver:
         self.cube = jnp.asarray((cube.real if self.real else cube) * scale, dtype=self.rdt if self.real else self.cdt)
         self.lims = (int(port.h_lim), int(port.k_lim), int(port.l_lim))
         self.shape = cube.shape
-        t0, dt, nt = port.thickness_uniform_grid()
-        self.t = jnp.asarray(t0 + dt * np.arange(nt), dtype=jnp.float64)
+        self.t_spec = port.thickness_uniform_grid()
         self.w = jnp.asarray(np.asarray(port.thick_w), dtype=jnp.float64)
         self.eigh = jax.jit(jnp.linalg.eigh)
         self.A = jnp.asarray(np.asarray(port.data.A, dtype=float), dtype=jnp.float64)
@@ -501,14 +520,22 @@ class _GpuSolver:
             pad = pad.at[jnp.arange(n, size), jnp.arange(n, size)].set(PAD_DIAGONAL + jnp.arange(size - n))
             H = pad
         lam, V = self.eigh(H)
-        lam = lam.astype(jnp.float64)
-        C = (V[jnp.asarray(pos)] * jnp.conj(V[0])[None, :]).astype(jnp.complex128 if self.prec == "double" else jnp.complex64)
-        phase = 2.0 * jnp.pi * jnp.mod(lam[:, None] * self.t[None, :], 1.0)
-        E = jnp.exp(1j * phase).astype(C.dtype)
+        cdt = jnp.complex128 if self.prec == "double" else jnp.complex64
+        C = (V[jnp.asarray(pos)] * jnp.conj(V[0])[None, :]).astype(cdt)
+        # Production's factorised phases (uniform_grid_phase_factors), built in float64 on the host from the
+        # eigenvalues, then one batched product on the device: amp[a, b*B + r] = sum_j C[a, j] shift[b, j] within[j, r].
+        lam_h = np.asarray(lam, dtype=np.float64)
+        t0, dt, nt = self.t_spec
+        within, shift = uniform_grid_phase_factors(lam_h[None, :], t0, dt, nt)
+        within, shift = jnp.asarray(within[0], dtype=cdt), jnp.asarray(shift[0], dtype=cdt)
         out = {}
         for h in hands:
-            amp = C @ (E if h > 0 else jnp.conj(E))
-            out[h] = np.asarray((jnp.abs(amp) ** 2).astype(jnp.float64) @ self.w)
+            wv, sv = (within, shift) if h > 0 else (jnp.conj(within), jnp.conj(shift))
+            parts = []
+            for s0 in range(0, C.shape[0], 64):  # bounded (64, blocks, N) intermediates per device call
+                amp = ((C[s0:s0 + 64, None, :] * sv[None, :, :]) @ wv).reshape(-1, sv.shape[0] * wv.shape[1])[:, :nt]
+                parts.append((jnp.abs(amp) ** 2).astype(jnp.float64) @ self.w)
+            out[h] = np.asarray(jnp.concatenate(parts))
         return out, n
 
 
@@ -581,7 +608,7 @@ def _run(port, rows, workers, kind, hands, support=None, log=print):
     """The shared pass over ``rows``; returns (light plans, per-row values or tables, diagnostics)."""
     t_start = time.time()
     step = 1.0 / (per_degree() if kind == "predict" else table_per_degree())
-    prec = precision()
+    prec = precision() if kind == "predict" else table_precision()
     support_t = None if support is None else support.grid()
     workers = max(1, int(workers))
     ctx = _context()
@@ -607,7 +634,8 @@ def _run(port, rows, workers, kind, hands, support=None, log=print):
         t_spec = uniform_grid_spec(support_t)
         t_weights = None
     total_points = sum(int(k1[i].max() - k0[i][k0[i] <= k1[i]].min() + 1) for i in range(len(taus)))
-    n_tasks = max((16 if gpu_devices() and kind == "predict" else 4) * workers, 1)
+    gpu_workers = len(gpu_devices()) * max(1, int(os.environ.get("GROND_SHARED_GRID_WORKERS_PER_GPU", "4") or 4))
+    n_tasks = max(16 * gpu_workers if gpu_devices() and kind == "predict" else 4 * workers, 1)
     span = max(1, total_points // n_tasks)
     tasks = []
     for i in range(len(taus)):
@@ -654,9 +682,12 @@ def _run(port, rows, workers, kind, hands, support=None, log=print):
 
     devices = gpu_devices() if kind == "predict" and getattr(port, "ug_cube", None) is not None else []
     if ctx is not None and devices:
-        workers_per_gpu = max(1, int(os.environ.get("GROND_SHARED_GRID_WORKERS_PER_GPU", "1") or 1))
+        workers_per_gpu = max(1, int(os.environ.get("GROND_SHARED_GRID_WORKERS_PER_GPU", "4") or 4))
         dev_list = [d for d in devices for _ in range(workers_per_gpu)]
-        n_cpu = max(0, workers - len(dev_list))
+        # CPU workers next to the GPUs only on request: at large N they are memory-bandwidth bound and slowed the
+        # GPU workers' host work as much as they added (SU-102, |Sg| <= 0.04: 743 s mixed against 760 s GPU only).
+        with_cpu = str(os.environ.get("GROND_SHARED_GRID_CPU_WITH_GPU", "0")).strip().lower() in {"1", "true", "on", "yes"}
+        n_cpu = max(0, workers - len(dev_list)) if with_cpu else 0
         log(f"  shared grid: {len(dev_list)} GPU worker(s) on device(s) {','.join(devices)} ({gpu_precision()}), "
             f"{n_cpu} CPU worker(s) ({prec})")
         _run_queue(ctx, tasks, n_cpu, dev_list, kind, absorb)
