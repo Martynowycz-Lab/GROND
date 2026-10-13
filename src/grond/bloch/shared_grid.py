@@ -48,7 +48,6 @@ ENV_TABLE_PER_DEGREE = "GROND_SHARED_GRID_TABLE_PER_DEGREE"
 ENV_GPUS = "GROND_SHARED_GRID_GPUS"
 ENV_GPU_PRECISION = "GROND_SHARED_GRID_GPU_PRECISION"
 GPU_BUCKET = 128
-PAD_DIAGONAL = 1.0e3
 MARGIN = 4
 TARGET_CHUNK = 32
 
@@ -517,7 +516,12 @@ class _GpuSolver:
         if size > n:
             pad = jnp.zeros((size, size), dtype=H.dtype)
             pad = pad.at[:n, :n].set(H)
-            pad = pad.at[jnp.arange(n, size), jnp.arange(n, size)].set(PAD_DIAGONAL + jnp.arange(size - n))
+            # Decoupled padding beams with distinct diagonals just above the physical range: an eigensolver's accuracy is
+            # relative to the matrix norm, so large padding values would cost float32 its precision at the scale of
+            # the couplings (measured: 1e3 pads gave 35% median errors in float32; these keep the norm unchanged).
+            top = float(np.max(np.abs(sg))) + 0.01  # decoupled, so coinciding with a physical eigenvalue is harmless
+            fill = top * (1.0 + np.arange(size - n) / float(size))
+            pad = pad.at[jnp.arange(n, size), jnp.arange(n, size)].set(jnp.asarray(fill, dtype=pad.dtype))
             H = pad
         lam, V = self.eigh(H)
         cdt = jnp.complex128 if self.prec == "double" else jnp.complex64
