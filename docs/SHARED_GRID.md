@@ -27,6 +27,7 @@ per-cycle thickness updates with `--nested-response-tables`).
 | `GROND_SHARED_GRID_WORKERS_PER_GPU` | default 4 | GPU worker processes per device |
 | `GROND_SHARED_GRID_GPU_PRECISION` | `single` (default), `double` | GPU eigensolver precision |
 | `GROND_SHARED_GRID_CPU_WITH_GPU` | `0` (default) | also run CPU workers next to the GPUs |
+| `GROND_SHARED_GRID_GPU_MIN_N` | default 2000 | use the GPUs only when a sampled grid matrix has at least this N (smaller matrices solve faster on CPU cores, in cache) |
 | `GROND_SHARED_GRID_MIN_ROWS` | default 200 | smaller requests always run per row |
 | `GROND_UG_BUILD_WORKERS` | default 1 | processes for the dense U_g cube build (fork platforms) |
 | `GROND_BASIS_CENTRING_COSET` | `1` | keep only the direct beam's lattice-centring coset in the beam pool (exact) |

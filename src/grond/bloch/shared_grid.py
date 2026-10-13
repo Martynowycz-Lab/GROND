@@ -685,6 +685,18 @@ def _run(port, rows, workers, kind, hands, support=None, log=print):
             log(f"  shared grid: {done}/{len(tasks)} tasks, {time.time() - t_pass:.0f} s")
 
     devices = gpu_devices() if kind == "predict" and getattr(port, "ug_cube", None) is not None else []
+    if devices:
+        # GPUs pay off only for large matrices: below about N = 2,000 a CPU core solves a grid matrix in cache (no
+        # bandwidth limit) and the device time is dominated by per-call overheads (GROND_SHARED_GRID_GPU_MIN_N).
+        min_n = int(os.environ.get("GROND_SHARED_GRID_GPU_MIN_N", "2000") or 2000)
+        probe_k = int(np.median(np.concatenate([np.asarray(k0[i])[k0[i] <= k1[i]] for i in range(len(taus))])))
+        tau0 = taus[len(taus) // 2]
+        i0 = taus.index(tau0)
+        act = np.flatnonzero((k0[i0] <= probe_k) & (k1[i0] >= probe_k))
+        n_probe = len(grid_basis(port, probe_k * step, tau0, hkls[act], float(port.cfg.max_support_sg))[0]) if len(act) else 0
+        if n_probe < min_n:
+            log(f"  shared grid: N ~ {n_probe} < {min_n}, CPU workers instead of GPUs")
+            devices = []
     if ctx is not None and devices:
         workers_per_gpu = max(1, int(os.environ.get("GROND_SHARED_GRID_WORKERS_PER_GPU", "4") or 4))
         dev_list = [d for d in devices for _ in range(workers_per_gpu)]
@@ -702,7 +714,31 @@ def _run(port, rows, workers, kind, hands, support=None, log=print):
     else:
         for task in tasks:
             absorb(_block_worker(task))
+    # Cubic cardinal weights can be negative, so an interpolated value of a very weak row can dip below zero where the
+    # per-row sum cannot; such values are clipped (tables, at 0) or floored (predictions, at 1e-30 like the selection
+    # code's DYN_FLOOR), and how many and how deep is recorded.
+    clipped = {"entries": 0, "rows": 0, "max_depth_rel": 0.0}
+    for h in hands:
+        arr = values[h] if kind == "predict" else tables[h]
+        neg = ~np.isfinite(arr) | (arr <= 0.0) if kind == "predict" else ~np.isfinite(arr) | (arr < 0.0)
+        if np.any(neg):
+            rows_neg = np.any(neg, axis=1) if arr.ndim == 2 else neg
+            scale_rows = np.max(np.abs(np.nan_to_num(arr)), axis=1) if arr.ndim == 2 else np.abs(np.nan_to_num(arr))
+            depth = np.abs(np.nan_to_num(np.where(neg, arr, 0.0)))
+            depth = depth.max(axis=1) if arr.ndim == 2 else depth
+            rel = depth[rows_neg] / np.maximum(scale_rows[rows_neg] if arr.ndim == 2 else np.max(np.abs(np.nan_to_num(arr))), 1e-300)
+            clipped["entries"] += int(np.count_nonzero(neg))
+            clipped["rows"] += int(np.count_nonzero(rows_neg))
+            clipped["max_depth_rel"] = max(clipped["max_depth_rel"], float(np.max(rel)) if len(rel) else 0.0)
+            if kind == "predict":
+                values[h] = np.where(neg, 1e-30, arr)
+            else:
+                tables[h] = np.where(neg, 0.0, arr)
+    if clipped["entries"]:
+        log(f"  shared grid: clipped {clipped['entries']} interpolated values below zero in {clipped['rows']} rows "
+            f"(deepest {clipped['max_depth_rel']:.2e} of the row's largest value)")
     diag = {"rows": len(rows), "tilts": len(taus), "grid_points": int(len(sizes)), "per_degree": 1.0 / step,
+            "clipped": clipped,
             "precision": prec, "cut": float(port.cfg.max_support_sg), "workers": workers,
             "N_median": float(np.median(sizes)) if sizes else 0.0, "N_max": int(max(sizes)) if sizes else 0,
             "cpu_solve_s": cpu["solve"], "cpu_thickness_s": cpu["thickness"], "light_plan_wall_s": t_light,
