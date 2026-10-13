@@ -42,6 +42,24 @@ def centring_coset_mask(hkls, latt) -> np.ndarray:
     return keep
 
 
+_UG_BUILD: dict = {}
+
+
+def _ug_build_workers() -> int:
+    """Processes for the dense U_g cube build: GROND_UG_BUILD_WORKERS (default 1, serial); fork platforms only."""
+    import multiprocessing as mp
+    import os
+
+    value = int(os.environ.get("GROND_UG_BUILD_WORKERS", "1") or 1)
+    return max(1, value) if "fork" in mp.get_all_start_methods() else 1
+
+
+def _ug_slab(h_vals):
+    """fcalc_res_grid on one slab of h values (the U_g cube builder's worker)."""
+    hh, kk, ll = np.meshgrid(h_vals, _UG_BUILD["k"], _UG_BUILD["l"], indexing="ij")
+    return fcalc_res_grid(_UG_BUILD["model"], hh, kk, ll)
+
+
 class PotentialMixin:
     """One cohesive part of XDSBlochPort; initialized by the public facade."""
 
@@ -128,9 +146,26 @@ class PotentialMixin:
         h_vals = np.arange(-self.h_lim, self.h_lim + 1, dtype=float)
         k_vals = np.arange(-self.k_lim, self.k_lim + 1, dtype=float)
         l_vals = np.arange(-self.l_lim, self.l_lim + 1, dtype=float)
-        hh, kk, ll = np.meshgrid(h_vals, k_vals, l_vals, indexing="ij")
         factor = float(self.gamma) / (math.pi * self.data.cell.volume)
-        cube = factor * fcalc_res_grid(self.model, hh, kk, ll)
+        workers = _ug_build_workers()
+        if workers > 1 and len(h_vals) > 1:
+            # Same values as the serial build: fcalc_res_grid is elementwise in (h, k, l), split here over h slabs.
+            import multiprocessing as mp
+
+            slabs = [h_vals[i::workers] for i in range(workers)]
+            _UG_BUILD.update(model=self.model, k=k_vals, l=l_vals)
+            try:
+                with mp.get_context("fork").Pool(min(workers, len(slabs))) as pool:
+                    parts = pool.map(_ug_slab, slabs)
+            finally:
+                _UG_BUILD.clear()
+            cube = np.empty((len(h_vals), len(k_vals), len(l_vals)), dtype=np.complex128)
+            for i, part in enumerate(parts):
+                cube[i::workers] = part
+            cube *= factor
+        else:
+            hh, kk, ll = np.meshgrid(h_vals, k_vals, l_vals, indexing="ij")
+            cube = factor * fcalc_res_grid(self.model, hh, kk, ll)
         return validate_ug_cube(cube, tuple(int(value) for value in plan["shape"]))
 
     def calculate_ug_array(self, hkls):

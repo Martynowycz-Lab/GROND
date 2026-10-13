@@ -183,8 +183,24 @@ def compute_response_table(hkl, res, cfg: Config, rows, support: ThicknessSuppor
     backend = str(getattr(cfg, "compute_backend", "scipy") or "scipy").lower()
     if backend in spectra.UNREPRESENTED_BACKENDS:
         raise ValueError(f"response tables need the exact row eigensystems; compute_backend {backend!r} is a reduction")
+    from grond.bloch import shared_grid
+
+    grid_port = None
+    if shared_grid.mode() != "off" and backend not in JAX_BACKENDS | JAX_PADDED_BACKENDS:
+        if ug_cache_dir is None and cache_dir is not None:
+            # One U_g cube per model for every variant of a selection (dose and cone do not change it).
+            ug_cache_dir = Path(cache_dir) / "ug_cache"
+        grid_port = spectra.build_port(str(hkl), str(hkl_transform), str(res), cfg, bool(alternate_hand), ug_cache_dir)
+        path, reason = shared_grid.choose_path(grid_port, rows, workers, purpose="table")
+        print(f"response table evaluator for {len(rows)} rows: {path} ({reason})", flush=True)
+        if path != "shared_grid":
+            grid_port = None
     ident = response_identity(hkl, res, cfg, rows, support, hands, hkl_transform=hkl_transform,
                               alternate_hand=alternate_hand)
+    if grid_port is not None:
+        ident["evaluator"] = {"shared_grid": True, "per_degree": shared_grid.per_degree(),
+                              "precision": shared_grid.precision(), "margin": shared_grid.MARGIN,
+                              "source_sha256": spectra.file_sha256(shared_grid.__file__)}
     key = spectra.identity_key(ident)
     final = None if cache_dir is None else Path(cache_dir) / f"response_{key}"
     info = {"key": key, "cache": None if final is None else str(final), "identity": ident}
@@ -219,7 +235,14 @@ def compute_response_table(hkl, res, cfg: Config, rows, support: ThicknessSuppor
             for name, values in per_row.items():
                 values[position] = entry[name]
 
-        if device or workers > 1:
+        if grid_port is not None:
+            arrays_grid, _diag = shared_grid.response_table(grid_port, rows, support, hands=hands, workers=workers)
+            for name, values in arrays.items():
+                values[:] = arrays_grid[1 if name == "hand_plus" else -1 if name == "hand_minus" else name]
+            for name, values in per_row.items():
+                values[:] = arrays_grid[name]
+            del arrays_grid
+        elif device or workers > 1:
             # One or a few rows per task keeps every worker busy to the end; results arrive in row order.
             size = max(1, min(8, len(rows) // (4 * workers)))
             chunks = [rows[i:i + size] for i in range(0, len(rows), size)]

@@ -571,6 +571,20 @@ class PredictionMixin:
             indices = np.arange(len(self.data.iobs))
         indices = validate_row_indices(indices, row_count=len(self.data.iobs))
         self._verify_prediction_sources()
+        from grond.bloch import shared_grid
+
+        path, reason = shared_grid.choose_path(self, indices, workers, purpose="predict")
+        if shared_grid.mode() != "off":
+            print(f"Bloch evaluator for {len(indices)} rows: {path} ({reason})", flush=True)
+        if path == "shared_grid":
+            t0 = time.perf_counter()
+            results = shared_grid.predict_rows(self, indices, workers=workers)
+            self._verify_prediction_sources()
+            out = self.pack_prediction_results(indices, results)
+            out["seconds"] = time.perf_counter() - t0
+            print(f"predicted {len(indices)}/{len(indices)} rows (shared grid) | wall={out['seconds']:.2f}s | "
+                  f"rate={len(indices) / max(out['seconds'], 1e-12):.2f}/s", flush=True)
+            return out
         backend = str(getattr(self.cfg, "compute_backend", "scipy") or "scipy").lower()
         if self.row_plan_cache_mode() != "off" and backend not in ALL_JAX_BACKENDS:
             return self.predict_rows_with_row_cache(indices, workers=workers, chunksize=chunksize)
