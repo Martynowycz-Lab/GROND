@@ -45,6 +45,10 @@ ENV_PER_DEGREE = "GROND_SHARED_GRID_PER_DEGREE"
 ENV_PRECISION = "GROND_SHARED_GRID_PRECISION"
 ENV_MIN_ROWS = "GROND_SHARED_GRID_MIN_ROWS"
 ENV_TABLE_PER_DEGREE = "GROND_SHARED_GRID_TABLE_PER_DEGREE"
+ENV_GPUS = "GROND_SHARED_GRID_GPUS"
+ENV_GPU_PRECISION = "GROND_SHARED_GRID_GPU_PRECISION"
+GPU_BUCKET = 128
+PAD_DIAGONAL = 1.0e3
 MARGIN = 4
 TARGET_CHUNK = 32
 
@@ -86,6 +90,20 @@ def precision() -> str:
     value = str(os.environ.get(ENV_PRECISION, "double") or "double").strip().lower()
     if value not in {"double", "single"}:
         raise ValueError(f"{ENV_PRECISION} must be double or single")
+    return value
+
+
+def gpu_devices() -> list[str]:
+    """CUDA device ids for GPU grid workers (GROND_SHARED_GRID_GPUS, e.g. "0,1,2"); predictions only."""
+    value = str(os.environ.get(ENV_GPUS, "") or "").strip()
+    return [v.strip() for v in value.split(",") if v.strip()]
+
+
+def gpu_precision() -> str:
+    """GPU eigensolver precision (default single: cuSOLVER divide and conquer, max 4.6e-4 from float64 measured)."""
+    value = str(os.environ.get(ENV_GPU_PRECISION, "single") or "single").strip().lower()
+    if value not in {"double", "single"}:
+        raise ValueError(f"{ENV_GPU_PRECISION} must be double or single")
     return value
 
 
@@ -279,6 +297,35 @@ def _grid_delta_b(port, omega: float) -> float:
     return rate * max(0.0, z - port.dose_ref_frame)
 
 
+def grid_basis(port, omega: float, tau: float, targets, cut: float):
+    """(basis, target positions, Sg of the basis) of the grid Hamiltonian at one orientation."""
+    order = {(0, 0, 0): 0}
+    for hkl in targets:
+        order.setdefault((int(hkl[0]), int(hkl[1]), int(hkl[2])), len(order))
+    pool = _G.get("pool")
+    if pool is None:
+        pool = np.asarray(port.pool_hkl, dtype=int)
+    sg_pool = port.sg_for_hkls_at_orientation(pool, omega, 0.0, tau)
+    candidates = np.flatnonzero(np.abs(sg_pool) <= cut)
+    cap = int(_G.get("n_basis", getattr(port.cfg, "n_basis", 0)) or 0)
+    if cap and len(candidates) > max(0, cap - 2):
+        pool_ug = _G.get("pool_ug")
+        if pool_ug is None:
+            pool_ug = np.asarray(port.pool_ug)
+        delta_b = _grid_delta_b(port, omega)
+        coupling = np.abs(pool_ug[candidates]) ** 2
+        if delta_b != 0.0:
+            coupling = coupling * np.exp(-0.5 * delta_b * np.asarray(port.pool_inv_d2)[candidates])
+        score = coupling / (np.abs(sg_pool[candidates]) + 1e-5)
+        candidates = candidates[np.lexsort((candidates, -score))[: max(0, cap - 2)]]
+    for i in candidates:
+        order.setdefault((int(pool[i, 0]), int(pool[i, 1]), int(pool[i, 2])), len(order))
+    basis = np.asarray(list(order), dtype=np.int64)
+    pos = np.asarray([order[(int(h[0]), int(h[1]), int(h[2]))] for h in targets], dtype=int)
+    sg = np.asarray(port.sg_for_hkls_at_orientation(basis, omega, 0.0, tau), dtype=float)
+    return basis, pos, sg
+
+
 def solve_grid_point(port, omega: float, tau: float, targets, cut: float, prec: str = "double"):
     """(eigenvalues, couplings[target, j] = V[t, j] conj(V[0, j]), basis size) at one grid orientation."""
     order = {(0, 0, 0): 0}
@@ -404,6 +451,126 @@ def _block_worker(task):
     return tilt_index, points, partial, cpu
 
 
+class _GpuSolver:
+    """One CUDA device: Hamiltonian from the U_g cube, eigh (sizes padded to GPU_BUCKET with decoupled beams),
+    target couplings and the thickness-weighted intensities, all on the device."""
+
+    def __init__(self, port, prec):
+        import jax
+
+        jax.config.update("jax_enable_x64", True)
+        import jax.numpy as jnp
+
+        self.jax, self.jnp, self.prec = jax, jnp, prec
+        self.rdt = jnp.float32 if prec == "single" else jnp.float64
+        self.cdt = jnp.complex64 if prec == "single" else jnp.complex128
+        cube = np.asarray(port.ug_cube)
+        self.real = bool(np.max(np.abs(cube.imag)) <= 1e-12 * max(float(np.max(np.abs(cube.real))), 1e-300))
+        scale = 1.0 / (2.0 * port.data.k)
+        self.cube = jnp.asarray((cube.real if self.real else cube) * scale, dtype=self.rdt if self.real else self.cdt)
+        self.lims = (int(port.h_lim), int(port.k_lim), int(port.l_lim))
+        self.shape = cube.shape
+        t0, dt, nt = port.thickness_uniform_grid()
+        self.t = jnp.asarray(t0 + dt * np.arange(nt), dtype=jnp.float64)
+        self.w = jnp.asarray(np.asarray(port.thick_w), dtype=jnp.float64)
+        self.eigh = jax.jit(jnp.linalg.eigh)
+        self.A = jnp.asarray(np.asarray(port.data.A, dtype=float), dtype=jnp.float64)
+        self.port = port
+
+    def intensities(self, basis, pos, sg, hands, delta_b=0.0):
+        jnp = self.jnp
+        n = len(basis)
+        size = int(math.ceil(n / GPU_BUCKET) * GPU_BUCKET)
+        hl, kl, ll = self.lims
+        b = jnp.asarray(basis, dtype=jnp.int32)
+        dh = b[None, :, 0] - b[:, None, 0]
+        dk = b[None, :, 1] - b[:, None, 1]
+        dl = b[None, :, 2] - b[:, None, 2]
+        ok = (jnp.abs(dh) <= hl) & (jnp.abs(dk) <= kl) & (jnp.abs(dl) <= ll)
+        if not bool(jnp.all(ok)):
+            raise ValueError("GPU grid: a beam difference lies outside the U_g cube")
+        H = self.cube[dh + hl, dk + kl, dl + ll]
+        if delta_b != 0.0:
+            # Dose Debye-Waller factor of each difference at the grid angle, as _static_matrix (1/d^2 = |A h|^2).
+            g = jnp.stack([dh, dk, dl], axis=-1).astype(jnp.float64) @ self.A.T
+            H = H * jnp.exp(-0.25 * float(delta_b) * jnp.sum(g * g, axis=-1)).astype(H.real.dtype)
+        H = H.at[jnp.diag_indices(n)].set(jnp.asarray(sg, dtype=H.dtype))
+        if size > n:
+            pad = jnp.zeros((size, size), dtype=H.dtype)
+            pad = pad.at[:n, :n].set(H)
+            pad = pad.at[jnp.arange(n, size), jnp.arange(n, size)].set(PAD_DIAGONAL + jnp.arange(size - n))
+            H = pad
+        lam, V = self.eigh(H)
+        lam = lam.astype(jnp.float64)
+        C = (V[jnp.asarray(pos)] * jnp.conj(V[0])[None, :]).astype(jnp.complex128 if self.prec == "double" else jnp.complex64)
+        phase = 2.0 * jnp.pi * jnp.mod(lam[:, None] * self.t[None, :], 1.0)
+        E = jnp.exp(1j * phase).astype(C.dtype)
+        out = {}
+        for h in hands:
+            amp = C @ (E if h > 0 else jnp.conj(E))
+            out[h] = np.asarray((jnp.abs(amp) ** 2).astype(jnp.float64) @ self.w)
+        return out, n
+
+
+def _queue_worker(kind, device, task_q, result_q):
+    """Pull grid blocks until the sentinel; device None = CPU (float64 path), else one GPU."""
+    try:
+        if device is not None:
+            os.environ["CUDA_VISIBLE_DEVICES"] = str(device)
+            os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+            gpu = _GpuSolver(_G["port"], gpu_precision())
+        while True:
+            task = task_q.get()
+            if task is None:
+                break
+            if device is None:
+                result_q.put(("ok", _block_worker(task)))
+                continue
+            tilt_index, k_lo, k_hi = task
+            g = _G
+            port, tau, step = g["port"], g["taus"][tilt_index], g["step"]
+            k0s, k1s = g["k0"][tilt_index], g["k1"][tilt_index]
+            points, cpu = [], {"solve": 0.0, "thickness": 0.0}
+            for k in range(k_lo, k_hi + 1):
+                act = np.flatnonzero((k0s <= k) & (k1s >= k))
+                if not len(act):
+                    continue
+                t0 = time.time()
+                basis, pos, sg = grid_basis(port, k * step, tau, g["hkls"][act], g["cut"])
+                inten, n = gpu.intensities(basis, pos, sg, g["hands"], _grid_delta_b(port, k * step))
+                points.append((k, act, inten, n))
+                cpu["solve"] += time.time() - t0
+            result_q.put(("ok", (tilt_index, points, {}, cpu)))
+    except BaseException as exc:  # report and stop; the parent raises
+        import traceback
+
+        result_q.put(("error", f"{type(exc).__name__}: {exc}\n{traceback.format_exc()[-2000:]}"))
+
+
+def _run_queue(ctx, tasks, n_cpu, devices, kind, absorb):
+    task_q, result_q = ctx.Queue(), ctx.Queue()
+    for task in tasks:
+        task_q.put(task)
+    procs = [ctx.Process(target=_queue_worker, args=(kind, d, task_q, result_q)) for d in devices]
+    procs += [ctx.Process(target=_queue_worker, args=(kind, None, task_q, result_q)) for _ in range(n_cpu)]
+    for _ in procs:
+        task_q.put(None)
+    for p in procs:
+        p.start()
+    try:
+        for _ in range(len(tasks)):
+            status, payload = result_q.get()
+            if status != "ok":
+                raise RuntimeError(f"shared grid worker failed: {payload}")
+            absorb(payload)
+    finally:
+        for p in procs:
+            if p.is_alive():
+                p.terminate()
+        for p in procs:
+            p.join()
+
+
 def _context():
     if "fork" in mp.get_all_start_methods():
         return mp.get_context("fork")
@@ -440,7 +607,7 @@ def _run(port, rows, workers, kind, hands, support=None, log=print):
         t_spec = uniform_grid_spec(support_t)
         t_weights = None
     total_points = sum(int(k1[i].max() - k0[i][k0[i] <= k1[i]].min() + 1) for i in range(len(taus)))
-    n_tasks = max(4 * workers, 1)
+    n_tasks = max((16 if gpu_devices() and kind == "predict" else 4) * workers, 1)
     span = max(1, total_points // n_tasks)
     tasks = []
     for i in range(len(taus)):
@@ -485,7 +652,15 @@ def _run(port, rows, workers, kind, hands, support=None, log=print):
         if done % max(1, len(tasks) // 10) == 0:
             log(f"  shared grid: {done}/{len(tasks)} tasks, {time.time() - t_pass:.0f} s")
 
-    if ctx is not None and workers > 1:
+    devices = gpu_devices() if kind == "predict" and getattr(port, "ug_cube", None) is not None else []
+    if ctx is not None and devices:
+        workers_per_gpu = max(1, int(os.environ.get("GROND_SHARED_GRID_WORKERS_PER_GPU", "1") or 1))
+        dev_list = [d for d in devices for _ in range(workers_per_gpu)]
+        n_cpu = max(0, workers - len(dev_list))
+        log(f"  shared grid: {len(dev_list)} GPU worker(s) on device(s) {','.join(devices)} ({gpu_precision()}), "
+            f"{n_cpu} CPU worker(s) ({prec})")
+        _run_queue(ctx, tasks, n_cpu, dev_list, kind, absorb)
+    elif ctx is not None and workers > 1:
         with ctx.Pool(min(workers, len(tasks))) as pool:
             for result in pool.imap_unordered(_block_worker, tasks, chunksize=1):
                 absorb(result)
