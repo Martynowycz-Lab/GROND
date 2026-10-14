@@ -84,3 +84,27 @@ def test_path_chooser_defaults_off_and_refuses_unsupported_physics(tmp_path, mon
     jitter = _port(tmp_path / "jitter", sg_jitter_mode="gaussian", sg_jitter_sigma0=0.001)
     path, reason = SG.choose_path(jitter, rows)
     assert path == "per_row" and "jitter" in reason
+
+
+def test_run_options_set_the_environment_for_every_stage(monkeypatch):
+    from grond.cli_options.parser import build_parser
+
+    for name in ("GROND_SHARED_GRID", "GROND_SHARED_GRID_GPUS", "GROND_BASIS_CENTRING_COSET"):
+        monkeypatch.delenv(name, raising=False)
+    args = build_parser().parse_args(["auto", "--prep", "p.json", "--out-dir", "o"])
+    assert (args.shared_grid, args.shared_grid_gpus, args.basis_centring_coset) == (None, None, None)
+    assert SG.apply_cli_options(args) == {"mode": "off", "basis_centring_coset": False}
+    args = build_parser().parse_args(["auto", "--prep", "p.json", "--out-dir", "o", "--shared-grid", "auto",
+                                      "--shared-grid-gpus", "0,1", "--basis-centring-coset", "on"])
+    record = SG.apply_cli_options(args)
+    assert record["mode"] == "auto" and record["gpus"] == ["0", "1"] and record["basis_centring_coset"]
+    assert SG.os.environ["GROND_SHARED_GRID"] == "auto" and SG.os.environ["GROND_BASIS_CENTRING_COSET"] == "1"
+
+
+def test_prediction_cache_identity_binds_the_evaluator(monkeypatch):
+    monkeypatch.setenv("GROND_SHARED_GRID", "off")
+    assert SG.cache_identity() is None  # per-row cache keys are unchanged
+    monkeypatch.setenv("GROND_SHARED_GRID", "auto")
+    monkeypatch.setenv("GROND_SHARED_GRID_GPUS", "0,1,2")
+    identity = SG.cache_identity()
+    assert identity["mode"] == "auto" and identity["gpus"] is True and identity["per_degree"] == 100.0

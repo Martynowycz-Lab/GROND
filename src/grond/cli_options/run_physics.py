@@ -82,6 +82,31 @@ def add_backend(ap: argparse.ArgumentParser) -> None:
         help="Bloch prediction backend. SciPy eigensolver is the production reference; scipy_bethe uses an opt-in promoted Bethe/Schur strong-beam reduction; SciPy expm/expm_multiply, real-embedded JAX expm, and JAX eigensolver backends are experimental agreement/speed probes. *_padded JAX backends pad matrix dimensions into small buckets to reduce compilation churn.",
     )
     ap.add_argument(
+        "--shared-grid",
+        choices=["off", "auto", "force"],
+        default=None,
+        help=(
+            "Bloch evaluator (sets GROND_SHARED_GRID for every stage; unset keeps the environment's value, default "
+            "off). auto solves one eigensystem per scan orientation, shared by every reflection rocking through it, "
+            "when the physics is supported and the cost model says it is at least 3x cheaper than per-reflection "
+            "solves (rows x profile points x tilts x N^2.5 against grid points x N^2.5; at least 200 rows); "
+            "otherwise per reflection. force: whenever supported. See docs/SHARED_GRID.md."
+        ),
+    )
+    ap.add_argument(
+        "--shared-grid-gpus",
+        default=None,
+        help="CUDA devices for shared-grid prediction passes, e.g. 0,1,2 (sets GROND_SHARED_GRID_GPUS; used when the "
+        "grid basis has at least 2000 beams).",
+    )
+    ap.add_argument(
+        "--basis-centring-coset",
+        choices=["off", "on"],
+        default=None,
+        help="Keep only the direct beam's lattice-centring coset in the beam pool (exact; sets "
+        "GROND_BASIS_CENTRING_COSET for every stage; unset keeps the environment's value, default off).",
+    )
+    ap.add_argument(
         "--row-plan-cache",
         choices=["auto", "off", "exact", "readwrite", "rebuild"],
         default="auto",

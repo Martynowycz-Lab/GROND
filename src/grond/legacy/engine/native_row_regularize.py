@@ -483,6 +483,12 @@ def prediction_cache_key(
         "indices_sha256": hashlib.sha256(indices.tobytes()).hexdigest(),
         "cfg": asdict(cfg),
     }
+    from grond.bloch import shared_grid
+
+    # A cache written with the shared grid possible never serves a per-row request, and the reverse; off adds nothing.
+    evaluator = shared_grid.cache_identity()
+    if evaluator is not None:
+        payload["bloch_evaluator"] = evaluator
     text = canonical_prediction_cache_payload(payload)
     return hashlib.sha256(text.encode()).hexdigest()[:20], payload
 

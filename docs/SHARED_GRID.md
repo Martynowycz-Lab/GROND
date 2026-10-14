@@ -14,6 +14,26 @@ Module: `src/grond/bloch/shared_grid.py`. Hooks: `XDSBlochPort.predict_rows` (ro
 `native_row_regularize` stage) and `legacy/engine/response_stage.compute_response_table` (nested selection and the
 per-cycle thickness updates with `--nested-response-tables`).
 
+## Switching it on in `grond auto` / `grond run`
+
+```
+grond auto ... --shared-grid auto [--shared-grid-gpus 0,1,2] [--basis-centring-coset on]
+```
+
+- `--shared-grid off|auto|force` sets `GROND_SHARED_GRID` once, at the start, for every stage of the run. Every stage
+  inherits it: screens, nested selection tables, gates, feedback passes, thickness updates and the final recompute.
+  Left unset, the environment's value is kept. The default is `off`, so a run without the option is unchanged.
+- `auto` decides per prediction pass and per response table, from the numbers of reflections and beams (next
+  section). Small passes, unsupported physics and small capped bases stay per reflection automatically, and the
+  reason is printed (`Bloch evaluator for N rows: ...`).
+- `--shared-grid-gpus` lists CUDA devices for prediction passes. They are used only when the grid basis has at least
+  2,000 beams; below that, CPU cores are faster.
+- `--basis-centring-coset on` drops the beams of other lattice-centring cosets, which are exactly decoupled. It is
+  exact and a large saving for centred lattices (SU-102, R: N falls by 3).
+- The settings in force are printed and recorded in `run_config.json` (`bloch_evaluator`).
+- Prediction caches written while the grid could be used carry these settings in their key. Such a cache never
+  serves a per-reflection request, and the reverse. With `off` the keys are unchanged.
+
 ## Settings (environment)
 
 | variable | values | meaning |
@@ -76,6 +96,23 @@ thickness tables), with N sampled at a few row centres. Rules of thumb behind it
 - **Fewer rocking points after the thickness average** (Gauss-Legendre 7-30 nodes) was tested per row on SU-102:
   29-212% maximum errors; the thickness-averaged rocking curve is not smooth for a gamma shape of 0.35. The uniform
   rule stays; on the grid, profile points cost only cardinal weights anyway.
+
+## Measured in production runs (SU-102, cc02: 128-core EPYC, 3x RTX 2080 Ti)
+
+Both runs were full `auto` runs, with both arms (full pore and empty pore) side by side on one server. Settings:
+nested selection over mosaic and dose, Q240, coset pool, `--shared-grid auto`, GPUs for prediction passes.
+
+| | \|Sg\| ≤ 0.04 (N ≈ 3,000) | \|Sg\| ≤ 0.01 (N ≈ 800) |
+|---|---|---|
+| nested selection (20 variants) | 2.3 h | about 2 h |
+| prediction pass (16,888 rows, 3 tilts, 32,600 grid points) | 72 min on the GPUs | minutes on CPU |
+| whole run | 6.5 h | see the run records |
+| chooser estimate (tables / passes) | 37x / 163x cheaper | 37-38x / grid |
+
+The published per-row SU-102 runs (\|Sg\| ≤ 0.01, 1,000-beam cap, Q60, no mosaic) took 54 h.
+
+Fe(II) (12 crystals, N ≈ 900 at 0.06): nested-selection tables were estimated 96x cheaper on the grid. Tyrosine
+(64-beam cap, about 1.4x): stays per reflection.
 
 ## Diagnostics
 

@@ -208,6 +208,12 @@ def cmd_run(args: argparse.Namespace) -> int:
     preset = apply_run_preset(args)
     for line in preset_console_lines(preset):
         print(line, flush=True)
+    from grond.bloch import shared_grid
+
+    # Every stage copies os.environ, so the evaluator options are set once here, before any stage starts.
+    args.bloch_evaluator_settings = shared_grid.apply_cli_options(args)
+    if args.bloch_evaluator_settings["mode"] != "off" or args.bloch_evaluator_settings["basis_centring_coset"]:
+        print(f"Bloch evaluator settings: {json.dumps(args.bloch_evaluator_settings, sort_keys=True)}", flush=True)
     prep = prep_from_args(args)
     _configure_static_pets_auto(prep, args)
     try:
@@ -307,6 +313,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         "prediction_cache_scope": args.prediction_cache_scope,
         "prediction_cache_compression": args.prediction_cache_compression,
         "compute_backend": args.compute_backend,
+        "bloch_evaluator": args.bloch_evaluator_settings,
         "jax_batch_size": args.jax_batch_size,
         "jax_matrix_bucket_size": args.jax_matrix_bucket_size,
         "matrix_convention": args.matrix_convention,

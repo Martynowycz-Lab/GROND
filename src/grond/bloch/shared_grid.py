@@ -116,6 +116,49 @@ def gpu_precision() -> str:
     return value
 
 
+def settings_record() -> dict:
+    """The shared-grid settings in force, for run records and the prediction-cache identity ({"mode": "off"} when off)."""
+    m = mode()
+    if m == "off":
+        return {"mode": m}
+    return {"mode": m, "per_degree": per_degree(), "table_per_degree": table_per_degree(), "precision": precision(),
+            "table_precision": table_precision(), "gpus": gpu_devices(), "gpu_precision": gpu_precision(),
+            "min_rows": int(os.environ.get(ENV_MIN_ROWS, "200") or 200),
+            "gpu_min_n": int(os.environ.get("GROND_SHARED_GRID_GPU_MIN_N", "2000") or 2000), "margin": MARGIN}
+
+
+def cache_identity() -> dict | None:
+    """What a prediction cache must also match when the grid may be used (None when off: per-row keys unchanged).
+
+    GPU use changes the values (float32 cuSOLVER), the device ids do not.
+    """
+    record = settings_record()
+    if record["mode"] == "off":
+        return None
+    return {**record, "gpus": bool(record["gpus"])}
+
+
+def apply_cli_options(args) -> dict:
+    """Set the environment from the grond run/auto options so that every stage inherits one setting.
+
+    --shared-grid sets GROND_SHARED_GRID, --shared-grid-gpus GROND_SHARED_GRID_GPUS and --basis-centring-coset
+    GROND_BASIS_CENTRING_COSET; an option left unset keeps the environment's value. Returns the settings in force.
+    """
+    value = getattr(args, "shared_grid", None)
+    if value is not None:
+        os.environ[ENV_MODE] = str(value)
+    gpus = getattr(args, "shared_grid_gpus", None)
+    if gpus is not None:
+        os.environ[ENV_GPUS] = str(gpus)
+    coset = getattr(args, "basis_centring_coset", None)
+    if coset is not None:
+        os.environ["GROND_BASIS_CENTRING_COSET"] = "1" if coset == "on" else "0"
+    record = settings_record()
+    record["basis_centring_coset"] = str(os.environ.get("GROND_BASIS_CENTRING_COSET", "0")).strip().lower() in {
+        "1", "true", "on", "yes"}
+    return record
+
+
 def unsupported_reason(port, purpose: str = "predict") -> str | None:
     """Why the shared grid cannot reproduce this port's physics (None when it can)."""
     cfg = port.cfg
