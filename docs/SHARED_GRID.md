@@ -104,12 +104,16 @@ nested selection over mosaic and dose, Q240, coset pool, `--shared-grid auto`, G
 
 | | \|Sg\| ≤ 0.04 (N ≈ 3,000) | \|Sg\| ≤ 0.01 (N ≈ 800) |
 |---|---|---|
-| nested selection (20 variants) | 2.3 h | about 2 h |
-| prediction pass (16,888 rows, 3 tilts, 32,600 grid points) | 72 min on the GPUs | minutes on CPU |
-| whole run | 6.5 h | see the run records |
-| chooser estimate (tables / passes) | 37x / 163x cheaper | 37-38x / grid |
+| workers per arm | 63 CPU + 9 GPU (3 per device) | 40 CPU (N < 2,000: no GPUs) |
+| nested selection (20 variants) | 8,193 s | 7,468 s |
+| structure feedback | 14,149 s (2 cycles) | 9,355 s (5 cycles) |
+| prediction pass (16,888 rows, 3 tilts, 32,600 grid points) | about 72 min on the GPUs | about 10 min on CPU |
+| whole run (auto) | 23,522 s (6.5 h) | 18,132 s (5.0 h) |
+| chooser estimate (tables / passes) | 37x / 163x cheaper | 37-38x / 91x cheaper |
+| held-out R_obs, full pore / empty pore | 17.67 / 18.57 | 17.62 / 18.70 |
 
-The published per-row SU-102 runs (\|Sg\| ≤ 0.01, 1,000-beam cap, Q60, no mosaic) took 54 h.
+The published per-row SU-102 runs (\|Sg\| ≤ 0.01, 1,000-beam cap, Q60, no mosaic) took 54 h and gave held-out
+R_obs 18.59 / 19.44.
 
 Fe(II) (12 crystals, N ≈ 900 at 0.06): nested-selection tables were estimated 96x cheaper on the grid. Tyrosine
 (64-beam cap, about 1.4x): stays per reflection.
