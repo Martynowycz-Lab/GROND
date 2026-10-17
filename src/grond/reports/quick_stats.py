@@ -877,7 +877,7 @@ def _append_quick_stats_model_panels(
             "",
             "## Final JANA/PETS-Style Row Statistics",
             "",
-            "These are the publication-facing row factors computed from the final frozen signed-row tables. `Robs`/`Rall` and `wRobs`/`wRall` are unmerged-row statistics; `MRobs`/`MRall` and `MwRobs`/`MwRall` are recomputed after arithmetic symmetry merging. The observed subset is `Iobs > 3 sigma(Iobs)`. These values are not SHELXL endpoint R factors.",
+            "These are the publication-facing row factors computed from the final frozen signed-row tables. `Robs`/`Rall` and `wRobs`/`wRall` are unmerged-row statistics; `MRobs`/`MRall` and `MwRobs`/`MwRall` are recomputed after arithmetic symmetry merging. `wR`/`MwR` are the amplitude form, Jana2020's `wR(all)` for refinement on F (`sqrt(sum w (Fo - Fc)^2 / sum w Fo^2)`, `w = 1/[sigma(Fo)^2 + (u Fo)^2]`); `MR`/`MwR` follow Klar et al. (2023). The observed subset is `Iobs > 3 sigma(Iobs)`. These values are not SHELXL endpoint R factors.",
             "",
             "| model | Ninput/excluded | Nobs/Nall | Nmerge used/excluded | MNobs/MNall | Robs | Rall | wRobs | wRall | MRobs | MRall | MwRobs | MwRall |",
             "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
@@ -1168,7 +1168,7 @@ def _append_quick_stats_resolution_rows(
         [
             "## JANA/PETS-Style Row And Post-Refinement Merged Statistics By Resolution/Scale Contract",
             "",
-            "These GROND-computed factors follow the JANA/PETS row-statistics family and remain separate from endpoint refinement. `Nobs/Nall` is the accepted observed-row coverage at that resolution gate; `Rall` and `wRall` use unmerged signed rows, while `MRall` and `MwRall` are recomputed after post-refinement symmetry merging. They are not SHELXL least-squares statistics.",
+            "These GROND-computed factors follow the JANA/PETS row-statistics family and remain separate from endpoint refinement. `Nobs/Nall` is the accepted observed-row coverage at that resolution gate; `Rall` and `wRall` use unmerged signed rows, while `MRall` and `MwRall` are recomputed after post-refinement symmetry merging; `wRall`/`MwRall` are the amplitude form (Jana2020 `wR(all)` for refinement on F). They are not SHELXL least-squares statistics.",
             "",
             "| endpoint | dmin A | scales | Nobs/Nall | dyn Rall | dyn wRall | dyn MRall | dyn MwRall | kin Rall | kin wRall |",
             "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",

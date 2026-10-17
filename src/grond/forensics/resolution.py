@@ -124,30 +124,31 @@ def _row_mr_shell_reasons(
 ) -> list[str]:
     """Return the reasons one shell fails the row MR tests.
 
-    The tests are the shell's dynamic MwRall, its cumulative MwRall penalty over the best so far, and the free-work
-    MwRall gap when both sets have at least ``min_free_rows`` rows.
+    The tests are the shell's dynamic MwRall_I, its cumulative MwRall_I penalty over the best so far, and the
+    free-work MwRall_I gap when both sets have at least ``min_free_rows`` rows. They read the intensity-residual
+    form (``*_I`` keys), against which the thresholds were set; the amplitude-form ``MwRall`` is report only.
     """
 
     reasons: list[str] = []
-    shell_mwr = _float(shell.get("dynamic_MwRall"))
+    shell_mwr = _float(shell.get("dynamic_MwRall_I"))
     if not math.isfinite(shell_mwr):
-        reasons.append("dynamic MwRall is not finite")
+        reasons.append("dynamic MwRall_I is not finite")
     elif shell_mwr > max_shell_mwrall:
-        reasons.append(f"dynamic MwRall {shell_mwr:.4g} > {max_shell_mwrall:.4g}")
+        reasons.append(f"dynamic MwRall_I {shell_mwr:.4g} > {max_shell_mwrall:.4g}")
 
-    cumulative_mwr = _float(shell.get("cumulative_dynamic_MwRall"))
+    cumulative_mwr = _float(shell.get("cumulative_dynamic_MwRall_I"))
     if math.isfinite(cumulative_mwr) and math.isfinite(best_cumulative_mwrall):
         penalty = cumulative_mwr - best_cumulative_mwrall
         if penalty > max_cumulative_mwr_penalty:
-            reasons.append(f"cumulative MwRall penalty {penalty:.4g} > {max_cumulative_mwr_penalty:.4g}")
+            reasons.append(f"cumulative MwRall_I penalty {penalty:.4g} > {max_cumulative_mwr_penalty:.4g}")
 
     work_n = int(_float(shell.get("work_Nall"), 0.0))
     free_n = int(_float(shell.get("free_Nall"), 0.0))
-    gap = _float(shell.get("free_work_MwRall_gap"))
+    gap = _float(shell.get("free_work_MwRall_I_gap"))
     if work_n >= min_free_rows and free_n >= min_free_rows and (
         not math.isfinite(gap) or gap > max_free_work_mwr_gap
     ):
-        reasons.append(f"work/free MwRall gap {gap:.4g} > {max_free_work_mwr_gap:.4g}")
+        reasons.append(f"work/free MwRall_I gap {gap:.4g} > {max_free_work_mwr_gap:.4g}")
     return reasons
 
 
@@ -190,8 +191,8 @@ def _heldout_stability_reasons(
 ) -> list[str]:
     """Return the reason one shell is unstable on held-out data, or an empty list.
 
-    The split CC is tested when there are enough split pairs; otherwise the free-work MwRall gap is, when both sets have
-    at least ``min_free_rows`` rows.
+    The split CC is tested when there are enough split pairs; otherwise the free-work MwRall_I gap (intensity-residual
+    form) is, when both sets have at least ``min_free_rows`` rows.
     """
 
     common = int(_float(shell.get("split_common"), 0.0))
@@ -203,10 +204,10 @@ def _heldout_stability_reasons(
 
     work_n = int(_float(shell.get("work_Nall"), 0.0))
     free_n = int(_float(shell.get("free_Nall"), 0.0))
-    gap = _float(shell.get("free_work_MwRall_gap"))
+    gap = _float(shell.get("free_work_MwRall_I_gap"))
     if work_n >= min_free_rows and free_n >= min_free_rows:
         if not math.isfinite(gap) or gap > max_free_work_mwr_gap:
-            return [f"work/free MwRall gap {gap:.4g} > {max_free_work_mwr_gap:.4g}"]
+            return [f"work/free MwRall_I gap {gap:.4g} > {max_free_work_mwr_gap:.4g}"]
         return []
     return []
 
@@ -230,8 +231,10 @@ def promote_resolution_limit(
 
     This is stricter than a pure I/sigma cutoff. A shell must retain basic
     signal, be stable on an available held-out comparison, and avoid a large
-    GROND row/MR merged weighted residual penalty. The exploratory limit is a
-    looser signal-only guard that remains useful for map or diagnostic review.
+    GROND row/MR merged weighted residual penalty. The weighted-residual tests
+    read the intensity-residual ``*_I`` shell keys, against which the default
+    thresholds were set. The exploratory limit is a looser signal-only guard
+    that remains useful for map or diagnostic review.
     """
 
     ordered = sorted(
@@ -278,7 +281,7 @@ def promote_resolution_limit(
             break
         promoted = d_low
         promoted_last = shell_no
-        cumulative = _float(shell.get("cumulative_dynamic_MwRall"))
+        cumulative = _float(shell.get("cumulative_dynamic_MwRall_I"))
         if math.isfinite(cumulative):
             best_cumulative = min(best_cumulative, cumulative)
 
@@ -300,7 +303,7 @@ def promote_resolution_limit(
                 max_free_work_mwr_gap=max_free_work_mwr_gap * 1.5,
             )
         )
-        shell_mwr = _float(shell.get("dynamic_MwRall"))
+        shell_mwr = _float(shell.get("dynamic_MwRall_I"))
         if not exploratory_reasons and (not math.isfinite(shell_mwr) or shell_mwr <= max_shell_mwrall * 1.25):
             exploratory = d_low
             exploratory_last = shell_no
