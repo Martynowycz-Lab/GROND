@@ -298,107 +298,6 @@ def check_sfac_contract(structure: str | Path) -> dict[str, object]:
     return report
 
 
-def estimate_model_nonh_atoms(structure: str) -> int | None:
-    """Estimate the number of non-hydrogen atoms in a CIF or SHELX model.
-
-    This intentionally avoids deep structure interpretation. The estimate is
-    used only for CLI scheduling, so a conservative count is enough to choose a
-    fast structure-update budget.
-    """
-
-    path = Path(structure).expanduser()
-    suffix = path.suffix.lower()
-    try:
-        if suffix == ".cif":
-            import gemmi
-
-            block = gemmi.cif.read_file(str(path)).sole_block()
-            type_col = block.find_loop("_atom_site_type_symbol")
-            label_col = block.find_loop("_atom_site_label")
-            if type_col:
-                return sum(1 for item in type_col if not str(item).strip().upper().startswith("H"))
-            if label_col:
-                return sum(1 for item in label_col if not str(item).strip().upper().startswith("H"))
-            return None
-
-        if suffix not in {".res", ".ins"}:
-            return None
-        sfac: list[str] = []
-        count = 0
-        controls = {
-            "TITL",
-            "CELL",
-            "ZERR",
-            "LATT",
-            "SYMM",
-            "SFAC",
-            "UNIT",
-            "FVAR",
-            "WGHT",
-            "EXTI",
-            "MERG",
-            "FMAP",
-            "PLAN",
-            "L.S.",
-            "CGLS",
-            "ACTA",
-            "BOND",
-            "CONF",
-            "HTAB",
-            "LIST",
-            "TEMP",
-            "SIZE",
-            "OMIT",
-            "SHEL",
-            "BASF",
-            "TWIN",
-            "SWAT",
-            "HKLF",
-            "END",
-            "REM",
-            "AFIX",
-            "PART",
-            "RESI",
-            "SAME",
-            "SIMU",
-            "RIGU",
-            "DELU",
-            "ISOR",
-            "EADP",
-            "EXYZ",
-            "DFIX",
-            "DANG",
-            "SADI",
-            "FLAT",
-            "CHIV",
-            "ANIS",
-        }
-        for raw in path.read_text(errors="replace").splitlines():
-            line = raw.strip()
-            if not line or line.startswith(("!", "#")):
-                continue
-            parts = line.split()
-            head = parts[0].upper()
-            if head == "SFAC":
-                sfac = [p.capitalize() for p in parts[1:]]
-                continue
-            if head in controls or len(parts) < 5:
-                continue
-            if not parts[1].lstrip("+-").isdigit():
-                continue
-            if not (_is_number(parts[2]) and _is_number(parts[3]) and _is_number(parts[4])):
-                continue
-            sfac_index = int(parts[1])
-            element = (
-                sfac[sfac_index - 1] if 0 < sfac_index <= len(sfac) else parts[0].lstrip("0123456789").capitalize()
-            )
-            if not element.upper().startswith("H") and not parts[0].upper().startswith("Q"):
-                count += 1
-        return count or None
-    except Exception:
-        return None
-
-
 def absolute_structure_policy(structure: str) -> dict:
     """Decide whether an alternate hand check makes sense for a model."""
 
@@ -536,7 +435,7 @@ def prepare_structure_for_legacy(structure: str, out_dir: Path) -> tuple[str, di
     """Return a SHELX-compatible structure path for engine regularization scripts.
 
     The Bloch calculator can read CIF coordinates directly, but map generation
-    and native structure update currently preserve and rewrite SHELX records.
+    and the SHELXL handoff preserve and rewrite SHELX records.
     Some CIF exports carry exact SHELX instructions in a text block;
     extracting that block is safer than rebuilding AFIX/WGHT/SFAC records.
     """

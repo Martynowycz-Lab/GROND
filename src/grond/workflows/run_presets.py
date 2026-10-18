@@ -172,7 +172,7 @@ def apply_run_preset(args: argparse.Namespace, explicit: Iterable[str] | None = 
         if bool(getattr(args, legacy, False)):
             raise SystemExit(
                 f"--preset {name} cannot be combined with --{legacy.replace('_', '-')}: --fast is the quick-look "
-                "frozen-model run and --full-fast the native-gradient profile; the preset keeps the standard AUTO "
+                "frozen-model run and --full-fast the cheap-N/Q profile; the preset keeps the standard AUTO "
                 "stages at lower fidelity"
             )
     if explicit is None:

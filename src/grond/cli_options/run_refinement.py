@@ -46,51 +46,12 @@ def add_scales_and_screening(ap: argparse.ArgumentParser) -> None:
 def add_structure_updates(ap: argparse.ArgumentParser) -> None:
     """Add structure updates options in the established order."""
 
-    ap.add_argument("--structure-n-basis", type=int, default=24)
-    ap.add_argument(
-        "--structure-n-points",
-        type=int,
-        default=None,
-        help=(
-            "Profile points of the native-gradient structure update. Default: 6 per 20 window-derived final "
-            "points (6 for the legacy 0.004 1/A window, 15 for the 0.010 default, 18 for the DIALS bbox)."
-        ),
-    )
-    ap.add_argument("--structure-objective-rows", type=int, default=400)
-    ap.add_argument("--structure-max-nfev", type=int, default=5)
-    ap.add_argument(
-        "--structure-early-stop-window",
-        type=int,
-        default=64,
-        help="Stop a structure-update block after this many residual calls without a meaningful data-RMS gain; 0 disables.",
-    )
-    ap.add_argument(
-        "--structure-early-stop-min-evals",
-        type=int,
-        default=0,
-        help="Minimum residual calls before a plateau stop can trigger; 0 uses the engine's parameter-count-aware floor.",
-    )
-    ap.add_argument(
-        "--structure-early-stop-min-improvement",
-        type=float,
-        default=2e-5,
-        help="Minimum RMS improvement counted as progress for plateau stopping.",
-    )
-    ap.add_argument(
-        "--structure-early-stop-metric",
-        choices=["total_rms", "data_rms"],
-        default="data_rms",
-        help="Trace column used by the structure-update plateau stop.",
-    )
     ap.add_argument(
         "--structure-update",
-        choices=["auto", "native_gradient", "shelxl_feedback", "off"],
+        choices=["auto", "shelxl_feedback", "off"],
         default="auto",
-        help="Structure-update engine. Auto uses the high-N/Q SHELXL feedback loop for full runs when SHELXL is available; native_gradient is the slower finite-difference diagnostic path.",
+        help="Structure-update engine. Auto uses the high-N/Q SHELXL feedback loop for full runs when SHELXL is available, otherwise off.",
     )
-    ap.add_argument("--structure-blocks", default="adp_ueq")
-    ap.add_argument("--structure-atom-selection", choices=["nonh", "all", "labels"], default="nonh")
-    ap.add_argument("--restraints", choices=["none", "start_geometry", "cctbx_rigu"], default="cctbx_rigu")
 
 
 def add_scale_polish(ap: argparse.ArgumentParser) -> None:

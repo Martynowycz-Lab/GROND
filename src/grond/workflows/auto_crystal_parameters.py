@@ -23,13 +23,12 @@ def configure_auto_crystals(prep: PrepConfig, args: argparse.Namespace) -> None:
     source = str(args.crystal_parameters_from or "")
     if not (source or beams or centers):
         return
-    if args.fast or args.full_fast or args.structure_update == "native_gradient" or args.native_only:
+    if args.fast or args.full_fast or args.native_only:
         raise SystemExit(
             "Fixed per-crystal parameters require the ordinary SHELXL feedback workflow. "
-            "Remove --fast/--full-fast/--native-only/--structure-update native_gradient."
+            "Remove --fast/--full-fast/--native-only."
         )
     if args.structure_update == "auto":
-        # The alternative gradient engine accepts only one global beam limit.
         args.structure_update = "shelxl_feedback"
     records = {}
     if source:

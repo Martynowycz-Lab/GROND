@@ -49,18 +49,6 @@ ENDPOINTS: dict[str, EndpointSpec] = {
         description="Run the Bloch simulation, nuisance gates, thickness search, residual reports, and hand diagnostics without updating the model through an external refiner.",
         notes="This is the fallback when no model-update endpoint is configured. It is still useful for R-factor improvement diagnostics and absolute-structure decisions.",
     ),
-    "native_gradient": EndpointSpec(
-        name="native_gradient",
-        status="implemented_diagnostic",
-        executable_key="python",
-        reflection_inputs=("signed row table",),
-        model_inputs=("RES/CIF",),
-        model_outputs=("RES-like updated model", "diagnostic traces"),
-        supports_single_cycle=False,
-        default_cycles=1,
-        description="Slow finite-difference row-space update used as a diagnostic reference for small models.",
-        notes="Useful for controls, not the default production endpoint because it is much slower than corrected-HKL feedback.",
-    ),
     "phenix_refine": EndpointSpec(
         name="phenix_refine",
         status="macromolecular_adapter",

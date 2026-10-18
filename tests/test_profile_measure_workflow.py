@@ -16,7 +16,6 @@ from grond.regularize.arguments_native import build_parser as native_parser
 from grond.regularize.contracts import TARGET_MODES, Nuisance
 from grond.workflows.checkpoints import _checkpoint_dataset_contract
 from grond.workflows.crystal_parameters import resolve_crystal_parameters
-from grond.workflows.endpoint_commands import structure_cmd
 from grond.workflows.native_commands import native_stage_cmd
 from grond.workflows.nested_nuisance import nested_variants
 from grond.workflows.nuisance_policy import auto_mosaicity_grid
@@ -137,9 +136,3 @@ def test_pets_owned_wedge_refuses_the_dials_equivalence_convention():
     p = port()
     with pytest.raises(ValueError, match="PETS-owned"):
         p.pets_exact_row_prediction_plan(0)
-
-
-def test_native_coordinate_update_refuses_an_unrepresented_measure(tmp_path):
-    args, ds, nui, _summary, _parsed = source_and_args(tmp_path)
-    with pytest.raises(ValueError, match="SHELXL feedback"):
-        structure_cmd("python", ds, "model.res", "", tmp_path/"native_update", args, nui)

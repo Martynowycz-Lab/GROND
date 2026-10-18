@@ -11,7 +11,6 @@ from grond.cli_support.execution import run_logged, transform_scout_job_count
 from grond.cli_support.values import read_json, try_read_json
 from grond.io.config import DatasetSpec, PrepConfig, write_datasets_csv
 from grond.io.structure_contract import absolute_structure_policy
-from grond.paths import engine_script
 from grond.reports.console import report_feature_decisions, report_macro_cycles, report_split, report_stage_heldout
 from grond.workflows.crystal_parameters import crystal_arguments
 from grond.workflows.dataset_gates import (
@@ -37,7 +36,7 @@ from grond.workflows.model_selection import (
     resolve_structure_update_strategy,
     resolved_frame_offset_candidates,
 )
-from grond.workflows.native_commands import native_stage_cmd, split_scheme_args
+from grond.workflows.native_commands import native_stage_cmd
 from grond.workflows.nested_nuisance import (
     NESTED_GATE_FAMILIES,
     feedback_final_nuisance,
@@ -50,11 +49,7 @@ from grond.workflows.nuisance_policy import (
     compact_base_nuisance,
     configure_auto_physics,
     configure_cell_esd,
-    effective_topup_d_min,
     resolve_final_n_basis,
-    resolved_row_plan_cache,
-    shared_structure_update_n_points,
-    shared_structure_update_window,
     stage_n_points,
 )
 from grond.workflows.report_commands import combine_cmd
@@ -471,70 +466,6 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
             report_macro_cycles(root / "runs" / "shared_shelxl_feedback" / "multi_shelxl_feedback_loop_summary.json", args)
             # The final, hand-pair and publication stages use the thickness selected for the kept model.
             nuisance = feedback_final_nuisance(nuisance, structure_feedback)
-        elif structure_strategy == "native_gradient":
-            shared = root / "runs" / "shared_structure_update"
-            structure_window = shared_structure_update_window(prep, args, nuisance)
-            cmd = [
-                python,
-                str(engine_script("native_multi_structure_update.py")),
-                "--datasets-csv",
-                str(datasets_csv),
-                "--res",
-                shared_model,
-                "--out-dir",
-                str(shared),
-                "--n-basis",
-                str(args.structure_n_basis),
-                "--n-points",
-                str(shared_structure_update_n_points(prep, args)),
-                "--topup-d-min",
-                f"{effective_topup_d_min(args, min_d_spacing=min(ds.min_d_spacing for ds in prep.datasets)):g}",
-                *structure_window,
-                "--min-d-spacing",
-                "0.70",
-                "--min-peak",
-                "90",
-                "--geometry-percentile",
-                f"{prep.geometry_percentile:g}",
-                "--block-schedule",
-                args.structure_blocks,
-                "--atom-selection",
-                args.structure_atom_selection,
-                "--max-nfev",
-                str(args.structure_max_nfev),
-                "--row-plan-cache",
-                resolved_row_plan_cache(args, fixed_model=False),
-                "--profile-quadrature",
-                args.profile_quadrature,
-                "--profile-accumulation",
-                args.profile_accumulation,
-                "--early-stop-window",
-                str(args.structure_early_stop_window),
-                "--early-stop-min-evals",
-                str(args.structure_early_stop_min_evals),
-                "--early-stop-min-improvement",
-                f"{args.structure_early_stop_min_improvement:g}",
-                "--early-stop-metric",
-                args.structure_early_stop_metric,
-                "--restraints",
-                args.restraints,
-                "--scale-fit-split",
-                "work",
-                *split_scheme_args(args),
-                "--workers",
-                str(args.workers),
-                "--chunksize",
-                str(args.chunksize),
-            ]
-            run_logged(cmd, logs, "shared_structure_update", dry_run=args.dry_run)
-            accepted = shared / "accepted_model.res"
-            structure_feedback = {
-                "status": "ok" if accepted.exists() else "no_accepted_model",
-                "strategy": structure_strategy,
-                "run": str(shared),
-            }
-            if accepted.exists():
-                final_model = str(accepted)
         else:
             structure_feedback = {"status": "unsupported_strategy", "strategy": structure_strategy}
     final_runs: dict[str, Path] = {}

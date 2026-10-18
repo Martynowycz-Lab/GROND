@@ -1,4 +1,4 @@
-"""Build coordinate-update and SHELXL-feedback commands with explicit numerical settings."""
+"""Build SHELXL-feedback commands with explicit numerical settings."""
 
 from __future__ import annotations
 
@@ -11,17 +11,11 @@ from grond.paths import engine_script
 from grond.workflows.nuisance_policy import (
     effective_topup_d_min,
     error_model_sigma_active,
-    grid_from_nuisance,
-    refuse_unrepresented_structure_update_physics,
     resolved_feedback_wght_mode,
     resolved_final_n_points,
     resolved_post_bloch_sigma_policy,
     resolved_row_plan_cache,
-    resolved_sg_window_max,
-    resolved_sg_window_mode,
-    resolved_structure_n_points,
 )
-from grond.workflows.split_args import split_scheme_args
 
 
 def endpoint_intensity_rescale(args: argparse.Namespace) -> str:
@@ -110,140 +104,6 @@ def legacy_handoff_conflicts(args: argparse.Namespace) -> list[str]:
     if str(getattr(args, "endpoint_wght_mode", "freeze-zero") or "freeze-zero") == "converge":
         conflicts.append("--endpoint-wght-mode converge (the legacy writer has no converged-weight loop)")
     return conflicts
-
-
-def structure_cmd(
-    python: str, ds: DatasetSpec, structure: str, baseline_hkl: str, out_dir: Path, args: argparse.Namespace, nui: dict
-) -> list[str]:
-    """Build the optional restrained structure-update command."""
-
-    if (getattr(args, "profile_coordinate", "target_sg") != "target_sg"
-            or getattr(args, "profile_normalization", "legacy") != "legacy"):
-        raise ValueError("native_structure_update does not represent the direct-angle observation measure; "
-                         "use the SHELXL feedback workflow, which preserves its row contract")
-    refuse_unrepresented_structure_update_physics(ds.name, nui, dose_supported=False)
-    return [
-        python,
-        str(engine_script("native_structure_update.py")),
-        "--hkl",
-        ds.hkl,
-        "--res",
-        structure,
-        "--baseline-hkl",
-        baseline_hkl or str(out_dir / "NO_BASELINE_HKL_SUPPLIED.hkl"),
-        f"--hkl-transform={ds.hkl_transform}",
-        "--out-dir",
-        str(out_dir),
-        "--n-basis",
-        str(args.structure_n_basis),
-        "--n-points",
-        str(resolved_structure_n_points(args, ds)),
-        "--topup-d-min",
-        f"{effective_topup_d_min(args, ds):g}",
-        "--max-support-sg",
-        f"{args.max_support_sg:g}",
-        "--sg-window",
-        f"{args.sg_window:g}",
-        "--sg-window-mode",
-        resolved_sg_window_mode(args, ds),
-        "--sg-window-min",
-        f"{args.sg_window_min:g}",
-        "--sg-window-max",
-        f"{resolved_sg_window_max(args, ds):g}",
-        "--sg-window-scale",
-        f"{args.sg_window_scale:g}",
-        "--sg-window-frame-floor",
-        f"{args.sg_window_frame_floor:g}",
-        "--min-d-spacing",
-        f"{ds.min_d_spacing:g}",
-        "--min-peak",
-        f"{ds.min_peak:g}",
-        "--geometry-percentile",
-        f"{ds.geometry_percentile:g}",
-        "--target-mode",
-        ds.target_mode,
-        "--objective-rows",
-        str(args.structure_objective_rows),
-        "--objective-bins",
-        "10",
-        "--objective-group-width-deg",
-        grid_from_nuisance(nui, "group_width_deg", "1.0"),
-        *split_scheme_args(args, split_contract=ds.split_contract),
-        "--block-schedule",
-        args.structure_blocks,
-        "--atom-selection",
-        args.structure_atom_selection,
-        "--max-nfev",
-        str(args.structure_max_nfev),
-        "--row-plan-cache",
-        resolved_row_plan_cache(args, fixed_model=False),
-        "--profile-quadrature",
-        args.profile_quadrature,
-        "--profile-accumulation",
-        args.profile_accumulation,
-        "--early-stop-window",
-        str(args.structure_early_stop_window),
-        "--early-stop-min-evals",
-        str(args.structure_early_stop_min_evals),
-        "--early-stop-min-improvement",
-        f"{args.structure_early_stop_min_improvement:g}",
-        "--early-stop-metric",
-        args.structure_early_stop_metric,
-        "--thickness",
-        grid_from_nuisance(nui, "thickness_A", "1200"),
-        "--thickness-grad-frac",
-        grid_from_nuisance(nui, "thickness_grad_frac", "0.4"),
-        "--frame-offset",
-        grid_from_nuisance(nui, "frame_offset", "0.0"),
-        "--row-resolution-b",
-        grid_from_nuisance(nui, "row_resolution_b", "0.0"),
-        "--sg-jitter-mode",
-        str(nui.get("sg_jitter_mode", "none")),
-        "--sg-jitter-sigma0",
-        grid_from_nuisance(nui, "sg_jitter_sigma0", "0.0"),
-        "--sg-jitter-sigma-d-inv",
-        grid_from_nuisance(nui, "sg_jitter_sigma_d_inv", "0.0"),
-        "--sg-jitter-sigma-frame",
-        grid_from_nuisance(nui, "sg_jitter_sigma_frame", "0.0"),
-        "--sg-jitter-points",
-        str(int(float(nui.get("sg_jitter_points", 1)))),
-        "--sg-jitter-student-df",
-        grid_from_nuisance(nui, "sg_jitter_student_df", "4.0"),
-        "--sg-jitter-width-factor",
-        grid_from_nuisance(nui, "sg_jitter_width_factor", "3.0"),
-        "--absorption-mode",
-        str(nui.get("absorption_mode", "none")),
-        "--absorption-mu",
-        grid_from_nuisance(nui, "absorption_mu", "0.0"),
-        "--absorption-frac",
-        grid_from_nuisance(nui, "absorption_frac", "0.0"),
-        "--absorption-mu-g2",
-        grid_from_nuisance(nui, "absorption_mu_g2", "0.0"),
-        "--absorption-mu-theta2",
-        grid_from_nuisance(nui, "absorption_mu_theta2", "0.0"),
-        "--absorption-tds-b",
-        grid_from_nuisance(nui, "absorption_tds_b", "0.0"),
-        "--group-width-deg",
-        grid_from_nuisance(nui, "group_width_deg", "1.0"),
-        "--detector-scale-bins",
-        str(int(float(nui.get("detector_scale_bins", 0)))),
-        "--sigma-a",
-        grid_from_nuisance(nui, "sigma_a", "0.0"),
-        "--sigma-b-corr",
-        grid_from_nuisance(nui, "sigma_b_corr", "0.0"),
-        "--sigma-c-peak",
-        grid_from_nuisance(nui, "sigma_c_peak", "0.0"),
-        "--lambda-grid",
-        FULL_Q_LAMBDA,
-        "--workers",
-        str(args.workers),
-        "--chunksize",
-        str(args.chunksize),
-        "--acceptance-metric",
-        "all_wR2",
-        "--free-wR2-tolerance",
-        "0.02",
-    ]
 
 
 def shelxl_feedback_cmd(

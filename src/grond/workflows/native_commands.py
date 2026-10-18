@@ -25,7 +25,6 @@ from grond.workflows.nuisance_policy import (
     resolved_sg_window_mode,
 )
 from grond.workflows.scale_model_policy import scale_model_cli_arguments
-from grond.workflows.split_args import split_scheme_args as split_scheme_args
 
 
 def native_stage_cmd(

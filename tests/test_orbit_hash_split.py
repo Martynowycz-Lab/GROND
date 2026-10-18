@@ -401,68 +401,6 @@ def test_single_dataset_shelxl_feedback_cycles_replay_the_orbit_hash_split(tmp_p
     assert _native_parser().parse_args(old[2:]).split_scheme == "legacy"
 
 
-def test_native_gradient_structure_updates_honour_the_split_scheme(tmp_path: Path):
-    """Without SHELXL, AUTO refines with the native-gradient engines; they must use the same free split."""
-
-    from grond.bloch.model import parse_model
-    from grond.legacy.engine.native_row_regularize import TARGET_MODES
-    from grond.refine.arguments_multidataset import build_parser as multi_update_parser
-    from grond.refine.arguments_native import build_parser as single_update_parser
-    from grond.refine.datasets import build_dataset_state
-    from grond.workflows.endpoint_commands import structure_cmd
-    from grond.workflows.native_commands import split_scheme_args
-
-    hkl = tmp_path / "x.HKL"
-    model = tmp_path / "m.res"
-    _write_xds(hkl, _grid_hkls())
-    model.write_text(P212121)
-    keys = sorted({G.orbit_key(*h) for h in _grid_hkls()})
-    lockbox = keys[::5]
-    lock_path = tmp_path / "lockbox.json"
-    _write_lockbox(lock_path, lockbox)
-    payload = build_transform_split_contract(
-        hkl, model, KLEIN_FOUR, dataset="d", scheme="orbit-hash", salt=H.DEFAULT_FREE_SALT, excluded_orbits=lockbox
-    )
-    contract = tmp_path / "split.json"
-    contract.write_text(json.dumps(payload))
-    base = ["auto", "--out-dir", str(tmp_path / "o"), "--hkl", str(hkl), "--structure", str(model)]
-    args = build_parser().parse_args([*base, "--exclude-orbits-json", str(lock_path)])
-    ds = DatasetSpec(name="d", hkl=str(hkl), split_contract=str(contract))
-
-    single = single_update_parser(
-        "structure update", default_hkl="a", default_res="b", default_baseline_hkl="c", target_modes=TARGET_MODES,
-        max_support_sg=1.0,
-    )
-    cmd = structure_cmd("python", ds, str(model), "", tmp_path / "s", args, {"thickness_A": 1000.0})
-    parsed = single.parse_args(cmd[2:])
-    assert (parsed.split_scheme, parsed.split_salt, parsed.split_contract) == ("orbit-hash", H.DEFAULT_FREE_SALT, str(contract))
-    assert parsed.exclude_orbits_json == str(lock_path.resolve())
-    assert (parsed.free_fraction, parsed.split_seed) == (0.10, 42)
-    legacy = build_parser().parse_args([*base, "--split-scheme", "legacy"])
-    parsed_legacy = single.parse_args(structure_cmd("python", ds, str(model), "", tmp_path / "s", legacy, {})[2:])
-    assert (parsed_legacy.split_scheme, parsed_legacy.split_contract, parsed_legacy.exclude_orbits_json) == ("legacy", "", "")
-
-    multi = multi_update_parser("multi structure update", max_support_sg=1.0, target_modes=TARGET_MODES)
-    common = ["--datasets-csv", "datasets.csv", "--res", str(model), "--out-dir", str(tmp_path / "m")]
-    symmetry = parse_model(model).get("symmetry_ops")
-    row = {"name": "d", "hkl": str(hkl), "split_contract": str(contract)}
-    state = build_dataset_state(row, multi.parse_args([*common, *split_scheme_args(args)]), 0.0, 0.0, symmetry_ops=symmetry)
-    selected_keys = [G.orbit_key(*state.data.hkl[i]) for i in state.target_indices]
-    assert selected_keys and not set(selected_keys) & set(lockbox)
-    assert len(selected_keys) == sum(G.orbit_key(*h) not in lockbox for h in _grid_hkls())
-    assert [bool(state.masks["free"][i]) for i in state.target_indices] == [
-        G.hash_mod(H.DEFAULT_FREE_SALT, key, 10) == 0 for key in selected_keys
-    ]
-    assert not np.any(state.masks["free"][state.objective_indices])
-    with pytest.raises(ValueError, match="--split-salt does not match"):
-        build_dataset_state(row, multi.parse_args([*common, *split_scheme_args(args), "--split-salt", "T"]), 0.0, 0.0,
-                            symmetry_ops=symmetry)
-    # Legacy: the historical per-dataset shuffle, contract ignored, every row kept.
-    legacy_state = build_dataset_state(row, multi.parse_args([*common, *split_scheme_args(legacy)]), 0.0, 0.0, symmetry_ops=symmetry)
-    assert len(legacy_state.target_indices) == len(_grid_hkls())
-    assert np.array_equal(legacy_state.masks["free"], split_masks(np.asarray(_grid_hkls()), 0.10, 42, symmetry_ops=MMM)["free"])
-
-
 def test_engine_max_rows_subset_is_ranked_without_excluded_orbits(tmp_path: Path):
     """Excluded orbits never take (or displace) a --max-rows selection slot."""
 

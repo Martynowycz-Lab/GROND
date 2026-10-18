@@ -233,7 +233,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             "Each crystal has an independent scale and sigma contract; a single concatenated replay would mix them. "
             "Leave the option at auto for the safe combined-endpoint workflow."
         )
-    profile = apply_speed_profile(args, prep.structure)
+    profile = apply_speed_profile(args)
     configure_auto_crystals(prep, args)
     args.workers = auto_worker_count(args.workers, args.max_core_fraction)
     args.chunksize = auto_chunksize(args.chunksize, args.workers)
@@ -253,7 +253,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         )
     raise_for_missing_external_tools(args, structure=prep.structure, multi_dataset=len(prep.datasets) > 1)
     try:
-        scale_model_policy = validate_scale_model_policy(args, multi_dataset=len(prep.datasets) > 1, prep=prep)
+        scale_model_policy = validate_scale_model_policy(args)
         refuse_sigma_weight_startup_conflicts(args)
         warn_missing_cell_esd_source(prep.structure, prep.datasets, args)
         nuisance_selection_policy = validate_nested_nuisance_policy(args, prep)

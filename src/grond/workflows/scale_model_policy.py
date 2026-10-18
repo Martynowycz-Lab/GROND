@@ -79,83 +79,9 @@ def resolved_endpoint_calibration_mode(args: argparse.Namespace) -> tuple[str, s
     return "off", PSPLINE_OFF_REASON
 
 
-def native_gradient_strategy_reason(args: argparse.Namespace) -> str:
-    """The option that made resolve_structure_update_strategy choose the native_gradient update."""
+def validate_scale_model_policy(args: argparse.Namespace) -> dict[str, object]:
+    """Fail closed on combinations a P-spline run cannot honour; return the run_config record."""
 
-    if str(getattr(args, "structure_update", "auto")) == "native_gradient":
-        return "--structure-update native_gradient"
-    if bool(getattr(args, "full_fast", False)):
-        return "--full-fast (it selects the native_gradient update unless --structure-update is given)"
-    if bool(getattr(args, "native_only", False)):
-        return "--native-only (it selects the native_gradient update unless --structure-update is given)"
-    return f"--structure-update auto with no usable SHELXL executable ({str(getattr(args, 'shelxl', 'shelxl'))!r})"
-
-
-def native_gradient_startup_conflicts(args: argparse.Namespace, *, multi_dataset: bool, prep=None) -> list[str]:
-    """Settings the native_gradient structure update cannot honour, each with the option that removes it.
-
-    The structure engines fit their own per-frame scales and do not model the mosaic cone; the single-dataset
-    engine has no dose B, and native_multi_structure_update applies one rocking window to every crystal.
-    Without this check the refusal comes after the screen, thickness and every physics gate.
-    """
-
-    from grond.workflows.nuisance_policy import feature_is_enabled, structure_update_window_options
-
-    conflicts = []
-    if resolved_scale_model(args) == "pspline":
-        conflicts.append(
-            "--scale-model pspline (the native_gradient structure update fits its own per-frame scales and cannot "
-            "honour --scale-model pspline; use --scale-model per-frame)"
-        )
-    if feature_is_enabled(args, "mosaicity"):
-        conflicts.append(
-            f"the mosaicity gate (--mosaicity-mode {getattr(args, 'mosaicity_mode', 'none')}: the structure update "
-            "does not model the mosaic cone; use --mosaicity-mode none)"
-        )
-    if not multi_dataset and feature_is_enabled(args, "dose"):
-        conflicts.append(
-            f"the dose-B gate (--dose-b-mode-grid {getattr(args, 'dose_b_mode_grid', '')}: the single-dataset "
-            "structure update has no dose B; use --dose-b-mode-grid none)"
-        )
-    if multi_dataset and prep is not None:
-        windows = structure_update_window_options(prep, args)
-        if len(set(windows.values())) > 1:
-            described = "; ".join(f"{name}: {' '.join(option)}" for name, option in windows.items())
-            conflicts.append(
-                "crystals that resolve to different rocking windows (native_multi_structure_update applies one "
-                f"window to every crystal; {described}; set one window explicitly, e.g. --sg-window-mode fixed "
-                "with --sg-window and --sg-window-max)"
-            )
-    return conflicts
-
-
-def refuse_native_gradient_startup_conflicts(args: argparse.Namespace, *, multi_dataset: bool, prep=None) -> None:
-    """Refuse at startup, before any stage, a native_gradient run whose structure update would be refused."""
-
-    from grond.workflows.model_selection import resolve_structure_update_strategy
-
-    if (
-        str(getattr(args, "mode", "auto")) not in {"regularize", "auto"}
-        or bool(getattr(args, "fast", False))
-        or resolve_structure_update_strategy(args, multi_dataset=multi_dataset) != "native_gradient"
-    ):
-        return
-    conflicts = native_gradient_startup_conflicts(args, multi_dataset=multi_dataset, prep=prep)
-    if conflicts:
-        raise ValueError(
-            f"the native_gradient structure update was chosen by {native_gradient_strategy_reason(args)} and "
-            f"cannot run with: {'; '.join(conflicts)}. Either use --structure-update shelxl_feedback with a SHELXL "
-            "executable, or remove each setting as stated"
-        )
-
-
-def validate_scale_model_policy(args: argparse.Namespace, *, multi_dataset: bool, prep=None) -> dict[str, object]:
-    """Fail closed on combinations a P-spline or native-gradient run cannot honour; return the run_config record.
-
-    ``prep`` (the run's datasets) lets the native-gradient check compare the crystals' rocking windows.
-    """
-
-    refuse_native_gradient_startup_conflicts(args, multi_dataset=multi_dataset, prep=prep)
     kind = resolved_scale_model(args)
     record: dict[str, object] = {
         "scale_model": kind,

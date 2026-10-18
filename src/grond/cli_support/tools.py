@@ -162,7 +162,7 @@ def required_external_tool_errors(
         "available"
     ):
         errors.append(
-            "The requested --structure-update shelxl_feedback needs SHELXL; set tools.shelxl or choose native_gradient/off."
+            "The requested --structure-update shelxl_feedback needs SHELXL; set tools.shelxl or choose off."
         )
     return errors
 

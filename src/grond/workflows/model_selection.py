@@ -126,25 +126,24 @@ def best_endpoint_model(run_dir: Path) -> Path | None:
 def resolve_structure_update_strategy(args: argparse.Namespace, *, multi_dataset: bool = False) -> str:
     """Choose the structure-update engine for the current run.
 
-    The SHELXL feedback loop is the preferred default whenever a
-    SHELXL executable is available because it reaches the same high-N/Q
-    row-space endpoint as finite-difference dynamical gradients at a small
-    fraction of the wall time.  Multi-dataset runs alternate in the same way
-    as single-dataset runs: per-dataset Bloch rows are merged into one
-    corrected endpoint HKL, one shared SHELXL update is run, and the updated
-    shared model is sent back through every dataset.
+    The SHELXL feedback loop is the default whenever a SHELXL executable is
+    available.  Multi-dataset runs alternate in the same way as single-dataset
+    runs: per-dataset Bloch rows are merged into one corrected endpoint HKL,
+    one shared SHELXL update is run, and the updated shared model is sent back
+    through every dataset.  --fast, --full-fast, --native-only or a missing
+    SHELXL leave the structure unchanged (off).
     """
 
     from grond.cli_support.tools import shelxl_is_available
 
     requested = getattr(args, "structure_update", "auto")
-    if requested in {"off", "native_gradient", "shelxl_feedback"}:
+    if requested in {"off", "shelxl_feedback"}:
         return requested
     if getattr(args, "fast", False) or getattr(args, "full_fast", False) or getattr(args, "native_only", False):
-        return "native_gradient"
+        return "off"
     if shelxl_is_available(getattr(args, "shelxl", "shelxl")):
         return "shelxl_feedback"
-    return "native_gradient"
+    return "off"
 
 
 def shelxl_feedback_current_model(run_dir: Path) -> Path | None:

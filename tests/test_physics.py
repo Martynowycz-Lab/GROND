@@ -386,26 +386,3 @@ def test_anisotropic_dw_matches_cartesian_displacement_covariance(tmp_path):
         g=rec @ hkl
         expected=np.exp(-2*np.pi**2*(g@u_cart@g))
         assert atom_dw(atom,hkl,model['cell']) == pytest.approx(expected,rel=1e-14)
-
-
-def test_native_updates_freeze_special_xyz_but_allow_ueq_and_general_moves(tmp_path):
-    from grond.legacy.engine.native_multi_structure_update import parameter_layout as multi_layout
-    from grond.legacy.engine.native_structure_update import (
-        model_from_vector,
-        parameter_layout,
-        special_position_coordinate_policy,
-    )
-    model = parse_model(res_file(tmp_path, ['C1 1 0 0 0 10.5 .02', 'C2 1 .13 .27 .31 11 .04']))
-    for layout in (parameter_layout, multi_layout):
-        params, x = layout(model, 'all', '', 'xyz_adp_ueq')
-        assert len(params) == 5
-        assert not any(p['atom']=='C1' and p['kind']=='xyz' for p in params)
-        changed = model_from_vector(model, params, x + .001)
-        assert [changed['atoms'][0][k] for k in ('x','y','z')] == [0,0,0]
-        assert changed['atoms'][0]['uiso'] == pytest.approx(.021)
-        assert len(list(unique_symmetry_mates(changed['atoms'][0],changed))) == 1
-    policy = special_position_coordinate_policy(model,'all','','xyz')
-    assert [x['atom'] for x in policy['frozen_atoms']] == ['C1']
-    assert 'held fixed' in policy['warning']
-    with pytest.raises(ValueError, match='special-position XYZ'):
-        parameter_layout(model, 'labels', 'C1', 'xyz')

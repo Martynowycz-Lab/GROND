@@ -125,7 +125,7 @@ def add_execution(ap: argparse.ArgumentParser) -> None:
     ap.add_argument(
         "--full-fast",
         action="store_true",
-        help="Run the automatic gates and lightweight structure update with cheap N/Q, but skip expensive final polish.",
+        help="Run the automatic gates with cheap N/Q and no structure update, and skip expensive final polish.",
     )
     ap.add_argument(
         "--full-fast-n-basis",
@@ -134,18 +134,6 @@ def add_execution(ap: argparse.ArgumentParser) -> None:
         help="Pinned basis size used by --full-fast final and screening stages. Use 10 for an even cheaper stress test.",
     )
     ap.add_argument("--full-fast-n-points", type=int, default=10, help="Quadrature points used by --full-fast.")
-    ap.add_argument(
-        "--full-fast-structure-rows",
-        type=int,
-        default=0,
-        help="Maximum objective rows for lightweight --full-fast structure update; 0 chooses an atom-count-aware budget.",
-    )
-    ap.add_argument(
-        "--full-fast-structure-max-nfev",
-        type=int,
-        default=0,
-        help="Maximum function evaluations per lightweight --full-fast structure block; 0 chooses an atom-count-aware budget.",
-    )
     ap.add_argument(
         "--auto-decide",
         dest="auto_decide",

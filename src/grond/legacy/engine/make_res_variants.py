@@ -10,10 +10,10 @@ import gemmi
 
 if __package__:
     from .bloch_engine import alternate_hand_model, parse_model
-    from .native_structure_update import update_res_coordinates
 else:  # pragma: no cover - direct script execution
     from bloch_engine import alternate_hand_model, parse_model
-    from native_structure_update import update_res_coordinates
+
+from grond.refine.native_output import update_res_coordinates  # noqa: E402  (bloch_engine puts grond on sys.path)
 
 
 def sfac_elements(lines: list[str]) -> dict[int, str]:

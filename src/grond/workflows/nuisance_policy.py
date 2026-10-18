@@ -31,10 +31,6 @@ AUTO_DIALS_BBOX_N_POINTS = 60
 LEGACY_SG_WINDOW_MAX = 0.012
 # PETS exact rows sample the PETS-owned rocking wedge, not an Sg window, with a fixed point count.
 AUTO_PETS_N_POINTS = 20
-# The native-gradient structure update samples 6 points per 20 window-derived final points (6 for a 0.004 1/A
-# window) unless --structure-n-points is given.
-LEGACY_STRUCTURE_N_POINTS = 6
-LEGACY_STRUCTURE_FINAL_N_POINTS = 20
 # Engine bound on the mosaic width (Config.mosaicity_max_sigma_deg default).
 MOSAICITY_MAX_SIGMA_DEG = 0.5
 # Sequential per-crystal feature gates.  The mosaic cone precedes the Sg-jitter proxy because the
@@ -358,10 +354,8 @@ def transform_scout_nuisance(args: argparse.Namespace) -> dict:
     }
 
 
-def apply_speed_profile(args: argparse.Namespace, structure: str | None = None) -> dict[str, object]:
+def apply_speed_profile(args: argparse.Namespace) -> dict[str, object]:
     """Apply named run profiles after parsing and return a provenance record."""
-
-    from grond.io.structure_contract import estimate_model_nonh_atoms
 
     if getattr(args, "fast", False) and getattr(args, "full_fast", False):
         raise SystemExit(
@@ -391,33 +385,6 @@ def apply_speed_profile(args: argparse.Namespace, structure: str | None = None) 
     assign("hand_n_basis", min(int(args.hand_n_basis), n_basis))
     assign("hand_n_points", min(int(args.hand_n_points), n_points))
     assign("n_points", n_points)
-    assign("structure_n_basis", min(int(args.structure_n_basis), n_basis))
-    # Full-fast keeps its cheap structure-update count when none is given explicitly; the unset value
-    # stands for that count in the profile record.
-    if args.structure_n_points is None:
-        args.structure_n_points = LEGACY_STRUCTURE_N_POINTS
-    assign("structure_n_points", min(int(args.structure_n_points), max(3, n_points)))
-    atom_count = estimate_model_nonh_atoms(structure or getattr(args, "structure", "") or "")
-    auto_rows = 250
-    auto_nfev = 2
-    if atom_count is not None and atom_count > 80:
-        auto_rows = 120
-        auto_nfev = 1
-    elif atom_count is not None and atom_count > 45:
-        auto_rows = 160
-        auto_nfev = 1
-    row_limit = int(args.full_fast_structure_rows) if int(args.full_fast_structure_rows) > 0 else auto_rows
-    eval_limit = int(args.full_fast_structure_max_nfev) if int(args.full_fast_structure_max_nfev) > 0 else auto_nfev
-    changes["structure_budget"] = {
-        "non_h_atoms": atom_count,
-        "row_limit": row_limit,
-        "max_eval_limit": eval_limit,
-        "source": "explicit"
-        if int(args.full_fast_structure_rows) > 0 or int(args.full_fast_structure_max_nfev) > 0
-        else "atom_count_auto",
-    }
-    assign("structure_objective_rows", min(int(args.structure_objective_rows), row_limit))
-    assign("structure_max_nfev", min(int(args.structure_max_nfev), eval_limit))
     assign("shelxl_iterations", min(int(args.shelxl_iterations), 1))
     if args.endpoint_feedback == "auto":
         assign("endpoint_feedback", "off")
@@ -625,115 +592,11 @@ def resolved_screen_n_points(args: argparse.Namespace, ds: DatasetSpec) -> int:
     return max(1, int(math.ceil(derived / 2.0)))
 
 
-def resolved_structure_n_points(args: argparse.Namespace, ds: DatasetSpec) -> int:
-    """Return the explicit --structure-n-points, or the native-gradient structure-update profile count.
-
-    The derived count keeps the structure-update spacing relative to the row stages: 6 points
-    per 20 window-derived final points (0.004 -> 6, 0.010 -> 15, DIALS bbox 60 -> 18,
-    PETS 20 -> 6).  An explicit --n-points does not change it, as for the screening Q.
-    """
-
-    explicit = getattr(args, "structure_n_points", None)
-    if explicit is not None:
-        return int(explicit)
-    derived = resolved_final_n_points(argparse.Namespace(**{**vars(args), "n_points": None}), ds)
-    return max(1, -(-derived * LEGACY_STRUCTURE_N_POINTS // LEGACY_STRUCTURE_FINAL_N_POINTS))
-
-
 def stage_n_points(args: argparse.Namespace, ds: DatasetSpec, *, screen: bool) -> int:
     """Profile points for one crystal's screening (screen, thickness, gates) or final-fidelity stage."""
 
     crystal = crystal_arguments(args, ds.name)
     return resolved_screen_n_points(crystal, ds) if screen else resolved_final_n_points(crystal, ds)
-
-
-def structure_update_unrepresented_physics(nui: dict, *, dose_supported: bool) -> list[str]:
-    """Selected terms a native-gradient structure-update engine has no option for.
-
-    Neither native_structure_update nor native_multi_structure_update models the mosaic cone, and the
-    single-dataset engine has no dose-B term; updating coordinates without them would silently use
-    other physics than every row stage.
-    """
-
-    def active(mode_key: str, value_key: str) -> bool:
-        """Return whether a nuisance term is on: its mode is not none and its value is nonzero (or not numeric)."""
-        mode = str(nui.get(mode_key, "none") or "none").strip().lower()
-        try:
-            return mode != "none" and abs(float(nui.get(value_key, 0.0) or 0.0)) > 0.0
-        except (TypeError, ValueError):
-            return mode != "none"
-
-    blocked = ["mosaicity_mode"] if active("mosaicity_mode", "mosaicity_sigma_deg") else []
-    if not dose_supported and active("dose_b_mode", "dose_b_per_frame"):
-        blocked.append("dose_b_mode")
-    return blocked
-
-
-def refuse_unrepresented_structure_update_physics(name: str, nui: dict, *, dose_supported: bool) -> None:
-    """Fail closed when the native-gradient structure update would drop selected physics."""
-
-    blocked = structure_update_unrepresented_physics(nui, dose_supported=dose_supported)
-    if blocked:
-        raise ValueError(
-            f"native-gradient structure update for {name} cannot represent the selected {', '.join(blocked)}; "
-            "use --structure-update shelxl_feedback, or disable the term (--mosaicity-mode none, "
-            "--dose-b-mode-grid none)"
-        )
-
-
-def structure_update_window_options(prep: PrepConfig, args: argparse.Namespace) -> dict[str, tuple[str, ...]]:
-    """Per-crystal rocking-window and support options that the multi-dataset structure update would use."""
-
-    options: dict[str, tuple[str, ...]] = {}
-    for ds in prep.datasets:
-        crystal = crystal_arguments(args, ds.name)
-        options[ds.name] = (
-            "--sg-window",
-            f"{crystal.sg_window:g}",
-            "--sg-window-mode",
-            resolved_sg_window_mode(crystal, ds),
-            "--sg-window-min",
-            f"{crystal.sg_window_min:g}",
-            "--sg-window-max",
-            f"{resolved_sg_window_max(crystal, ds):g}",
-            "--sg-window-scale",
-            f"{crystal.sg_window_scale:g}",
-            "--sg-window-frame-floor",
-            f"{crystal.sg_window_frame_floor:g}",
-            "--max-support-sg",
-            f"{crystal.max_support_sg:g}",
-        )
-    return options
-
-
-def shared_structure_update_window(prep: PrepConfig, args: argparse.Namespace, nuisance: dict[str, dict]) -> list[str]:
-    """Rocking-window and support options of the one-window multi-dataset structure update.
-
-    native_multi_structure_update applies one window to every crystal, so the crystals must resolve to
-    the same window; the cone is refused because that engine does not model it (dose B is per dataset).
-    """
-
-    for ds in prep.datasets:
-        refuse_unrepresented_structure_update_physics(ds.name, nuisance.get(ds.name) or {}, dose_supported=True)
-    options = set(structure_update_window_options(prep, args).values())
-    if len(options) != 1:
-        raise ValueError(
-            "native-gradient multi-dataset structure update uses one rocking window for every crystal, but the "
-            "crystals resolve to different windows; use --structure-update shelxl_feedback or set the window explicitly"
-        )
-    return list(options.pop())
-
-
-def shared_structure_update_n_points(prep: PrepConfig, args: argparse.Namespace) -> int:
-    """Profile point count of the one-window multi-dataset structure update; the crystals must agree."""
-
-    counts = {resolved_structure_n_points(crystal_arguments(args, ds.name), ds) for ds in prep.datasets}
-    if len(counts) != 1:
-        raise ValueError(
-            "native-gradient multi-dataset structure update uses one profile point count for every crystal, but "
-            f"the crystals resolve to {sorted(counts)}; set --structure-n-points explicitly"
-        )
-    return counts.pop()
 
 
 def parse_strict_grid(text: object, label: str) -> list[float]:

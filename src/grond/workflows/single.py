@@ -37,7 +37,7 @@ from grond.workflows.decision import (
     thickness_polish_nuisance,
     write_json,
 )
-from grond.workflows.endpoint_commands import shelxl_feedback_cmd, structure_cmd
+from grond.workflows.endpoint_commands import shelxl_feedback_cmd
 from grond.workflows.endpoint_selection import run_scale_window_polish
 from grond.workflows.final_hand_selection import (
     _early_final_agreement,
@@ -617,55 +617,40 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
     structure_update_run = None
     structure_feedback_fallback: dict = {}
     feedback_final_run: Path | None = None
-    if args.mode in {"regularize", "auto"} and not args.fast:
-        if structure_strategy == "shelxl_feedback":
-            final_n_basis = resolve_final_n_basis(
-                prep, ds, args, python, logs, root, active_model, "adaptive_shelxl_feedback"
+    if args.mode in {"regularize", "auto"} and not args.fast and structure_strategy == "shelxl_feedback":
+        final_n_basis = resolve_final_n_basis(
+            prep, ds, args, python, logs, root, active_model, "adaptive_shelxl_feedback"
+        )
+        struct_dir = root / "runs" / ds.name / "adaptive_shelxl_feedback"
+        source_summary = thickness_run / "summary.json"
+        run_logged(
+            shelxl_feedback_cmd(
+                python,
+                ds,
+                active_model,
+                source_summary,
+                dataset_baseline_hkl(prep, ds),
+                struct_dir,
+                args,
+                n_basis=final_n_basis,
             )
-            struct_dir = root / "runs" / ds.name / "adaptive_shelxl_feedback"
-            source_summary = thickness_run / "summary.json"
-            run_logged(
-                shelxl_feedback_cmd(
-                    python,
-                    ds,
-                    active_model,
-                    source_summary,
-                    dataset_baseline_hkl(prep, ds),
-                    struct_dir,
-                    args,
-                    n_basis=final_n_basis,
-                )
-                + nested_feedback_args(args, root, ds),
-                logs,
-                f"{ds.name}_adaptive_shelxl_feedback",
-                dry_run=args.dry_run,
+            + nested_feedback_args(args, root, ds),
+            logs,
+            f"{ds.name}_adaptive_shelxl_feedback",
+            dry_run=args.dry_run,
+        )
+        structure_update_run = struct_dir
+        report_macro_cycles(struct_dir / "shelxl_feedback_loop_summary.json", args)
+        if args.dry_run:
+            feedback_final_run = (
+                struct_dir
+                / f"cycle_{int(args.shelxl_feedback_cycles):02d}_N{int(final_n_basis)}Q{resolved_final_n_points(args, ds)}"
             )
-            structure_update_run = struct_dir
-            report_macro_cycles(struct_dir / "shelxl_feedback_loop_summary.json", args)
-            if args.dry_run:
-                feedback_final_run = (
-                    struct_dir
-                    / f"cycle_{int(args.shelxl_feedback_cycles):02d}_N{int(final_n_basis)}Q{resolved_final_n_points(args, ds)}"
-                )
-            else:
-                feedback_final_run, structure_feedback_fallback = feedback_loop_outcome(struct_dir, ds.name, final_model)
-                feedback_model = shelxl_feedback_current_model(struct_dir)
-                if feedback_model is not None:
-                    final_model = str(feedback_model)
-        elif structure_strategy == "native_gradient":
-            struct_dir = root / "runs" / ds.name / "adaptive_structure_update"
-            run_logged(
-                structure_cmd(
-                    python, ds, active_model, dataset_baseline_hkl(prep, ds), struct_dir, args, regularized_nui
-                ),
-                logs,
-                f"{ds.name}_adaptive_structure_update",
-                dry_run=args.dry_run,
-            )
-            structure_update_run = struct_dir
-            updated = struct_dir / "bloch_updated_model.res"
-            if updated.exists():
-                final_model = str(updated)
+        else:
+            feedback_final_run, structure_feedback_fallback = feedback_loop_outcome(struct_dir, ds.name, final_model)
+            feedback_model = shelxl_feedback_current_model(struct_dir)
+            if feedback_model is not None:
+                final_model = str(feedback_model)
 
     if feedback_final_run is not None:
         final = feedback_final_run
@@ -1268,17 +1253,6 @@ def run_single(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pa
     if args.mode in {"regularize", "auto"} and not args.fast and not args.dry_run and not nui:
         raise RuntimeError(f"No best nuisance result found in {screen}; refusing to launch an unpinned final grid.")
     final_model = prep.structure
-    if args.mode in {"regularize", "auto"} and not args.fast:
-        struct_dir = root / "runs" / ds.name / "structure_update"
-        run_logged(
-            structure_cmd(python, ds, prep.structure, dataset_baseline_hkl(prep, ds), struct_dir, args, nui),
-            logs,
-            f"{ds.name}_structure_update",
-            dry_run=args.dry_run,
-        )
-        updated = struct_dir / "bloch_updated_model.res"
-        if updated.exists():
-            final_model = str(updated)
     final = screen
     absolute_structure_diagnostic = ""
     if args.mode in {"regularize", "auto"} and not args.fast:
