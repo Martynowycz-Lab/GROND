@@ -95,7 +95,6 @@ def _apply_source_physics_to_hand_args(
     if str(source_config.get("split_salt") or ""):
         args.split_salt = str(source_config["split_salt"])
     args.exclude_orbits_json = str(source_config.get("exclude_orbits_json") or "")
-    args.fast = False
     args.native_only = True
     args.make_maps = False
     args.production_scales = str(source_config.get("scale_fit_split") or "work") == "all"

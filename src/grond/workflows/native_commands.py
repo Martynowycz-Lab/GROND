@@ -70,50 +70,49 @@ def native_stage_cmd(
     n_points = getattr(args, "fixed_n_points", None) or n_points
     if n_points is None or isinstance(n_points, bool) or int(n_points) < 1:
         raise ValueError(f"native stage {stage!r} for {ds.name} needs a resolved positive n_points, got {n_points!r}")
-    fast = bool(args.fast)
-    endpoint_ok = bool(endpoint and is_shelx_model(structure) and not args.native_only)
+    endpoint_ok = bool(endpoint and is_shelx_model(structure) and not getattr(args, "native_only", False))
     lambda_grid = FULL_Q_LAMBDA if endpoint_ok else ""
-    endpoint_b_grid = args.endpoint_b_grid if endpoint_ok and not fast else "0.0"
-    endpoint_exti_grid = args.endpoint_exti_grid if endpoint_ok and not fast else "off"
-    shelxl_iterations = args.shelxl_iterations if endpoint_ok and not fast else 1
+    endpoint_b_grid = args.endpoint_b_grid if endpoint_ok else "0.0"
+    endpoint_exti_grid = args.endpoint_exti_grid if endpoint_ok else "off"
+    shelxl_iterations = args.shelxl_iterations if endpoint_ok else 1
     finalish_stage = stage in {"final", "noH", "hand", "adaptive_final"} or stage.endswith("_final")
     post_bloch_sigma_policy = resolved_post_bloch_sigma_policy(
-        args, final_endpoint=bool(endpoint_ok and finalish_stage and not fast)
+        args, final_endpoint=bool(endpoint_ok and finalish_stage)
     )
     thickness_grid = (
         grid_from_nuisance(pinned, "thickness_A", "1200")
         if pinned
-        else ("1000,1200,1400" if fast else args.thickness_grid)
+        else args.thickness_grid
     )
     grad_grid = (
         grid_from_nuisance(pinned, "thickness_grad_frac", "0.4")
         if pinned
-        else ("0.0,0.4" if fast else args.thickness_grad_grid)
+        else args.thickness_grad_grid
     )
     frame_grid = (
-        grid_from_nuisance(pinned, "frame_offset", "0.0") if pinned else ("0.0" if fast else args.frame_offset_grid)
+        grid_from_nuisance(pinned, "frame_offset", "0.0") if pinned else args.frame_offset_grid
     )
     group_grid = (
         grid_from_nuisance(pinned, "group_width_deg", "1.0")
         if pinned
-        else ("frame,2frame" if fast else args.group_width_grid)
+        else args.group_width_grid
     )
-    sigma_a = grid_from_nuisance(pinned, "sigma_a", "0.0") if pinned else ("0.0" if fast else args.sigma_a_grid)
+    sigma_a = grid_from_nuisance(pinned, "sigma_a", "0.0") if pinned else args.sigma_a_grid
     sigma_b = grid_from_nuisance(pinned, "sigma_b_corr", "0.0") if pinned else "0.0"
     sigma_c = (
-        grid_from_nuisance(pinned, "sigma_c_peak", "0.0") if pinned else ("0.0" if fast else args.sigma_c_peak_grid)
+        grid_from_nuisance(pinned, "sigma_c_peak", "0.0") if pinned else args.sigma_c_peak_grid
     )
     row_resolution_b = (
         grid_from_nuisance(pinned, "row_resolution_b", "0.0")
         if pinned
-        else ("0.0" if fast else args.row_resolution_b_grid)
+        else args.row_resolution_b_grid
     )
     # hand-check replays the recorded split of its source stage (production_scales); AUTO fits on work rows.
     scale_fit_split = scale_fit_split_override or ("all" if getattr(args, "production_scales", False) else "work")
     if scale_fit_split not in {"work", "all"}:
         raise ValueError(f"invalid scale-fit split override {scale_fit_split!r}")
     pinned_jitter_mode = grid_from_nuisance(pinned, "sg_jitter_mode", "none") if pinned else ""
-    jitter_mode_grid = pinned_jitter_mode if pinned else ("none" if fast else args.sg_jitter_mode_grid)
+    jitter_mode_grid = pinned_jitter_mode if pinned else args.sg_jitter_mode_grid
     if (
         pinned
         and allow_pinned_jitter_fallback
@@ -203,15 +202,15 @@ def native_stage_cmd(
         "--sg-jitter-sigma0-grid",
         grid_from_nuisance(pinned, "sg_jitter_sigma0", "0.0")
         if pinned
-        else ("0.0" if fast else args.sg_jitter_sigma0_grid),
+        else args.sg_jitter_sigma0_grid,
         "--sg-jitter-sigma-d-inv-grid",
         grid_from_nuisance(pinned, "sg_jitter_sigma_d_inv", "0.0")
         if pinned
-        else ("0.0" if fast else args.sg_jitter_sigma_d_inv_grid),
+        else args.sg_jitter_sigma_d_inv_grid,
         "--sg-jitter-sigma-frame-grid",
         grid_from_nuisance(pinned, "sg_jitter_sigma_frame", "0.0") if pinned else "0.0",
         "--sg-jitter-points",
-        str(int(float(pinned.get("sg_jitter_points", args.sg_jitter_points if not fast else 1)))),
+        str(int(float(pinned.get("sg_jitter_points", args.sg_jitter_points)))),
         "--profile-coordinate",
         str(getattr(args, "profile_coordinate", "target_sg") or "target_sg"),
         "--profile-normalization",
@@ -227,17 +226,17 @@ def native_stage_cmd(
         "--absorption-mode-grid",
         grid_from_nuisance(pinned, "absorption_mode", "none")
         if pinned
-        else ("none" if fast else args.absorption_mode_grid),
+        else args.absorption_mode_grid,
         "--absorption-mu-grid",
-        grid_from_nuisance(pinned, "absorption_mu", "0.0") if pinned else ("0.0" if fast else args.absorption_mu_grid),
+        grid_from_nuisance(pinned, "absorption_mu", "0.0") if pinned else args.absorption_mu_grid,
         "--absorption-frac-grid",
         grid_from_nuisance(pinned, "absorption_frac", "0.0")
         if pinned
-        else ("0.0" if fast else args.absorption_frac_grid),
+        else args.absorption_frac_grid,
         "--absorption-mu-g2-grid",
         grid_from_nuisance(pinned, "absorption_mu_g2", "0.0")
         if pinned
-        else ("0.0" if fast else args.absorption_mu_g2_grid),
+        else args.absorption_mu_g2_grid,
         "--absorption-mu-theta2-grid",
         grid_from_nuisance(pinned, "absorption_mu_theta2", "0.0") if pinned else "0.0",
         "--absorption-tds-b-grid",
@@ -245,16 +244,16 @@ def native_stage_cmd(
         "--dose-b-mode-grid",
         grid_from_nuisance(pinned, "dose_b_mode", "none")
         if pinned
-        else ("none" if fast or not unpinned_dose_grid else args.dose_b_mode_grid),
+        else ("none" if not unpinned_dose_grid else args.dose_b_mode_grid),
         "--dose-b-per-frame-grid",
         grid_from_nuisance(pinned, "dose_b_per_frame", "0.0")
         if pinned
-        else ("0.0" if fast or not unpinned_dose_grid else unpinned_dose_grid),
+        else (unpinned_dose_grid if unpinned_dose_grid else "0.0"),
         "--row-resolution-b-grid",
         row_resolution_b,
         *mosaicity_options,
         "--thickness-points",
-        str(args.final_thickness_points if (pinned and finalish_stage) else (3 if fast else args.thickness_points)),
+        str(args.final_thickness_points if (pinned and finalish_stage) else args.thickness_points),
         "--topup-d-min",
         f"{effective_topup_d_min(args, ds):g}",
         "--max-support-sg",
@@ -311,7 +310,7 @@ def native_stage_cmd(
     ]
     if endpoint_ok and finalish_stage and bool(getattr(args, "shelx_acta", False)):
         cmd.append("--acta")
-    if endpoint_ok and not fast and str(getattr(args, "endpoint_wght_mode", "freeze-zero")) == "converge":
+    if endpoint_ok and str(getattr(args, "endpoint_wght_mode", "freeze-zero")) == "converge":
         # converge calls are L.S. 10 (the combined endpoints' --shelxl-feedback-endpoint-ls-cycles), not the
         # engine's one-cycle default, so each call's shift/esd test and weight suggestion see a converged model.
         cmd += ["--endpoint-ls-cycles", str(int(getattr(args, "shelxl_feedback_endpoint_ls_cycles", 10) or 10))]

@@ -355,8 +355,8 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
             dataset_baseline_hkl(prep, ds),
             screen,
             args,
-            n_basis=20 if args.fast else args.screen_n_basis,
-            n_points=5 if args.fast else args.screen_n_points,
+            n_basis=args.screen_n_basis,
+            n_points=args.screen_n_points,
             stage="adaptive_screen",
             pinned=compact_base_nuisance(args),
             make_maps=False,
@@ -422,8 +422,8 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
                     dataset_baseline_hkl(prep, ds),
                     screen,
                     args,
-                    n_basis=20 if args.fast else args.screen_n_basis,
-                    n_points=5 if args.fast else args.screen_n_points,
+                    n_basis=args.screen_n_basis,
+                    n_points=args.screen_n_points,
                     stage="adaptive_screen",
                     pinned=compact_base_nuisance(args),
                     make_maps=False,
@@ -494,7 +494,7 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
             )
             feature_records.append(record)
         thickness_run = feature_source
-    elif not args.fast:
+    else:
         thickness_run = root / "runs" / ds.name / "adaptive_thickness_polish"
         thickness_baseline = discrete_thickness_baseline_nuisance(args, active_nui)
         thickness_candidates = thickness_polish_nuisance(thickness_baseline, screen_frame_offsets)
@@ -546,12 +546,12 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
             )
 
     final_model = active_model
-    final_n_basis = 20 if args.fast else int(args.final_basis_fallback)
+    final_n_basis = int(args.final_basis_fallback)
     structure_strategy = resolve_structure_update_strategy(args, multi_dataset=False)
     structure_update_run = None
     structure_feedback_fallback: dict = {}
     feedback_final_run: Path | None = None
-    if args.mode in {"regularize", "auto"} and not args.fast and structure_strategy == "shelxl_feedback":
+    if structure_strategy == "shelxl_feedback":
         final_n_basis = resolve_final_n_basis(
             prep, ds, args, python, logs, root, active_model, "adaptive_shelxl_feedback"
         )
@@ -589,7 +589,7 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
     if feedback_final_run is not None:
         final = feedback_final_run
     else:
-        final = root / "runs" / ds.name / ("adaptive_fast_final" if args.fast else "adaptive_final")
+        final = root / "runs" / ds.name / "adaptive_final"
         final_n_basis = resolve_final_n_basis(prep, ds, args, python, logs, root, final_model, "adaptive_final")
         run_logged(
             native_stage_cmd(
@@ -600,7 +600,7 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
                 final,
                 args,
                 n_basis=final_n_basis,
-                n_points=5 if args.fast else args.n_points,
+                n_points=args.n_points,
                 stage="adaptive_final",
                 pinned=regularized_nui,
                 make_maps=args.make_maps,
@@ -612,7 +612,7 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
         )
     endpoint_feedback_decision: dict = {}
     endpoint_feedback_run = None
-    if args.mode in {"regularize", "auto"} and not args.fast and not args.dry_run and feedback_final_run is None:
+    if not args.dry_run and feedback_final_run is None:
         run_feedback, endpoint_feedback_decision = should_run_endpoint_feedback(final, args)
         endpoint_model = best_endpoint_model(final)
         if run_feedback and endpoint_model is not None:
@@ -655,8 +655,8 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
                 best_nuisance(final) or regularized_nui, absorption_policy="uniform"
             )
             hand_args = _args_with_recorded_native_contract(args, final_config)
-            hand_n_basis = _positive_summary_int(final_config, "n_basis") or (20 if args.fast else final_n_basis)
-            hand_n_points = _positive_summary_int(final_config, "n_points") or (5 if args.fast else args.n_points)
+            hand_n_basis = _positive_summary_int(final_config, "n_basis") or final_n_basis
+            hand_n_points = _positive_summary_int(final_config, "n_points") or args.n_points
             # Both hands' pair scales exclude the free orbits.
             scale_fit_split = "work"
             run_logged(
@@ -823,8 +823,8 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
                         dataset_baseline_hkl(prep, ds),
                         promoted,
                         args,
-                        n_basis=20 if args.fast else final_n_basis,
-                        n_points=5 if args.fast else args.n_points,
+                        n_basis=final_n_basis,
+                        n_points=args.n_points,
                         stage="adaptive_promoted_hand_final",
                         pinned=best_nuisance(final) or regularized_nui,
                         make_maps=args.make_maps,
@@ -1031,7 +1031,7 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
                 no_h_run,
                 args,
                 n_basis=final_n_basis,
-                n_points=5 if args.fast else args.n_points,
+                n_points=args.n_points,
                 stage="adaptive_noH",
                 pinned=best_nuisance(final) or regularized_nui,
                 make_maps=args.make_maps,

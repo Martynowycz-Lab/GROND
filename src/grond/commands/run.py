@@ -179,8 +179,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             "allow_missing_tools": bool(getattr(args, "allow_missing_tools", False)),
         },
         "accelerators": probe_accelerators(python),
-        "mode": args.mode,
-        "fast": args.fast,
+        "mode": "auto",
         "preset": preset,
         "datasets": [ds.__dict__ for ds in prep.datasets],
         "structure": prep.structure,
@@ -288,15 +287,11 @@ def cmd_run(args: argparse.Namespace) -> int:
             "quick_stats": quick,
         }
     )
-    if getattr(args, "json", False):
-        print(json.dumps(payload, indent=2, allow_nan=True))
-    else:
-        print(_format_terminal_finish_summary(payload), flush=True)
+    print(_format_terminal_finish_summary(payload), flush=True)
     return 0
 
 
 def cmd_auto(args: argparse.Namespace) -> int:
     """Run the ordinary one-command GROND auto workflow."""
 
-    args.mode = "auto"
     return cmd_run(args)

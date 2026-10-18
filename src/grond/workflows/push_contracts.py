@@ -293,7 +293,6 @@ def hydrate_push_args_for_multi(
     for key, value in vars(defaults).items():
         if not hasattr(args, key) or getattr(args, key) is None:
             setattr(args, key, value)
-    args.fast = False
     args.native_only = False
     # A continuation replays the checkpoint's pinned nuisance; the per-macro-cycle thickness update of the AUTO
     # nested nuisance stage needs that run's nested contracts and does not apply.

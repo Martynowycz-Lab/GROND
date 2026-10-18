@@ -85,9 +85,9 @@ def nuisance_selection(args: argparse.Namespace) -> str:
 
 
 def nested_selection_enabled(args: argparse.Namespace) -> bool:
-    """Whether AUTO runs the nested nuisance stage (never under --fast, which skips all nuisance stages)."""
+    """Whether AUTO runs the nested nuisance stage."""
 
-    return nuisance_selection(args) == "nested" and not bool(getattr(args, "fast", False))
+    return nuisance_selection(args) == "nested"
 
 
 def feedback_thickness_update_mode(args: argparse.Namespace) -> tuple[str, str]:
@@ -166,8 +166,6 @@ def validate_nested_nuisance_policy(args: argparse.Namespace, prep: PrepConfig |
               "feedback_thickness_update_reason": update_reason}
     if selection != "nested":
         return record
-    if bool(getattr(args, "fast", False)):
-        return {**record, "status": "not_applicable_fast", "reason": "--fast skips every nuisance stage"}
     if int(getattr(args, "nested_n_basis", 0) or 0) < 2:
         raise ValueError("--nested-n-basis must be an integer of at least 2 beams")
     requested_points = str(getattr(args, "nested_n_points", "screen") or "screen").strip().lower()

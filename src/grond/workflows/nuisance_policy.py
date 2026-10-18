@@ -141,8 +141,6 @@ def resolve_final_n_basis(
     from grond.cli_support.execution import run_logged
 
     args = crystal_arguments(args, ds.name)
-    if args.fast:
-        return 20
     if int(args.n_basis) > 0:
         return int(args.n_basis)
     if args.dry_run:
@@ -241,26 +239,8 @@ def grid_has_variation(text: str) -> bool:
 
 
 def compact_base_nuisance(args: argparse.Namespace) -> dict:
-    """Build the starting nuisance grid for fast or full automatic runs."""
+    """Build the starting nuisance grid of the automatic runs."""
 
-    if args.fast:
-        return {
-            "thickness_A": "1000,1200,1400",
-            "thickness_model": "uniform_gradient",
-            "thickness_grad_frac": "0.0,0.4",
-            "frame_offset": "0.0",
-            "group_width_deg": "frame,2frame",
-            "detector_scale_bins": 0,
-            "sigma_a": "0.0",
-            "sigma_b_corr": "0.0",
-            "sigma_c_peak": "0.0",
-            "sg_jitter_mode": "none",
-            "absorption_mode": "none",
-            "dose_b_mode": "none",
-            "mosaicity_mode": "none",
-            "mosaicity_sigma_deg": "0.0",
-            "row_resolution_b": "0.0",
-        }
     return {
         "thickness_A": args.thickness_grid,
         "thickness_model": "uniform_gradient",
@@ -407,8 +387,6 @@ def feature_grid(args: argparse.Namespace, family: str, nui: dict, ds: DatasetSp
 def feature_is_enabled(args: argparse.Namespace, family: str) -> bool:
     """Return true when an optional feature family has a real search grid."""
 
-    if args.fast:
-        return False
     if family == "row_resolution":
         return grid_has_variation(args.row_resolution_b_grid)
     if family == "absorption":

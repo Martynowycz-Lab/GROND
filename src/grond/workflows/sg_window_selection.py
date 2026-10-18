@@ -79,7 +79,7 @@ def run_sg_window_scout(
 
     args = crystal_arguments(args, ds.name)
     mode = getattr(args, "sg_window_scout", "auto")
-    if mode == "off" or getattr(args, "fast", False):
+    if mode == "off":
         return {"status": "disabled"}
     widths = scout_widths(parse_numeric_grid(getattr(args, "sg_window_scout_grid", "")), float(getattr(args, "sg_window", 0.004)))
     if not widths:

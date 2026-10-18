@@ -134,7 +134,7 @@ def _estimated_sg_window_scout_steps(args: argparse.Namespace) -> int:
     from grond.workflows.sg_window_selection import scout_widths
 
     mode = getattr(args, "sg_window_scout", "auto")
-    if mode == "off" or getattr(args, "fast", False):
+    if mode == "off":
         return 0
     grid = parse_numeric_grid(getattr(args, "sg_window_scout_grid", ""))
     return len(scout_widths(grid, float(getattr(args, "sg_window", 0.004))))
@@ -160,16 +160,15 @@ def estimate_run_steps(prep: PrepConfig, args: argparse.Namespace) -> int:
             total += 4
             # Early held-out hand pair and its paired-row diagnostic after the screen.
             total += 2
-        if not getattr(args, "fast", False):
+        total += 1
+        total += sum(
+            1
+            for family in FEATURE_GATE_FAMILIES
+            if feature_is_enabled(args, family)
+        )
+        if getattr(args, "mode", "auto") in {"regularize", "auto"}:
             total += 1
-            total += sum(
-                1
-                for family in FEATURE_GATE_FAMILIES
-                if feature_is_enabled(args, family)
-            )
-            if getattr(args, "mode", "auto") in {"regularize", "auto"}:
-                total += 1
-            total += 1
+        total += 1
         total += 1
         if len(prep.datasets) == 1 and getattr(args, "hand_control", True):
             total += 2

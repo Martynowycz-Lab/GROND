@@ -637,8 +637,6 @@ def _run_early_escalation(
     escalate, status = early_escalation_trigger(screen, settings)
     if not escalate:
         return done(status)
-    if bool(getattr(args, "fast", False)):
-        return done("skipped_fast")
     try:
         fidelity = {}
         for ds in prep.datasets:

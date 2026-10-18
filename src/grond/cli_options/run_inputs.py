@@ -52,7 +52,6 @@ def add_inputs(ap: argparse.ArgumentParser) -> None:
 def add_execution(ap: argparse.ArgumentParser) -> None:
     """Add execution options in the established order."""
 
-    ap.add_argument("--mode", choices=["bloch", "regularize", "auto"], default="auto")
     ap.add_argument(
         "--preset",
         choices=["standard", "fast"],
@@ -61,18 +60,9 @@ def add_execution(ap: argparse.ArgumentParser) -> None:
             "standard (default) or fast: fewer rocking points, beams and candidate settings, every check kept."
         ),
     )
-    ap.add_argument(
-        "--fast", action="store_true", help="Use N=20/Q=5, no absorption/non-Hermitian terms, and no structure moves."
-    )
-    ap.add_argument("--native-only", action="store_true", help="Do not write corrected-HKL endpoints.")
     ap.add_argument("--python", default="", help="Python for the calculation subprocesses (default: the one running grond).")
     add_tool_config_args(ap)
     ap.add_argument("--dry-run", action="store_true")
-    ap.add_argument(
-        "--json",
-        action="store_true",
-        help="Print the compact machine-readable payload instead of the human final summary.",
-    )
     ap.add_argument(
         "--resume",
         action=argparse.BooleanOptionalAction,

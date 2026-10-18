@@ -165,7 +165,7 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
     initial_runs: dict[str, Path] = {}
     nuisance: dict[str, dict] = {}
     for ds in prep.datasets:
-        run_dir = root / "runs" / ds.name / ("fast_N20_Q5" if args.fast else "screen")
+        run_dir = root / "runs" / ds.name / "screen"
         run_logged(
             native_stage_cmd(
                 python,
@@ -174,8 +174,8 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
                 dataset_baseline_hkl(prep, ds),
                 run_dir,
                 args,
-                n_basis=20 if args.fast else args.screen_n_basis,
-                n_points=5 if args.fast else stage_n_points(args, ds, screen=True),
+                n_basis=args.screen_n_basis,
+                n_points=stage_n_points(args, ds, screen=True),
                 stage="screen",
                 pinned=compact_base_nuisance(args),
                 make_maps=False,
@@ -226,7 +226,7 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
             shared_model = str(early_hand_decision["selected_model_after"])
             for ds in prep.datasets:
                 # Re-screen in the chosen hand so the thickness seed is not chosen in the rejected one.
-                run_dir = root / "runs" / ds.name / ("fast_N20_Q5_selected_hand" if args.fast else "screen_selected_hand")
+                run_dir = root / "runs" / ds.name / "screen_selected_hand"
                 run_logged(
                     native_stage_cmd(
                         python,
@@ -235,8 +235,8 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
                         dataset_baseline_hkl(prep, ds),
                         run_dir,
                         args,
-                        n_basis=20 if args.fast else args.screen_n_basis,
-                        n_points=5 if args.fast else stage_n_points(args, ds, screen=True),
+                        n_basis=args.screen_n_basis,
+                        n_points=stage_n_points(args, ds, screen=True),
                         stage="screen",
                         pinned=compact_base_nuisance(args),
                         make_maps=False,
@@ -319,7 +319,7 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
                 )
                 feature_records.append(record)
             write_json(root / "decisions" / ds.name / "feature_decisions.json", feature_records)
-        elif not args.fast:
+        else:
             thick = root / "runs" / ds.name / "multi_thickness_polish"
             thickness_baseline = discrete_thickness_baseline_nuisance(args, active_nui)
             run_logged(
@@ -384,7 +384,7 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
     final_model = shared_model
     structure_strategy = resolve_structure_update_strategy(args, multi_dataset=True)
     structure_feedback: dict = {"status": "not_run", "strategy": structure_strategy}
-    if args.mode in {"regularize", "auto"} and not args.fast and structure_strategy != "off":
+    if structure_strategy != "off":
         if structure_strategy == "shelxl_feedback":
             final_model, structure_feedback = run_multi_shelxl_feedback_loop(
                 prep,
@@ -405,27 +405,26 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
     resolution_limits: dict[str, dict] = {}
     sg_window_scout_runs: dict[str, dict] = {}
     for ds in prep.datasets:
-        run_dir = initial_runs[ds.name] if args.fast else root / "runs" / ds.name / "final"
-        if not args.fast:
-            final_n_basis = resolve_final_n_basis(prep, ds, args, python, logs, root, final_model, "final")
-            run_logged(
-                native_stage_cmd(
-                    python,
-                    ds,
-                    final_model,
-                    dataset_baseline_hkl(prep, ds),
-                    run_dir,
-                    args,
-                    n_basis=final_n_basis,
-                    n_points=stage_n_points(args, ds, screen=False),
-                    stage="final",
-                    pinned=nuisance[ds.name],
-                    make_maps=args.make_maps,
-                ),
-                logs,
-                f"{ds.name}_final",
-                dry_run=args.dry_run,
-            )
+        run_dir = root / "runs" / ds.name / "final"
+        final_n_basis = resolve_final_n_basis(prep, ds, args, python, logs, root, final_model, "final")
+        run_logged(
+            native_stage_cmd(
+                python,
+                ds,
+                final_model,
+                dataset_baseline_hkl(prep, ds),
+                run_dir,
+                args,
+                n_basis=final_n_basis,
+                n_points=stage_n_points(args, ds, screen=False),
+                stage="final",
+                pinned=nuisance[ds.name],
+                make_maps=args.make_maps,
+            ),
+            logs,
+            f"{ds.name}_final",
+            dry_run=args.dry_run,
+        )
         final_runs[ds.name] = run_dir
         resolution_limits[ds.name] = run_resolution_limit_gate(
             python,
