@@ -14,7 +14,7 @@ from pathlib import Path
 
 from grond.engine.shelx_diagnostics import parse_shelx_lst_metrics, parse_shelx_lst_pathologies
 from grond.engine.shelx_hkl import audit_fixed_width_precision
-from grond.forensics.resolution import classify_endpoint_candidate
+from grond.validation.resolution_limit import classify_endpoint_candidate
 
 # Preferred SHELXL GooF range; outside it the chooser warns but never blocks an endpoint.
 GOOF_WARNING_MIN = 0.85

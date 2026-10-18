@@ -26,7 +26,6 @@ from grond.workflows.final_hand_selection import (
     run_early_elastic_hand_selection,
     run_multi_final_elastic_hand_selection,
 )
-from grond.workflows.forensic_gates import run_resolution_limit_gate
 from grond.workflows.hand_row_contracts import _args_with_recorded_native_contract, _positive_summary_int
 from grond.workflows.model_selection import (
     best_nuisance,
@@ -53,6 +52,7 @@ from grond.workflows.nuisance_policy import (
     stage_n_points,
 )
 from grond.workflows.report_commands import combine_cmd
+from grond.workflows.resolution_gate import run_resolution_limit_gate
 from grond.workflows.shared_refinement import run_multi_shelxl_feedback_loop
 from grond.workflows.single import run_feature_gate
 from grond.workflows.thickness_materialization import (

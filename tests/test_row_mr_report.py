@@ -7,7 +7,7 @@ import pytest
 
 from grond.engine.resolution_limit_audit import shell_record
 from grond.engine.row_mr_report import compute_model_metrics, row_mr_r_factors
-from grond.forensics.resolution import promote_resolution_limit
+from grond.validation.resolution_limit import promote_resolution_limit
 
 U = 0.01
 

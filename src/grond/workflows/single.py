@@ -45,7 +45,6 @@ from grond.workflows.final_hand_selection import (
     run_early_elastic_hand_selection,
     write_heldout_hand_decision,
 )
-from grond.workflows.forensic_gates import run_resolution_limit_gate
 from grond.workflows.hand_row_contracts import (
     _args_with_recorded_native_contract,
     _paired_row_split_contract,
@@ -91,6 +90,7 @@ from grond.workflows.nuisance_policy import (
     resolved_final_n_points,
     stage_n_points,
 )
+from grond.workflows.resolution_gate import run_resolution_limit_gate
 from grond.workflows.thickness_materialization import (
     discrete_thickness_baseline_nuisance,
     discrete_thickness_promotion_record,

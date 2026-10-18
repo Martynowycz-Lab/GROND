@@ -24,7 +24,7 @@ from pathlib import Path
 import numpy as np
 
 if __package__:
-    from ..forensics.resolution import promote_resolution_limit
+    from ..validation.resolution_limit import promote_resolution_limit
     from .row_mr_report import (
         canonical_hkl,
         compute_model_metrics,
@@ -49,7 +49,7 @@ else:  # pragma: no cover - direct script execution
         safe_float,
     )
 
-    from grond.forensics.resolution import promote_resolution_limit
+    from grond.validation.resolution_limit import promote_resolution_limit
 
 
 def parse_named_path(text: str) -> tuple[str, Path]:
