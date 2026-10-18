@@ -32,7 +32,6 @@ def _float_from_mapping(mapping: Mapping[str, object], key: str, default: float 
 def _thickness_summary_row(
     *,
     dataset: str,
-    scale_mode: str,
     feature_mode: str,
     n_basis: int,
     n_points: int,
@@ -55,7 +54,6 @@ def _thickness_summary_row(
     thickness_A = _float_from_mapping(nuisance, "thickness_A")
     return {
         "dataset": dataset,
-        "scale_mode": scale_mode,
         "feature_mode": feature_mode,
         "n_basis": int(n_basis),
         "n_points": int(n_points),
@@ -218,7 +216,7 @@ def _write_thickness_scout_report(out_dir: Path, summary: dict[str, object]) -> 
             [
                 "## Promoted Reference",
                 "",
-                f"The promoted reference for q-field comparison is `{promoted.get('dataset', '')}` / `{promoted.get('scale_mode', '')}` / `{promoted.get('feature_mode', '')}` at N/Q `{promoted.get('n_basis', '')}/{promoted.get('n_points', '')}` with thickness `{num(promoted.get('thickness_nm'))}` nm and gradient `{num(promoted.get('thickness_grad_frac'))}`.",
+                f"The promoted reference for q-field comparison is `{promoted.get('dataset', '')}` / `{promoted.get('feature_mode', '')}` at N/Q `{promoted.get('n_basis', '')}/{promoted.get('n_points', '')}` with thickness `{num(promoted.get('thickness_nm'))}` nm and gradient `{num(promoted.get('thickness_grad_frac'))}`.",
                 "",
             ]
         )
@@ -231,15 +229,15 @@ def _write_thickness_scout_report(out_dir: Path, summary: dict[str, object]) -> 
         [
             "## Selected Runs",
             "",
-            "| dataset | scale | features | N/Q | thickness nm | grad | all R1 | all wR2 | free wR2 | q corr | p95 | run |",
-            "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+            "| dataset | features | N/Q | thickness nm | grad | all R1 | all wR2 | free wR2 | q corr | p95 | run |",
+            "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|",
         ]
     )
     q_by_run = {row.get("candidate_row_table"): row for row in q_rows}
     for row in rows:
         q = q_by_run.get(str(row.get("row_table", "")), {})
         lines.append(
-            f"| {row.get('dataset', '')} | {row.get('scale_mode', '')} | {row.get('feature_mode', '')} | "
+            f"| {row.get('dataset', '')} | {row.get('feature_mode', '')} | "
             f"{row.get('n_basis', '')}/{row.get('n_points', '')} | {num(row.get('thickness_nm'))} | "
             f"{num(row.get('thickness_grad_frac'))} | {pct(row.get('all_dyn_R1'))} | {pct(row.get('all_dyn_wR2'))} | "
             f"{pct(row.get('free_dyn_wR2'))} | {num(q.get('logq_corr'))} | {num(q.get('p95_abs_dlogq'))} | "
@@ -250,7 +248,7 @@ def _write_thickness_scout_report(out_dir: Path, summary: dict[str, object]) -> 
             "",
             "## Interpretation",
             "",
-            "If detector-scale removal or final-feature activation moves the selected thickness while the row statistics remain similar, the thickness is not uniquely identified by the scalar row contract. In that case the stable quantity to trust is the row-wise Bloch/Born correction field and the final row and endpoint validation, not the absolute thickness number.",
+            "If final-feature activation moves the selected thickness while the row statistics remain similar, the thickness is not uniquely identified by the scalar row contract. In that case the stable quantity to trust is the row-wise Bloch/Born correction field and the final row and endpoint validation, not the absolute thickness number.",
             "",
             "The combined trial table and machine-readable summary are written next to this report.",
             "",
@@ -260,9 +258,9 @@ def _write_thickness_scout_report(out_dir: Path, summary: dict[str, object]) -> 
 
 
 def _thickness_scout_variant_args(
-    args: argparse.Namespace, *, scale_mode: str, feature_mode: str, thickness_grid_A: str, gradient_grid: str
+    args: argparse.Namespace, *, feature_mode: str, thickness_grid_A: str, gradient_grid: str
 ) -> argparse.Namespace:
-    """Return a copy of args with one scout scale/feature contract pinned."""
+    """Return a copy of args with one scout feature contract pinned."""
 
     variant = argparse.Namespace(**vars(args))
     variant.thickness_grid = thickness_grid_A
@@ -282,9 +280,6 @@ def _thickness_scout_variant_args(
     variant.row_resolution_b_grid = "0.0"
     variant.dose_b_mode_grid = "none"
     variant.dose_b_per_frame_grid = "0.0"
-    # Both scale modes fit the same P-spline frame scales; there is no detector scale field.
-    if scale_mode not in {"production", "no_detector", "nodetector", "no-detector"}:
-        raise SystemExit(f"Unknown thickness-scout scale mode {scale_mode!r}. Use production or no-detector.")
     if feature_mode == "bare":
         variant.sg_jitter_mode_grid = "none"
         variant.sg_jitter_sigma0_grid = "0.0"

@@ -33,7 +33,6 @@ INPUT_PATH_FLAGS = {
     "--row-table",
     "--rows",
     "--run",
-    "--scale-polish",
     "--source-summary",
     "--start-res",
     "--structure",
@@ -42,7 +41,7 @@ INPUT_PATH_FLAGS = {
     "--xds-dir",
 }
 OUTPUT_PATH_FLAGS = {"--out", "--out-dir", "--output", "--write-rows"}
-ASSIGNMENT_PATH_FLAGS = {"--resolution-limit", "--run", "--scale-polish"}
+ASSIGNMENT_PATH_FLAGS = {"--resolution-limit", "--run"}
 
 
 def _sha256_file(path: Path) -> str:

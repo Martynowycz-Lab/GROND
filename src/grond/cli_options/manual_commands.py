@@ -136,7 +136,7 @@ def register_manual(sub: argparse._SubParsersAction) -> None:
         "thickness",
         help="Select and pin thickness, gradient, frame offset, and the primary nuisance contract.",
         description=(
-            "Run the detector-free primary thickness experiment at the requested N/Q grid. "
+            "Run the primary thickness experiment at the requested N/Q grid. "
             "This stage does not move coordinates."
         ),
     )
@@ -155,7 +155,7 @@ def register_manual(sub: argparse._SubParsersAction) -> None:
     p_manual_thickness.add_argument(
         "--expanded",
         action="store_true",
-        help="Also calculate production-scale and final-diagnostic sensitivity branches; not needed for the primary run.",
+        help="Also calculate the final-diagnostic sensitivity branch; not needed for the primary run.",
     )
     p_manual_thickness.add_argument(
         "--n-basis-grid", default="24,48", help="Comma-separated basis sizes for scout and confirmation."

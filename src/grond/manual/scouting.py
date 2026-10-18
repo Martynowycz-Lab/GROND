@@ -267,7 +267,6 @@ def manual_thickness(args) -> int:
         warnings.append("Thickness calculation skipped; supplied summaries define the pinned nuisance contracts.")
         report = ""
     else:
-        scale_modes = "production,no-detector" if args.expanded else "no-detector"
         feature_modes = "bare,final-diagnostic" if args.expanded else "bare"
         command_line = [
             *_child_base(args),
@@ -286,8 +285,6 @@ def manual_thickness(args) -> int:
             args.thickness_grid_nm,
             "--gradient-grid",
             args.gradient_grid,
-            "--scale-modes",
-            scale_modes,
             "--feature-modes",
             feature_modes,
             *_tool_args(args),

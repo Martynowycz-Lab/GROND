@@ -115,15 +115,6 @@ def parse_named_path(text: str) -> tuple[str, Path]:
     return path.parent.name or path.stem, path
 
 
-def parse_scale_polish_path(text: str) -> tuple[str, Path]:
-    """Parse a named scale-polish summary or directory path."""
-
-    name, path = parse_named_path(text)
-    if path.is_dir():
-        path = path / "scale_compression_summary.json"
-    return name, path
-
-
 def parse_resolution_limit_path(text: str) -> tuple[str, Path]:
     """Parse a named resolution-limit summary or directory path."""
 
@@ -897,22 +888,6 @@ def scale_polish_table_rows(scale_payloads: list[dict]) -> list[dict]:
     return rows
 
 
-def load_scale_polish_payloads(items: list[str]) -> list[dict]:
-    """Load scale-polish summaries passed to the publication table generator."""
-
-    payloads = []
-    for item in items:
-        name, path = parse_scale_polish_path(item)
-        payload = read_json(path)
-        if not payload:
-            continue
-        payload = dict(payload)
-        payload["dataset"] = name
-        payload["summary_path"] = str(path.resolve())
-        payloads.append(payload)
-    return payloads
-
-
 def tex_escape(text: str) -> str:
     """Escape LaTeX special characters in text."""
 
@@ -1352,12 +1327,6 @@ def main() -> None:
         help="Include rows marked dataset_role=completeness_only in GROND row/MR row metrics.",
     )
     ap.add_argument(
-        "--scale-polish",
-        action="append",
-        default=[],
-        help="Scale-polish summary as name=/path/to/scale_compression_summary.json or name=/path/to/scale_polish_dir.",
-    )
-    ap.add_argument(
         "--resolution-limit",
         action="append",
         default=[],
@@ -1440,7 +1409,8 @@ def main() -> None:
         "full_control_input_rows": full_input_row_count,
         "full_control_retained_rows": len(full_rows),
     }
-    scale_payloads = load_scale_polish_payloads(args.scale_polish)
+    # GROND writes no scale-polish summaries; the report keeps its empty scale-polish block.
+    scale_payloads: list[dict] = []
     resolution_payloads = load_resolution_limit_payloads(args.resolution_limit)
     endpoint_summaries, endpoint_metadata = endpoint_summary_rows(
         rows,

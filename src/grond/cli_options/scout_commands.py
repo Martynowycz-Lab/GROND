@@ -133,7 +133,7 @@ def register_thickness(sub: argparse._SubParsersAction) -> None:
     p_thick = sub.add_parser(
         "thickness-scout",
         aliases=["thickness"],
-        help="Audit effective thickness sensitivity to row contract, scale model, and accepted nuisance terms.",
+        help="Audit effective thickness sensitivity to row contract and accepted nuisance terms.",
     )
     add_common_run_args(p_thick, expose_lambda_controls=False)
     p_thick.set_defaults(mode="regularize", n_points=10)
@@ -149,9 +149,6 @@ def register_thickness(sub: argparse._SubParsersAction) -> None:
     )
     p_thick.add_argument(
         "--gradient-grid", default="0.0,0.4,0.8,1.0", help="Physical uniform-gradient fraction grid (0 through 1)."
-    )
-    p_thick.add_argument(
-        "--scale-modes", default="production,no-detector", help="Comma grid: production and/or no-detector."
     )
     p_thick.add_argument(
         "--feature-modes", default="bare,final-diagnostic", help="Comma grid: bare and/or final-diagnostic."

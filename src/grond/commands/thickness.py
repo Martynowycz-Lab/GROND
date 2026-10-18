@@ -77,9 +77,8 @@ def cmd_thickness_scout(args: argparse.Namespace) -> int:
     gradient_grid = parse_numeric_grid(args.gradient_grid)
     if not gradient_grid:
         raise SystemExit("Provide at least one value in --gradient-grid.")
-    scale_modes = parse_name_grid(args.scale_modes)
     feature_modes = parse_name_grid(args.feature_modes)
-    total = len(prep.datasets) * len(scale_modes) * len(feature_modes) * len(basis_grid)
+    total = len(prep.datasets) * len(feature_modes) * len(basis_grid)
     configure_progress(logs, resume=bool(args.resume), total=total)
 
     rows: list[dict[str, object]] = []
@@ -89,94 +88,85 @@ def cmd_thickness_scout(args: argparse.Namespace) -> int:
     promoted_reference: dict[str, object] = {}
 
     for ds in prep.datasets:
-        for scale_mode in scale_modes:
-            for feature_mode in feature_modes:
-                center_A = float("nan")
-                center_grad = float("nan")
-                for index, n_basis in enumerate(basis_grid):
-                    if index == 0 or not args.local_confirmation:
-                        thick_values_A = full_grid_A
-                        grad_values = gradient_grid
-                    else:
-                        thick_values_A = (
-                            centered_grid(
-                                center_A,
-                                window=10.0 * float(args.local_window_nm),
-                                step=10.0 * float(args.local_step_nm),
-                                lower=10.0 * float(args.thickness_min_nm),
-                                upper=10.0 * float(args.thickness_max_nm),
-                            )
-                            or full_grid_A
+        for feature_mode in feature_modes:
+            center_A = float("nan")
+            center_grad = float("nan")
+            for index, n_basis in enumerate(basis_grid):
+                if index == 0 or not args.local_confirmation:
+                    thick_values_A = full_grid_A
+                    grad_values = gradient_grid
+                else:
+                    thick_values_A = (
+                        centered_grid(
+                            center_A,
+                            window=10.0 * float(args.local_window_nm),
+                            step=10.0 * float(args.local_step_nm),
+                            lower=10.0 * float(args.thickness_min_nm),
+                            upper=10.0 * float(args.thickness_max_nm),
                         )
-                        grad_values = (
-                            centered_grid(
-                                center_grad,
-                                window=float(args.local_gradient_window),
-                                step=float(args.local_gradient_step),
-                                lower=float(args.gradient_min),
-                                upper=float(args.gradient_max),
-                            )
-                            or gradient_grid
+                        or full_grid_A
+                    )
+                    grad_values = (
+                        centered_grid(
+                            center_grad,
+                            window=float(args.local_gradient_window),
+                            step=float(args.local_gradient_step),
+                            lower=float(args.gradient_min),
+                            upper=float(args.gradient_max),
                         )
-                    thickness_grid_A = format_numeric_grid(thick_values_A)
-                    gradient_grid_text = format_numeric_grid(grad_values)
-                    variant = _thickness_scout_variant_args(
-                        args,
-                        scale_mode=scale_mode,
-                        feature_mode=feature_mode,
-                        thickness_grid_A=thickness_grid_A,
-                        gradient_grid=gradient_grid_text,
+                        or gradient_grid
                     )
-                    label = f"thickness_{safe_label(ds.name)}_{safe_label(scale_mode)}_{safe_label(feature_mode)}_N{int(n_basis)}Q{n_points}"
-                    run_dir = (
-                        out_dir
-                        / "runs"
-                        / ds.name
-                        / f"{safe_label(scale_mode)}_{safe_label(feature_mode)}_N{int(n_basis)}Q{n_points}"
+                thickness_grid_A = format_numeric_grid(thick_values_A)
+                gradient_grid_text = format_numeric_grid(grad_values)
+                variant = _thickness_scout_variant_args(
+                    args,
+                    feature_mode=feature_mode,
+                    thickness_grid_A=thickness_grid_A,
+                    gradient_grid=gradient_grid_text,
+                )
+                label = f"thickness_{safe_label(ds.name)}_{safe_label(feature_mode)}_N{int(n_basis)}Q{n_points}"
+                run_dir = out_dir / "runs" / ds.name / f"{safe_label(feature_mode)}_N{int(n_basis)}Q{n_points}"
+                cmd = native_stage_cmd(
+                    python,
+                    ds,
+                    prep.structure,
+                    dataset_baseline_hkl(prep, ds),
+                    run_dir,
+                    variant,
+                    n_basis=int(n_basis),
+                    n_points=n_points,
+                    stage=label,
+                    make_maps=False,
+                    endpoint=False,
+                )
+                run_logged(cmd, logs, label, dry_run=bool(args.dry_run))
+                row = _thickness_summary_row(
+                    dataset=ds.name,
+                    feature_mode=feature_mode,
+                    n_basis=int(n_basis),
+                    n_points=n_points,
+                    run_dir=run_dir,
+                    thickness_grid=thickness_grid_A,
+                    gradient_grid=gradient_grid_text,
+                )
+                rows.append(row)
+                if not promoted_reference and row.get("status") == "ok":
+                    promoted_reference = row
+                if math.isfinite(_float_from_mapping(row, "thickness_A")):
+                    center_A = _float_from_mapping(row, "thickness_A")
+                if math.isfinite(_float_from_mapping(row, "thickness_grad_frac")):
+                    center_grad = _float_from_mapping(row, "thickness_grad_frac")
+                for trial in _read_csv_dicts(run_dir / "nuisance_trials.csv"):
+                    trial_rows.append(
+                        {
+                            "dataset": ds.name,
+                            "feature_mode": feature_mode,
+                            "n_basis": int(n_basis),
+                            "n_points": n_points,
+                            "run_dir": str(run_dir.resolve()),
+                            **trial,
+                        }
                     )
-                    cmd = native_stage_cmd(
-                        python,
-                        ds,
-                        prep.structure,
-                        dataset_baseline_hkl(prep, ds),
-                        run_dir,
-                        variant,
-                        n_basis=int(n_basis),
-                        n_points=n_points,
-                        stage=label,
-                        make_maps=False,
-                        endpoint=False,
-                    )
-                    run_logged(cmd, logs, label, dry_run=bool(args.dry_run))
-                    row = _thickness_summary_row(
-                        dataset=ds.name,
-                        scale_mode=scale_mode,
-                        feature_mode=feature_mode,
-                        n_basis=int(n_basis),
-                        n_points=n_points,
-                        run_dir=run_dir,
-                        thickness_grid=thickness_grid_A,
-                        gradient_grid=gradient_grid_text,
-                    )
-                    rows.append(row)
-                    if not promoted_reference and row.get("status") == "ok":
-                        promoted_reference = row
-                    if math.isfinite(_float_from_mapping(row, "thickness_A")):
-                        center_A = _float_from_mapping(row, "thickness_A")
-                    if math.isfinite(_float_from_mapping(row, "thickness_grad_frac")):
-                        center_grad = _float_from_mapping(row, "thickness_grad_frac")
-                    for trial in _read_csv_dicts(run_dir / "nuisance_trials.csv"):
-                        trial_rows.append(
-                            {
-                                "dataset": ds.name,
-                                "scale_mode": scale_mode,
-                                "feature_mode": feature_mode,
-                                "n_basis": int(n_basis),
-                                "n_points": n_points,
-                                "run_dir": str(run_dir.resolve()),
-                                **trial,
-                            }
-                        )
 
     q_rows: list[dict[str, object]] = []
     ref_csv = Path(str(promoted_reference.get("row_table", ""))) if promoted_reference else Path()
@@ -186,7 +176,7 @@ def cmd_thickness_scout(args: argparse.Namespace) -> int:
             if cand_csv.exists():
                 q_rows.append(
                     {
-                        **{k: row.get(k, "") for k in ("dataset", "scale_mode", "feature_mode", "n_basis", "n_points")},
+                        **{k: row.get(k, "") for k in ("dataset", "feature_mode", "n_basis", "n_points")},
                         **_q_field_stability(ref_csv, cand_csv),
                     }
                 )
@@ -198,7 +188,7 @@ def cmd_thickness_scout(args: argparse.Namespace) -> int:
                 delta_nm = abs(thickness_nm - reference_thickness)
                 if delta_nm >= float(args.warning_shift_nm):
                     warnings.append(
-                        f"{row.get('dataset')} {row.get('scale_mode')}/{row.get('feature_mode')} N{row.get('n_basis')} selected {thickness_nm:.1f} nm, {delta_nm:.1f} nm away from the promoted reference. Treat this as row-contract sensitivity, not a new physical thickness."
+                        f"{row.get('dataset')} {row.get('feature_mode')} N{row.get('n_basis')} selected {thickness_nm:.1f} nm, {delta_nm:.1f} nm away from the promoted reference. Treat this as row-contract sensitivity, not a new physical thickness."
                     )
 
     summary = {
@@ -212,12 +202,11 @@ def cmd_thickness_scout(args: argparse.Namespace) -> int:
             "n_points": n_points,
             "thickness_grid_nm": thickness_nm_grid,
             "gradient_grid": gradient_grid,
-            "scale_modes": scale_modes,
             "feature_modes": feature_modes,
         },
         "policy": {
             "interpretation": "GROND thickness is row-contract effective thickness, not a direct microscope thickness unless independently calibrated.",
-            "auto_recommendation": "Use the early bare production-scale thickness for auto, pin it through LS1, and treat final-feature movement as a warning.",
+            "auto_recommendation": "Use the early bare thickness for auto, pin it through LS1, and treat final-feature movement as a warning.",
             "warning_shift_nm": float(args.warning_shift_nm),
         },
         "promoted_reference": promoted_reference,
