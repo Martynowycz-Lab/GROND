@@ -68,7 +68,6 @@ combine-as-imports = true
 "src/grond/engine/native_row_regularize.py" = ["E402", "E741"]
 "src/grond/engine/post_bloch_sigma.py" = ["E741"]
 "src/grond/engine/row_mr_report.py" = ["E741"]
-"src/grond/engine/scale_contract_replay.py" = ["E741"]
 "src/grond/engine/support_basis_scan.py" = ["E402"]
 "src/grond/refine/native_output.py" = ["E741"]
 "src/grond/refine/shelx_input.py" = ["E741"]
