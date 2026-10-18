@@ -184,8 +184,6 @@ def estimate_run_steps(prep: PrepConfig, args: argparse.Namespace) -> int:
             total += 2
         if getattr(args, "h_omit", "off") in {"on", "both", "only"}:
             total += 2
-        if getattr(args, "scale_polish", "auto") != "off":
-            total += 1
         total += _estimated_resolution_steps(args)
         total += _estimated_sg_window_scout_steps(args)
     if len(prep.datasets) > 1:

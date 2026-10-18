@@ -38,7 +38,6 @@ from grond.workflows.decision import (
     write_json,
 )
 from grond.workflows.endpoint_commands import shelxl_feedback_cmd
-from grond.workflows.endpoint_selection import run_scale_window_polish
 from grond.workflows.final_hand_selection import (
     _early_final_agreement,
     _heldout_preference,
@@ -1127,14 +1126,6 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
             dry_run=args.dry_run,
         )
 
-    scale_polish = run_scale_window_polish(
-        python,
-        final,
-        root / "scale_polish" / ds.name,
-        logs,
-        f"{ds.name}_adaptive_final",
-        args,
-    )
     resolution_limit = run_resolution_limit_gate(
         python,
         {ds.name: final},
@@ -1182,7 +1173,6 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
         "endpoint_feedback_run": str(endpoint_feedback_run) if endpoint_feedback_run else "",
         "post_feedback_hand_promotion": post_feedback_hand_promotion,
         "final_row_model_contract": final_row_model_contract,
-        "scale_polish": scale_polish,
         "resolution_limit": resolution_limit,
         "sg_window_scout": sg_window_scout,
         "screen_run": str(screen),
@@ -1199,7 +1189,6 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
         "absolute_structure_diagnostic": absolute_structure_diagnostic,
         "post_feedback_hand_promotion": post_feedback_hand_promotion,
         "final_row_model_contract": final_row_model_contract,
-        "scale_polish": scale_polish,
         "resolution_limits": {ds.name: resolution_limit},
         "sg_window_scout": {ds.name: sg_window_scout},
         "decision_tree": str(root / "decisions" / ds.name / "decision_tree.json"),
@@ -1326,14 +1315,6 @@ def run_single(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pa
             f"{ds.name}_final_noH",
             dry_run=args.dry_run,
         )
-    scale_polish = run_scale_window_polish(
-        python,
-        final,
-        root / "scale_polish" / ds.name,
-        logs,
-        f"{ds.name}_final",
-        args,
-    )
     resolution_limit = run_resolution_limit_gate(
         python,
         {ds.name: final},
@@ -1361,7 +1342,6 @@ def run_single(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pa
         "no_h_run": str(no_h_run) if no_h_run else "",
         "model": final_model,
         "absolute_structure_diagnostic": absolute_structure_diagnostic,
-        "scale_polish": scale_polish,
         "resolution_limits": {ds.name: resolution_limit},
         "sg_window_scout": {ds.name: sg_window_scout},
     }

@@ -11,7 +11,7 @@ from .run_physics import add_backend, add_basis, add_geometry, add_nuisance
 from .run_refinement import (
     add_dataset_policy,
     add_resolution,
-    add_scale_polish,
+    add_scale_contract_selection,
     add_scales_and_screening,
     add_structure_updates,
 )
@@ -30,7 +30,7 @@ def add_common_run_args(ap: argparse.ArgumentParser, *, expose_lambda_controls: 
     add_structure_updates(ap)
     add_geometry(ap)
     add_endpoints(ap, expose_lambda_controls=expose_lambda_controls)
-    add_scale_polish(ap)
+    add_scale_contract_selection(ap)
     add_resolution(ap)
     add_dataset_policy(ap)
     add_nuisance(ap)

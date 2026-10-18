@@ -235,16 +235,9 @@ def register_manual(sub: argparse._SubParsersAction) -> None:
 
     p_manual_scales = manual_stages.add_parser(
         "scales",
-        help="Audit compact frame/detector scale models without silently changing the selected endpoint.",
-        description=(
-            "Fit compact scale candidates to the frozen selected rows. The report separates frame and detector "
-            "parameter counts. This stage is audit-only until a compact contract is explicitly replayed."
-        ),
+        help="Record that the full pinned frame scales stay applied (GROND has no compact-scale audit).",
     )
     add_manual_compute_args(p_manual_scales)
-    p_manual_scales.add_argument(
-        "--skip", action="store_true", help="Keep full pinned scales and skip compact-scale diagnostics."
-    )
     p_manual_scales.set_defaults(func=cmd_manual)
 
     p_manual_finish = manual_stages.add_parser(

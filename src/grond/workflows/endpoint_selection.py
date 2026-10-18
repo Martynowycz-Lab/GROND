@@ -26,7 +26,7 @@ from grond.workflows.endpoint_chooser import write_publication_endpoint_choice
 from grond.workflows.endpoint_commands import legacy_handoff_conflicts
 from grond.workflows.nuisance_policy import resolved_post_bloch_sigma_policy
 from grond.workflows.report_commands import publication_report_cmd
-from grond.workflows.scale_model_policy import resolved_endpoint_calibration_mode, resolved_scale_polish_mode
+from grond.workflows.scale_model_policy import resolved_endpoint_calibration_mode
 
 
 def run_publication_report(python: str, prep: PrepConfig, result: dict, args: argparse.Namespace, logs: Path) -> dict:
@@ -399,100 +399,4 @@ def run_endpoint_calibration(prep: PrepConfig, result: dict, args: argparse.Name
         "report": str((out_dir / "REPORT.md").resolve()),
         "endpoint_csv": str((out_dir / "scale_contract_endpoint_replay.csv").resolve()),
         "publication_selection": selection,
-    }
-
-
-def run_scale_window_polish(
-    python: str, run_dir: Path, out_dir: Path, logs: Path, label: str, args: argparse.Namespace
-) -> dict:
-    """Run the post-hoc scale-window compression gate for a finished row table."""
-
-    mode, off_reason = resolved_scale_polish_mode(args)
-    if mode == "off":
-        return {"status": "disabled", **({"reason": off_reason} if off_reason else {})}
-    row_table = run_dir / "native_dyn_calc.csv"
-    summary = run_dir / "summary.json"
-    if args.dry_run:
-        return {"status": "dry_run", "row_table": str(row_table), "out_dir": str(out_dir)}
-    if not row_table.exists():
-        return {"status": "missing_row_table", "row_table": str(row_table)}
-    out_dir.mkdir(parents=True, exist_ok=True)
-    cmd = [
-        python,
-        str(engine_script("scale_compression_polish.py")),
-        "--row-table",
-        str(row_table),
-        "--summary",
-        str(summary),
-        "--out-dir",
-        str(out_dir),
-        "--title",
-        f"GROND scale-window polish: {label}",
-        "--group-strides",
-        "1",
-        "--window-scan-deg",
-        str(getattr(args, "scale_polish_window_deg", 5.0)),
-        "--detector-bins",
-        getattr(args, "scale_polish_detector_bins", "0,2,4,8"),
-        "--detector-ridge",
-        str(getattr(args, "detector_scale_ridge", 0.05)),
-        "--detector-smoothness",
-        str(getattr(args, "detector_scale_smoothness", 0.10)),
-        "--detector-min-rows",
-        str(getattr(args, "detector_scale_min_rows", 20)),
-        "--detector-min-holdout-improvement",
-        str(getattr(args, "detector_scale_min_holdout_improvement", 0.002)),
-        "--detector-required-improved-splits",
-        str(getattr(args, "detector_scale_required_improved_splits", 2)),
-        "--detector-max-bloch-gain-loss",
-        str(getattr(args, "detector_scale_max_bloch_gain_loss", 0.002)),
-        "--detector-min-field-correlation",
-        str(getattr(args, "detector_scale_min_field_correlation", 0.50)),
-        "--detector-max-field-log-rms",
-        str(getattr(args, "detector_scale_max_field_log_rms", 0.10)),
-        "--scale-objective",
-        getattr(args, "scale_polish_objective", "row_mr"),
-        "--tolerance",
-        str(getattr(args, "scale_polish_tolerance", 0.01)),
-        "--selection-metrics",
-        getattr(
-            args,
-            "scale_polish_selection_metrics",
-            "free_Rall,work_Rall",
-        ),
-        "--frame-models",
-        getattr(args, "scale_polish_frame_models", "adaptive,fixed"),
-        "--adaptive-frame-counts",
-        getattr(args, "scale_polish_adaptive_counts", "auto"),
-    ]
-    if getattr(args, "scale_polish_scan_offsets", False):
-        cmd.append("--scan-offsets")
-    if getattr(args, "detector_scale_independent_calibration", False):
-        cmd.append("--detector-independent-calibration")
-    try:
-        run_logged(cmd, logs, f"{safe_label(label)}_scale_window_polish", dry_run=False)
-    except subprocess.CalledProcessError as exc:
-        if mode == "on":
-            raise
-        return {"status": "failed", "returncode": exc.returncode, "command": exc.cmd, "out_dir": str(out_dir)}
-    summary_payload = try_read_json(out_dir / "scale_compression_summary.json")
-    selected = summary_payload.get("selected")
-    selected_output = summary_payload.get("selected_output")
-    widest = summary_payload.get("selected_widest")
-    return {
-        "status": "accepted" if selected else "diagnostic_only",
-        "out_dir": str(out_dir),
-        "report": str((out_dir / "REPORT.md").resolve()),
-        "candidate_csv": str((out_dir / "scale_compression_candidates.csv").resolve()),
-        "selected_compact_run": str((out_dir / "selected_compact_run").resolve())
-        if (out_dir / "selected_compact_run").exists()
-        else "",
-        "selected_strict_run": str((out_dir / "selected_strict_run").resolve())
-        if (out_dir / "selected_strict_run").exists()
-        else "",
-        "selected": selected or {},
-        "selected_output": selected_output or {},
-        "baseline": summary_payload.get("baseline") or {},
-        "selected_information": summary_payload.get("selected_information") or {},
-        "selected_widest": widest or {},
     }

@@ -146,8 +146,6 @@ def _configure_static_pets_auto(
     force("frame_offset_grid", "0")
     force("group_width_grid", "999,10,5,3,2,1")
     force("detector_scale_bins", "0")
-    force("scale_polish", "off")
-    force("scale_polish_detector_bins", "0")
     # PETS exact rows have no continuous scan angle for P-spline scales; keep compact angular groups.
     force("scale_model", "per-frame")
     force("row_resolution_b_grid", "0.0")
@@ -333,26 +331,6 @@ def cmd_run(args: argparse.Namespace) -> int:
         },
         "scale_model": scale_model_policy,
         "nuisance_selection": nuisance_selection_policy,
-        "scale_polish": {
-            "mode": args.scale_polish,
-            "frame_models": args.scale_polish_frame_models,
-            "adaptive_counts": args.scale_polish_adaptive_counts,
-            "window_deg": args.scale_polish_window_deg,
-            "detector_bins": args.scale_polish_detector_bins,
-            "detector_ridge_to_unity": args.detector_scale_ridge,
-            "detector_spatial_smoothness": args.detector_scale_smoothness,
-            "detector_minimum_rows_per_tile": args.detector_scale_min_rows,
-            "detector_minimum_holdout_improvement": args.detector_scale_min_holdout_improvement,
-            "detector_required_improved_splits": args.detector_scale_required_improved_splits,
-            "detector_maximum_bloch_gain_loss": args.detector_scale_max_bloch_gain_loss,
-            "detector_minimum_field_correlation": args.detector_scale_min_field_correlation,
-            "detector_maximum_field_log_rms": args.detector_scale_max_field_log_rms,
-            "detector_independent_calibration": args.detector_scale_independent_calibration,
-            "objective": args.scale_polish_objective,
-            "tolerance": args.scale_polish_tolerance,
-            "selection_metrics": args.scale_polish_selection_metrics,
-            "scan_offsets": args.scale_polish_scan_offsets,
-        },
         "multi_scale_contract_selection": {
             "mode": args.multi_scale_contract_selection,
             "minimum_scale_reduction": args.multi_scale_min_reduction,

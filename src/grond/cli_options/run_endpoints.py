@@ -23,7 +23,7 @@ def add_endpoints(ap: argparse.ArgumentParser, *, expose_lambda_controls: bool) 
         "--scale-smoothness",
         type=float,
         default=0.0,
-        help="Experimental L2 frame-scale smoothness coefficient. Default 0 keeps per-group scales independent; GROND's default parameter reduction is the post-hoc scale-polish gate.",
+        help="Experimental L2 frame-scale smoothness coefficient. Default 0 keeps per-group scales independent.",
     )
     ap.add_argument(
         "--endpoint-b-grid",

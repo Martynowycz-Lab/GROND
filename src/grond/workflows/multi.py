@@ -22,7 +22,6 @@ from grond.workflows.dataset_gates import (
 )
 from grond.workflows.dataset_policy import policy_by_name, write_policy_weighted_runs
 from grond.workflows.decision import apply_preflight, preflight_dataset, thickness_polish_nuisance, write_json
-from grond.workflows.endpoint_selection import run_scale_window_polish
 from grond.workflows.final_hand_selection import (
     hand_decision_settings,
     run_early_elastic_hand_selection,
@@ -469,7 +468,6 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
         else:
             structure_feedback = {"status": "unsupported_strategy", "strategy": structure_strategy}
     final_runs: dict[str, Path] = {}
-    scale_polish_runs: dict[str, dict] = {}
     resolution_limits: dict[str, dict] = {}
     sg_window_scout_runs: dict[str, dict] = {}
     for ds in prep.datasets:
@@ -495,14 +493,6 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
                 dry_run=args.dry_run,
             )
         final_runs[ds.name] = run_dir
-        scale_polish_runs[ds.name] = run_scale_window_polish(
-            python,
-            run_dir,
-            root / "scale_polish" / ds.name,
-            logs,
-            f"{ds.name}_final",
-            args,
-        )
         resolution_limits[ds.name] = run_resolution_limit_gate(
             python,
             {ds.name: run_dir},
@@ -622,18 +612,9 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
             )
             switched_runs[ds.name] = selected_run
         final_runs = switched_runs
-        scale_polish_runs = {}
         resolution_limits = {}
         for ds in prep.datasets:
             run_dir = final_runs[ds.name]
-            scale_polish_runs[ds.name] = run_scale_window_polish(
-                python,
-                run_dir,
-                root / "scale_polish_selected_hand" / ds.name,
-                logs,
-                f"{ds.name}_final_selected_hand",
-                args,
-            )
             resolution_limits[ds.name] = run_resolution_limit_gate(
                 python,
                 {ds.name: run_dir},
@@ -689,15 +670,10 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
         }
         write_json(root / "decisions" / "shared_absolute_structure_decision.json", shared_hand_decision)
     combined_input_runs, publication_runs, scale_contract_selection = run_multi_scale_contract_selection(
-        python=python,
         full_runs=final_runs,
         full_input_runs=full_input_runs,
         full_publication_runs=full_publication_runs,
-        scale_polish=scale_polish_runs,
-        final_dataset_policy=final_dataset_policy,
-        final_model=final_model,
         root=root,
-        logs=logs,
         args=args,
     )
     combined = root / "runs" / "combined"
@@ -748,7 +724,6 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
         },
         "structure_update_strategy": structure_strategy,
         "structure_feedback": structure_feedback,
-        "scale_polish": scale_polish_runs,
         "scale_contract_selection": scale_contract_selection,
         "resolution_limits": resolution_limits,
         "merged_resolution_limit": merged_resolution_limit,

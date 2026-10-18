@@ -285,95 +285,25 @@ def manual_feedback(args) -> int:
 
 
 def manual_scales(args) -> int:
-    """Run the ``scales`` stage: audit compact scale models per crystal; the full pinned scales stay applied."""
+    """Run the ``scales`` stage: record that the full pinned frame scales stay applied (no compact-scale audit)."""
 
     workflow_path, workflow = _load_workflow(args)
-    feedback = _require_stage(workflow, "feedback")
+    _require_stage(workflow, "feedback")
     root = Path(workflow["root"])
     out = root / "05_scales"
     out.mkdir(parents=True, exist_ok=True)
-    if args.skip:
-        handoff = _record_stage(
-            workflow_path,
-            workflow,
-            name="scales",
-            output_dir=out,
-            status="skipped",
-            outputs={
-                "datasets": {},
-                "application": "not run; full pinned scales remain active",
-                "headline": {"application": "full pinned frame scales retained; compact audit skipped"},
-            },
-            command={"status": "skipped_user_choice"},
-            next_command=_next_command("finish", workflow_path, workflow=workflow),
-        )
-        _print_handoff(handoff)
-        return 0
-    commands: dict[str, object] = {}
-    outputs: dict[str, object] = {}
-    for name, run_text in feedback["outputs"]["selected_row_runs"].items():
-        run = Path(run_text)
-        dataset_out = out / name
-        command_line = [
-            *_child_base(args),
-            "scale-polish",
-            "--row-table",
-            str(run / "native_dyn_calc.csv"),
-            "--summary",
-            str(run / "summary.json"),
-            "--out-dir",
-            str(dataset_out),
-            *_tool_args(args),
-        ]
-        commands[name] = _run_stage_command(command_line, verbose=_verbose_child_output(args))
-        summary_path = dataset_out / "scale_compression_summary.json"
-        summary = _read_json(summary_path)
-        selected = summary.get("selected") if isinstance(summary.get("selected"), Mapping) else {}
-        outputs[name] = {
-            "summary": str(summary_path),
-            "report": str(dataset_out / "REPORT.md"),
-            "selected": {
-                key: selected.get(key)
-                for key in (
-                    "name",
-                    "frame_model",
-                    "detector_bins",
-                    "scale_params",
-                    "group_scale_params",
-                    "detector_scale_params",
-                    "Robs",
-                    "Rall",
-                    "wRall",
-                    "within_strict",
-                )
-            },
-        }
-    compact_frame_total = sum(
-        int((row.get("selected") or {}).get("group_scale_params") or 0)
-        for row in outputs.values()
-        if isinstance(row, Mapping)
-    )
-    compact_detector_total = sum(
-        int((row.get("selected") or {}).get("detector_scale_params") or 0)
-        for row in outputs.values()
-        if isinstance(row, Mapping)
-    )
     handoff = _record_stage(
         workflow_path,
         workflow,
         name="scales",
         output_dir=out,
-        status="ready",
+        status="skipped",
         outputs={
-            "datasets": outputs,
-            "application": "audit_only; full pinned scales remain active",
-            "headline": {
-                "compact_audit": f"{compact_frame_total} frame + {compact_detector_total} detector parameters",
-                "application": "audit only; endpoint still uses the full pinned scale grouping",
-            },
+            "datasets": {},
+            "application": "not run; full pinned scales remain active",
+            "headline": {"application": "full pinned frame scales retained; compact audit skipped"},
         },
-        command={"datasets": commands},
-        warnings=["Scale compression is audited but not silently applied to the shared endpoint."],
+        command={"status": "compact_scale_audit_not_available"},
         next_command=_next_command("finish", workflow_path, workflow=workflow),
     )
     _print_handoff(handoff)

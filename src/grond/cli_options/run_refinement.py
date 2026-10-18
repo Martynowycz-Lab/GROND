@@ -26,9 +26,8 @@ def add_scales_and_screening(ap: argparse.ArgumentParser) -> None:
         default="pspline",
         help=(
             "Frame-scale family fitted in every native stage. pspline (default): smooth P-spline in scan angle "
-            "on the scale-fit rows, n_basis and lambda chosen per crystal by inner orbit CV; scale polish, "
-            "compact scale-contract selection and endpoint-calibration replays are then off. per-frame: free "
-            "per-frame scales with post-hoc compression."
+            "on the scale-fit rows, n_basis and lambda chosen per crystal by inner orbit CV; endpoint-calibration "
+            "replays are then off. per-frame: free per-frame scales."
         ),
     )
     ap.add_argument(
@@ -54,65 +53,14 @@ def add_structure_updates(ap: argparse.ArgumentParser) -> None:
     )
 
 
-def add_scale_polish(ap: argparse.ArgumentParser) -> None:
-    """Add scale polish options in the established order."""
+def add_scale_contract_selection(ap: argparse.ArgumentParser) -> None:
+    """Add the multi-dataset scale-contract options (recorded in the decision; the full contract is kept)."""
 
-    ap.add_argument(
-        "--scale-polish",
-        choices=["auto", "on", "off"],
-        default="auto",
-        help="Run a post-hoc scale-window compression gate after the final Bloch row table.",
-    )
-    ap.add_argument(
-        "--scale-polish-window-deg",
-        type=float,
-        default=5.0,
-        help="Maximum physical frame-window width tested by the scale-polish gate.",
-    )
-    ap.add_argument(
-        "--scale-polish-frame-models",
-        default="adaptive,fixed",
-        help="Frame-scale compression models tested by the scale-polish gate.",
-    )
-    ap.add_argument(
-        "--scale-polish-adaptive-counts",
-        default="auto",
-        help="Adaptive neighboring-frame segment counts for scale polish; percentages such as 50%% are accepted.",
-    )
-    ap.add_argument(
-        "--scale-polish-detector-bins",
-        default="0,2,4,8",
-        help="Detector flat-field grids tested on frozen predictions. Automatic promotion uses the smallest detector field that earns the validation gates; 8x8 remains diagnostic without independent calibration.",
-    )
-    ap.add_argument(
-        "--scale-polish-objective",
-        choices=["row_mr", "native", "sigma"],
-        default="row_mr",
-        help="Fit compact frame scales on work rows with the JANA-style row weight by default.",
-    )
-    ap.add_argument("--scale-polish-tolerance", type=float, default=0.01)
-    ap.add_argument(
-        "--scale-polish-selection-metrics",
-        default="free_Rall,work_Rall",
-        help=(
-            "Metrics protected when selecting compact scales. Default: held-out and work JANA-style "
-            "Rall; wRall is a secondary report/tie-break and endpoint/native wR2 are excluded."
-        ),
-    )
-    ap.add_argument(
-        "--scale-polish-scan-offsets",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Test all block-boundary offsets in the scale-polish gate.",
-    )
     ap.add_argument(
         "--multi-scale-contract-selection",
         choices=["auto", "off"],
         default="auto",
-        help=(
-            "For multi-dataset runs, replay strict compact per-crystal scales through the complete combined "
-            "endpoint and promote the smallest contract that passes physics, held-out, coverage, and SHELXL gates."
-        ),
+        help="Multi-dataset scale-contract decision record; the full per-crystal scale contract is always kept.",
     )
     ap.add_argument(
         "--multi-scale-min-reduction",

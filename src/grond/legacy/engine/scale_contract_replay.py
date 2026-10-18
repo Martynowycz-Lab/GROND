@@ -11,6 +11,7 @@ the Bloch basis.
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import math
 import re
@@ -41,31 +42,6 @@ try:
         write_hkl,
     )
     from .post_bloch_sigma import fit_uniform_z_rms_sigma_scale, scale_row_sigmas
-    from .scale_compression_polish import (
-        adaptive_segment_groups,
-        baseline_scale_log_by_fit,
-        baseline_scale_log_by_row,
-        coarsen_detector,
-        coarsen_groups,
-        col,
-        count_scale_params,
-        detector_scale_policy_diagnostics,
-        fit_group_detector_scales,
-        fit_group_scales,
-        infer_detector_base,
-        infer_group_width_deg,
-        information_criteria,
-        load_baseline_counts,
-        log_scale_step_rms,
-        native_metrics,
-        native_weight_from_summary,
-        read_json,
-        read_rows,
-        row_mr_metrics,
-        source_sigma_array,
-        split_masks,
-        write_rows,
-    )
 except ImportError:  # pragma: no cover - direct script execution
     from bloch_engine import sha256
     from endpoint_modulation import modulation_manifest_fields
@@ -88,32 +64,82 @@ except ImportError:  # pragma: no cover - direct script execution
         write_hkl,
     )
     from post_bloch_sigma import fit_uniform_z_rms_sigma_scale, scale_row_sigmas
-    from scale_compression_polish import (
-        adaptive_segment_groups,
-        baseline_scale_log_by_fit,
-        baseline_scale_log_by_row,
-        coarsen_detector,
-        coarsen_groups,
-        col,
-        count_scale_params,
-        detector_scale_policy_diagnostics,
-        fit_group_detector_scales,
-        fit_group_scales,
-        infer_detector_base,
-        infer_group_width_deg,
-        information_criteria,
-        load_baseline_counts,
-        log_scale_step_rms,
-        native_metrics,
-        native_weight_from_summary,
-        read_json,
-        read_rows,
-        row_mr_metrics,
-        source_sigma_array,
-        split_masks,
-        write_rows,
-    )
 
+# The compact-scale fitting helpers (the scale-window polish that used to share them is gone).
+from grond.regularize.compression_policy import detector_scale_policy_diagnostics  # noqa: E402
+from grond.regularize.compression_topology import (  # noqa: E402
+    adaptive_segment_groups,
+    baseline_scale_log_by_fit,
+    baseline_scale_log_by_row,
+    coarsen_detector,
+    coarsen_groups,
+    count_scale_params,
+    infer_detector_base,
+    infer_group_width_deg,
+    log_scale_step_rms,
+    split_masks,
+)
+from grond.regularize.compression_weights import (  # noqa: E402
+    col,
+    fit_group_detector_scales,
+    fit_group_scales,
+    information_criteria,
+    native_metrics,
+    row_mr_metrics,
+    safe_float,
+    source_sigma_array,
+)
+
+
+def read_rows(path: Path) -> list[dict[str, str]]:
+    """Read a CSV file into a list of row dicts; raise if it has no rows."""
+
+    with path.open(newline="") as f:
+        rows = list(csv.DictReader(f))
+    if not rows:
+        raise ValueError(f"No rows found in {path}")
+    return rows
+
+
+def write_rows(path: Path, rows: list[dict[str, object]], fieldnames: list[str]) -> None:
+    """Write rows to a CSV with the given header, ignoring extra keys; create the parent folder."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def read_json(path: Path) -> dict:
+    """Read a JSON file, or return an empty dict if it does not exist."""
+
+    if not path.exists():
+        return {}
+    return json.loads(path.read_text())
+
+
+def load_baseline_counts(summary: dict, n_rows: int) -> tuple[int, int, int]:
+    """Return the baseline (scale, total, physical) parameter counts from the native summary.
+
+    The total is the row count minus the recorded degrees of freedom when present, else the scale count.
+    """
+
+    best = summary.get("best_native") or {}
+    scale_count = int(safe_float(best.get("scale_count"), 0.0))
+    dof = safe_float((((best.get("metrics") or {}).get("all") or {}).get("dyn") or {}).get("dof"), float("nan"))
+    total = int(max(0, round(n_rows - dof))) if np.isfinite(dof) else scale_count
+    physical = max(0, total - scale_count)
+    return scale_count, total, physical
+
+
+def native_weight_from_summary(summary: dict, cli_a: float, cli_b: float) -> tuple[float, float]:
+    """Return the native WGHT (a, b): finite command-line values, else the summary's, else 0."""
+
+    weight = (summary.get("best_native") or {}).get("native_weight") or {}
+    a = cli_a if np.isfinite(cli_a) else safe_float(weight.get("a"), 0.0)
+    b = cli_b if np.isfinite(cli_b) else safe_float(weight.get("b"), 0.0)
+    return float(a), float(b)
 
 def parse_specs(text: str) -> list[str]:
     """Split the comma-separated scale specs, defaulting to ['baseline']."""

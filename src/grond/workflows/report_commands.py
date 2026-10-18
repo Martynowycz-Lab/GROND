@@ -165,47 +165,8 @@ def publication_report_cmd(
     elif result.get("primary_run"):
         name = prep.datasets[0].name if prep.datasets else "dataset"
         cmd += ["--run", f"{name}={result['primary_run']}"]
-    cmd += scale_polish_report_args(prep, result)
     cmd += resolution_limit_report_args(result)
     return cmd
-
-
-def scale_polish_report_args(prep: PrepConfig, result: dict) -> list[str]:
-    """Return final-table arguments for compact scale-manifold summaries."""
-
-    scale_polish = result.get("scale_polish")
-    if not isinstance(scale_polish, Mapping):
-        return []
-
-    args: list[str] = []
-    if result.get("combined"):
-        scale_contract = result.get("scale_contract_selection")
-        if isinstance(scale_contract, Mapping):
-            selected_contract = str(scale_contract.get("selected_contract", "full"))
-            if selected_contract != "full":
-                projected = scale_contract.get("publication_scale_polish_summaries")
-                if not isinstance(projected, Mapping) or not projected:
-                    return []
-                for name, summary_path in projected.items():
-                    if str(summary_path).strip():
-                        args += ["--scale-polish", f"{name}={summary_path}"]
-                return args
-        publication_names = set((result.get("publication_full_runs") or result.get("publication_runs") or {}).keys())
-        for name, payload in scale_polish.items():
-            if publication_names and name not in publication_names:
-                continue
-            if not isinstance(payload, Mapping):
-                continue
-            out_dir = payload.get("out_dir")
-            if out_dir:
-                args += ["--scale-polish", f"{name}={Path(str(out_dir)) / 'scale_compression_summary.json'}"]
-        return args
-
-    out_dir = scale_polish.get("out_dir")
-    if out_dir:
-        name = prep.datasets[0].name if prep.datasets else "dataset"
-        args += ["--scale-polish", f"{name}={Path(str(out_dir)) / 'scale_compression_summary.json'}"]
-    return args
 
 
 def resolution_limit_report_args(result: dict) -> list[str]:

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import argparse
 import math
 
 import numpy as np
@@ -16,54 +15,12 @@ def str_col(rows: list[dict[str, str]], name: str, default: str = "") -> np.ndar
     return np.asarray([str(r.get(name, default)) for r in rows])
 
 
-def parse_csv_ints(text: str) -> list[int]:
-    """Parse comma-separated integers in first-seen order without repeats.
-
-    global, inf and infinite stand for 10**9, a single group.
-    """
-
-    out = []
-    for part in str(text).split(","):
-        part = part.strip()
-        if not part:
-            continue
-        if part.lower() in {"global", "inf", "infinite"}:
-            out.append(10**9)
-        else:
-            out.append(int(float(part)))
-    return sorted(set(out), key=out.index)
-
-
 def infer_group_width_deg(summary: dict) -> float:
     """Return the physical angle represented by one existing row-table group."""
 
     nui = (summary.get("best_native") or {}).get("nuisance") or {}
     value = safe_float(nui.get("group_width_deg"), float("nan"))
     return value if np.isfinite(value) and value > 0 else float("nan")
-
-
-def build_group_strides(args: argparse.Namespace, summary: dict) -> tuple[list[int], dict[str, object]]:
-    """Build group strides from explicit strides and optional physical window size."""
-
-    strides = parse_csv_ints(args.group_strides)
-    group_width_deg = infer_group_width_deg(summary)
-    scan = {
-        "enabled": bool(float(args.window_scan_deg) > 0),
-        "requested_window_scan_deg": float(args.window_scan_deg),
-        "source_group_width_deg": group_width_deg,
-        "max_stride_from_window": None,
-    }
-    if float(args.window_scan_deg) > 0:
-        if not np.isfinite(group_width_deg) or group_width_deg <= 0:
-            raise ValueError("--window-scan-deg requires best_native.nuisance.group_width_deg in the source summary")
-        max_stride = max(1, int(math.ceil(float(args.window_scan_deg) / group_width_deg)))
-        scan["max_stride_from_window"] = max_stride
-        strides.extend(range(1, max_stride + 1))
-
-    finite = sorted({int(s) for s in strides if int(s) < 10**8})
-    has_global = any(int(s) >= 10**8 for s in strides)
-    out = finite + ([10**9] if has_global else [])
-    return out, scan
 
 
 def split_masks(rows: list[dict[str, str]]) -> dict[str, np.ndarray]:
@@ -258,23 +215,3 @@ def adaptive_segment_groups(
         mapped[missing] = np.maximum(0, np.searchsorted(unique_groups, groups[missing], side="right") - 1)
         mapped[missing] = np.minimum(mapped[missing], len(segments) - 1)
     return mapped, len(segments)
-
-
-def baseline_within_group_log_rms(
-    baseline_log_scale: np.ndarray,
-    candidate_groups: np.ndarray,
-    fit_good: np.ndarray,
-) -> float:
-    """Measure how much the original fitted frame scales vary inside merged groups."""
-
-    good = fit_good & np.isfinite(baseline_log_scale) & np.isfinite(candidate_groups)
-    if np.count_nonzero(good) < 2:
-        return float("nan")
-    groups = candidate_groups[good].astype(int)
-    logs = baseline_log_scale[good]
-    _, inv = np.unique(groups, return_inverse=True)
-    counts = np.bincount(inv).astype(float)
-    sums = np.bincount(inv, weights=logs)
-    means = sums / np.maximum(counts, 1.0)
-    residual = logs - means[inv]
-    return float(np.sqrt(np.mean(residual * residual)))
