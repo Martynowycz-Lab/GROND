@@ -7,8 +7,8 @@ from pathlib import Path
 
 import numpy as np
 
+from grond.hashing import sha256_file
 from grond.legacy.engine.bloch_engine import Config, XDSBlochPort, XDSData, parse_model
-from grond.macromolecule import sha256_file
 from grond.regularize.multidataset import native_metrics_by_split
 from grond.regularize.observations import row_contract_selection, target_arrays
 from grond.regularize.prediction_cache import external_geometry_fingerprints

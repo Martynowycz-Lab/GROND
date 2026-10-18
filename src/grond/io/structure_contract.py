@@ -8,7 +8,7 @@ from pathlib import Path
 
 from grond.cli_support.execution import run_logged
 from grond.cli_support.values import DEFAULT_ELECTRON_WAVELENGTH_A, try_read_json
-from grond.macromolecule import sha256_file
+from grond.hashing import sha256_file
 from grond.paths import engine_script
 from grond.workflows.decision import write_json
 

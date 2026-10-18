@@ -1,4 +1,4 @@
-"""Expose configuration, row-template, model-check and endpoint-discovery commands."""
+"""Expose configuration, row-template and model-check commands."""
 
 from __future__ import annotations
 
@@ -8,7 +8,6 @@ from pathlib import Path
 
 from grond.io.structure_contract import check_sfac_contract
 from grond.io.tool_config import write_config_template
-from grond.refine.endpoints import endpoint_report
 
 
 def cmd_init_config(args: argparse.Namespace) -> int:
@@ -18,14 +17,13 @@ def cmd_init_config(args: argparse.Namespace) -> int:
         args.out,
         fmt=args.format,
         overwrite=bool(args.overwrite),
-        include_optional_endpoints=bool(args.with_endpoint_adapters),
     )
     print(
         json.dumps(
             {
                 "config": str(out),
                 "format": args.format,
-                "profile": "all_endpoint_adapters" if args.with_endpoint_adapters else "small_molecule",
+                "profile": "small_molecule",
             },
             indent=2,
         )
@@ -91,24 +89,3 @@ def cmd_sfac_check(args: argparse.Namespace) -> int:
         payload["out"] = str(out.resolve())
     print(json.dumps(payload, indent=2))
     return 0 if payload.get("ok") else 2
-
-
-def cmd_endpoints(args: argparse.Namespace) -> int:
-    """CLI entrypoint that reports configured model-update endpoint adapters."""
-
-    payload = endpoint_report(getattr(args, "tool_config", {}) or {})
-    if args.json:
-        print(json.dumps(payload, indent=2))
-        return 0
-    for row in payload["endpoints"]:
-        marker = "available" if row.get("available") else "missing"
-        print(f"{row['name']}: {row['status']} ({marker})")
-        print(f"  {row['description']}")
-        resolved = ((row.get("executable") or {}).get("resolved") or "").strip()
-        if resolved:
-            print(f"  executable: {resolved}")
-        if row.get("configured_command_template"):
-            print("  command: configured from grond.config.json")
-        if row.get("notes"):
-            print(f"  {row['notes']}")
-    return 0

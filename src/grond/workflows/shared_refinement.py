@@ -9,8 +9,8 @@ from pathlib import Path
 
 from grond.cli_support.execution import run_logged
 from grond.cli_support.values import try_read_json
+from grond.hashing import sha256_file
 from grond.io.config import PrepConfig
-from grond.macromolecule import sha256_file
 from grond.refine.feedback_trajectory import (
     COMPLETED_LOOP_STATUSES,
     KEEP_POLICIES,

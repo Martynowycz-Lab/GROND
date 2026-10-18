@@ -8,8 +8,8 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from grond.cli_support.values import try_read_json
+from grond.hashing import sha256_file
 from grond.io.config import PrepConfig
-from grond.macromolecule import sha256_file
 from grond.paths import engine_script
 from grond.workflows.decision import safe_float
 

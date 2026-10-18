@@ -25,7 +25,7 @@ import gemmi
 import numpy as np
 
 from grond.bloch.model import parse_model, shelx_u_cart_matrix
-from grond.macromolecule import sha256_file
+from grond.hashing import sha256_file
 from grond.maps.ccp4 import read_ccp4_map
 from grond.maps.placement import (
     PlacementOptions,

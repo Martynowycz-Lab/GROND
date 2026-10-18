@@ -41,7 +41,7 @@ INPUT_PATH_FLAGS = {
     "--shelxl",
     "--xds-dir",
 }
-OUTPUT_PATH_FLAGS = {"--out", "--out-dir", "--out-mtz", "--output", "--write-rows"}
+OUTPUT_PATH_FLAGS = {"--out", "--out-dir", "--output", "--write-rows"}
 ASSIGNMENT_PATH_FLAGS = {"--resolution-limit", "--run", "--scale-polish"}
 
 

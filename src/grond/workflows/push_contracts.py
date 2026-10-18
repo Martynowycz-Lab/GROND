@@ -10,8 +10,8 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from grond.cli_support.values import read_json, try_read_json
+from grond.hashing import sha256_file
 from grond.io.config import DatasetSpec, PrepConfig
-from grond.macromolecule import sha256_file
 from grond.validation.heldout import DEFAULT_FREE_SALT
 from grond.workflows.checkpoints import _checkpoint_path
 

@@ -42,8 +42,8 @@ from grond.bloch.splits import (
     orbit_hash_split_masks,
     shared_orbit_split_masks,
 )
+from grond.hashing import sha256_file
 from grond.io.config import PrepConfig
-from grond.macromolecule import sha256_file
 from grond.refine.shelx_input import set_active_wght_lines
 from grond.refine.shelxl_diagnostics import (
     npd_atoms_from_lst_text,

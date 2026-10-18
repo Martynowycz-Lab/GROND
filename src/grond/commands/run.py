@@ -13,10 +13,10 @@ from grond.cli_support import execution
 from grond.cli_support.execution import configure_progress, estimate_run_steps
 from grond.cli_support.tools import choose_python, external_tool_statuses, raise_for_missing_external_tools
 from grond.commands.preparation import prep_from_args
+from grond.hashing import sha256_file
 from grond.hkl_transform import parse_hkl_transform_info
 from grond.io.config import PrepConfig, write_prep
 from grond.io.structure_contract import check_sfac_contract, prepare_structure_for_legacy
-from grond.macromolecule import sha256_file
 from grond.reports.progress import _quick_progress_finish_info
 from grond.reports.quick_stats import write_quick_stats
 from grond.reports.terminal import _format_terminal_finish_summary

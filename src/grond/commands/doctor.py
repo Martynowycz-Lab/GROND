@@ -183,7 +183,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         "external_tools": {
             name: all_external_tools[name] for name in reported_tool_names if name in all_external_tools
         },
-        "showing": "all implemented endpoint adapters"
+        "showing": "all configured tools"
         if bool(getattr(args, "all_tools", False))
         else "small-molecule tools",
     }

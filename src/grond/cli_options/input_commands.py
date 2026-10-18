@@ -39,11 +39,6 @@ def register_inputs(sub: argparse._SubParsersAction) -> None:
     p_cfg = sub.add_parser("init-config", help="Write a GROND JSON/YAML external-tool config template.")
     p_cfg.add_argument("--out", default="grond.config.json")
     p_cfg.add_argument("--format", choices=["json", "yaml"], default="json")
-    p_cfg.add_argument(
-        "--with-endpoint-adapters",
-        action="store_true",
-        help="Also include optional Phenix, REFMAC, Servalcat, and custom endpoint-adapter blocks.",
-    )
     p_cfg.add_argument("--overwrite", action="store_true")
     p_cfg.set_defaults(func=cmd_init_config)
 

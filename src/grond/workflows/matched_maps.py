@@ -12,7 +12,7 @@ import gemmi
 import numpy as np
 
 from grond.bloch.model import fcalc_res, parse_model
-from grond.macromolecule import sha256_file
+from grond.hashing import sha256_file
 from grond.maps import native_dynamic as native
 from grond.maps.ccp4 import read_ccp4_map
 from grond.regularize.multidataset import canonical_model_friedel

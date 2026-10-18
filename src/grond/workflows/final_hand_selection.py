@@ -11,9 +11,9 @@ import numpy as np
 
 from grond.cli_support.execution import run_logged
 from grond.cli_support.values import read_json, try_read_json
+from grond.hashing import sha256_file
 from grond.io.config import PrepConfig
 from grond.io.structure_contract import absolute_structure_policy, is_shelx_model, make_alternate_hand_model
-from grond.macromolecule import sha256_file
 from grond.paths import engine_script
 from grond.reports.console import console_enabled, report_hand_decision
 from grond.workflows.crystal_parameters import crystal_arguments

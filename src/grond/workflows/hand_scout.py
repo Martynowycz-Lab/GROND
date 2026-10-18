@@ -6,8 +6,8 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from grond.cli_support.values import try_read_json
+from grond.hashing import sha256_file
 from grond.io.config import DatasetSpec, PrepConfig
-from grond.macromolecule import sha256_file
 
 
 def _dataset_decision_identity(prep: PrepConfig, ds: DatasetSpec) -> dict[str, object]:

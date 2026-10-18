@@ -17,13 +17,13 @@ from grond.cli_support.execution import (
     transform_scout_worker_count,
 )
 from grond.cli_support.values import read_json
+from grond.hashing import sha256_file
 from grond.hkl_transform import (
     absolute_configuration_claim_contract,
     parse_hkl_transform_info,
     source_orientation_contract,
 )
 from grond.io.config import DatasetSpec, PrepConfig
-from grond.macromolecule import sha256_file
 from grond.workflows.decision import (
     ALL_PROPER_SIGNED_PERMUTATIONS,
     expand_transform_candidates,

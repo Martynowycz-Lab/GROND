@@ -8,9 +8,9 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from grond.cli_support.values import try_read_json
+from grond.hashing import sha256_file
 from grond.io.config import PrepConfig
 from grond.legacy.engine.shelx_diagnostics import parse_shelx_lst_pathologies
-from grond.macromolecule import sha256_file
 from grond.reports.values import _quick_float, _quick_int, _quick_number
 from grond.workflows.conventional_baseline import _fresh_baseline_shelxl, _validated_fresh_conventional_baseline
 from grond.workflows.model_selection import dataset_baseline_hkl

@@ -7,8 +7,8 @@ import json
 import math
 from pathlib import Path
 
+from grond.hashing import sha256_file
 from grond.io.config import PrepConfig
-from grond.macromolecule import sha256_file
 from grond.workflows.crystal_parameters import dataset_values, resolve_crystal_parameters
 
 THICKNESS_FIELDS = ("thickness_A", "thickness_model", "thickness_grad_frac", "thickness_sigma_frac")

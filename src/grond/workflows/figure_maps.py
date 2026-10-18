@@ -23,7 +23,7 @@ from pathlib import Path
 
 from grond.cli_support.tools import external_tool_statuses
 from grond.cli_support.values import try_read_json
-from grond.macromolecule import sha256_file
+from grond.hashing import sha256_file
 from grond.maps.model_box import (
     DEFAULT_MODEL_BOX_MARGIN_A,
     native_package_entries,
