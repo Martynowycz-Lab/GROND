@@ -26,7 +26,6 @@ from grond.workflows.push_contracts import (
     prep_from_multi_checkpoint,
     refuse_single_push_split_scale_overrides,
     resolve_dataset_row_contracts,
-    resolve_dataset_scale_specs,
     resolve_push_continuation_contract,
     single_push_handoff_args,
     warn_historical_continuation_defaults,
@@ -67,7 +66,6 @@ def cmd_push_endpoint_multi(
     args.dataset_row_contracts = resolve_dataset_row_contracts(
         getattr(args, "dataset_row_contract", None), prep.datasets
     )
-    args.dataset_scale_specs = resolve_dataset_scale_specs(getattr(args, "dataset_scale_spec", None), prep.datasets)
     row_contract_policy = (
         dataset_policy_from_row_contracts(args.dataset_row_contracts, prep.datasets)
         if args.dataset_row_contracts
@@ -97,12 +95,10 @@ def cmd_push_endpoint_multi(
             "nuisance_datasets": sorted(nuisance),
             "crystal_parameters": args.crystal_parameters,
             "dataset_row_contracts": dict(args.dataset_row_contracts),
-            "dataset_scale_specs": dict(args.dataset_scale_specs),
             "structure_dataset_policy_source": "immutable_row_contract" if row_contract_policy else "checkpoint",
             "multi_endpoint_merge_key": args.multi_endpoint_merge_key,
             "continuation_contract": args.continuation_contract,
             "shared_loop": "per-dataset Bloch rows -> GROND-side corrected-HKL merge -> one shared SHELXL LS step -> repeat",
-            "compact_scale_reselection_performed": False,
             "tool_config": getattr(args, "tool_config_path", ""),
             "external_tools": external_tool_statuses(args),
         }
@@ -129,16 +125,8 @@ def cmd_push_endpoint_multi(
         "structure_feedback": feedback,
         "crystal_parameters": args.crystal_parameters,
         "dataset_row_contracts": dict(args.dataset_row_contracts),
-        "dataset_scale_specs": dict(args.dataset_scale_specs),
         "structure_dataset_policy": dict(policy),
         "continuation_contract": args.continuation_contract,
-        "compact_scale_reselection_performed": False,
-        "compact_scale_contract_replayed": bool(args.dataset_scale_specs),
-        "scale_contract_note": (
-            "The push replays the declared compact scale topology after each Bloch calculation; it does not select a new topology."
-            if args.dataset_scale_specs
-            else "The push refit the pinned full grouping. Run compact-scale selection separately on the selected safe cycle."
-        ),
     }
     (out_dir / "push_endpoint_summary.json").write_text(json.dumps(result, indent=2, allow_nan=True) + "\n")
     report = write_multi_push_endpoint_report(out_dir, best_cycle_tolerance=float(args.best_cycle_tolerance))

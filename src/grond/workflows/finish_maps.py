@@ -23,7 +23,7 @@ from grond.maps.model_box import (
 )
 from grond.maps.native_dynamic import NativeDynamicMapOptions, write_native_dynamic_map_package
 from grond.maps.placement import PlacementOptions
-from grond.reports.endpoints import _chooser_publication_endpoint, _endpoint_calibration_publication_endpoint
+from grond.reports.endpoints import _chooser_publication_endpoint
 from grond.reports.values import _quick_final_run, _quick_load_run_summary
 from grond.workflows.conventional_baseline import (
     _endpoint_baseline_no_harm_gate,
@@ -61,9 +61,6 @@ def _publication_endpoint_from_result(result: Mapping[str, object]) -> Mapping[s
             return {}
         if endpoint.get("promotion_fields_ok") is not True:
             return {}
-        source_kind = str(endpoint.get("source_kind") or "")
-        if result.get("combined") and "endpoint_calibration" in source_kind:
-            return {}
         final_summary = _quick_load_run_summary(_quick_final_run(result))
         fresh_baseline = _validated_fresh_conventional_baseline(result)
         gate = _endpoint_baseline_no_harm_gate(
@@ -78,11 +75,6 @@ def _publication_endpoint_from_result(result: Mapping[str, object]) -> Mapping[s
         checked["baseline_no_harm_gate"] = gate
         return checked
 
-    calibration_endpoint = _endpoint_calibration_publication_endpoint(result)
-    if calibration_endpoint:
-        checked_calibration = no_harm_checked(calibration_endpoint)
-        if checked_calibration:
-            return checked_calibration
     chooser_endpoint = _chooser_publication_endpoint(result)
     if chooser_endpoint:
         return no_harm_checked(chooser_endpoint)

@@ -1,9 +1,8 @@
-"""Run endpoint calibration and choose a usable, provenance-bound final endpoint."""
+"""Choose a usable, provenance-bound final endpoint and write the publication tables."""
 
 from __future__ import annotations
 
 import argparse
-import subprocess
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -11,22 +10,14 @@ from grond.cli_support import execution
 from grond.cli_support.execution import run_logged
 from grond.cli_support.values import try_read_json
 from grond.io.config import PrepConfig
-from grond.paths import engine_script
-from grond.workflows.conventional_baseline import (
-    _endpoint_baseline_no_harm_gate,
-    _validated_fresh_conventional_baseline,
-)
-from grond.workflows.decision import safe_float, safe_label, write_json
+from grond.workflows.conventional_baseline import _validated_fresh_conventional_baseline
+from grond.workflows.decision import safe_float, write_json
 from grond.workflows.endpoint_candidates import (
-    _endpoint_calibration_chooser_candidate,
     _multi_feedback_endpoint_candidates,
     _publication_model_endpoint_candidate,
 )
 from grond.workflows.endpoint_chooser import write_publication_endpoint_choice
-from grond.workflows.endpoint_commands import legacy_handoff_conflicts
-from grond.workflows.nuisance_policy import resolved_post_bloch_sigma_policy
 from grond.workflows.report_commands import publication_report_cmd
-from grond.workflows.scale_model_policy import resolved_endpoint_calibration_mode
 
 
 def run_publication_report(python: str, prep: PrepConfig, result: dict, args: argparse.Namespace, logs: Path) -> dict:
@@ -148,9 +139,6 @@ def run_publication_endpoint_chooser(prep: PrepConfig, result: dict, args: argpa
     if not runs and not combined_run:
         return {"status": "no_endpoint_runs"}
     extra_candidates = []
-    calibration_candidate = _endpoint_calibration_chooser_candidate(result)
-    if calibration_candidate:
-        extra_candidates.append(calibration_candidate)
     model_candidate = _publication_model_endpoint_candidate(result)
     if model_candidate:
         extra_candidates.append(model_candidate)
@@ -168,8 +156,6 @@ def run_publication_endpoint_chooser(prep: PrepConfig, result: dict, args: argpa
         extra_candidates=extra_candidates,
         min_hkl_safe_factor=getattr(args, "publication_endpoint_min_hkl_safe_factor", 0.25),
         max_modulation_p95=getattr(args, "publication_endpoint_max_modulation_p95", 20.0),
-        publication_goof_min=getattr(args, "endpoint_calibration_goof_min", 0.85),
-        publication_goof_max=getattr(args, "endpoint_calibration_goof_max", 1.15),
         allow_npd=bool(getattr(args, "publication_allow_npd", False)),
         combined_baseline_r1_all=(
             safe_float(combined_baseline.get("R1_all"), float("nan")) if combined_baseline else None
@@ -178,14 +164,6 @@ def run_publication_endpoint_chooser(prep: PrepConfig, result: dict, args: argpa
         require_combined_baseline=bool(result.get("combined")),
         global_publication_blockers=global_publication_blockers,
     )
-
-
-def _endpoint_calibration_lambda(summary: Mapping[str, object], args: argparse.Namespace) -> float:
-    """Return the diagnostic q exponent to replay for a frozen row table."""
-
-    del summary
-    value = safe_float(getattr(args, "endpoint_calibration_lambda_q", 1.0), 1.0)
-    return value if value > 0.0 else 1.0
 
 
 def _recorded_native_row_tables(
@@ -220,7 +198,7 @@ def _recorded_native_row_tables(
 
 
 def _multi_endpoint_calibration_not_applicable(result: Mapping[str, object]) -> dict[str, object]:
-    """Describe why single-table scale replay is unsafe for a multi run."""
+    """The endpoint-calibration record grond finish writes for a multi run; GROND runs no scale replay."""
 
     combined = Path(str(result.get("combined") or "")).expanduser()
     row_tables = _recorded_native_row_tables(result, include_endpoint_only=True)
@@ -236,167 +214,4 @@ def _multi_endpoint_calibration_not_applicable(result: Mapping[str, object]) -> 
         "row_tables": row_tables,
         "row_tables_exist": {name: Path(path).exists() for name, path in row_tables.items()},
         "future_contract": "replay each scale candidate independently per dataset, then evaluate through the normal combined endpoint path",
-    }
-
-
-def run_endpoint_calibration(prep: PrepConfig, result: dict, args: argparse.Namespace, python: str, logs: Path) -> dict:
-    """Replay the final frozen row table through the endpoint-calibration chooser."""
-
-    mode, off_reason = resolved_endpoint_calibration_mode(args)
-    if mode == "off":
-        return {"status": "disabled", **({"reason": off_reason} if off_reason else {})}
-    if mode == "auto" and getattr(args, "fast", False):
-        return {"status": "disabled_fast_mode"}
-    if args.dry_run:
-        return {"status": "dry_run", "out_dir": str(Path(args.out_dir) / "endpoint_calibration")}
-    if result.get("combined"):
-        if mode == "on":
-            raise RuntimeError(
-                "--endpoint-calibration on is not supported for multi-dataset runs: scale contracts must be "
-                "replayed independently per dataset and then passed through the normal combined endpoint. "
-                "Use --endpoint-calibration auto (safe explicit skip) or calibrate each dataset separately."
-            )
-        return _multi_endpoint_calibration_not_applicable(result)
-    conflicts = legacy_handoff_conflicts(args)
-    if conflicts:
-        reason = (
-            "The endpoint-calibration replay writes its corrected HKL and runs SHELXL with the legacy handoff "
-            "contract and cannot honour: " + "; ".join(conflicts) + ". The feedback-loop model endpoint and the "
-            "publication chooser remain authoritative."
-        )
-        if mode == "on":
-            raise RuntimeError(
-                f"--endpoint-calibration on: {reason} To calibrate, select the single-step handoff with "
-                "--shelxl-feedback-shelxl-iterations 1 --shelxl-feedback-endpoint-ls-cycles 1 "
-                "--shelxl-convergence-shift-esd 0 --shelxl-feedback-xyz-tol 0 --shelxl-npd-recovery damp "
-                "--shelxl-carry-damp --endpoint-include-free-rows --endpoint-q-policy clip "
-                "--endpoint-intensity-scale median-iobs --endpoint-wght-mode freeze-zero --dataset-sigma-policy auto, "
-                "or use --endpoint-calibration auto (explicit skip)."
-            )
-        return {"status": "not_applicable_handoff_contract", "reason": reason, "conflicts": conflicts}
-    label = "combined"
-    run_dir: Path | None = None
-    if result.get("combined"):
-        run_dir = Path(str(result["combined"]))
-    elif result.get("primary_run"):
-        label = prep.datasets[0].name if prep.datasets else "dataset"
-        run_dir = Path(str(result["primary_run"]))
-    if run_dir is None:
-        return {"status": "no_frozen_row_table"}
-    row_table = run_dir / "native_dyn_calc.csv"
-    summary_path = run_dir / "summary.json"
-    if not row_table.exists() or not summary_path.exists():
-        return {
-            "status": "missing_frozen_row_table",
-            "row_table": str(row_table),
-            "summary": str(summary_path),
-        }
-    summary = try_read_json(summary_path)
-    lambda_q = _endpoint_calibration_lambda(summary, args)
-    out_dir = Path(args.out_dir) / "endpoint_calibration" / safe_label(label)
-    cmd = [
-        python,
-        str(engine_script("scale_contract_replay.py")),
-        "--row-table",
-        str(row_table),
-        "--summary",
-        str(summary_path),
-        "--out-dir",
-        str(out_dir),
-        "--specs",
-        str(getattr(args, "endpoint_calibration_specs", "")),
-        "--lambda-q",
-        f"{lambda_q:g}",
-        "--post-bloch-sigma-policy",
-        resolved_post_bloch_sigma_policy(args, final_endpoint=True),
-        "--post-bloch-sigma-holdout-fraction",
-        f"{args.post_bloch_sigma_holdout_fraction:g}",
-        "--post-bloch-sigma-min-scale",
-        f"{getattr(args, 'endpoint_calibration_sigma_min_scale', 0.05):g}",
-        "--post-bloch-sigma-max-scale",
-        f"{getattr(args, 'endpoint_calibration_sigma_max_scale', 4.0):g}",
-        "--shelxl",
-        args.shelxl,
-        "--shelxl-iterations",
-        str(getattr(args, "endpoint_calibration_shelxl_iterations", 1)),
-        "--wght-modes",
-        str(getattr(args, "endpoint_calibration_wght_modes", "freeze-zero,promote")),
-        "--publication-goof-min",
-        f"{getattr(args, 'endpoint_calibration_goof_min', 0.85):g}",
-        "--publication-goof-max",
-        f"{getattr(args, 'endpoint_calibration_goof_max', 1.15):g}",
-        "--publication-max-r1-cost",
-        f"{getattr(args, 'endpoint_calibration_max_r1_cost', 0.010):g}",
-        "--publication-free-wr2-tolerance",
-        f"{getattr(args, 'endpoint_calibration_free_wr2_tolerance', 0.040):g}",
-        "--publication-free-rall-tolerance",
-        f"{getattr(args, 'endpoint_calibration_free_rall_tolerance', 0.010):g}",
-        "--publication-work-rall-tolerance",
-        f"{getattr(args, 'endpoint_calibration_work_rall_tolerance', 0.010):g}",
-        "--publication-free-wrall-tolerance",
-        f"{getattr(args, 'endpoint_calibration_free_wrall_tolerance', 0.050):g}",
-        "--publication-max-modulation-p95",
-        f"{getattr(args, 'publication_endpoint_max_modulation_p95', 20.0):g}",
-        "--publication-prefer-wght-mode",
-        str(getattr(args, "endpoint_calibration_prefer_wght_mode", "freeze-zero")),
-        "--publication-selection-policy",
-        str(getattr(args, "endpoint_calibration_selection_policy", "gated-smallest")),
-        "--publication-information-criterion",
-        str(getattr(args, "endpoint_calibration_information_criterion", "bic_fitted_variance")),
-        "--instability-u",
-        f"{getattr(args, 'instability_u', 0.01):g}",
-        "--detector-ridge",
-        f"{getattr(args, 'detector_scale_ridge', 0.05):g}",
-        "--detector-smoothness",
-        f"{getattr(args, 'detector_scale_smoothness', 0.10):g}",
-        "--detector-min-rows",
-        str(getattr(args, "detector_scale_min_rows", 20)),
-        "--detector-min-holdout-improvement",
-        f"{getattr(args, 'detector_scale_min_holdout_improvement', 0.002):g}",
-        "--detector-required-improved-splits",
-        str(getattr(args, "detector_scale_required_improved_splits", 2)),
-        "--detector-max-bloch-gain-loss",
-        f"{getattr(args, 'detector_scale_max_bloch_gain_loss', 0.002):g}",
-        "--detector-min-field-correlation",
-        f"{getattr(args, 'detector_scale_min_field_correlation', 0.50):g}",
-        "--detector-max-field-log-rms",
-        f"{getattr(args, 'detector_scale_max_field_log_rms', 0.10):g}",
-    ]
-    if bool(getattr(args, "shelxl_carry_damp", False)):
-        cmd.append("--keep-damp")
-    if bool(getattr(args, "publication_allow_npd", False)):
-        cmd.append("--publication-allow-npd")
-    if bool(getattr(args, "detector_scale_independent_calibration", False)):
-        cmd.append("--detector-independent-calibration")
-    try:
-        run_logged(cmd, logs, f"{safe_label(label)}_endpoint_calibration", dry_run=False)
-    except subprocess.CalledProcessError as exc:
-        if mode == "on":
-            raise
-        return {"status": "failed", "returncode": exc.returncode, "command": exc.cmd, "out_dir": str(out_dir)}
-    replay_summary = try_read_json(out_dir / "summary.json")
-    selection = replay_summary.get("publication_selection", {})
-    selection = dict(selection) if isinstance(selection, Mapping) else {}
-    endpoint = selection.get("publication_endpoint")
-    endpoint = endpoint if isinstance(endpoint, Mapping) else {}
-    if endpoint:
-        no_harm_gate = _endpoint_baseline_no_harm_gate(summary, endpoint)
-        selection["baseline_no_harm_gate"] = no_harm_gate
-        if bool(no_harm_gate.get("passed", False)):
-            checked_endpoint = dict(endpoint)
-            checked_endpoint["baseline_no_harm_gate"] = no_harm_gate
-            selection["publication_endpoint"] = checked_endpoint
-        else:
-            selection["status"] = "failed_baseline_no_harm_gate"
-            selection["baseline_rejected_endpoint"] = dict(endpoint)
-            selection.pop("publication_endpoint", None)
-    return {
-        "status": "ok",
-        "label": label,
-        "run_dir": str(run_dir),
-        "lambda_q": lambda_q,
-        "out_dir": str(out_dir),
-        "report": str((out_dir / "REPORT.md").resolve()),
-        "endpoint_csv": str((out_dir / "scale_contract_endpoint_replay.csv").resolve()),
-        "publication_selection": selection,
     }

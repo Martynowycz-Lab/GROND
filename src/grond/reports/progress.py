@@ -157,7 +157,7 @@ def progress_phase(label: str) -> str | None:
         return "screen"
     if text.startswith("combined_") or text.startswith("publication"):
         return "combined resolution and tables"
-    if text.startswith("combine_") or "endpoint_calibration" in text:
+    if text.startswith("combine_"):
         return "combine endpoints"
     if "final" in text:
         return "final"

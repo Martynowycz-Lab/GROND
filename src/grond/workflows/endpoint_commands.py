@@ -78,34 +78,6 @@ def endpoint_native_output_args(args: argparse.Namespace, *, final: bool = False
     return cmd
 
 
-def legacy_handoff_conflicts(args: argparse.Namespace) -> list[str]:
-    """Requested handoff settings that a legacy-contract corrected-HKL writer cannot honour.
-
-    The endpoint-calibration replay (scale_contract_replay.py) writes its own corrected HKL with the legacy
-    contract: every row including split=free, the median-IOBS scale, no correction-ratio exclusion, the DAMP
-    ladder and a fixed SHELXL call count.  It can become the publication endpoint, so under the default
-    handoff it would silently republish free rows and an unconverged, per-cycle-scaled refinement.  Missing
-    attributes resolve to the legacy contract.
-    """
-
-    conflicts = []
-    if not bool(getattr(args, "endpoint_include_free_rows", True)):
-        conflicts.append("--no-endpoint-include-free-rows (the legacy HKL contains every row, free rows included)")
-    if endpoint_intensity_rescale(args) != "median-iobs":
-        conflicts.append("--endpoint-intensity-scale absolute (the legacy writer only has the median-IOBS scale)")
-    if str(getattr(args, "endpoint_q_policy", "clip") or "clip") != "clip":
-        conflicts.append("--endpoint-q-policy exclude (the legacy writer keeps every correction ratio)")
-    if str(getattr(args, "shelxl_npd_recovery", "damp") or "damp") != "damp":
-        conflicts.append("--shelxl-npd-recovery isor (the legacy writer uses the DAMP ladder)")
-    if float(getattr(args, "shelxl_convergence_shift_esd", 0.0) or 0.0) > 0.0:
-        conflicts.append("--shelxl-convergence-shift-esd > 0 (the legacy writer runs a fixed SHELXL call count)")
-    if str(getattr(args, "dataset_sigma_policy", "auto") or "auto") == "error_model":
-        conflicts.append("--dataset-sigma-policy error_model (the legacy writer only has uniform_z_rms sigmas)")
-    if str(getattr(args, "endpoint_wght_mode", "freeze-zero") or "freeze-zero") == "converge":
-        conflicts.append("--endpoint-wght-mode converge (the legacy writer has no converged-weight loop)")
-    return conflicts
-
-
 def shelxl_feedback_cmd(
     python: str,
     ds: DatasetSpec,

@@ -26,8 +26,8 @@ def add_scales_and_screening(ap: argparse.ArgumentParser) -> None:
         default="pspline",
         help=(
             "Frame-scale family fitted in every native stage. pspline (default): smooth P-spline in scan angle "
-            "on the scale-fit rows, n_basis and lambda chosen per crystal by inner orbit CV; endpoint-calibration "
-            "replays are then off. per-frame: free per-frame scales."
+            "on the scale-fit rows, n_basis and lambda chosen per crystal by inner orbit CV. "
+            "per-frame: free per-frame scales."
         ),
     )
     ap.add_argument(

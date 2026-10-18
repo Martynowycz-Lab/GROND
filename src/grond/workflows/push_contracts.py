@@ -352,42 +352,6 @@ def resolve_dataset_row_contracts(
     return resolved
 
 
-def resolve_dataset_scale_specs(
-    specifications: list[str] | tuple[str, ...] | None,
-    datasets: list[DatasetSpec],
-) -> dict[str, str]:
-    """Parse all-or-none ``DATASET=compact-scale-spec`` bindings."""
-
-    raw = list(specifications or [])
-    if not raw:
-        return {}
-    names = {dataset.name for dataset in datasets}
-    resolved: dict[str, str] = {}
-    for value in raw:
-        text = str(value).strip()
-        if "=" not in text:
-            raise SystemExit("--dataset-scale-spec must be DATASET=SPEC, for example crystal_a=adaptive:28:det8")
-        name, spec = text.split("=", 1)
-        name = name.strip()
-        spec = spec.strip()
-        if name not in names:
-            raise SystemExit(
-                f"--dataset-scale-spec names unknown dataset {name!r}; expected: {', '.join(sorted(names))}"
-            )
-        if not spec:
-            raise SystemExit(f"--dataset-scale-spec for {name!r} has an empty compact scale specification")
-        if name in resolved:
-            raise SystemExit(f"--dataset-scale-spec was supplied more than once for {name!r}")
-        resolved[name] = spec
-    missing = sorted(names - set(resolved))
-    if missing:
-        raise SystemExit(
-            "compact multi-dataset continuation requires one --dataset-scale-spec for every dataset; "
-            f"missing: {', '.join(missing)}"
-        )
-    return resolved
-
-
 def dataset_policy_from_row_contracts(
     contracts: Mapping[str, str],
     datasets: list[DatasetSpec],

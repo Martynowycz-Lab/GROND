@@ -15,7 +15,7 @@ from grond.workflows.endpoint_chooser import (
 
 
 def _normalize_publication_endpoint_block(endpoint: Mapping[str, object], *, selection_source: str) -> dict[str, object]:
-    """Normalize endpoint-chooser and endpoint-calibration records to one shape."""
+    """Normalize endpoint-chooser records to one shape."""
 
     shelxl = endpoint.get("shelxl") if isinstance(endpoint.get("shelxl"), Mapping) else {}
     artifact_provenance = endpoint_artifact_provenance(endpoint)
@@ -57,7 +57,7 @@ def _normalize_publication_endpoint_block(endpoint: Mapping[str, object], *, sel
 
     out = dict(endpoint)
     out["selection_source"] = selection_source
-    out["source_kind"] = str(endpoint.get("source_kind") or ("endpoint_calibration" if selection_source == "endpoint_calibration" else ""))
+    out["source_kind"] = str(endpoint.get("source_kind") or "")
     out["endpoint_res"] = str(canonical_res.get("path") or first_text("endpoint_res", "res"))
     out["endpoint_hkl"] = str(canonical_hkl.get("path") or first_text("endpoint_hkl", "hkl"))
     out["endpoint_lst"] = str(
@@ -224,22 +224,6 @@ def _normalize_publication_endpoint_block(endpoint: Mapping[str, object], *, sel
     elif promotion_fields.get("passed") is not True:
         out["provenance_error"] = str(promotion_fields.get("reason") or "producer promotion fields are incomplete")
     return out
-
-
-def _endpoint_calibration_publication_endpoint(result: Mapping[str, object]) -> Mapping[str, object]:
-    """Return the endpoint-calibration publication replay, if present."""
-
-    if result.get("combined"):
-        # Historical multi summaries may contain an unsafe single-table replay.
-        # Multi-dataset scale contracts are independent and can only be
-        # calibrated through a future per-dataset replay-and-recombine path.
-        return {}
-    endpoint_calibration = result.get("endpoint_calibration") if isinstance(result.get("endpoint_calibration"), Mapping) else {}
-    selection = endpoint_calibration.get("publication_selection", {}) if isinstance(endpoint_calibration, Mapping) else {}
-    endpoint = selection.get("publication_endpoint") if isinstance(selection, Mapping) else {}
-    if not isinstance(endpoint, Mapping) or not endpoint:
-        return {}
-    return _normalize_publication_endpoint_block(endpoint, selection_source="endpoint_calibration")
 
 
 def _chooser_publication_endpoint(result: Mapping[str, object]) -> Mapping[str, object]:

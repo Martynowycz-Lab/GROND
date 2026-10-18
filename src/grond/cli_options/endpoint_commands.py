@@ -136,16 +136,6 @@ def register_push(sub: argparse._SubParsersAction) -> None:
             "membership from raw XDS filters."
         ),
     )
-    p_push.add_argument(
-        "--dataset-scale-spec",
-        action="append",
-        default=[],
-        metavar="DATASET=SPEC",
-        help=(
-            "Multi-dataset only: replay this compact scale topology after each fresh Bloch row calculation and before "
-            "the shared endpoint. Supply once for every dataset; examples are adaptive:28:det8 or stride:6:det8."
-        ),
-    )
     p_push.add_argument("--post-bloch-sigma-policy", choices=["none", "uniform_z_rms"], default="none")
     p_push.add_argument("--post-bloch-sigma-holdout-fraction", type=float, default=0.20)
     p_push.add_argument("--post-bloch-sigma-min-scale", type=float, default=0.25)

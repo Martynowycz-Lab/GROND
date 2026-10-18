@@ -2,11 +2,8 @@
 
 ``--scale-model pspline`` (the AUTO default) fits smooth P-spline frame scales on the scale-fit rows
 inside every native stage, with (n_basis, lambda) chosen per crystal by inner orbit CV. The post-hoc
-per-frame compressions (the multi-dataset compact scale-contract selection and the single-dataset
-endpoint-calibration scale replays) refit free per-frame, window or adaptive scales from
-the frozen row table and would replace the P-spline model, so they resolve to off. An explicit ``on``
-request for one of them cannot be honoured and raises before any calculation starts.
-``--scale-model per-frame`` fits free per-frame scales and leaves these compressions to their own settings.
+multi-dataset compact scale-contract selection would replace the P-spline model, so it resolves to off.
+``--scale-model per-frame`` fits free per-frame scales.
 """
 
 from __future__ import annotations
@@ -51,20 +48,6 @@ def resolved_multi_scale_contract_selection(args: argparse.Namespace) -> tuple[s
     return "off", PSPLINE_OFF_REASON
 
 
-def resolved_endpoint_calibration_mode(args: argparse.Namespace) -> tuple[str, str]:
-    """(mode, reason) for the single-dataset endpoint-calibration scale replays."""
-
-    mode = str(getattr(args, "endpoint_calibration", "auto"))
-    if resolved_scale_model(args) != "pspline":
-        return mode, ""
-    if mode == "on":
-        raise ValueError(
-            "--endpoint-calibration on replays compact per-frame/window scale contracts and would replace the "
-            "P-spline scale model; use --scale-model per-frame for the legacy calibration replay"
-        )
-    return "off", PSPLINE_OFF_REASON
-
-
 def validate_scale_model_policy(args: argparse.Namespace) -> dict[str, object]:
     """Fail closed on combinations a P-spline run cannot honour; return the run_config record."""
 
@@ -85,7 +68,6 @@ def validate_scale_model_policy(args: argparse.Namespace) -> dict[str, object]:
             "contract": contract.to_dict(),
             "hyperparameters": "chosen per crystal and stage by inner 3-fold orbit CV over the scale-fit rows",
             "multi_scale_contract_selection": resolved_multi_scale_contract_selection(args)[0],
-            "endpoint_calibration": resolved_endpoint_calibration_mode(args)[0],
             "off_reason": PSPLINE_OFF_REASON,
         }
     )

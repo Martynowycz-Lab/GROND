@@ -14,7 +14,6 @@ from grond.reports.distributions import _quick_residual_z_summary
 from grond.reports.endpoints import (
     _chooser_diagnostic_endpoint,
     _chooser_publication_endpoint,
-    _endpoint_calibration_publication_endpoint,
     _quick_endpoint_file_block,
 )
 from grond.reports.hand import (
@@ -143,7 +142,7 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
         )
     frozen_row_tables = [(name, Path(path).expanduser()) for name, path in recorded_row_tables.items()]
     if not publication_endpoint:
-        rejected_endpoint = _chooser_publication_endpoint(result) or _endpoint_calibration_publication_endpoint(result)
+        rejected_endpoint = _chooser_publication_endpoint(result)
         rejected_gate = _endpoint_baseline_no_harm_gate(
             final_summary,
             rejected_endpoint,

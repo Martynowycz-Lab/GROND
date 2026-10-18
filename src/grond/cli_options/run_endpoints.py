@@ -296,69 +296,7 @@ def add_endpoints(ap: argparse.ArgumentParser, *, expose_lambda_controls: bool) 
         "--publication-allow-npd",
         action=argparse.BooleanOptionalAction,
         default=False,
-        help="Explicit diagnostic override allowing endpoints with NPD pathology to pass publication selection gates. Default requires NPD == 0. The general endpoint chooser reports split warnings without withholding a usable model; strict compact detector/scale promotion can still require zero splits.",
-    )
-    ap.add_argument(
-        "--endpoint-calibration",
-        choices=["auto", "on", "off"],
-        default="auto",
-        help="Replay the final frozen row table through corrected-HKL endpoint calibration after auto completes.",
-    )
-    ap.add_argument(
-        "--endpoint-calibration-specs",
-        default="baseline,adaptive:293:det0,adaptive:293:det2,adaptive:293:det4,adaptive:293:det8,adaptive:200:det0,adaptive:200:det2,adaptive:200:det4,adaptive:200:det8,adaptive:120:det0,adaptive:120:det2,adaptive:120:det4,adaptive:120:det8,adaptive:80:det0,adaptive:80:det2,adaptive:80:det4,adaptive:80:det8,window:1.0:det0,window:1.0:det4,window:1.0:det8,window:3.0:det0,window:3.0:det2,window:3.0:det4,window:3.0:det8,window:5.0:det0,window:5.0:det4,window:5.0:det8",
-    )
-    if expose_lambda_controls:
-        ap.add_argument(
-            "--endpoint-calibration-lambda-q",
-            type=float,
-            default=1.0,
-            help="Diagnostic endpoint q exponent for replay tests. Production auto pins this to 1.0.",
-        )
-    else:
-        ap.set_defaults(endpoint_calibration_lambda_q=1.0)
-    ap.add_argument(
-        "--endpoint-calibration-wght-modes",
-        default="freeze-zero,promote",
-        help="Endpoint-calibration weight branches. The default tests fixed WGHT 0 0 before the compatibility branch.",
-    )
-    ap.add_argument("--endpoint-calibration-prefer-wght-mode", default="freeze-zero")
-    ap.add_argument(
-        "--endpoint-calibration-goof-min",
-        type=float,
-        default=0.85,
-        help="Lower preferred GooF warning threshold; never a model-handoff gate.",
-    )
-    ap.add_argument(
-        "--endpoint-calibration-goof-max",
-        type=float,
-        default=1.15,
-        help="Upper preferred GooF warning threshold; never a model-handoff gate.",
-    )
-    ap.add_argument("--endpoint-calibration-max-r1-cost", type=float, default=0.010)
-    ap.add_argument("--endpoint-calibration-free-wr2-tolerance", type=float, default=0.040)
-    ap.add_argument("--endpoint-calibration-free-rall-tolerance", type=float, default=0.010)
-    ap.add_argument("--endpoint-calibration-work-rall-tolerance", type=float, default=0.010)
-    ap.add_argument("--endpoint-calibration-free-wrall-tolerance", type=float, default=0.050)
-    ap.add_argument(
-        "--endpoint-calibration-selection-policy",
-        choices=["bic", "gated-smallest"],
-        default="gated-smallest",
-        help="Final scale-contract selector. Scale topology is chosen from held-out/work JANA-style row factors; endpoint factors are reporting only.",
-    )
-    ap.add_argument(
-        "--endpoint-calibration-information-criterion",
-        choices=["bic_fitted_variance", "aic_fitted_variance", "bic_known_sigma", "aic_known_sigma"],
-        default="bic_fitted_variance",
-        help="Information criterion used by endpoint calibration when the BIC policy is active.",
-    )
-    ap.add_argument("--endpoint-calibration-sigma-min-scale", type=float, default=0.05)
-    ap.add_argument("--endpoint-calibration-sigma-max-scale", type=float, default=4.0)
-    ap.add_argument(
-        "--endpoint-calibration-shelxl-iterations",
-        type=int,
-        default=3,
-        help="External one-cycle SHELXL calls for the final fixed-weight endpoint replay. This does not change the SHELXL feedback rounds; it stabilizes the openable presentation endpoint.",
+        help="Explicit diagnostic override allowing endpoints with NPD pathology to pass publication selection gates. Default requires NPD == 0. The endpoint chooser reports split warnings without withholding a usable model.",
     )
     ap.add_argument(
         "--instability-u",

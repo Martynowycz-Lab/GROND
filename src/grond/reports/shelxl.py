@@ -371,7 +371,7 @@ def _quick_endpoint_scale_text(endpoint: Mapping[str, object]) -> str:
 
 
 def _quick_goof_warning(goof_value: object) -> str:
-    """Return a short endpoint-calibration warning for non-boring GooF values."""
+    """Return a short endpoint warning for GooF values outside 0.85-1.15."""
 
     goof = _quick_float(goof_value)
     if not math.isfinite(goof):

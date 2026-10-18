@@ -16,6 +16,10 @@ from grond.engine.shelx_diagnostics import parse_shelx_lst_metrics, parse_shelx_
 from grond.engine.shelx_hkl import audit_fixed_width_precision
 from grond.forensics.resolution import classify_endpoint_candidate
 
+# Preferred SHELXL GooF range; outside it the chooser warns but never blocks an endpoint.
+GOOF_WARNING_MIN = 0.85
+GOOF_WARNING_MAX = 1.15
+
 
 def _float(value, fallback: float = float("nan")) -> float:
     """Convert a scalar to a finite float when possible."""
@@ -628,8 +632,6 @@ def classify_publication_endpoint(
     *,
     min_hkl_safe_factor: float = 0.25,
     max_modulation_p95: float = 20.0,
-    publication_goof_min: float = 0.85,
-    publication_goof_max: float = 1.15,
     allow_npd: bool = False,
 ) -> dict:
     """Classify one endpoint as publishable physical output or diagnostic only."""
@@ -718,10 +720,10 @@ def classify_publication_endpoint(
     goof = _float(candidate.get("GooF"))
     if not math.isfinite(goof):
         reasons.append("endpoint GooF is unavailable; publication endpoints must have conventional SHELXL GooF")
-    elif goof < publication_goof_min or goof > publication_goof_max:
+    elif goof < GOOF_WARNING_MIN or goof > GOOF_WARNING_MAX:
         warnings.append(
             f"endpoint GooF {goof:.3f} is outside the preferred range "
-            f"[{publication_goof_min:.3f}, {publication_goof_max:.3f}]; inspect weights, sigmas, maps, and "
+            f"[{GOOF_WARNING_MIN:.3f}, {GOOF_WARNING_MAX:.3f}]; inspect weights, sigmas, maps, and "
             "continued-refinement behavior, but keep the endpoint available for model building"
         )
     metrics_ok = math.isfinite(_float(candidate.get("wR2_all"))) and math.isfinite(_float(candidate.get("R1_all")))
@@ -744,8 +746,6 @@ def choose_publication_endpoints(
     *,
     min_hkl_safe_factor: float = 0.25,
     max_modulation_p95: float = 20.0,
-    publication_goof_min: float = 0.85,
-    publication_goof_max: float = 1.15,
     prefer_combined: bool = False,
     allow_npd: bool = False,
     combined_baseline_r1_all: float | None = None,
@@ -762,8 +762,6 @@ def choose_publication_endpoints(
             candidate,
             min_hkl_safe_factor=min_hkl_safe_factor,
             max_modulation_p95=max_modulation_p95,
-            publication_goof_min=publication_goof_min,
-            publication_goof_max=publication_goof_max,
             allow_npd=allow_npd,
         )
         if blockers:
@@ -872,7 +870,7 @@ def choose_publication_endpoints(
                 "finite positive HKL export scale; written HKLF4 values are finite with positive sigmas",
                 f"HKL rescaling below {min_hkl_safe_factor:g} warns but cannot by itself reject a model",
                 f"95th percentile modulation is reported and warned above {max_modulation_p95:g}, but never blocks promotion",
-                f"SHELXL GooF is finite; values outside {publication_goof_min:g}-{publication_goof_max:g} are warned but do not block model handoff",
+                f"SHELXL GooF is finite; values outside {GOOF_WARNING_MIN:g}-{GOOF_WARNING_MAX:g} are warned but do not block model handoff",
                 "hash-bound final LST pathology audit is complete and NPD == 0; split warnings are reported but do not block promotion",
                 "stored endpoint statistics agree with hash-verified live LST statistics within SHELXL print rounding",
                 "collected endpoint RES, HKL, and LST paths and SHA-256 values must match the current files",
@@ -1043,8 +1041,6 @@ def write_publication_endpoint_choice(
     extra_candidates: list[dict] | None = None,
     min_hkl_safe_factor: float = 0.25,
     max_modulation_p95: float = 20.0,
-    publication_goof_min: float = 0.85,
-    publication_goof_max: float = 1.15,
     allow_npd: bool = False,
     combined_baseline_r1_all: float | None = None,
     combined_baseline_source: str = "",
@@ -1062,8 +1058,6 @@ def write_publication_endpoint_choice(
         candidates,
         min_hkl_safe_factor=min_hkl_safe_factor,
         max_modulation_p95=max_modulation_p95,
-        publication_goof_min=publication_goof_min,
-        publication_goof_max=publication_goof_max,
         prefer_combined=combined_run is not None,
         allow_npd=allow_npd,
         combined_baseline_r1_all=combined_baseline_r1_all,

@@ -42,16 +42,12 @@ def cmd_finish(args: argparse.Namespace) -> int:
         run_config = try_read_json(run_dir / "run_config.json")
         chooser_config = run_config.get("publication_endpoint_chooser")
         chooser_config = chooser_config if isinstance(chooser_config, Mapping) else {}
-        endpoint_config = run_config.get("endpoint_calibration")
-        endpoint_config = endpoint_config if isinstance(endpoint_config, Mapping) else {}
         chooser_args = argparse.Namespace(
             out_dir=str(run_dir),
             dry_run=False,
             publication_endpoint_chooser=True,
             publication_endpoint_min_hkl_safe_factor=safe_float(chooser_config.get("min_hkl_safe_factor"), 0.25),
             publication_endpoint_max_modulation_p95=safe_float(chooser_config.get("max_modulation_p95"), 20.0),
-            endpoint_calibration_goof_min=safe_float(endpoint_config.get("goof_min"), 0.85),
-            endpoint_calibration_goof_max=safe_float(endpoint_config.get("goof_max"), 1.15),
             publication_allow_npd=bool(chooser_config.get("allow_npd", False)),
             publication_feedback_cycles=str(
                 getattr(args, "publication_feedback_cycles", None) or chooser_config.get("feedback_cycles") or "kept"

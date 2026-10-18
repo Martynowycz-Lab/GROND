@@ -25,11 +25,7 @@ from grond.workflows.all_data_refinement import all_data_console_line, run_all_d
 from grond.workflows.auto_crystal_parameters import configure_auto_crystals
 from grond.workflows.checkpoints import write_continue_checkpoint
 from grond.workflows.conventional_baseline import run_fresh_conventional_baseline
-from grond.workflows.endpoint_selection import (
-    run_endpoint_calibration,
-    run_publication_endpoint_chooser,
-    run_publication_report,
-)
+from grond.workflows.endpoint_selection import run_publication_endpoint_chooser, run_publication_report
 from grond.workflows.leak_free_start import prep_with_leak_free_start, run_leak_free_start
 from grond.workflows.model_selection import resolve_structure_update_strategy
 from grond.workflows.multi import run_multi
@@ -164,10 +160,6 @@ def _configure_static_pets_auto(
     force("profile_quadrature", "uniform")
     force("profile_accumulation", "sum")
     force("sg_window_scout", "off")
-    force(
-        "endpoint_calibration_specs",
-        "baseline,window:1.0:det0,window:3.0:det0,window:5.0:det0",
-    )
     args.pets_static_auto = True
     payload = {
         "schema": "grond.pets2-static-auto-contract.v1",
@@ -222,12 +214,6 @@ def cmd_run(args: argparse.Namespace) -> int:
             f"WARN --h-omit {requested_h_omit} is a deprecated alias for --h-omit on; "
             "the calculation is a retrospective strip-H sensitivity control, not a prospective never-H experiment.",
             flush=True,
-        )
-    if len(prep.datasets) > 1 and str(getattr(args, "endpoint_calibration", "auto")) == "on":
-        raise SystemExit(
-            "--endpoint-calibration on cannot be forced for a multi-dataset run. "
-            "Each crystal has an independent scale and sigma contract; a single concatenated replay would mix them. "
-            "Leave the option at auto for the safe combined-endpoint workflow."
         )
     profile = apply_speed_profile(args)
     configure_auto_crystals(prep, args)
@@ -390,22 +376,6 @@ def cmd_run(args: argparse.Namespace) -> int:
             "allow_npd": args.publication_allow_npd,
             "feedback_cycles": str(getattr(args, "publication_feedback_cycles", "all") or "all"),
         },
-        "endpoint_calibration": {
-            "mode": args.endpoint_calibration,
-            "specs": args.endpoint_calibration_specs,
-            "lambda_q": args.endpoint_calibration_lambda_q,
-            "wght_modes": args.endpoint_calibration_wght_modes,
-            "preferred_wght_mode": args.endpoint_calibration_prefer_wght_mode,
-            "selection_policy": args.endpoint_calibration_selection_policy,
-            "information_criterion": args.endpoint_calibration_information_criterion,
-            "goof_min": args.endpoint_calibration_goof_min,
-            "goof_max": args.endpoint_calibration_goof_max,
-            "max_r1_cost": args.endpoint_calibration_max_r1_cost,
-            "free_wr2_tolerance": args.endpoint_calibration_free_wr2_tolerance,
-            "sigma_min_scale": args.endpoint_calibration_sigma_min_scale,
-            "sigma_max_scale": args.endpoint_calibration_sigma_max_scale,
-            "allow_npd": args.publication_allow_npd,
-        },
     }
     (Path(args.out_dir) / "run_config.json").write_text(json.dumps(config, indent=2) + "\n")
     # a crystal whose cell no transform reconciles with the model is left out, recorded, before any split is planned
@@ -419,7 +389,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     result = run_single(prep, args, python, logs) if len(prep.datasets) == 1 else run_multi(prep, args, python, logs)
     result["conventional_baseline"] = conventional_baseline
     result["leak_free_start"] = leak_free_start
-    result["endpoint_calibration"] = run_endpoint_calibration(prep, result, args, python, logs)
+    # The P-spline scales are never replayed through compact scale contracts; QUICK_STATS reports this record.
+    result["endpoint_calibration"] = {"status": "disabled", "reason": "scale_model_pspline"}
     result["publication_endpoint_chooser"] = run_publication_endpoint_chooser(prep, result, args)
     # --free-set off: the published endpoint refined once more against work and free reflections
     result["final_all_data_refinement"] = run_all_data_refinement(prep, result, args)

@@ -32,7 +32,6 @@ from grond.workflows.native_commands import native_stage_cmd
 from grond.workflows.nested_nuisance import MultiFeedbackThickness, feedback_thickness_update_enabled
 from grond.workflows.nuisance_policy import resolve_final_n_basis, resolved_feedback_wght_mode
 from grond.workflows.report_commands import combine_cmd
-from grond.workflows.scale_materialization import materialize_dataset_scale_contract
 
 
 def pinned_physics_drift(pinned: Mapping[str, object], selected: Mapping[str, object]) -> list[str]:
@@ -138,7 +137,6 @@ def run_multi_final_row_recompute(
 
     final_root = root / "runs" / "shared_shelxl_feedback" / "final_row_recompute"
     raw_runs: dict[str, Path] = {}
-    scale_contract_runs: dict[str, Path] = {}
     for ds in prep.datasets:
         run_dir = final_root / ds.name
         per_crystal = crystal_arguments(args, ds.name)
@@ -164,20 +162,12 @@ def run_multi_final_row_recompute(
             dry_run=False,
         )
         raw_runs[ds.name] = run_dir
-        scale_contract_runs[ds.name] = materialize_dataset_scale_contract(
-            python,
-            run_dir,
-            args,
-            ds.name,
-            logs,
-            label="final_row_recompute",
-        )
     if structure_dataset_policy.get("status") in {"disabled", "single_dataset", "dry_run", "missing_row_table"}:
-        active_runs = scale_contract_runs
-        weighted_runs = scale_contract_runs
+        active_runs = raw_runs
+        weighted_runs = raw_runs
     else:
         weighted_runs = write_policy_weighted_runs(
-            scale_contract_runs,
+            raw_runs,
             structure_dataset_policy,
             final_root / "weighted_runs",
             include_endpoint_only=False,
@@ -189,7 +179,7 @@ def run_multi_final_row_recompute(
         "model": str(model),
         "definition": "fixed-nuisance Bloch rows for the accepted shared SHELXL output model; no additional LS1 step",
         "raw_runs": {name: str(path) for name, path in raw_runs.items()},
-        "runs": {name: str(path) for name, path in scale_contract_runs.items()},
+        "runs": {name: str(path) for name, path in raw_runs.items()},
         "weighted_runs": {name: str(path) for name, path in weighted_runs.items()},
         "active_runs": {name: str(path) for name, path in active_runs.items()},
     }
@@ -248,8 +238,6 @@ def run_multi_shelxl_feedback_loop(
         }
         for name, path in row_contracts.items()
     }
-    scale_specs = getattr(args, "dataset_scale_specs", {})
-    scale_specs = scale_specs if isinstance(scale_specs, Mapping) else {}
     summary: dict = {
         "status": "not_run" if cycles_requested <= 0 else "running",
         "strategy": "shelxl_feedback",
@@ -258,7 +246,6 @@ def run_multi_shelxl_feedback_loop(
         "cycles_requested": cycles_requested,
         "shelxl_iterations_per_cycle": int(getattr(args, "shelxl_feedback_shelxl_iterations", 1) or 1),
         "dataset_row_contracts": row_contract_provenance,
-        "dataset_scale_specs": dict(scale_specs),
         "crystal_parameters": getattr(args, "crystal_parameters", {}),
         "handoff": {
             "shelxl_convergence_shift_esd": float(getattr(args, "shelxl_convergence_shift_esd", 0.0) or 0.0),
@@ -382,14 +369,7 @@ def run_multi_shelxl_feedback_loop(
             )
             raw_cycle_runs[ds.name] = run_dir
             previous_runs[ds.name] = run_dir
-            cycle_runs[ds.name] = materialize_dataset_scale_contract(
-                python,
-                run_dir,
-                args,
-                ds.name,
-                logs,
-                label=cycle_label,
-            )
+            cycle_runs[ds.name] = run_dir
             selected_nuisance = (try_read_json(run_dir / "summary.json").get("best_native") or {}).get("nuisance") or {}
             if not args.dry_run:
                 drifted = pinned_physics_drift(cycle_nuisance.get(ds.name) or {}, selected_nuisance)

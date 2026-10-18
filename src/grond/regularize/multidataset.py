@@ -59,12 +59,9 @@ def scale_contract_provenance(summary: dict, rows: list[dict]) -> dict[str, obje
             break
 
     if not model_names:
-        replay_candidate = (summary.get("scale_contract_replay") or {}).get("candidate") or {}
-        replay_name = str(replay_candidate.get("name", "")).strip()
         compression_candidate = (summary.get("scale_compression") or {}).get("selected_output") or {}
         compression_name = str(compression_candidate.get("name", "")).strip()
         candidates = (
-            (replay_name, "summary.scale_contract_replay.candidate.name"),
             (str(nuisance.get("scale_replay_model", "")).strip(), "summary.best_native.nuisance.scale_replay_model"),
             (compression_name, "summary.scale_compression.selected_output.name"),
             (str(nuisance.get("scale_compression_model", "")).strip(), "summary.best_native.nuisance.scale_compression_model"),
