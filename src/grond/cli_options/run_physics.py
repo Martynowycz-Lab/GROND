@@ -229,15 +229,6 @@ def add_nuisance(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--sg-jitter-sigma-frame-grid", default="0.0")
     ap.add_argument("--sg-jitter-points", type=int, default=3)
     ap.add_argument(
-        "--pinned-sg-jitter-fallback",
-        choices=["none", "off"],
-        default="none",
-        help=(
-            "When a pinned nonzero Sg-jitter convolution is locally infeasible, also score an explicit no-jitter "
-            "candidate. This preserves the local-root bound and records any selected nuisance change."
-        ),
-    )
-    ap.add_argument(
         "--absorption-mode-grid",
         default="none",
         help="Absorption feature-gate grid. Default none (no absorption). Legacy: none,midgley_like.",
@@ -312,11 +303,6 @@ def add_nuisance(ap: argparse.ArgumentParser) -> None:
         help=(
             "Rocking points while the settings are chosen: final (default), screen or a number."
         ),
-    )
-    ap.add_argument(
-        "--nested-families",
-        default="uniform_gradient,gamma",
-        help="Thickness-distribution families of the nested selection: uniform_gradient (t0, gradient) and/or gamma (mean, shape).",
     )
     ap.add_argument(
         "--nested-response-tables",

@@ -140,7 +140,6 @@ def build_parser(description: str) -> argparse.ArgumentParser:
         default=0,
         help="LIST code of generated endpoint inputs (AUTO 6: an .fcf with phases for SHELXLE/Olex2 maps). 0 keeps the model's LIST.",
     )
-    ap.add_argument("--acta", action="store_true", help="Add ACTA to the combined endpoints so SHELXL writes a CIF.")
     ap.add_argument(
         "--shelxl-convergence-shift-esd",
         type=float,

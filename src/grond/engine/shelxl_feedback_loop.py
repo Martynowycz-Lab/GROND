@@ -73,8 +73,6 @@ def native_output_args(args: argparse.Namespace) -> list[str]:
         out.append("--strip-q-peaks")
     if int(getattr(args, "endpoint_list_code", 0) or 0) > 0:
         out += ["--endpoint-list-code", str(int(args.endpoint_list_code))]
-    if bool(getattr(args, "acta", False)):
-        out.append("--acta")
     return out
 
 

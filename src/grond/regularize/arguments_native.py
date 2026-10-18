@@ -206,7 +206,6 @@ def build_parser(description: str, *, default_hkl, default_res, default_baseline
     ap.add_argument("--zerr-esds", default="", help="Six cell e.s.d.s a,b,c,alpha,beta,gamma for the ZERR record of generated endpoint inputs (Z kept). Empty keeps the model's ZERR.")
     ap.add_argument("--strip-q-peaks", action="store_true", help="Drop difference-map peaks (Q1, Q2, ...) of a previous SHELXL run from generated endpoint inputs (AUTO).")
     ap.add_argument("--endpoint-list-code", type=int, default=0, help="LIST code of generated endpoint inputs (AUTO 6: an .fcf with phases for SHELXLE/Olex2 maps). 0 keeps the model's LIST.")
-    ap.add_argument("--acta", action="store_true", help="Add ACTA to generated endpoint inputs so SHELXL writes a CIF.")
     ap.add_argument("--shelxl-convergence-shift-esd", type=float, default=0.0, help="Stop the SHELXL calls of an endpoint once the last L.S. cycle has |max shift/esd| below this value (AUTO 0.01). 0 disables the test (legacy).")
     ap.add_argument("--shelxl-npd-recovery", choices=["damp", "isor"], default="damp", help="Recovery for a non-positive-definite ADP step: legacy DAMP ladder, or ISOR on the NPD atoms only (AUTO).")
     ap.add_argument("--keep-damp", action="store_true", help="Legacy: carry an active DAMP instruction into later SHELXL calls and the written RES. Default strips it.")

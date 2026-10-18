@@ -35,7 +35,7 @@ def combine_cmd(
 
     ``feedback_cycle`` marks a structure-feedback macro-cycle: it uses the macro-cycle weighting rule
     (--shelxl-feedback-wght-mode).  ``final_outputs`` (default: not a feedback cycle) adds the unmerged
-    endpoint and ACTA, which belong to the final combined endpoint only.  ``free_validation`` (combine_final only)
+    endpoint, which belongs to the final combined endpoint only.  ``free_validation`` (combine_final only)
     forwards --endpoint-free-validation on when the AUTO option is on and the free rows stay out of the HKL; the
     option is never emitted otherwise, so every other command is unchanged.
     """
@@ -90,11 +90,9 @@ def combine_cmd(
         resolved_feedback_wght_mode(args) if feedback_cycle else str(getattr(args, "endpoint_wght_mode", "freeze-zero")),
         *endpoint_handoff_args(args),
     ]
-    if (not feedback_cycle) if final_outputs is None else final_outputs:
-        if str(getattr(args, "unmerged_endpoint", "off") or "off") == "on":
-            cmd.append("--unmerged-endpoint")
-        if bool(getattr(args, "shelx_acta", False)):
-            cmd.append("--acta")
+    final = (not feedback_cycle) if final_outputs is None else final_outputs
+    if final and str(getattr(args, "unmerged_endpoint", "off") or "off") == "on":
+        cmd.append("--unmerged-endpoint")
     endpoint_min_d_spacing = float(
         getattr(args, "endpoint_min_d_spacing", 0.0) or getattr(args, "min_d_spacing", 0.0) or 0.0
     )

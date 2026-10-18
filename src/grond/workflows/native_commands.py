@@ -116,7 +116,6 @@ def native_stage_cmd(
     if (
         pinned
         and allow_pinned_jitter_fallback
-        and str(getattr(args, "pinned_sg_jitter_fallback", "none")) == "none"
         and pinned_jitter_mode.strip().lower() != "none"
     ):
         # A previously selected convolution can become geometrically
@@ -308,8 +307,6 @@ def native_stage_cmd(
         "--hkl-float-format",
         "shelx_fixed",
     ]
-    if endpoint_ok and finalish_stage and bool(getattr(args, "shelx_acta", False)):
-        cmd.append("--acta")
     if endpoint_ok and str(getattr(args, "endpoint_wght_mode", "freeze-zero")) == "converge":
         # converge calls are L.S. 10 (the combined endpoints' --shelxl-feedback-endpoint-ls-cycles), not the
         # engine's one-cycle default, so each call's shift/esd test and weight suggestion see a converged model.

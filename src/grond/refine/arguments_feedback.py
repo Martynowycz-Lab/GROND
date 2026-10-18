@@ -51,7 +51,6 @@ def build_parser(description: str) -> argparse.ArgumentParser:
     ap.add_argument("--zerr-esds", default="", help="Six cell e.s.d.s a,b,c,alpha,beta,gamma for the ZERR record of generated endpoint inputs. Empty keeps the model's ZERR.")
     ap.add_argument("--strip-q-peaks", action="store_true", help="Drop previous difference-map peaks (Q1, Q2, ...) from generated endpoint inputs.")
     ap.add_argument("--endpoint-list-code", type=int, default=0, help="LIST code of generated endpoint inputs (AUTO 6). 0 keeps the model's LIST.")
-    ap.add_argument("--acta", action="store_true", help="Add ACTA to generated endpoint inputs so SHELXL writes a CIF.")
     ap.add_argument("--shelxl-convergence-shift-esd", type=float, default=0.0, help="Stop the SHELXL calls of one macro-cycle once |max shift/esd| is below this value (AUTO 0.01). 0 keeps the fixed call count (legacy).")
     ap.add_argument("--shelxl-npd-recovery", choices=["damp", "isor"], default="damp", help="NPD recovery: legacy DAMP ladder or ISOR on the NPD atoms only (AUTO).")
     ap.add_argument("--keep-damp", action="store_true", help="Legacy: carry an active DAMP instruction into later calls and macro-cycles.")

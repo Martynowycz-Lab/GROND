@@ -89,12 +89,6 @@ def register_push(sub: argparse._SubParsersAction) -> None:
     p_push.add_argument("--workers", type=int, default=auto_worker_count(0, 0.85), help="Worker processes (default: 85%% of the cores).")
     p_push.add_argument("--chunksize", type=int, default=4, help="Observations per worker task (default %(default)s).")
     p_push.add_argument("--row-plan-cache", choices=["off", "exact", "readwrite", "rebuild"], default="off", help="Reuse of per-observation geometry: off (default), exact, readwrite or rebuild.")
-    p_push.add_argument(
-        "--pinned-sg-jitter-fallback",
-        choices=["none", "off"],
-        default="none",
-        help="Revalidate an infeasible pinned Sg-jitter model against an explicit no-jitter candidate.",
-    )
     p_push.add_argument("--min-d-spacing", type=float, default=0.0)
     p_push.add_argument(
         "--endpoint-min-d-spacing",

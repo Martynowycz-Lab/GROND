@@ -247,12 +247,6 @@ def add_endpoints(ap: argparse.ArgumentParser, *, expose_lambda_controls: bool) 
         help="Olex2/SHELXLE readiness of generated SHELXL inputs: drop stale difference-map peaks (Q1, Q2, ...) and write LIST 6 so every endpoint has an .fcf with phases for maps. off is the legacy setting (the model's peaks and LIST kept).",
     )
     ap.add_argument(
-        "--shelx-acta",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Add ACTA to the final endpoints so SHELXL writes a CIF next to the .res (off by default; grond check-shelx --acta does the same for any endpoint).",
-    )
-    ap.add_argument(
         "--endpoint-feedback",
         choices=["auto", "on", "off"],
         default="auto",

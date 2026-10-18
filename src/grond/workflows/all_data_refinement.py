@@ -136,7 +136,7 @@ def run_all_data_refinement(prep: PrepConfig, result: Mapping[str, object], args
     mode = str(getattr(args, "endpoint_wght_mode", "freeze-zero"))
     cleanup = str(getattr(args, "shelx_ins_cleanup", "off") or "off") == "on"
     native = SimpleNamespace(zerr_esds=str(getattr(args, "resolved_zerr_esds", "") or ""), strip_q_peaks=cleanup,
-                             endpoint_list_code=6 if cleanup else 0, acta=bool(getattr(args, "shelx_acta", False)))
+                             endpoint_list_code=6 if cleanup else 0)
     write_endpoint_ins(
         Path(str(endpoint["endpoint_res"])), out_dir / f"{STEM}.ins", hkl_name=f"{STEM}.hkl",
         keep_exti=bool(endpoint.get("keep_exti", False)), wght=endpoint_initial_wght(mode),

@@ -52,13 +52,13 @@ def endpoint_handoff_args(args: argparse.Namespace) -> list[str]:
     return cmd + endpoint_native_output_args(args)
 
 
-def endpoint_native_output_args(args: argparse.Namespace, *, final: bool = False) -> list[str]:
+def endpoint_native_output_args(args: argparse.Namespace) -> list[str]:
     """Engine options of the SHELXL-native outputs shared by every endpoint writer.
 
     The converge call cap (when an endpoint or macro-cycle rule is converge), the error-model refit count
-    (under the error model), the resolved cell e.s.d.s (ZERR), the Olex2/SHELXLE input cleanup (no stale
-    Q-peaks, LIST 6) and, for ``final`` endpoints only, ACTA.  An option is emitted only when it acts, so
-    missing attributes and the legacy flags add no option to the engine commands.
+    (under the error model), the resolved cell e.s.d.s (ZERR) and the Olex2/SHELXLE input cleanup (no stale
+    Q-peaks, LIST 6).  An option is emitted only when it acts, so missing attributes and the legacy flags add
+    no option to the engine commands.
     """
 
     cmd: list[str] = []
@@ -73,8 +73,6 @@ def endpoint_native_output_args(args: argparse.Namespace, *, final: bool = False
         cmd += ["--zerr-esds", zerr]
     if str(getattr(args, "shelx_ins_cleanup", "off") or "off") == "on":
         cmd += ["--strip-q-peaks", "--endpoint-list-code", "6"]
-    if final and bool(getattr(args, "shelx_acta", False)):
-        cmd.append("--acta")
     return cmd
 
 

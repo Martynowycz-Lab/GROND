@@ -1152,8 +1152,6 @@ def native_endpoint_outputs(args) -> dict:
         out["strip_q_peaks"] = True
     if int(getattr(args, "endpoint_list_code", 0) or 0) > 0:
         out["list_code"] = int(args.endpoint_list_code)
-    if bool(getattr(args, "acta", False)):
-        out["acta"] = True
     return out
 
 

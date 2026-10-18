@@ -65,7 +65,8 @@ from grond.workflows.nuisance_policy import (
 NUISANCE_SELECTIONS = ("nested", "sequential")
 # Feature gates the nested stage replaces (it selects the cone and dose jointly with the thickness).
 NESTED_GATE_FAMILIES = ("mosaicity", "dose")
-FAMILY_NAMES = {"uniform_gradient": "wedge", "wedge": "wedge", "gamma": "gamma"}
+# Thickness-distribution families of the nested selection: uniform_gradient (t0, gradient) and gamma (mean, shape).
+NESTED_FAMILIES = ("wedge", "gamma")
 CONTRACT_SCHEMA = "grond.nested-nuisance-contract.v1"
 # Nuisance fields the materialized replay must reproduce exactly.
 REPLAY_FIELDS = ("thickness_model", "thickness_evaluator", "mosaicity_mode", "dose_b_mode")
@@ -118,15 +119,9 @@ def feedback_thickness_update_enabled(args: argparse.Namespace) -> bool:
 
 
 def nested_families(args: argparse.Namespace) -> tuple[str, ...]:
-    """Return the ``--nested-families`` thickness families as engine names; raise when empty or unknown."""
+    """The thickness families of the nested selection as engine names: uniform_gradient (wedge) and gamma."""
 
-    tokens = [t.strip() for t in str(getattr(args, "nested_families", "uniform_gradient,gamma") or "").split(",") if t.strip()]
-    if not tokens:
-        raise ValueError("--nested-families is empty; give uniform_gradient and/or gamma")
-    unknown = [t for t in tokens if t not in FAMILY_NAMES]
-    if unknown:
-        raise ValueError(f"--nested-families has unknown families {unknown}; choices are uniform_gradient, gamma")
-    return tuple(dict.fromkeys(FAMILY_NAMES[t] for t in tokens))
+    return NESTED_FAMILIES
 
 
 def nested_grids(args: argparse.Namespace) -> SelectionGrids:
