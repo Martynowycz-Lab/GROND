@@ -13,7 +13,10 @@ from .input_commands import register_inputs
 from .integration_commands import register_integration
 from .manual_commands import register_manual
 from .run_commands import register_runs
+from .scout_commands import register_scouts, register_thickness
 from .validation_commands import register_runtime
+
+INTERNAL_COMMANDS = {"scout", "hand-check", "thickness-scout"}
 
 # Help level of each option, per command. Options not listed here are level 2.
 HELP_LEVELS = {
@@ -84,6 +87,13 @@ def build_parser(level: int = 0) -> argparse.ArgumentParser:
     register_inputs(sub)
     register_integration(sub)
     register_runtime(sub)
+    # Stage commands that `grond manual` runs; they are not listed in `grond -h`.
+    register_scouts(sub)
+    register_thickness(sub)
+    sub._choices_actions = [a for a in sub._choices_actions if a.dest not in INTERNAL_COMMANDS]
+    seen = set()
     for name, subparser in sub.choices.items():
-        _apply_help_levels(name, subparser, level)
+        if id(subparser) not in seen:  # an alias maps to the same parser
+            seen.add(id(subparser))
+            _apply_help_levels(name, subparser, level)
     return parser
