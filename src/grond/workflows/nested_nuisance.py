@@ -58,6 +58,7 @@ from grond.workflows.nuisance_policy import (
     auto_mosaicity_grid,
     dose_b_per_frame_grid,
     feature_is_enabled,
+    nuisance_grid,
     parse_strict_grid,
     stage_n_points,
 )
@@ -228,7 +229,7 @@ def nested_variants(args: argparse.Namespace, ds: DatasetSpec) -> list[dict]:
         else:
             cones += [(mode, float(s)) for s in parse_strict_grid(sigmas, "mosaicity sigma")
                       if float(s) > 0.0 or mode == "gaussian_cone"]
-    dose_modes = [m for m in str(getattr(args, "dose_b_mode_grid", "none") or "none").replace(",", " ").split() if m]
+    dose_modes = [m for m in str(nuisance_grid(args, "dose_b_mode_grid") or "none").replace(",", " ").split() if m]
     doses: list[tuple[str, float, dict]] = [("none", 0.0, {"dose_b_total_A2": 0.0})] if "none" in dose_modes else []
     if "linear_frame" in dose_modes:
         per_frame, conversion = dose_b_per_frame_grid(args, ds)
@@ -240,7 +241,7 @@ def nested_variants(args: argparse.Namespace, ds: DatasetSpec) -> list[dict]:
                 continue  # linear_frame at 0 per frame is the no-dose physics already listed
             doses.append(("linear_frame", float(value), params))
     if not doses:
-        raise ValueError(f"--dose-b-mode-grid {args.dose_b_mode_grid!r} gives no dose candidate")
+        raise ValueError(f"the dose mode grid {nuisance_grid(args, 'dose_b_mode_grid')!r} gives no dose candidate")
     points = int(getattr(args, "mosaicity_points", 3))
     variants = []
     for mode, sigma in cones:

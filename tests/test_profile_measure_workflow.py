@@ -35,7 +35,8 @@ def parser(tmp_path):
 def source_and_args(tmp_path):
     args = build_parser().parse_args(["auto", "--hkl", str(tmp_path/"input.hkl"), "--structure", str(tmp_path/"model.res"),
                                       "--out-dir", str(tmp_path/"run"), *OPTIONS, "--mosaicity-mode", "gaussian_cone",
-                                      "--mosaicity-support-sigma-deg", "0.3", "--dose-b-mode-grid", "none"])
+                                      "--mosaicity-support-sigma-deg", "0.3"])
+    args.dose_b_mode_grid = "none"  # a stage may narrow the AUTO dose grid on its namespace (nuisance_grid)
     ds = DatasetSpec(name="one", hkl=str(tmp_path/"input.hkl"))
     nui = asdict(Nuisance(1200., 0., 0., 1., 0, 0., 0., 0., mosaicity_mode="gaussian_cone",
                          mosaicity_sigma_deg=0.1, mosaicity_points=3, mosaicity_support_sigma_deg=0.3))

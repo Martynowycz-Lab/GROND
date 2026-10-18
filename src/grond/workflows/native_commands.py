@@ -18,6 +18,7 @@ from grond.workflows.nuisance_policy import (
     effective_topup_d_min,
     grid_from_nuisance,
     grid_has_variation,
+    nuisance_grid,
     prediction_cache_dir,
     resolved_post_bloch_sigma_policy,
     resolved_row_plan_cache,
@@ -90,29 +91,29 @@ def native_stage_cmd(
         else args.thickness_grad_grid
     )
     frame_grid = (
-        grid_from_nuisance(pinned, "frame_offset", "0.0") if pinned else args.frame_offset_grid
+        grid_from_nuisance(pinned, "frame_offset", "0.0") if pinned else nuisance_grid(args, "frame_offset_grid")
     )
     group_grid = (
         grid_from_nuisance(pinned, "group_width_deg", "1.0")
         if pinned
-        else args.group_width_grid
+        else nuisance_grid(args, "group_width_grid")
     )
-    sigma_a = grid_from_nuisance(pinned, "sigma_a", "0.0") if pinned else args.sigma_a_grid
+    sigma_a = grid_from_nuisance(pinned, "sigma_a", "0.0") if pinned else nuisance_grid(args, "sigma_a_grid")
     sigma_b = grid_from_nuisance(pinned, "sigma_b_corr", "0.0") if pinned else "0.0"
     sigma_c = (
-        grid_from_nuisance(pinned, "sigma_c_peak", "0.0") if pinned else args.sigma_c_peak_grid
+        grid_from_nuisance(pinned, "sigma_c_peak", "0.0") if pinned else nuisance_grid(args, "sigma_c_peak_grid")
     )
     row_resolution_b = (
         grid_from_nuisance(pinned, "row_resolution_b", "0.0")
         if pinned
-        else args.row_resolution_b_grid
+        else nuisance_grid(args, "row_resolution_b_grid")
     )
     # hand-check replays the recorded split of its source stage (production_scales); AUTO fits on work rows.
     scale_fit_split = scale_fit_split_override or ("all" if getattr(args, "production_scales", False) else "work")
     if scale_fit_split not in {"work", "all"}:
         raise ValueError(f"invalid scale-fit split override {scale_fit_split!r}")
     pinned_jitter_mode = grid_from_nuisance(pinned, "sg_jitter_mode", "none") if pinned else ""
-    jitter_mode_grid = pinned_jitter_mode if pinned else args.sg_jitter_mode_grid
+    jitter_mode_grid = pinned_jitter_mode if pinned else nuisance_grid(args, "sg_jitter_mode_grid")
     if (
         pinned
         and allow_pinned_jitter_fallback
@@ -125,7 +126,7 @@ def native_stage_cmd(
         jitter_mode_grid = f"{pinned_jitter_mode},none"
     # An unpinned (non-adaptive) grid searches dose only on an explicit per-frame grid; the
     # total-B-over-the-scan grid is converted per crystal by the dose feature gate.
-    unpinned_dose_grid = str(getattr(args, "dose_b_per_frame_grid", "") or "").strip()
+    unpinned_dose_grid = str(nuisance_grid(args, "dose_b_per_frame_grid") or "").strip()
     # The mosaic cone is part of the pinned physics: one candidate is forwarded as the
     # engine's scalar options (recorded verbatim in its config), a feature grid as grids.
     mosaicity_modes = grid_from_nuisance(pinned, "mosaicity_mode", "none") if pinned else "none"
@@ -182,7 +183,7 @@ def native_stage_cmd(
         "--thickness-grid",
         thickness_grid,
         "--thickness-model-grid",
-        grid_from_nuisance(pinned, "thickness_model", "uniform_gradient") if pinned else args.thickness_model_grid,
+        grid_from_nuisance(pinned, "thickness_model", "uniform_gradient") if pinned else nuisance_grid(args, "thickness_model_grid"),
         "--thickness-grad-grid",
         grad_grid,
         "--thickness-sigma-frac-grid",
@@ -201,11 +202,11 @@ def native_stage_cmd(
         "--sg-jitter-sigma0-grid",
         grid_from_nuisance(pinned, "sg_jitter_sigma0", "0.0")
         if pinned
-        else args.sg_jitter_sigma0_grid,
+        else nuisance_grid(args, "sg_jitter_sigma0_grid"),
         "--sg-jitter-sigma-d-inv-grid",
         grid_from_nuisance(pinned, "sg_jitter_sigma_d_inv", "0.0")
         if pinned
-        else args.sg_jitter_sigma_d_inv_grid,
+        else nuisance_grid(args, "sg_jitter_sigma_d_inv_grid"),
         "--sg-jitter-sigma-frame-grid",
         grid_from_nuisance(pinned, "sg_jitter_sigma_frame", "0.0") if pinned else "0.0",
         "--sg-jitter-points",
@@ -225,17 +226,17 @@ def native_stage_cmd(
         "--absorption-mode-grid",
         grid_from_nuisance(pinned, "absorption_mode", "none")
         if pinned
-        else args.absorption_mode_grid,
+        else nuisance_grid(args, "absorption_mode_grid"),
         "--absorption-mu-grid",
-        grid_from_nuisance(pinned, "absorption_mu", "0.0") if pinned else args.absorption_mu_grid,
+        grid_from_nuisance(pinned, "absorption_mu", "0.0") if pinned else nuisance_grid(args, "absorption_mu_grid"),
         "--absorption-frac-grid",
         grid_from_nuisance(pinned, "absorption_frac", "0.0")
         if pinned
-        else args.absorption_frac_grid,
+        else nuisance_grid(args, "absorption_frac_grid"),
         "--absorption-mu-g2-grid",
         grid_from_nuisance(pinned, "absorption_mu_g2", "0.0")
         if pinned
-        else args.absorption_mu_g2_grid,
+        else nuisance_grid(args, "absorption_mu_g2_grid"),
         "--absorption-mu-theta2-grid",
         grid_from_nuisance(pinned, "absorption_mu_theta2", "0.0") if pinned else "0.0",
         "--absorption-tds-b-grid",
@@ -243,7 +244,7 @@ def native_stage_cmd(
         "--dose-b-mode-grid",
         grid_from_nuisance(pinned, "dose_b_mode", "none")
         if pinned
-        else ("none" if not unpinned_dose_grid else args.dose_b_mode_grid),
+        else ("none" if not unpinned_dose_grid else nuisance_grid(args, "dose_b_mode_grid")),
         "--dose-b-per-frame-grid",
         grid_from_nuisance(pinned, "dose_b_per_frame", "0.0")
         if pinned

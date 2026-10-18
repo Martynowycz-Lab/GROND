@@ -199,50 +199,9 @@ def add_geometry(ap: argparse.ArgumentParser) -> None:
 def add_nuisance(ap: argparse.ArgumentParser) -> None:
     """Add nuisance options in the established order."""
 
-    ap.add_argument(
-        "--row-resolution-b-grid",
-        default="0.0,14,18",
-        help="Raw-row dynamical resolution-envelope grid. Positive values are the dynamic-gradient counterpart of negative endpoint-B diagnostics.",
-    )
     ap.add_argument("--thickness-grid", default="1000,1200,1400")
-    ap.add_argument("--thickness-model-grid", default="uniform_gradient")
     ap.add_argument("--thickness-grad-grid", default="0.4,1.0")
-    ap.add_argument(
-        "--frame-offset-grid",
-        default="auto",
-        help=(
-            "Profile-center offsets in XDS frames, or 'auto'. Auto reconciles the global XDS header "
-            "orientation with row ZCAL positions before work-row nuisance selection."
-        ),
-    )
-    ap.add_argument(
-        "--group-width-grid",
-        default="auto",
-        help="Frame-group width grid (the group column of the row tables). Numeric values are degrees; frame, 2frame, 3frames, and auto resolve from XDS OSCILLATION_RANGE. Auto never goes below one physical frame; explicit numeric sub-frame values are diagnostic opt-ins.",
-    )
-    ap.add_argument("--sigma-a-grid", default="0.0")
-    ap.add_argument("--sigma-b-corr-grid", default="0.0")
-    ap.add_argument("--sigma-c-peak-grid", default="0.0,0.15")
-    ap.add_argument("--sg-jitter-mode-grid", default="none,gaussian")
-    ap.add_argument("--sg-jitter-sigma0-grid", default="0.0,0.0015")
-    ap.add_argument("--sg-jitter-sigma-d-inv-grid", default="0.0")
-    ap.add_argument("--sg-jitter-sigma-frame-grid", default="0.0")
     ap.add_argument("--sg-jitter-points", type=int, default=3)
-    ap.add_argument(
-        "--absorption-mode-grid",
-        default="none",
-        help="Absorption feature-gate grid. Default none (no absorption). Legacy: none,midgley_like.",
-    )
-    ap.add_argument("--absorption-mu-grid", default="0.0", help="Legacy: 0.0,0.00005.")
-    ap.add_argument("--absorption-frac-grid", default="0.0", help="Legacy: 0.0,0.02.")
-    ap.add_argument("--absorption-mu-g2-grid", default="0.0")
-    ap.add_argument("--absorption-mu-theta2-grid", default="0.0")
-    ap.add_argument("--absorption-tds-b-grid", default="0.0")
-    ap.add_argument(
-        "--dose-b-mode-grid",
-        default="none,linear_frame",
-        help="Dose-B feature-gate modes. Legacy: none (with --dose-b-per-frame-grid 0.0).",
-    )
     ap.add_argument(
         "--dose-b-total-grid",
         default="0,0.5,1,2,3",
@@ -250,11 +209,6 @@ def add_nuisance(ap: argparse.ArgumentParser) -> None:
             "Dose-B grid in A^2 accumulated over the whole scan; each crystal converts it to B per frame with "
             "its own ZCAL span. Ignored when --dose-b-per-frame-grid is given."
         ),
-    )
-    ap.add_argument(
-        "--dose-b-per-frame-grid",
-        default="",
-        help="Explicit dose-B grid in A^2 per XDS frame (legacy units); overrides --dose-b-total-grid. Legacy: 0.0.",
     )
     ap.add_argument(
         "--mosaicity-mode",

@@ -40,6 +40,36 @@ SCREEN_N_BASIS = 24
 # Final beam count when the support scan recommends none (and in a dry run).
 FINAL_BASIS_FALLBACK = 128
 
+# Nuisance search grids of AUTO (the screen, the feature gates and the nested selection).  grond thickness-scout
+# narrows some of them on its own namespace; every other command uses these values.
+NUISANCE_GRIDS = {
+    "row_resolution_b_grid": "0.0,14,18",
+    "thickness_model_grid": "uniform_gradient",
+    "frame_offset_grid": "auto",
+    "group_width_grid": "auto",
+    "sigma_a_grid": "0.0",
+    "sigma_b_corr_grid": "0.0",
+    "sigma_c_peak_grid": "0.0,0.15",
+    "sg_jitter_mode_grid": "none,gaussian",
+    "sg_jitter_sigma0_grid": "0.0,0.0015",
+    "sg_jitter_sigma_d_inv_grid": "0.0",
+    "sg_jitter_sigma_frame_grid": "0.0",
+    "absorption_mode_grid": "none",
+    "absorption_mu_grid": "0.0",
+    "absorption_frac_grid": "0.0",
+    "absorption_mu_g2_grid": "0.0",
+    "absorption_mu_theta2_grid": "0.0",
+    "absorption_tds_b_grid": "0.0",
+    "dose_b_mode_grid": "none,linear_frame",
+    "dose_b_per_frame_grid": "",
+}
+
+
+def nuisance_grid(args: argparse.Namespace, name: str) -> str:
+    """The nuisance search grid ``name``: the namespace's value when a stage set one, else the AUTO grid."""
+
+    return getattr(args, name, NUISANCE_GRIDS[name])
+
 
 def error_model_sigma_active(args: argparse.Namespace) -> bool:
     """Whether the per-crystal error model sets the SHELXL/merge sigmas (--dataset-sigma-policy error_model)."""
@@ -248,8 +278,8 @@ def compact_base_nuisance(args: argparse.Namespace) -> dict:
         "thickness_model": "uniform_gradient",
         "thickness_grad_frac": args.thickness_grad_grid,
         "thickness_sigma_frac": "0.0",
-        "frame_offset": args.frame_offset_grid,
-        "group_width_deg": args.group_width_grid,
+        "frame_offset": nuisance_grid(args, "frame_offset_grid"),
+        "group_width_deg": nuisance_grid(args, "group_width_grid"),
         "detector_scale_bins": "0",  # recorded nuisance field; no detector scale field
         "sigma_a": "0.0",
         "sigma_b_corr": "0.0",
@@ -341,38 +371,38 @@ def feature_grid(args: argparse.Namespace, family: str, nui: dict, ds: DatasetSp
     """
 
     if family == "row_resolution":
-        return nuisance_with_updates(nui, row_resolution_b=args.row_resolution_b_grid)
+        return nuisance_with_updates(nui, row_resolution_b=nuisance_grid(args, "row_resolution_b_grid"))
     if family == "absorption":
         return nuisance_with_updates(
             nui,
-            absorption_mode=args.absorption_mode_grid,
-            absorption_mu=args.absorption_mu_grid,
-            absorption_frac=args.absorption_frac_grid,
-            absorption_mu_g2=args.absorption_mu_g2_grid,
-            absorption_mu_theta2=args.absorption_mu_theta2_grid,
-            absorption_tds_b=args.absorption_tds_b_grid,
+            absorption_mode=nuisance_grid(args, "absorption_mode_grid"),
+            absorption_mu=nuisance_grid(args, "absorption_mu_grid"),
+            absorption_frac=nuisance_grid(args, "absorption_frac_grid"),
+            absorption_mu_g2=nuisance_grid(args, "absorption_mu_g2_grid"),
+            absorption_mu_theta2=nuisance_grid(args, "absorption_mu_theta2_grid"),
+            absorption_tds_b=nuisance_grid(args, "absorption_tds_b_grid"),
         )
     if family == "sg_jitter":
         return nuisance_with_updates(
             nui,
-            sg_jitter_mode=args.sg_jitter_mode_grid,
-            sg_jitter_sigma0=args.sg_jitter_sigma0_grid,
-            sg_jitter_sigma_d_inv=args.sg_jitter_sigma_d_inv_grid,
-            sg_jitter_sigma_frame=args.sg_jitter_sigma_frame_grid,
+            sg_jitter_mode=nuisance_grid(args, "sg_jitter_mode_grid"),
+            sg_jitter_sigma0=nuisance_grid(args, "sg_jitter_sigma0_grid"),
+            sg_jitter_sigma_d_inv=nuisance_grid(args, "sg_jitter_sigma_d_inv_grid"),
+            sg_jitter_sigma_frame=nuisance_grid(args, "sg_jitter_sigma_frame_grid"),
             sg_jitter_points=args.sg_jitter_points,
         )
     if family == "sigma_error":
         return nuisance_with_updates(
             nui,
-            sigma_a=args.sigma_a_grid,
-            sigma_b_corr=args.sigma_b_corr_grid,
-            sigma_c_peak=args.sigma_c_peak_grid,
+            sigma_a=nuisance_grid(args, "sigma_a_grid"),
+            sigma_b_corr=nuisance_grid(args, "sigma_b_corr_grid"),
+            sigma_c_peak=nuisance_grid(args, "sigma_c_peak_grid"),
         )
     if family == "dose":
         per_frame, _conversion = dose_b_per_frame_grid(args, ds)
         return nuisance_with_updates(
             nui,
-            dose_b_mode=args.dose_b_mode_grid,
+            dose_b_mode=nuisance_grid(args, "dose_b_mode_grid"),
             dose_b_per_frame=per_frame,
         )
     if family == "mosaicity":
@@ -390,35 +420,35 @@ def feature_is_enabled(args: argparse.Namespace, family: str) -> bool:
     """Return true when an optional feature family has a real search grid."""
 
     if family == "row_resolution":
-        return grid_has_variation(args.row_resolution_b_grid)
+        return grid_has_variation(nuisance_grid(args, "row_resolution_b_grid"))
     if family == "absorption":
         return (
-            grid_has_variation(args.absorption_mode_grid)
-            or grid_has_variation(args.absorption_mu_grid)
-            or grid_has_variation(args.absorption_frac_grid)
-            or grid_has_variation(args.absorption_mu_g2_grid)
-            or grid_has_variation(args.absorption_mu_theta2_grid)
-            or grid_has_variation(args.absorption_tds_b_grid)
+            grid_has_variation(nuisance_grid(args, "absorption_mode_grid"))
+            or grid_has_variation(nuisance_grid(args, "absorption_mu_grid"))
+            or grid_has_variation(nuisance_grid(args, "absorption_frac_grid"))
+            or grid_has_variation(nuisance_grid(args, "absorption_mu_g2_grid"))
+            or grid_has_variation(nuisance_grid(args, "absorption_mu_theta2_grid"))
+            or grid_has_variation(nuisance_grid(args, "absorption_tds_b_grid"))
         )
     if family == "sg_jitter":
         return (
-            grid_has_variation(args.sg_jitter_mode_grid)
-            or grid_has_variation(args.sg_jitter_sigma0_grid)
-            or grid_has_variation(args.sg_jitter_sigma_d_inv_grid)
-            or grid_has_variation(args.sg_jitter_sigma_frame_grid)
+            grid_has_variation(nuisance_grid(args, "sg_jitter_mode_grid"))
+            or grid_has_variation(nuisance_grid(args, "sg_jitter_sigma0_grid"))
+            or grid_has_variation(nuisance_grid(args, "sg_jitter_sigma_d_inv_grid"))
+            or grid_has_variation(nuisance_grid(args, "sg_jitter_sigma_frame_grid"))
         )
     if family == "sigma_error":
         return (
-            grid_has_variation(args.sigma_a_grid)
-            or grid_has_variation(args.sigma_b_corr_grid)
-            or grid_has_variation(args.sigma_c_peak_grid)
+            grid_has_variation(nuisance_grid(args, "sigma_a_grid"))
+            or grid_has_variation(nuisance_grid(args, "sigma_b_corr_grid"))
+            or grid_has_variation(nuisance_grid(args, "sigma_c_peak_grid"))
         )
     if family == "dose":
-        modes = [m for m in str(args.dose_b_mode_grid or "").replace(",", " ").split() if m]
-        values = str(getattr(args, "dose_b_per_frame_grid", "") or "").strip() or str(
+        modes = [m for m in str(nuisance_grid(args, "dose_b_mode_grid") or "").replace(",", " ").split() if m]
+        values = str(nuisance_grid(args, "dose_b_per_frame_grid") or "").strip() or str(
             getattr(args, "dose_b_total_grid", "") or ""
         )
-        return "linear_frame" in modes and (grid_has_variation(args.dose_b_mode_grid) or grid_has_variation(values))
+        return "linear_frame" in modes and (grid_has_variation(nuisance_grid(args, "dose_b_mode_grid")) or grid_has_variation(values))
     if family == "mosaicity":
         modes, sigmas = auto_mosaicity_grid(args)
         return grid_has_variation(modes) or grid_has_variation(sigmas)
@@ -614,7 +644,7 @@ def dose_b_per_frame_grid(args: argparse.Namespace, ds: DatasetSpec | None) -> t
     --dose-b-total-grid (A^2 over the scan) is divided by this dataset's ZCAL span.
     """
 
-    explicit = str(getattr(args, "dose_b_per_frame_grid", "") or "").strip()
+    explicit = str(nuisance_grid(args, "dose_b_per_frame_grid") or "").strip()
     if explicit:
         return explicit, {"source": "dose_b_per_frame_grid", "per_frame_grid": explicit}
     totals = parse_strict_grid(getattr(args, "dose_b_total_grid", ""), "dose total B")
@@ -659,10 +689,10 @@ def configure_auto_physics(prep: PrepConfig, args: argparse.Namespace) -> dict:
 
     # Validate the gate grids before any calculation starts.
     auto_mosaicity_grid(args)
-    parse_strict_grid(getattr(args, "dose_b_per_frame_grid", ""), "dose per-frame B")
+    parse_strict_grid(nuisance_grid(args, "dose_b_per_frame_grid"), "dose per-frame B")
     if any(value < 0.0 for value in parse_strict_grid(getattr(args, "dose_b_total_grid", ""), "dose total B")):
         raise ValueError("--dose-b-total-grid values must be nonnegative (A^2 accumulated over the scan)")
-    dose_by_total = feature_is_enabled(args, "dose") and not str(getattr(args, "dose_b_per_frame_grid", "") or "").strip()
+    dose_by_total = feature_is_enabled(args, "dose") and not str(nuisance_grid(args, "dose_b_per_frame_grid") or "").strip()
     records: dict[str, dict] = {}
     for ds in prep.datasets:
         crystal = crystal_arguments(args, ds.name)
@@ -717,14 +747,14 @@ def configure_auto_physics(prep: PrepConfig, args: argparse.Namespace) -> dict:
         "datasets": records,
         "mosaicity": {"mode_grid": modes, "sigma_deg_grid": sigmas, "points": int(args.mosaicity_points)},
         "dose": {
-            "mode_grid": str(args.dose_b_mode_grid),
-            "per_frame_grid": str(getattr(args, "dose_b_per_frame_grid", "") or ""),
+            "mode_grid": str(nuisance_grid(args, "dose_b_mode_grid")),
+            "per_frame_grid": str(nuisance_grid(args, "dose_b_per_frame_grid") or ""),
             "total_b_grid_A2": str(getattr(args, "dose_b_total_grid", "") or ""),
         },
         "absorption": {
-            "mode_grid": str(args.absorption_mode_grid),
-            "mu_grid": str(args.absorption_mu_grid),
-            "frac_grid": str(args.absorption_frac_grid),
+            "mode_grid": str(nuisance_grid(args, "absorption_mode_grid")),
+            "mu_grid": str(nuisance_grid(args, "absorption_mu_grid")),
+            "frac_grid": str(nuisance_grid(args, "absorption_frac_grid")),
         },
         "physics_gate_selection": "orbit-cv",
         "thickness_gate_split": "matched",
