@@ -79,10 +79,7 @@ def resolved_dataset_sigma_policy(args: argparse.Namespace, *, multi_dataset: bo
 def resolved_feedback_wght_mode(args: argparse.Namespace) -> str:
     """SHELXL weighting policy of the structure-feedback macro-cycles (``endpoint`` follows the endpoints)."""
 
-    requested = str(getattr(args, "shelxl_feedback_wght_mode", "endpoint") or "endpoint")
-    if requested == "endpoint":
-        return str(getattr(args, "endpoint_wght_mode", "freeze-zero"))
-    return requested
+    return str(getattr(args, "endpoint_wght_mode", "freeze-zero"))
 
 
 def refuse_sigma_weight_startup_conflicts(args: argparse.Namespace) -> None:
@@ -750,7 +747,7 @@ def warn_missing_cell_esd_source(structure: str, datasets, args: argparse.Namesp
     from grond.io.structure_contract import is_shelx_model
     from grond.refine.cell_esd import dataset_model_cell
 
-    if str(getattr(args, "cell_esd_policy", "source") or "source") == "source" or bool(getattr(args, "dry_run", False)):
+    if bool(getattr(args, "dry_run", False)):
         return
     if str(getattr(args, "cell_esd", "") or "").strip() or not is_shelx_model(structure):
         return
@@ -782,21 +779,17 @@ def warn_missing_cell_esd_source(structure: str, datasets, args: argparse.Namesp
 def configure_cell_esd(structure: str, datasets, args: argparse.Namespace) -> dict:
     """Resolve the ZERR cell e.s.d.s of every SHELXL endpoint once the HKL transforms are fixed.
 
-    ``--cell-esd-policy auto`` (AUTO) takes --cell-esd, else the crystals' cell spread, else the one
-    crystal's XDS CORRECT.LP or DIALS scan-varying spread (grond.refine.cell_esd); without a measured source it
-    uses the model's ZERR e.s.d.s (or keeps its ZERR when they are zero) and warns; ``source`` (legacy, and every
-    namespace without the option) keeps the model's ZERR.  The
-    record is written to decisions/cell_esd.json and the value reaches the engines as --zerr-esds.
+    Takes --cell-esd, else the crystals' cell spread, else the one crystal's XDS CORRECT.LP or DIALS
+    scan-varying spread (grond.refine.cell_esd); without a measured source it uses the model's ZERR e.s.d.s (or
+    keeps its ZERR when they are zero) and warns.  The record is written to decisions/cell_esd.json and the value reaches the engines as --zerr-esds.
     """
 
     from grond.io.structure_contract import is_shelx_model
     from grond.refine.cell_esd import resolve_cell_esds
 
-    policy = str(getattr(args, "cell_esd_policy", "source") or "source")
+    policy = "auto"
     args.resolved_zerr_esds = ""
-    if policy == "source":
-        record: dict = {"status": "source_policy", "policy": policy, "definition": "the model's ZERR is written unchanged"}
-    elif not is_shelx_model(structure):
+    if not is_shelx_model(structure):
         record = {"status": "not_shelx_model", "policy": policy, "structure": str(structure)}
     elif bool(getattr(args, "dry_run", False)):
         record = {"status": "dry_run", "policy": policy}

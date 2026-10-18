@@ -81,15 +81,6 @@ def structurally_converged(stats: dict) -> bool:
     )
 
 
-def endpoint_free_validation_mode(args: argparse.Namespace) -> str:
-    """Return the ``--endpoint-free-validation`` setting (on/off; off when absent); raise on any other value."""
-
-    mode = str(getattr(args, "endpoint_free_validation", "off") or "off")
-    if mode not in {"on", "off"}:
-        raise ValueError(f"unknown --endpoint-free-validation {mode!r}")
-    return mode
-
-
 def leak_free_split_masks(
     rows: list[tuple[tuple[int, int, int], str]],
     model: dict,
@@ -391,11 +382,10 @@ def run_leak_free_start(
     if recoveries:
         record["leak"] = ("none: start model refined on work orbits only, with ISOR on atoms that went NPD ("
                           + "; ".join(record["npd_recovery"]["restraints_added"]) + ")")
-    if endpoint_free_validation_mode(args) == "on":
-        try:  # reporting only: a failed validation never changes the start model or stops the run
-            record["free_validation"] = score_leak_free_start(out_dir, rows, masks, shelxl=shelxl, stem=stem)
-        except Exception as exc:
-            record["free_validation"] = {"status": "failed", "error": f"{type(exc).__name__}: {exc}"}
+    try:  # reporting only: a failed validation never changes the start model or stops the run
+        record["free_validation"] = score_leak_free_start(out_dir, rows, masks, shelxl=shelxl, stem=stem)
+    except Exception as exc:
+        record["free_validation"] = {"status": "failed", "error": f"{type(exc).__name__}: {exc}"}
     (out_dir / "summary.json").write_text(json.dumps(record, indent=2) + "\n")
     return record
 

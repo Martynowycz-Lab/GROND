@@ -108,11 +108,10 @@ def run_all_data_refinement(prep: PrepConfig, result: Mapping[str, object], args
         return {"status": "skipped_free_set_on"}
     if getattr(args, "dry_run", False):
         return {"status": "dry_run"}
-    if str(getattr(args, "endpoint_free_validation", "on")) != "on":
-        return {"status": "not_available", "reason": "--endpoint-free-validation off writes no free reflections"}
     from grond.engine.combine_native_nuisance_runs import endpoint_native_outputs, run_shelxl
     from grond.refine.shelx_input import write_endpoint_ins
     from grond.refine.shelxl_iterations import endpoint_initial_wght
+    from grond.workflows.endpoint_commands import WGHT_CONVERGE_MAX_CALLS
     from grond.workflows.finish_maps import _publication_endpoint_from_result
 
     out_dir = Path(getattr(args, "out_dir", ".")) / ALL_DATA_DIR
@@ -134,9 +133,9 @@ def run_all_data_refinement(prep: PrepConfig, result: Mapping[str, object], args
     write_hklf4_lines(out_dir / f"{STEM}.hkl", lines)
     record["reflections"] = {"work": n_work, "free": n_free}
     mode = str(getattr(args, "endpoint_wght_mode", "freeze-zero"))
-    cleanup = str(getattr(args, "shelx_ins_cleanup", "off") or "off") == "on"
-    native = SimpleNamespace(zerr_esds=str(getattr(args, "resolved_zerr_esds", "") or ""), strip_q_peaks=cleanup,
-                             endpoint_list_code=6 if cleanup else 0)
+    # Olex2/SHELXLE-ready input: no stale Q-peaks, LIST 6.
+    native = SimpleNamespace(zerr_esds=str(getattr(args, "resolved_zerr_esds", "") or ""), strip_q_peaks=True,
+                             endpoint_list_code=6)
     write_endpoint_ins(
         Path(str(endpoint["endpoint_res"])), out_dir / f"{STEM}.ins", hkl_name=f"{STEM}.hkl",
         keep_exti=bool(endpoint.get("keep_exti", False)), wght=endpoint_initial_wght(mode),
@@ -152,7 +151,7 @@ def run_all_data_refinement(prep: PrepConfig, result: Mapping[str, object], args
         convergence_shift_esd=float(getattr(args, "shelxl_convergence_shift_esd", 0.0) or 0.0),
         npd_recovery=str(getattr(args, "shelxl_npd_recovery", "damp") or "damp"),
         keep_damp=bool(getattr(args, "shelxl_carry_damp", False)),
-        wght_converge_max_calls=int(getattr(args, "wght_converge_max_calls", 20) or 20),
+        wght_converge_max_calls=WGHT_CONVERGE_MAX_CALLS,
     )
     record["shelxl"] = {key: value for key, value in refined.items() if key != "iteration_history"}
     record["statistics"] = {key: refined.get(key) for key in STATISTICS}

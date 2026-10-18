@@ -48,18 +48,6 @@ def add_endpoints(ap: argparse.ArgumentParser, *, expose_lambda_controls: bool) 
         help="SHELXL weight policy for corrected-HKL endpoint files. converge (default) starts each handoff at WGHT 0 0 and promotes SHELXL's suggested WGHT until the applied and suggested WGHT agree (|da| < 0.002, |db| < 0.02) and max shift/esd < --shelxl-convergence-shift-esd, at most --wght-converge-max-calls calls, so the written .res carries the converged WGHT; promote-gold starts at WGHT 0.1 0 and promotes on later calls until shift/esd converges; promote keeps the source-model WGHT on the first call and then promotes; freeze-zero is the legacy WGHT 0 0 after GROND sigma calibration; inherit keeps the source-model WGHT.",
     )
     ap.add_argument(
-        "--wght-converge-max-calls",
-        type=int,
-        default=20,
-        help="Maximum SHELXL calls of one endpoint handoff under the converge weighting mode.",
-    )
-    ap.add_argument(
-        "--shelxl-feedback-wght-mode",
-        choices=["endpoint", "freeze-zero", "inherit", "promote", "promote-gold", "converge"],
-        default="endpoint",
-        help="SHELXL weight policy of the structure-feedback macro-cycles. endpoint (default) uses --endpoint-wght-mode; the other values are the --endpoint-wght-mode policies (promote-gold is cheaper than converge). The rule used is recorded in the loop summary.",
-    )
-    ap.add_argument(
         "--endpoint-intensity-scale",
         choices=["absolute", "median-iobs"],
         default="absolute",
@@ -147,23 +135,6 @@ def add_endpoints(ap: argparse.ArgumentParser, *, expose_lambda_controls: bool) 
         ),
     )
     ap.add_argument(
-        "--error-model-refits",
-        type=int,
-        default=1,
-        help="error_model only: after SHELXL has refined an endpoint, refit each crystal's error model against the refined model (work rows only, intensities unchanged) and refine again, this many times. 0 fits against the entering model only.",
-    )
-    ap.add_argument(
-        "--error-model-dataset-weight",
-        choices=["off", "apply"],
-        default="off",
-        help=(
-            "error_model only: off (default) lets each crystal's fitted error model set its SHELXL weight alone, so a "
-            "dataset-policy downweight (for example 0.25) does not inflate that crystal's sigmas a second time; "
-            "crystals the policy excludes stay out. apply also scales the crystal's SHELXL sigmas by the policy weight "
-            "(sigma / sqrt(w)). The row-table (JANA-style) statistics are unaffected."
-        ),
-    )
-    ap.add_argument(
         "--dataset-sigma-holdout-fraction",
         type=float,
         default=0.20,
@@ -224,27 +195,9 @@ def add_endpoints(ap: argparse.ArgumentParser, *, expose_lambda_controls: bool) 
         help="Multi-crystal runs: next to the merged combined endpoint, write and refine an unmerged SHELXL endpoint (every corrected work row, batch = crystal index, MERG 0, one refined BASF per extra crystal). off is the legacy setting.",
     )
     ap.add_argument(
-        "--endpoint-free-validation",
-        choices=["on", "off"],
-        default="on",
-        help="Reporting only: score every final SHELXL model on the held-out (free) orbits with SHELXL L.S. 0 (no parameter moves) next to its own work reflections: the GROND merged and unmerged combined endpoints (free rows corrected exactly like the work rows) and the conventional leak-free start (free reflections of the baseline HKL). R1gt, R1all, wR2 and GooF on free and on work go to HELDOUT_VALIDATION and Table 1; nothing is chosen on them. off is the legacy setting (the combine command is then unchanged).",
-    )
-    ap.add_argument(
-        "--cell-esd-policy",
-        choices=["auto", "source"],
-        default="auto",
-        help="Cell e.s.d.s (ZERR) of the SHELXL endpoints. auto (default): --cell-esd if given, else the sample standard deviation of the crystals' cells (two or more crystals), else the crystal's XDS CORRECT.LP e.s.d.s or DIALS scan-varying cell spread; symmetry-fixed parameters get 0. Without a measured source the starting model's ZERR e.s.d.s are used (its ZERR is kept unchanged when they are zero) and a warning is printed. source writes the model's ZERR unchanged.",
-    )
-    ap.add_argument(
         "--cell-esd",
         default="",
         help="Explicit cell e.s.d.s a,b,c,alpha,beta,gamma (A, deg) in the model setting for ZERR.",
-    )
-    ap.add_argument(
-        "--shelx-ins-cleanup",
-        choices=["on", "off"],
-        default="on",
-        help="Olex2/SHELXLE readiness of generated SHELXL inputs: drop stale difference-map peaks (Q1, Q2, ...) and write LIST 6 so every endpoint has an .fcf with phases for maps. off is the legacy setting (the model's peaks and LIST kept).",
     )
     ap.add_argument(
         "--endpoint-feedback",

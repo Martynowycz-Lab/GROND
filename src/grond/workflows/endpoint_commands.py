@@ -17,6 +17,11 @@ from grond.workflows.nuisance_policy import (
     resolved_row_plan_cache,
 )
 
+# Most SHELXL calls of the WGHT convergence loop of a converge endpoint.
+WGHT_CONVERGE_MAX_CALLS = 20
+# Error-model refit passes of the per-crystal sigma model.
+ERROR_MODEL_REFITS = 1
+
 
 def endpoint_intensity_rescale(args: argparse.Namespace) -> str:
     """Engine ``--rescale`` value for the AUTO ``--endpoint-intensity-scale`` choice (legacy when absent)."""
@@ -63,16 +68,16 @@ def endpoint_native_output_args(args: argparse.Namespace) -> list[str]:
 
     cmd: list[str] = []
     if "converge" in {str(getattr(args, "endpoint_wght_mode", "freeze-zero")), resolved_feedback_wght_mode(args)}:
-        cmd += ["--wght-converge-max-calls", str(int(getattr(args, "wght_converge_max_calls", 20) or 20))]
+        cmd += ["--wght-converge-max-calls", str(WGHT_CONVERGE_MAX_CALLS)]
     if error_model_sigma_active(args) or str(getattr(args, "post_bloch_sigma_policy", "auto")) == "error_model":
-        cmd += ["--error-model-refits", str(int(getattr(args, "error_model_refits", 1)))]
-    if error_model_sigma_active(args) and str(getattr(args, "error_model_dataset_weight", "apply")) == "off":
+        cmd += ["--error-model-refits", str(ERROR_MODEL_REFITS)]
+    if error_model_sigma_active(args):
+        # The error model is fitted per crystal; its dataset weight is not applied (AUTO).
         cmd += ["--error-model-dataset-weight", "off"]
     zerr = str(getattr(args, "resolved_zerr_esds", "") or "").strip()
     if zerr:
         cmd += ["--zerr-esds", zerr]
-    if str(getattr(args, "shelx_ins_cleanup", "off") or "off") == "on":
-        cmd += ["--strip-q-peaks", "--endpoint-list-code", "6"]
+    cmd += ["--strip-q-peaks", "--endpoint-list-code", "6"]
     return cmd
 
 

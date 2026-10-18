@@ -108,11 +108,9 @@ def combine_cmd(
 
 
 def endpoint_free_validation_active(args: argparse.Namespace) -> bool:
-    """AUTO --endpoint-free-validation on with the free rows kept out of every refinement HKL (legacy when absent)."""
+    """Endpoint free validation runs when the free rows are kept out of every refinement HKL."""
 
-    return str(getattr(args, "endpoint_free_validation", "off") or "off") == "on" and not bool(
-        getattr(args, "endpoint_include_free_rows", True)
-    )
+    return not bool(getattr(args, "endpoint_include_free_rows", True))
 
 
 def publication_report_cmd(
