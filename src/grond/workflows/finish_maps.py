@@ -493,7 +493,7 @@ def _finish_native_row_tables(result: Mapping[str, object]) -> list[tuple[str, P
         if not endpoint_row_table and origin_summary:
             endpoint_row_table = str(Path(origin_summary).expanduser().parent / "native_dyn_calc.csv")
 
-    if source_kind in {"native_corrected_hkl", "observation_polish"}:
+    if source_kind == "native_corrected_hkl":
         if endpoint_row_table:
             return [(endpoint_label, Path(endpoint_row_table).expanduser())]
         if endpoint_run_dir:

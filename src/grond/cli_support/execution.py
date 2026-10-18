@@ -123,23 +123,6 @@ def _print_stage_metrics(cmd: list[str]) -> None:
         )
 
 
-def _estimated_forensic_steps(args: argparse.Namespace) -> int:
-    """Estimate post-final audit commands for progress reporting."""
-
-    if not getattr(args, "forensic_gate", True):
-        return 0
-    depth = (
-        "quick"
-        if getattr(args, "fast", False) and getattr(args, "forensic_depth", "standard") == "standard"
-        else getattr(args, "forensic_depth", "standard")
-    )
-    if depth == "quick":
-        return 2
-    if depth == "full":
-        return 9
-    return 6
-
-
 def _estimated_resolution_steps(args: argparse.Namespace) -> int:
     """Estimate resolution-promotion commands for progress reporting."""
 
@@ -205,7 +188,6 @@ def estimate_run_steps(prep: PrepConfig, args: argparse.Namespace) -> int:
             total += 1
         total += _estimated_resolution_steps(args)
         total += _estimated_sg_window_scout_steps(args)
-        total += _estimated_forensic_steps(args)
     if len(prep.datasets) > 1:
         if getattr(args, "hand_control", True):
             # One shared opposite-model materialization plus one native

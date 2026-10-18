@@ -139,13 +139,10 @@ def run_publication_endpoint_chooser(prep: PrepConfig, result: dict, args: argpa
     if result.get("combined"):
         runs = {name: Path(run) for name, run in (result.get("publication_runs") or result.get("runs") or {}).items()}
         combined_run = Path(result["combined"])
-        forensic_summaries = result.get("forensics") if isinstance(result.get("forensics"), Mapping) else {}
     elif result.get("primary_run"):
         label = prep.datasets[0].name if prep.datasets else "dataset"
         runs = {label: Path(result["primary_run"])}
         combined_run = None
-        forensic = result.get("forensics")
-        forensic_summaries = {label: forensic} if isinstance(forensic, Mapping) else {}
     else:
         return {"status": "no_endpoint_runs"}
     if not runs and not combined_run:
@@ -168,7 +165,6 @@ def run_publication_endpoint_chooser(prep: PrepConfig, result: dict, args: argpa
         runs,
         out_dir,
         combined_run=combined_run,
-        forensic_summaries=forensic_summaries,
         extra_candidates=extra_candidates,
         min_hkl_safe_factor=getattr(args, "publication_endpoint_min_hkl_safe_factor", 0.25),
         max_modulation_p95=getattr(args, "publication_endpoint_max_modulation_p95", 20.0),

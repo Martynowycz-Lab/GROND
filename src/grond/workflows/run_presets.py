@@ -91,7 +91,6 @@ FAST_PRESET: tuple[PresetSetting, ...] = (
     PresetSetting(
         "unmerged_endpoint", "--unmerged-endpoint", "off", "no unmerged HKLF 4 batch endpoint (standard: on)"
     ),
-    PresetSetting("forensic_depth", "--forensic-depth", "quick", "quick forensic reports (standard: standard)"),
 )
 
 PRESETS: dict[str, tuple[PresetSetting, ...]] = {DEFAULT_PRESET: (), "fast": FAST_PRESET}

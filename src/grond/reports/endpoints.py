@@ -76,10 +76,6 @@ def _normalize_publication_endpoint_block(endpoint: Mapping[str, object], *, sel
         if manifest.exists():
             out["endpoint_manifest"] = str(manifest)
     out["endpoint_row_table"] = first_text("endpoint_row_table", "row_table")
-    if not out["endpoint_row_table"] and str(out.get("source_kind", "")) == "observation_polish":
-        run_dir = first_text("run_dir")
-        if run_dir:
-            out["endpoint_row_table"] = str(Path(run_dir) / "promoted_observation_rows.csv")
     out["spec"] = str(endpoint.get("spec") or endpoint.get("scale_spec") or endpoint.get("source_kind") or endpoint.get("label") or "")
     out["shelxl_R1gt"] = first_number("shelxl_R1gt", "R1_gt")
     out["shelxl_R1all"] = first_number("shelxl_R1all", "R1_all")

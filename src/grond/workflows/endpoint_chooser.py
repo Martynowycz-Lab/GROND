@@ -1,6 +1,6 @@
 """Choose the publication endpoint among a run's verified endpoint candidates.
 
-Candidates come from native, combined and observation-polish summaries; each one's RES/HKL/LST provenance is
+Candidates come from native and combined summaries; each one's RES/HKL/LST provenance is
 hash-verified. Writes publication_endpoint_choice.json with Markdown and LaTeX reports.
 """
 
@@ -489,8 +489,8 @@ def endpoint_promotion_field_contract(endpoint: Mapping) -> dict[str, object]:
     }
 
 
-def _normalize_endpoint(label: str, endpoint: Mapping, *, run_dir: Path | None, source_kind: str, index: int, accepted_polish: bool | None = None) -> dict:
-    """Normalize one endpoint dictionary from a native, combined, or polish summary."""
+def _normalize_endpoint(label: str, endpoint: Mapping, *, run_dir: Path | None, source_kind: str, index: int) -> dict:
+    """Normalize one endpoint dictionary from a native or combined summary."""
 
     shelxl = endpoint.get("shelxl") if isinstance(endpoint.get("shelxl"), Mapping) else {}
     artifacts = endpoint.get("artifacts") if isinstance(endpoint.get("artifacts"), Mapping) else {}
@@ -582,8 +582,6 @@ def _normalize_endpoint(label: str, endpoint: Mapping, *, run_dir: Path | None, 
         "shelxl": dict(shelxl),
         "wght_mode": endpoint.get("wght_mode") or endpoint.get("endpoint_wght_mode") or shelxl.get("wght_mode"),
     }
-    if accepted_polish is not None:
-        candidate["observation_polish_accepted"] = bool(accepted_polish)
     return candidate
 
 
@@ -625,44 +623,6 @@ def _collect_combined_candidate(combined_run: Path | None) -> list[dict]:
     return candidates
 
 
-def _observation_polish_summary_path(forensic_summary: Mapping) -> Path | None:
-    """Resolve an observation-polish summary path from a forensic gate summary."""
-
-    artifacts = forensic_summary.get("artifacts") if isinstance(forensic_summary.get("artifacts"), Mapping) else {}
-    report = artifacts.get("observation_polish")
-    if report:
-        return Path(report).with_name("summary.json")
-    return None
-
-
-def _collect_observation_polish_candidates(forensic_summaries: Mapping[str, Mapping] | None) -> list[dict]:
-    """Collect optional final-polish endpoint candidates from forensic outputs."""
-
-    candidates: list[dict] = []
-    for label, forensic_summary in (forensic_summaries or {}).items():
-        if not isinstance(forensic_summary, Mapping):
-            continue
-        summary_path = _observation_polish_summary_path(forensic_summary)
-        if not summary_path:
-            continue
-        summary = _read_json(summary_path)
-        endpoints = summary.get("endpoint_results_sorted") or []
-        accepted = bool(summary.get("accepted", False))
-        for index, endpoint in enumerate(endpoints, start=1):
-            endpoint_accepted = bool(accepted and endpoint.get("accepted_endpoint", False))
-            candidates.append(
-                _normalize_endpoint(
-                    f"{label}:observation_polish",
-                    endpoint,
-                    run_dir=summary_path.parent,
-                    source_kind="observation_polish",
-                    index=index,
-                    accepted_polish=endpoint_accepted,
-                )
-            )
-    return candidates
-
-
 def classify_publication_endpoint(
     candidate: Mapping,
     *,
@@ -692,7 +652,6 @@ def classify_publication_endpoint(
         )
     endpoint_b = _float(candidate.get("endpoint_b"), 0.0)
     lambda_q = _float(candidate.get("lambda_q"), 1.0)
-    source_kind = str(candidate.get("source_kind", ""))
     if candidate.get("endpoint_policy_required") is True and candidate.get("endpoint_policy_complete") is not True:
         reasons.append(
             "endpoint correction policy is incomplete; the producer must explicitly record endpoint_b and keep_exti"
@@ -705,8 +664,6 @@ def classify_publication_endpoint(
         reasons.append("endpoint-B is unavailable; the producer must record a finite endpoint_b")
     elif abs(endpoint_b) > 1e-12:
         reasons.append("nonzero endpoint-B is diagnostic-only because it reshapes corrected HKL intensities and can distort ADPs or maps")
-    if source_kind == "observation_polish" and not bool(candidate.get("observation_polish_accepted", False)):
-        reasons.append("observation-polish correction did not pass the raw-row and endpoint holdout gates")
     if candidate.get("provenance_required") is True and candidate.get("artifact_provenance_ok") is not True:
         provenance = (
             candidate.get("artifact_provenance")
@@ -918,7 +875,6 @@ def choose_publication_endpoints(
                 f"SHELXL GooF is finite; values outside {publication_goof_min:g}-{publication_goof_max:g} are warned but do not block model handoff",
                 "hash-bound final LST pathology audit is complete and NPD == 0; split warnings are reported but do not block promotion",
                 "stored endpoint statistics agree with hash-verified live LST statistics within SHELXL print rounding",
-                "observation-polish endpoints must pass raw-row and endpoint holdout gates",
                 "collected endpoint RES, HKL, and LST paths and SHA-256 values must match the current files",
                 "safety, endpoint-B, and EXTI fields are explicit in the producer endpoint record and manifest-consistent; modulation provenance mismatches are warnings",
                 "no unresolved run-level publication blocker",
@@ -1020,7 +976,7 @@ def _write_markdown(out_dir: Path, decision: Mapping) -> Path:
     lines.extend(
         [
             "",
-            "Promotion rule: finite endpoint metrics, full q correction, EXTI off, endpoint-B equal to zero, exact current RES/HKL/LST paths and SHA-256 values, a complete hash-bound final LST pathology audit, no NPD pathology unless explicitly overridden, safe HKL rescaling, and a passed observation-polish gate when a polish correction is involved. SHELXL GooF outside the preferred range, large modulation p95, a missing conventional comparison, and an endpoint R1all worse than the conventional baseline are reported as warnings, not mathematical-validity or model-handoff gates. Multi-dataset runs never substitute a single-dataset endpoint for a failed combined physical endpoint. Split warnings are reported but do not block promotion.",
+            "Promotion rule: finite endpoint metrics, full q correction, EXTI off, endpoint-B equal to zero, exact current RES/HKL/LST paths and SHA-256 values, a complete hash-bound final LST pathology audit, no NPD pathology unless explicitly overridden, and safe HKL rescaling. SHELXL GooF outside the preferred range, large modulation p95, a missing conventional comparison, and an endpoint R1all worse than the conventional baseline are reported as warnings, not mathematical-validity or model-handoff gates. Multi-dataset runs never substitute a single-dataset endpoint for a failed combined physical endpoint. Split warnings are reported but do not block promotion.",
             "",
             "## Endpoint Candidates",
             "",
@@ -1084,7 +1040,6 @@ def write_publication_endpoint_choice(
     out_dir: Path,
     *,
     combined_run: Path | None = None,
-    forensic_summaries: Mapping[str, Mapping] | None = None,
     extra_candidates: list[dict] | None = None,
     min_hkl_safe_factor: float = 0.25,
     max_modulation_p95: float = 20.0,
@@ -1102,7 +1057,6 @@ def write_publication_endpoint_choice(
     candidates = []
     candidates.extend(_collect_native_candidates(runs))
     candidates.extend(_collect_combined_candidate(combined_run))
-    candidates.extend(_collect_observation_polish_candidates(forensic_summaries))
     candidates.extend(extra_candidates or [])
     decision = choose_publication_endpoints(
         candidates,

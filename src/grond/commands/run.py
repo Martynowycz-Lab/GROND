@@ -166,8 +166,6 @@ def _configure_static_pets_auto(
     force("profile_quadrature", "uniform")
     force("profile_accumulation", "sum")
     force("sg_window_scout", "off")
-    force("observation_polish", "off")
-    force("forensic_depth", "quick")
     force(
         "endpoint_calibration_specs",
         "baseline,window:1.0:det0,window:3.0:det0,window:5.0:det0",

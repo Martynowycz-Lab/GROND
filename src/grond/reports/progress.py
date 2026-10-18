@@ -130,7 +130,7 @@ PHASE_ORDER = (
 def progress_phase(label: str) -> str | None:
     """Map a stage label to its workflow phase; None means "same phase as the preceding stage".
 
-    Unphased stages (resolution limits, forensics, polish) run inside the phase that
+    Unphased stages (resolution limits, polish) run inside the phase that
     launched them, so the caller attributes them to the previous stage's phase.
     """
 

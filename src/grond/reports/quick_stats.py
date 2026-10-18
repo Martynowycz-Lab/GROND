@@ -1644,7 +1644,7 @@ def _write_quick_stats_final_summary(
     elif policy or criterion:
         endpoint_note = (
             f"Endpoint calibration used `{policy or 'n/a'}` with `{criterion or 'n/a'}` = "
-            f"`{_quick_number(criterion_value, 3)}`. If the endpoint chooser selected an accepted observation-polish endpoint, "
+            f"`{_quick_number(criterion_value, 3)}`. If the endpoint chooser selected another endpoint, "
             "that endpoint is reported above and the calibration replay remains an audit branch."
         )
     else:

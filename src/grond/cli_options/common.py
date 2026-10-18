@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 
-from .forensics import add_forensic_args
 from .run_decisions import add_decision_controls
 from .run_endpoints import add_endpoints
 from .run_inputs import add_execution, add_inputs, add_observations_and_outputs
@@ -35,4 +34,3 @@ def add_common_run_args(ap: argparse.ArgumentParser, *, expose_lambda_controls: 
     add_resolution(ap)
     add_dataset_policy(ap)
     add_nuisance(ap)
-    add_forensic_args(ap, expose_lambda_controls=expose_lambda_controls)

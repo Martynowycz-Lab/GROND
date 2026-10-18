@@ -388,10 +388,6 @@ def apply_speed_profile(args: argparse.Namespace) -> dict[str, object]:
     assign("shelxl_iterations", min(int(args.shelxl_iterations), 1))
     if args.endpoint_feedback == "auto":
         assign("endpoint_feedback", "off")
-    if args.observation_polish == "auto":
-        assign("observation_polish", "off")
-    if args.forensic_depth == "standard":
-        assign("forensic_depth", "quick")
     return changes
 
 

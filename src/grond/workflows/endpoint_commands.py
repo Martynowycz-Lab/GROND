@@ -81,11 +81,11 @@ def endpoint_native_output_args(args: argparse.Namespace, *, final: bool = False
 def legacy_handoff_conflicts(args: argparse.Namespace) -> list[str]:
     """Requested handoff settings that a legacy-contract corrected-HKL writer cannot honour.
 
-    The endpoint-calibration replay (scale_contract_replay.py) and the observation-polish endpoint write
-    their own corrected HKL with the legacy contract: every row including split=free, the median-IOBS
-    scale, no correction-ratio exclusion, the DAMP ladder and a fixed SHELXL call count.  Both can become
-    the publication endpoint, so under the default handoff they would silently republish free rows and an
-    unconverged, per-cycle-scaled refinement.  Missing attributes resolve to the legacy contract.
+    The endpoint-calibration replay (scale_contract_replay.py) writes its own corrected HKL with the legacy
+    contract: every row including split=free, the median-IOBS scale, no correction-ratio exclusion, the DAMP
+    ladder and a fixed SHELXL call count.  It can become the publication endpoint, so under the default
+    handoff it would silently republish free rows and an unconverged, per-cycle-scaled refinement.  Missing
+    attributes resolve to the legacy contract.
     """
 
     conflicts = []

@@ -28,7 +28,7 @@ from grond.workflows.final_hand_selection import (
     run_early_elastic_hand_selection,
     run_multi_final_elastic_hand_selection,
 )
-from grond.workflows.forensic_gates import run_forensic_gate, run_resolution_limit_gate
+from grond.workflows.forensic_gates import run_resolution_limit_gate
 from grond.workflows.hand_row_contracts import _args_with_recorded_native_contract, _positive_summary_int
 from grond.workflows.model_selection import (
     best_nuisance,
@@ -469,7 +469,6 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
         else:
             structure_feedback = {"status": "unsupported_strategy", "strategy": structure_strategy}
     final_runs: dict[str, Path] = {}
-    forensic_runs: dict[str, dict] = {}
     scale_polish_runs: dict[str, dict] = {}
     resolution_limits: dict[str, dict] = {}
     sg_window_scout_runs: dict[str, dict] = {}
@@ -514,16 +513,6 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
             args,
             title=f"GROND resolution-limit promotion: {ds.name}",
             scope="dataset",
-        )
-        forensic_runs[ds.name] = run_forensic_gate(
-            python,
-            run_dir / "native_dyn_calc.csv",
-            ds.hkl,
-            final_model,
-            root / "forensics" / ds.name,
-            logs,
-            ds.name,
-            args,
         )
     final_dataset_policy = run_dataset_policy_gate(
         final_runs,
@@ -635,7 +624,6 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
         final_runs = switched_runs
         scale_polish_runs = {}
         resolution_limits = {}
-        forensic_runs = {}
         for ds in prep.datasets:
             run_dir = final_runs[ds.name]
             scale_polish_runs[ds.name] = run_scale_window_polish(
@@ -656,16 +644,6 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
                 args,
                 title=f"GROND resolution-limit promotion: {ds.name}",
                 scope="dataset",
-            )
-            forensic_runs[ds.name] = run_forensic_gate(
-                python,
-                run_dir / "native_dyn_calc.csv",
-                ds.hkl,
-                final_model,
-                root / "forensics_selected_hand" / ds.name,
-                logs,
-                ds.name,
-                args,
             )
         final_dataset_policy = run_dataset_policy_gate(
             final_runs,
@@ -770,7 +748,6 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
         },
         "structure_update_strategy": structure_strategy,
         "structure_feedback": structure_feedback,
-        "forensics": forensic_runs,
         "scale_polish": scale_polish_runs,
         "scale_contract_selection": scale_contract_selection,
         "resolution_limits": resolution_limits,

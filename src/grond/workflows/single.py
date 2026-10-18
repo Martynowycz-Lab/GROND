@@ -48,7 +48,7 @@ from grond.workflows.final_hand_selection import (
     run_early_elastic_hand_selection,
     write_heldout_hand_decision,
 )
-from grond.workflows.forensic_gates import run_forensic_gate, run_resolution_limit_gate
+from grond.workflows.forensic_gates import run_resolution_limit_gate
 from grond.workflows.hand_row_contracts import (
     _args_with_recorded_native_contract,
     _paired_row_split_contract,
@@ -1146,16 +1146,6 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
         title=f"GROND resolution-limit promotion: {ds.name}",
         scope="dataset",
     )
-    forensics = run_forensic_gate(
-        python,
-        final / "native_dyn_calc.csv",
-        ds.hkl,
-        final_model,
-        root / "forensics" / ds.name,
-        logs,
-        ds.name,
-        args,
-    )
     sg_window_scout = run_sg_window_scout(
         python,
         prep,
@@ -1199,7 +1189,6 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
         "thickness_run": str(thickness_run),
         "final_run": str(final),
         "final_model": final_model,
-        "forensics": forensics,
         "preflight": str(root / "decisions" / ds0.name / "preflight.json"),
     }
     write_json(root / "decisions" / ds.name / "decision_tree.json", decision_summary)
@@ -1210,7 +1199,6 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
         "absolute_structure_diagnostic": absolute_structure_diagnostic,
         "post_feedback_hand_promotion": post_feedback_hand_promotion,
         "final_row_model_contract": final_row_model_contract,
-        "forensics": forensics,
         "scale_polish": scale_polish,
         "resolution_limits": {ds.name: resolution_limit},
         "sg_window_scout": {ds.name: sg_window_scout},
@@ -1357,16 +1345,6 @@ def run_single(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pa
         title=f"GROND resolution-limit promotion: {ds.name}",
         scope="dataset",
     )
-    forensics = run_forensic_gate(
-        python,
-        final / "native_dyn_calc.csv",
-        ds.hkl,
-        final_model,
-        root / "forensics" / ds.name,
-        logs,
-        ds.name,
-        args,
-    )
     sg_window_scout = run_sg_window_scout(
         python,
         prep,
@@ -1383,7 +1361,6 @@ def run_single(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pa
         "no_h_run": str(no_h_run) if no_h_run else "",
         "model": final_model,
         "absolute_structure_diagnostic": absolute_structure_diagnostic,
-        "forensics": forensics,
         "scale_polish": scale_polish,
         "resolution_limits": {ds.name: resolution_limit},
         "sg_window_scout": {ds.name: sg_window_scout},
