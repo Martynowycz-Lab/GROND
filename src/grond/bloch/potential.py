@@ -232,13 +232,6 @@ class PotentialMixin:
         dz = max(0.0, float(self.data.zcal[int(row_idx)]) - self.dose_ref_frame)
         return float(getattr(self.cfg, "dose_b_per_frame", 0.0)) * dz
 
-    def dose_attenuation(self, hkl, row_idx):
-        """Return the dose Debye-Waller factor exp(-DeltaB/(4 d^2)) of one HKL for a row (1.0 without dose damage)."""
-        delta_b = self.row_delta_b(row_idx)
-        if delta_b == 0.0:
-            return 1.0
-        inv_d2 = self.inv_d2_for_hkls(hkl)
-        return float(math.exp(-0.25 * delta_b * inv_d2))
 
     def dose_attenuation_for_inv_d2(self, inv_d2, row_idx):
         """Return exp(-DeltaB * inv_d2 / 4) elementwise for precomputed 1/d^2 values (Å⁻²) and one row."""
@@ -247,9 +240,6 @@ class PotentialMixin:
             return np.ones_like(inv_d2, dtype=float)
         return np.exp(-0.25 * delta_b * np.asarray(inv_d2, dtype=float))
 
-    def ug_for_row(self, hkl, row_idx):
-        """Return U_g of one HKL with the row's dose attenuation applied."""
-        return self.ug(hkl) * self.dose_attenuation(hkl, row_idx)
 
     def ug_for_row_array(self, hkls, row_idx):
         """Return ug_array(hkls) with the row's dose attenuation exp(-DeltaB/(4 d^2)) applied."""

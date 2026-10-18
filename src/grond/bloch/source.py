@@ -10,7 +10,6 @@ from pathlib import Path
 PHYSICS_SOURCE_PATHS = (
     # Imported sign/row contracts are part of physics even when unchanged here.
     "hkl_transform.py",
-    "io/row_contract.py",
     "paths.py",
     "engine/bloch_engine.py",
     "bloch/source.py",

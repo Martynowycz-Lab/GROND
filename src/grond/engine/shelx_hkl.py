@@ -216,13 +216,6 @@ def _fixed_width_hklf4_records(path: Path) -> tuple[list[bytes], dict[str, objec
     }
 
 
-def audit_fixed_width_hklf4(path: Path) -> dict[str, object]:
-    """Return a strict reflection/value-preservation audit for one HKLF4 file."""
-
-    _lines, audit = _fixed_width_hklf4_records(path)
-    return audit
-
-
 def audit_fixed_width_precision(path: Path) -> dict[str, object]:
     """Check the written observations, not the arbitrary units before export.
 

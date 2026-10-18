@@ -209,27 +209,6 @@ class PredictionMixin:
         out["row_plan_cache_unique_diffs"] = int(len(cache.get("unique_diffs", [])))
         return out
 
-    def merge_prediction_chunks(self, chunks):
-        """Merge packed chunks key by key: arrays concatenated, support HKL lists joined, ``seconds`` summed."""
-
-        if not chunks:
-            return self.pack_prediction_results(np.zeros(0, dtype=int), [])
-        out = {}
-        for key in chunks[0]:
-            if key == "support_hkls":
-                merged = []
-                for chunk in chunks:
-                    merged.extend(chunk[key])
-                out[key] = merged
-            elif key == "seconds":
-                out[key] = float(sum(float(chunk.get(key, 0.0)) for chunk in chunks))
-            else:
-                vals = [chunk[key] for chunk in chunks]
-                if isinstance(vals[0], np.ndarray):
-                    out[key] = np.concatenate(vals)
-                else:
-                    out[key] = vals
-        return out
 
     def pack_prediction_results(self, indices, results):
         """Pack per-row prediction dicts into one dict of arrays, in the order of ``indices``.

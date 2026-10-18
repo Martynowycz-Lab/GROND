@@ -202,60 +202,6 @@ def distribution_weights(family: str, params: dict, t: np.ndarray, mu: float = 0
     return w
 
 
-def distribution_weight_derivatives(family: str, params: dict, t: np.ndarray) -> tuple[np.ndarray, dict[str, np.ndarray]]:
-    """Table weights and derivatives of the support-renormalised distribution.
-
-    Gamma returns the derivative with respect to its nominal mean at fixed
-    shape. A wedge returns derivatives for its centre and gradient fraction.
-    Nodes and support stay fixed. Uniform absorption is applied by propagation,
-    not included here. At the zero-width wedge limit, gradient stays fixed and
-    the centre uses the local linear-interpolation slope (right side at a knot).
-    """
-    t = np.asarray(t, dtype=float)
-    weights = distribution_weights(family, params, t)
-    if canonical_family(family) == "gamma":
-        shape, theta = gamma_parameters(params)
-        mean = float(params["mean"])
-        moment0, moment1 = _gamma_moments(t[:-1], t[1:], shape, theta)
-        moment2 = shape * theta * _gamma_moments(t[:-1], t[1:], shape + 1, theta)[1]
-        raw = _hat_weights_from_moments(t, moment0, moment1)
-        derivative = _hat_weights_from_moments(
-            t, shape * (moment1 / mean**2 - moment0 / mean),
-            shape * (moment2 / mean**2 - moment1 / mean),
-        )
-        # Match the forward evaluator's removal of negative rounding residue.
-        derivative[raw <= 0] = 0
-        mass = np.maximum(raw, 0).sum()
-        derivative = (derivative - weights * derivative.sum()) / mass
-        return weights, {"mean": derivative}
-
-    low, high = wedge_bounds(params)
-    centre, gradient = float(params["t0"]), float(params["grad"])
-    if low == high:
-        index = min(int(np.searchsorted(t, centre, side="right")) - 1, len(t) - 2)
-        derivative = np.zeros_like(t)
-        derivative[index:index + 2] = [-1.0, 1.0]
-        derivative /= t[index + 1] - t[index]
-        return weights, {"t0": derivative, "grad": np.zeros_like(t)}
-
-    lower, upper = max(low, t[0]), min(high, t[-1])
-    if lower == 0:
-        lower_hat = np.zeros_like(t)
-        lower_hat[0] = 1.0
-    else:
-        lower_hat = distribution_weights("wedge", {"t0": lower, "grad": 0.0}, t)
-    upper_hat = distribution_weights("wedge", {"t0": upper, "grad": 0.0}, t)
-    lower_moves, upper_moves = float(low > t[0]), float(high < t[-1])
-
-    def derivative(lower_step, upper_step):
-        return (upper_hat * upper_step - lower_hat * lower_step - weights * (upper_step - lower_step)) / (upper - lower)
-
-    return weights, {
-        "t0": derivative((1 - gradient) * lower_moves, (1 + gradient) * upper_moves),
-        "grad": derivative(-centre * lower_moves, centre * upper_moves),
-    }
-
-
 def gamma_cf_profile(lam, coupling, shape: float, theta: float, alpha: float = 0.0) -> tuple[np.ndarray, np.ndarray]:
     """Exact gamma(shape, theta) average of |sum_j c_j exp(2*pi*i*s*lam_j*t)|^2 exp(-alpha*t), s = +1 and -1.
 
