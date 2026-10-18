@@ -1237,10 +1237,6 @@ def main():
     # The precision every prediction Config uses: --double, else GROND_PRECISION (complex64 when unset).
     prediction_precision = prediction_precision_record(args.double_precision)
     args.double_precision = prediction_precision["double_precision"]
-    if args.paired_inverse_hand and str(args.q_control) != "real":
-        raise ValueError(
-            "--paired-inverse-hand cannot be combined with a shuffled-q control"
-        )
     if args.endpoint_wght_mode == "converge" and not float(args.shelxl_convergence_shift_esd or 0.0) > 0.0:
         ap.error("--endpoint-wght-mode converge needs --shelxl-convergence-shift-esd > 0 (AUTO 0.01)")
     if args.post_bloch_sigma_policy == "error_model" and args.endpoint_include_free_rows:
@@ -1517,34 +1513,6 @@ def main():
         (out / "discrete_thickness_promotion.json").write_text(
             json.dumps(promotion_decision, indent=2, allow_nan=True) + "\n"
         )
-    if args.fail_if_born_r1gt_above > 0.0 and best["metrics"]["all"]["born"]["R1_gt"] > float(args.fail_if_born_r1gt_above):
-        failure = {
-            "reason": "matched_born_gate_failed",
-            "message": "Matched Born is too poor for a meaningful Bloch/nuisance search. Check HKL transform, hand, cell basis, and geometry before changing physics knobs.",
-            "threshold_R1_gt": float(args.fail_if_born_r1gt_above),
-            "born_R1_gt": float(best["metrics"]["all"]["born"]["R1_gt"]),
-            "born_R1_all": float(best["metrics"]["all"]["born"]["R1_all"]),
-            "born_wR2_all": float(best["metrics"]["all"]["born"]["wR2_all"]),
-            "born_CC": float(best["metrics"]["all"]["born"]["CC"]),
-            "hkl_transform": data.hkl_transform_spec,
-            "raw_xds_cell": [data.raw_cell.a, data.raw_cell.b, data.raw_cell.c, data.raw_cell.alpha, data.raw_cell.beta, data.raw_cell.gamma],
-            "axis_derived_source_cell": [
-                data.axis_derived_source_cell.a,
-                data.axis_derived_source_cell.b,
-                data.axis_derived_source_cell.c,
-                data.axis_derived_source_cell.alpha,
-                data.axis_derived_source_cell.beta,
-                data.axis_derived_source_cell.gamma,
-            ],
-            "axis_derived_source_cell_basis": data.axis_derived_source_cell_basis,
-            "simulation_cell": [data.cell.a, data.cell.b, data.cell.c, data.cell.alpha, data.cell.beta, data.cell.gamma],
-            "simulation_cell_basis": data.working_cell_basis,
-        }
-        (out / "gate_failure.json").write_text(json.dumps(failure, indent=2, allow_nan=True) + "\n")
-        raise RuntimeError(
-            f"matched Born gate failed: R1gt={failure['born_R1_gt']:.4f} > "
-            f"{failure['threshold_R1_gt']:.4f}; hkl_transform={data.hkl_transform_spec}"
-        )
     promotion_requested = bool(str(args.promotion_baseline_json).strip())
     rows = []
     for selection_rank, trial in enumerate(all_trials_sorted, start=1):
@@ -1588,7 +1556,6 @@ def main():
             wght_a,
             wght_b,
             scale_fit_split=args.scale_fit_split,
-            q_control_args=args,
         )
         inverse_row_table = out / "native_inverse_hand_dyn_calc.csv"
         write_row_table(inverse_row_table, data, target, inverse_eval, masks, target_mode=args.target_mode)

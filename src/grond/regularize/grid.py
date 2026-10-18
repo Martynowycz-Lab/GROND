@@ -305,6 +305,6 @@ def populate_nuisance_trials(
                                                                 **support_fields,
                                                                 **abs_par,
                                                             )
-                                                            ev = evaluate_trial(data, target, base_sig, pred, indices, masks, nui, wght_a, wght_b, scale_fit_split=args.scale_fit_split, q_control_args=args)
+                                                            ev = evaluate_trial(data, target, base_sig, pred, indices, masks, nui, wght_a, wght_b, scale_fit_split=args.scale_fit_split)
                                                             ev["prediction_cache"] = {"status": pred.get("cache_status"), "path": pred.get("cache_path")}
                                                             all_trials.append(ev)

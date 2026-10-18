@@ -1320,12 +1320,6 @@ def main() -> None:
         default=0.01,
         help="JANA/PETS-style row-weight instability factor u used by wR and MwR.",
     )
-    ap.add_argument("--no-pdf", action="store_true")
-    ap.add_argument(
-        "--include-completeness-only",
-        action="store_true",
-        help="Include rows marked dataset_role=completeness_only in GROND row/MR row metrics.",
-    )
     ap.add_argument(
         "--resolution-limit",
         action="append",
@@ -1375,11 +1369,9 @@ def main() -> None:
         name, run_dir = parse_named_path(item)
         full_rows.extend(read_csv_rows(run_dir.resolve() / "native_dyn_calc.csv", name))
 
-    if not args.include_completeness_only:
-        rows = [r for r in rows if str(r.get("dataset_role", "primary")) not in {"completeness_only", "exclude"}]
-        full_rows = [
-            r for r in full_rows if str(r.get("dataset_role", "primary")) not in {"completeness_only", "exclude"}
-        ]
+    # Rows marked dataset_role=completeness_only (or exclude) do not enter the GROND row/MR metrics.
+    rows = [r for r in rows if str(r.get("dataset_role", "primary")) not in {"completeness_only", "exclude"}]
+    full_rows = [r for r in full_rows if str(r.get("dataset_role", "primary")) not in {"completeness_only", "exclude"}]
 
     input_row_count = len(rows)
     full_input_row_count = len(full_rows)
@@ -1524,11 +1516,8 @@ def main() -> None:
         writer = csv.DictWriter(stream, fieldnames=list(per_dataset_rows[0].keys()))
         writer.writeheader()
         writer.writerows(per_dataset_rows)
-    pdf_status = {"built": False, "reason": "disabled"}
-    canonical_pdf_status = {"built": False, "reason": "disabled"}
-    if not args.no_pdf:
-        pdf_status = build_pdf(tex_path)
-        canonical_pdf_status = build_pdf(canonical_tex_path)
+    pdf_status = build_pdf(tex_path)
+    canonical_pdf_status = build_pdf(canonical_tex_path)
     result = {
         "summary": str(json_path.resolve()),
         "markdown": str(md_path.resolve()),

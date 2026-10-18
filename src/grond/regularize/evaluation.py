@@ -7,94 +7,11 @@ from dataclasses import asdict
 
 import numpy as np
 
-from grond.engine.bloch_engine import XDSData
 from grond.validation import heldout
 
 from .contracts import Nuisance, ScaleModel
 from .observations import group_indices, row_resolution_modulation, sigma_eff
 from .scales import native_metrics
-
-
-def resolution_shell_bins(data: XDSData, valid, shell_count: int) -> np.ndarray:
-    """Assign rows to approximately equal-population resolution bins."""
-
-    bins = np.full(len(data.hkl), -1, dtype=int)
-    valid = np.asarray(valid, dtype=bool)
-    n_shells = max(1, int(shell_count))
-    if not np.any(valid):
-        return bins
-    dvals = np.asarray([data.cell.calculate_d(tuple(int(v) for v in h)) for h in data.hkl], dtype=float)
-    inv_d = np.full(len(dvals), np.nan, dtype=float)
-    finite = valid & np.isfinite(dvals) & (dvals > 0.0)
-    inv_d[finite] = 1.0 / dvals[finite]
-    values = inv_d[finite]
-    if values.size == 0:
-        return bins
-    if values.size < n_shells:
-        n_shells = max(1, values.size)
-    quantiles = np.linspace(0.0, 1.0, n_shells + 1)
-    edges = np.quantile(values, quantiles)
-    edges = np.maximum.accumulate(edges)
-    for i, val in zip(np.where(finite)[0], inv_d[finite], strict=True):
-        shell = int(np.searchsorted(edges, val, side="right") - 1)
-        bins[i] = min(max(shell, 0), n_shells - 1)
-    return bins
-
-
-def apply_q_control(data: XDSData, dyn: np.ndarray, born: np.ndarray, valid, groups: np.ndarray, q_control_args=None) -> tuple[np.ndarray, dict]:
-    """Apply an explicit row-space q null control before ordinary scale fitting."""
-
-    mode = str(getattr(q_control_args, "q_control", "real") if q_control_args is not None else "real")
-    meta = {
-        "mode": mode,
-        "description": "real row-wise Bloch/Born q" if mode == "real" else "row-space permutation of log(Idyn/Iborn)",
-    }
-    if mode == "real":
-        return dyn, meta
-    valid = np.asarray(valid, dtype=bool) & np.isfinite(dyn) & np.isfinite(born) & (dyn > 0.0) & (born > 0.0)
-    out = np.array(dyn, dtype=float, copy=True)
-    q = np.full(len(dyn), np.nan, dtype=float)
-    q[valid] = dyn[valid] / np.maximum(born[valid], 1e-30)
-    logq = np.full(len(dyn), np.nan, dtype=float)
-    logq[valid] = np.log(np.clip(q[valid], 1e-30, np.inf))
-    seed = int(getattr(q_control_args, "q_control_seed", 12345) if q_control_args is not None else 12345)
-    rng = np.random.default_rng(seed)
-    shell_count = int(getattr(q_control_args, "q_control_shells", 10) if q_control_args is not None else 10)
-    shell_bins = resolution_shell_bins(data, valid, shell_count)
-    if mode == "shuffle_global":
-        keys = np.zeros(len(dyn), dtype=int)
-    elif mode == "shuffle_shell":
-        keys = shell_bins
-    elif mode == "shuffle_shell_scan":
-        scan_groups = np.asarray(groups, dtype=int)
-        keys = shell_bins.astype(np.int64) * 1000003 + scan_groups.astype(np.int64)
-    else:
-        raise ValueError(f"unknown q_control {mode!r}")
-    shuffled_logq = np.array(logq, dtype=float, copy=True)
-    shuffled_rows = 0
-    singleton_bins = 0
-    active_bins = 0
-    for key in np.unique(keys[valid]):
-        idx = np.where(valid & (keys == key))[0]
-        if idx.size < 2:
-            singleton_bins += int(idx.size == 1)
-            continue
-        active_bins += 1
-        shuffled_logq[idx] = rng.permutation(shuffled_logq[idx])
-        shuffled_rows += int(idx.size)
-    out[valid] = born[valid] * np.exp(shuffled_logq[valid])
-    meta.update(
-        {
-            "seed": seed,
-            "shell_count": shell_count,
-            "valid_rows": int(np.count_nonzero(valid)),
-            "shuffled_rows": int(shuffled_rows),
-            "active_bins": int(active_bins),
-            "singleton_bins": int(singleton_bins),
-            "logq_corr_original_shuffled": float(np.corrcoef(logq[valid], shuffled_logq[valid])[0, 1]) if np.count_nonzero(valid) > 2 else float("nan"),
-        }
-    )
-    return out, meta
 
 
 def pspline_trial_scales(data, target, base_sig, dyn, born, groups, valid, scale_fit, scale_model: ScaleModel, orbit_keys) -> dict:
@@ -166,7 +83,7 @@ def pspline_trial_scales(data, target, base_sig, dyn, born, groups, valid, scale
     return {"dyn_scaled": dyn_scaled, "born_scaled": born_scaled, "angle": angle, "info": info}
 
 
-def evaluate_trial(data, target, base_sig, pred, indices, masks, nui: Nuisance, wght_a, wght_b, scale_fit_split: str = "work", q_control_args=None, *, scale_model: ScaleModel, orbit_keys):
+def evaluate_trial(data, target, base_sig, pred, indices, masks, nui: Nuisance, wght_a, wght_b, scale_fit_split: str = "work", *, scale_model: ScaleModel, orbit_keys):
     """Scale and score one nuisance trial's Bloch (dyn) and Born row predictions against the target rows.
 
     The q control and the row resolution factor act on dyn first. P-spline frame scales are fitted on the
@@ -248,7 +165,8 @@ def evaluate_trial(data, target, base_sig, pred, indices, masks, nui: Nuisance, 
         & (dyn > 0.0)
         & (born > 0.0)
     )
-    dyn, q_control_meta = apply_q_control(data, dyn, born, valid, groups, q_control_args)
+    # The real row-wise Bloch/Born q (the retired shuffled-q controls permuted log(Idyn/Iborn) here).
+    q_control_meta = {"mode": "real", "description": "real row-wise Bloch/Born q"}
     row_mod, row_mod_meta = row_resolution_modulation(data, valid, nui.row_resolution_b)
     dyn = dyn * row_mod
     dyn_inverse = dyn_inverse * row_mod

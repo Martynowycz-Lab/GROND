@@ -15,8 +15,6 @@ def build_parser(description: str) -> argparse.ArgumentParser:
     ap.add_argument("--run", action="append", required=True, help="name=/path/to/native_nuisance_run")
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--res", required=True)
-    ap.add_argument("--wght-a", type=float, default=None)
-    ap.add_argument("--wght-b", type=float, default=None)
     ap.add_argument(
         "--endpoint-lambda",
         default="1.0",

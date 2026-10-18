@@ -136,14 +136,6 @@ def build_parser(description: str, *, default_hkl, default_res, default_baseline
         help="Off-diagonal U_g indexing convention. j_minus_i is the production signed-row default; i_minus_j is a diagnostic.",
     )
     ap.add_argument(
-        "--q-control",
-        choices=["real", "shuffle_global", "shuffle_shell", "shuffle_shell_scan"],
-        default="real",
-        help="Diagnostic null that permutes log(Idyn/Iborn) before normal scale fitting and endpoint export.",
-    )
-    ap.add_argument("--q-control-seed", type=int, default=12345)
-    ap.add_argument("--q-control-shells", type=int, default=10, help="Resolution shells used by shell and shell+scan q-shuffle controls.")
-    ap.add_argument(
         "--group-width-grid",
         default="auto",
         help="Comma grid of frame-group widths (the row table's group column). Values are degrees; also accepts frame, 2frame, 3frames, and auto.",
@@ -193,7 +185,6 @@ def build_parser(description: str, *, default_hkl, default_res, default_baseline
             "and the work-row R1 veto; with --promotion-max-free-wr2-loss inf the gate then reads no free row."
         ),
     )
-    ap.add_argument("--fail-if-born-r1gt-above", type=float, default=0.0, help="Fail after the prediction grid if matched Born R1gt is above this value. Use as a basis/indexing sanity gate.")
     ap.add_argument(
         "--lambda-grid",
         default="1.0",
@@ -271,7 +262,6 @@ def build_parser(description: str, *, default_hkl, default_res, default_baseline
     )
     ap.add_argument(
         "--double",
-        "--float64",
         dest="double_precision",
         action="store_true",
         default=False,

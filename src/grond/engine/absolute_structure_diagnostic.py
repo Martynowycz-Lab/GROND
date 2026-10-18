@@ -5,8 +5,7 @@ This is intentionally row-level. It does not pretend to be a SHELXL Flack
 parameter or a merged absolute-structure statistic. It asks whether the same
 signed observations have a lower scaled-residual sum for one selected native
 prediction than for the alternate-hand check after each branch has had its
-declared nuisance scales applied.  The default is the Bloch prediction;
-``--prediction-column born_scaled`` provides the matched Born control.
+declared nuisance scales applied, on the Bloch prediction (dyn_scaled).
 """
 
 from __future__ import annotations
@@ -23,7 +22,6 @@ KEY_COLUMNS = ("row_index", "h", "k", "l")
 REQUIRED_COLUMNS = KEY_COLUMNS
 BASE_PREDICTION_COLUMNS = ("target_I",)
 SOURCE_SIGMA_COLUMNS = ("source_sigma", "xds_sigma", "sigma_eff")
-SUPPORTED_PREDICTION_COLUMNS = ("dyn_scaled", "born_scaled")
 ADJUSTED_HAND_METHOD = "klar_palatinus_adjusted_reflection_count_hand_z"
 ADJUSTED_HAND_METHOD_VERSION = "4"
 ADJUSTED_HAND_TIE_POLICY = "neutral_half_ties_relative_1e-12_sigma_absolute_1e-12"
@@ -467,13 +465,9 @@ def main() -> None:
     ap.add_argument("--best", required=True, help="Native row CSV for the active/best hand assignment.")
     ap.add_argument("--other", required=True, help="Native row CSV for the alternate-hand comparison.")
     ap.add_argument("--out", required=True, help="Output JSON path.")
-    ap.add_argument(
-        "--prediction-column",
-        choices=SUPPORTED_PREDICTION_COLUMNS,
-        default="dyn_scaled",
-        help="Branch prediction to compare; dyn_scaled is the Bloch default and born_scaled is the matched Born control.",
-    )
     args = ap.parse_args()
+    # The Bloch branch prediction is compared (born_scaled is the matched Born control column).
+    prediction_column = "dyn_scaled"
 
     best_path = Path(args.best)
     other_path = Path(args.other)
@@ -503,7 +497,7 @@ def main() -> None:
                 "label": "all",
                 "n": 0,
                 "klar_palatinus_adjusted_hand_z": {
-                    **adjusted_hand_method_metadata(args.prediction_column),
+                    **adjusted_hand_method_metadata(prediction_column),
                     "status": "missing_input_files",
                     "n": 0,
                 },
@@ -512,7 +506,7 @@ def main() -> None:
                 "label": "work",
                 "n": 0,
                 "klar_palatinus_adjusted_hand_z": {
-                    **adjusted_hand_method_metadata(args.prediction_column),
+                    **adjusted_hand_method_metadata(prediction_column),
                     "status": "missing_input_files",
                     "n": 0,
                 },
@@ -521,7 +515,7 @@ def main() -> None:
                 "label": "free",
                 "n": 0,
                 "klar_palatinus_adjusted_hand_z": {
-                    **adjusted_hand_method_metadata(args.prediction_column),
+                    **adjusted_hand_method_metadata(prediction_column),
                     "status": "missing_input_files",
                     "n": 0,
                 },
@@ -533,10 +527,10 @@ def main() -> None:
     best_rows, best_fields = read_rows(best_path)
     other_rows, other_fields = read_rows(other_path)
     missing = {
-        "best": missing_columns(best_fields, args.prediction_column),
-        "other": missing_columns(other_fields, args.prediction_column),
+        "best": missing_columns(best_fields, prediction_column),
+        "other": missing_columns(other_fields, prediction_column),
     }
-    adjusted_missing = adjusted_hand_missing_columns(best_fields, other_fields, args.prediction_column)
+    adjusted_missing = adjusted_hand_missing_columns(best_fields, other_fields, prediction_column)
     if missing["best"] or missing["other"]:
         joined: list[tuple[dict[str, str], dict[str, str]]] = []
         status = "missing_required_columns"
@@ -562,7 +556,7 @@ def main() -> None:
         },
         "interpretation": {
             "diagnostic": "row-level alternate-hand check; not a Flack parameter and not a merged absolute-structure statistic",
-            "prediction_column": args.prediction_column,
+            "prediction_column": prediction_column,
             "delta_chi2": "sum((other residual/sigma)^2 - (best residual/sigma)^2); positive favors best",
             "paired_row_t": "paired t-style contrast of per-row delta_chi2 values",
             "sqrt_positive_delta_chi2": "square root of positive delta_chi2; a scale indicator, not a probability or hand-assignment score",
@@ -594,9 +588,9 @@ def main() -> None:
                 "reference": KLAR_PALATINUS_REFERENCE,
             },
         },
-        "all": block("all", joined, adjusted_missing, args.prediction_column),
-        "work": block("work", work, adjusted_missing, args.prediction_column),
-        "free": block("free", free, adjusted_missing, args.prediction_column),
+        "all": block("all", joined, adjusted_missing, prediction_column),
+        "work": block("work", work, adjusted_missing, prediction_column),
+        "free": block("free", free, adjusted_missing, prediction_column),
     }
     all_adjusted = out["all"]["klar_palatinus_adjusted_hand_z"]
     errors = list(all_adjusted.get("calculation_errors") or [])

@@ -1161,9 +1161,7 @@ def main():
         row_table_path = run / "native_dyn_calc.csv"
         summary_path = run / "summary.json"
         summary = read_json(summary_path)
-        source_wght_a, source_wght_b = selected_native_wght(summary)
-        dataset_wght_a = float(args.wght_a) if args.wght_a is not None else source_wght_a
-        dataset_wght_b = float(args.wght_b) if args.wght_b is not None else source_wght_b
+        dataset_wght_a, dataset_wght_b = selected_native_wght(summary)
         per_dataset_wght[name] = {"a": dataset_wght_a, "b": dataset_wght_b}
         unfiltered_rows = read_rows(run, name)
         rows, resolution_filter = filter_native_rows_by_resolution(
@@ -1355,8 +1353,8 @@ def main():
             endpoint_weight_by_name.get(name, 1.0),
         )
 
-    wght_a = 0.126534 if args.wght_a is None else float(args.wght_a)
-    wght_b = 0.0 if args.wght_b is None else float(args.wght_b)
+    wght_a = 0.126534
+    wght_b = 0.0
     endpoint_key_for = endpoint_key_function(args.endpoint_merge_key, symmetry_ops)
     if args.rescale == "absolute" and args.endpoint_source == "hkl":
         raise ValueError("--rescale absolute needs --endpoint-source native (row predictions and the current model)")
@@ -1724,7 +1722,7 @@ def main():
         "wght": {
             "a": wght_a,
             "b": wght_b,
-            "mode": "explicit_override" if args.wght_a is not None or args.wght_b is not None else "per_dataset_native",
+            "mode": "per_dataset_native",
             "per_dataset": per_dataset_wght,
         },
         "native_joint": native,
