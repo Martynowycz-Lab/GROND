@@ -284,7 +284,7 @@ def manual_feedback(args) -> int:
 
 
 def manual_scales(args) -> int:
-    """Run the ``scales`` stage: record that the full pinned frame scales stay applied (no compact-scale audit)."""
+    """Run the ``scales`` stage: record that the full pinned frame scales stay applied."""
 
     workflow_path, workflow = _load_workflow(args)
     _require_stage(workflow, "feedback")
@@ -299,10 +299,9 @@ def manual_scales(args) -> int:
         status="skipped",
         outputs={
             "datasets": {},
-            "application": "not run; full pinned scales remain active",
-            "headline": {"application": "full pinned frame scales retained; compact audit skipped"},
+            "application": "full pinned scales remain active",
+            "headline": {"application": "full pinned frame scales retained"},
         },
-        command={"status": "compact_scale_audit_not_available"},
         next_command=_next_command("finish", workflow_path, workflow=workflow),
     )
     _print_handoff(handoff)

@@ -235,7 +235,7 @@ def register_manual(sub: argparse._SubParsersAction) -> None:
 
     p_manual_scales = manual_stages.add_parser(
         "scales",
-        help="Record that the full pinned frame scales stay applied (GROND has no compact-scale audit).",
+        help="Record that the full pinned frame scales stay applied.",
     )
     add_manual_compute_args(p_manual_scales)
     p_manual_scales.set_defaults(func=cmd_manual)

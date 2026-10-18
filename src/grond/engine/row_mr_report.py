@@ -433,15 +433,6 @@ def fmt_float(value, digits: int = 3) -> str:
     return f"{v:.{digits}f}"
 
 
-def fmt_delta_percent(value, digits: int = 2) -> str:
-    """Format a residual-factor delta as signed percentage points."""
-
-    v = safe_float(value)
-    if not math.isfinite(v):
-        return "n/a"
-    return f"{100.0 * v:+.{digits}f}"
-
-
 def fmt_int_pair(a, b) -> str:
     """Format two integers as 'a, b'."""
 
@@ -543,54 +534,6 @@ def rows_at_or_below_resolution(
     return [row for row in rows if row_d_spacing(row, model) >= cutoff - 1e-12]
 
 
-def scale_param_count(scale_payloads: list[dict], compact: bool) -> int | None:
-    """Return summed scale-parameter count for full or compact scale models."""
-
-    total = 0
-    found = False
-    for payload in scale_payloads:
-        # ``selected_output`` is the candidate whose row table was actually
-        # materialized. ``selected`` may be a smaller strict diagnostic when
-        # the information-criterion branch chose a different output model.
-        source = (
-            (payload.get("selected_output") or payload.get("selected") or {})
-            if compact
-            else (payload.get("baseline") or {})
-        )
-        value = safe_float(source.get("scale_params"))
-        if math.isfinite(value):
-            total += int(round(value))
-            found = True
-    return total if found else None
-
-
-def scale_param_label(scale_payloads: list[dict], compact: bool) -> str:
-    """Return display text for scale-parameter count."""
-
-    count = scale_param_count(scale_payloads, compact=compact)
-    if count is None:
-        return "n/a"
-    return str(count)
-
-
-def load_compact_rows(scale_payloads: list[dict]) -> tuple[list[dict], list[str]]:
-    """Load selected compact-scale row tables from scale-polish summaries."""
-
-    rows: list[dict] = []
-    sources: list[str] = []
-    for payload in scale_payloads:
-        selected_dir = payload.get("selected_run_dir") or payload.get("selected_compact_run") or ""
-        if not selected_dir:
-            continue
-        row_table = Path(str(selected_dir)).expanduser() / "native_dyn_calc.csv"
-        if not row_table.exists():
-            continue
-        dataset = str(payload.get("dataset") or row_table.parent.name or "dataset")
-        rows.extend(read_csv_rows(row_table, dataset))
-        sources.append(str(row_table.resolve()))
-    return rows, sources
-
-
 def load_resolution_limit_payloads(items: list[str]) -> list[dict]:
     """Load resolution-limit summaries passed to the publication table generator."""
 
@@ -629,7 +572,6 @@ def suggested_resolution_dmin(payloads: list[dict]) -> float:
 def endpoint_summary_rows(
     requested_rows: list[dict],
     model: dict,
-    scale_payloads: list[dict],
     resolution_payloads: list[dict],
     instability_u: float = 0.01,
     *,
@@ -637,19 +579,17 @@ def endpoint_summary_rows(
     requested_min_d_spacing: float = 0.0,
     selected_scale_contract: str = "",
 ) -> tuple[list[dict], dict]:
-    """Build the three user-facing endpoint summaries requested by auto mode.
+    """Build the row-contract summaries reported by auto mode.
 
-    The rows are:
-    1. requested resolution with the full fitted scale curve,
-    2. requested resolution with the compact scale manifold,
-    3. promoted/suggested resolution with the compact scale manifold.
+    The rows are the requested resolution with the full fitted scale curve, then the
+    promoted/suggested resolution. A multi-dataset run (``full``) also reports its selected
+    rows at both resolutions.
     """
 
     endpoint_rows: list[dict] = []
-    compact_rows, compact_sources = load_compact_rows(scale_payloads)
     explicit_requested_dmin = safe_float(requested_min_d_spacing)
     selected_contract = str(selected_scale_contract).strip().lower()
-    explicit_multi_contract = selected_contract in {"full", "compact_bic", "compact_min_strict"}
+    explicit_multi_contract = selected_contract == "full"
     resolution_model = (
         model
         if explicit_multi_contract or (math.isfinite(explicit_requested_dmin) and explicit_requested_dmin > 0.0)
@@ -664,104 +604,44 @@ def endpoint_summary_rows(
     if not math.isfinite(suggested_dmin):
         suggested_dmin = requested_dmin
 
-    def append(
-        label: str, rows: list[dict], dmin: float, scale_model: str, scale_params: str, status: str = "ok"
-    ) -> None:
-        """Add one endpoint summary: the rows kept at dmin, their row/MR factors and the scale description."""
+    def append(label: str, rows: list[dict], dmin: float, scale_model: str) -> None:
+        """Add one row-contract summary: the rows kept at dmin, their row/MR factors and the scale description."""
 
         kept = rows_at_or_below_resolution(rows, dmin, resolution_model)
         summary = compute_row_mr_summary(kept, model, instability_u=instability_u) if kept else {}
         endpoint_rows.append(
             {
                 "label": label,
-                "status": status,
+                "status": "ok",
                 "dmin_A": dmin_for_rows(kept, resolution_model) if kept else safe_float(dmin),
                 "requested_cutoff_A": safe_float(dmin),
                 "row_count": len(kept),
                 "scale_model": scale_model,
-                "scale_params": scale_params,
+                "scale_params": "n/a",
                 "row_mr": summary,
             }
         )
 
     full_control_rows = list(full_rows) if full_rows else list(requested_rows)
-    append(
-        "requested_resolution_full_scales",
-        full_control_rows,
-        requested_dmin,
-        "full fitted scale curve",
-        scale_param_label(scale_payloads, compact=False),
-    )
-    if explicit_multi_contract and selected_contract.startswith("compact_"):
-        append(
-            "requested_resolution_compact_scales",
-            requested_rows,
-            requested_dmin,
-            selected_contract,
-            scale_param_label(scale_payloads, compact=True),
-        )
-        append(
-            "suggested_resolution_compact_scales",
-            requested_rows,
-            suggested_dmin,
-            selected_contract,
-            scale_param_label(scale_payloads, compact=True),
-        )
-    elif explicit_multi_contract:
+    append("requested_resolution_full_scales", full_control_rows, requested_dmin, "full fitted scale curve")
+    if explicit_multi_contract:
         append(
             "requested_resolution_selected_full_scales",
             requested_rows,
             requested_dmin,
             "selected full fitted scale curve",
-            scale_param_label(scale_payloads, compact=False),
         )
         append(
             "suggested_resolution_selected_full_scales",
             requested_rows,
             suggested_dmin,
             "selected full fitted scale curve",
-            scale_param_label(scale_payloads, compact=False),
-        )
-    elif compact_rows:
-        append(
-            "requested_resolution_compact_scales",
-            compact_rows,
-            requested_dmin,
-            "compact scale manifold",
-            scale_param_label(scale_payloads, compact=True),
-        )
-        append(
-            "suggested_resolution_compact_scales",
-            compact_rows,
-            suggested_dmin,
-            "compact scale manifold",
-            scale_param_label(scale_payloads, compact=True),
         )
     else:
-        endpoint_rows.append(
-            {
-                "label": "requested_resolution_compact_scales",
-                "status": "missing_compact_scale_table",
-                "dmin_A": requested_dmin,
-                "requested_cutoff_A": requested_dmin,
-                "row_count": 0,
-                "scale_model": "compact scale manifold",
-                "scale_params": "n/a",
-                "row_mr": {},
-            }
-        )
-        append(
-            "suggested_resolution_compact_scales",
-            requested_rows,
-            suggested_dmin,
-            "full fitted scale curve fallback",
-            scale_param_label(scale_payloads, compact=False),
-            status="fallback_full_scales",
-        )
+        append("suggested_resolution_full_scales", requested_rows, suggested_dmin, "full fitted scale curve")
     metadata = {
         "requested_dmin_A": requested_dmin,
         "suggested_dmin_A": suggested_dmin,
-        "compact_sources": compact_sources,
         "full_control_rows_supplied": bool(full_rows),
         "selected_scale_contract": selected_contract or "legacy_unspecified",
         "d_spacing_source": "shared reporting-model cell",
@@ -840,50 +720,6 @@ def markdown_table(rows: list[dict]) -> list[str]:
     for row in rows:
         lines.append("| " + " | ".join(str(row[h]) for h in headers) + " |")
     return lines
-
-
-def scale_parameter_text(baseline: dict, selected: dict, key: str) -> str:
-    """Return a compact baseline-to-selected parameter-count string."""
-
-    base = safe_float(baseline.get(key), float("nan"))
-    chosen = safe_float(selected.get(key), float("nan"))
-    if not math.isfinite(base) or not math.isfinite(chosen):
-        return "n/a"
-    saved = int(round(base - chosen))
-    return f"{int(round(base))} -> {int(round(chosen))} ({saved} saved)"
-
-
-def scale_polish_table_rows(scale_payloads: list[dict]) -> list[dict]:
-    """Build rows summarizing compact scale-manifold choices for the final table."""
-
-    rows = []
-    for payload in scale_payloads:
-        baseline = payload.get("baseline") or {}
-        selected = payload.get("selected_output") or payload.get("selected") or {}
-        delta = selected.get("delta_vs_baseline") or {}
-        status = "accepted" if payload.get("selected_output") or payload.get("selected") else "diagnostic"
-        if not selected:
-            status = "not available"
-        rows.append(
-            {
-                "Dataset": payload.get("dataset", "dataset"),
-                "Status": status,
-                "Model": selected.get("name", "n/a"),
-                "Scale params (full -> compact)": scale_parameter_text(baseline, selected, "scale_params"),
-                "Frame scales (full -> compact)": scale_parameter_text(
-                    baseline, selected, "group_scale_params"
-                ),
-                "Detector scales (full -> compact)": scale_parameter_text(
-                    baseline, selected, "detector_scale_params"
-                ),
-                "Total params (full -> compact)": scale_parameter_text(baseline, selected, "total_params"),
-                "Penalty dRall pp": fmt_delta_percent(delta.get("Rall")),
-                "Penalty dwRall pp": fmt_delta_percent(delta.get("wRall")),
-                "Penalty dR1all pp": fmt_delta_percent(delta.get("native_R1_all")),
-                "Penalty dwR2all pp": fmt_delta_percent(delta.get("native_wR2_all")),
-            }
-        )
-    return rows
 
 
 def tex_escape(text: str) -> str:
@@ -1026,18 +862,16 @@ def write_markdown(
     title: str,
     meta: dict,
     row_mr_summary: dict,
-    scale_payloads: list[dict] | None = None,
     endpoint_summaries: list[dict] | None = None,
     *,
     canonical: bool = False,
 ) -> None:
-    """Write the Markdown publication report: setup, row/MR factors, scale and endpoint summaries.
+    """Write the Markdown publication report: setup, row/MR factors and the row-contract summaries.
 
     canonical=True writes the JANA/PETS row-statistics tables.
     """
 
     cell = meta["cell"]
-    scale_rows = scale_polish_table_rows(scale_payloads or [])
     row_rows = jana_table_rows(row_mr_summary) if canonical else table_rows(row_mr_summary)
     endpoint_rows = (
         row_contract_table_rows(endpoint_summaries or [])
@@ -1087,20 +921,9 @@ def write_markdown(
             [
                 endpoint_heading,
                 "",
-                "Auto mode reports the requested resolution with full scales, the requested resolution with compact scales, and the suggested final row contract. These are JANA/PETS-style row statistics, not SHELXL endpoint statistics.",
+                "Auto mode reports the rows at the requested resolution and at the suggested final resolution, with the full fitted scale curve. These are JANA/PETS-style row statistics, not SHELXL endpoint statistics.",
                 "",
                 *markdown_table(endpoint_rows),
-                "",
-            ]
-        )
-    if scale_rows:
-        lines.extend(
-            [
-                "## Compact Scale-Manifold Accounting",
-                "",
-                "The compact scale-manifold pass is a frozen-Bloch post-regularization audit. The table reports how many scale/total nuisance parameters the compact model saves and the residual penalty relative to the full fitted scale curve. Positive residual deltas mean the compact model is worse than the full-scale baseline.",
-                "",
-                *markdown_table(scale_rows),
                 "",
             ]
         )
@@ -1112,7 +935,6 @@ def write_latex(
     title: str,
     meta: dict,
     row_mr_summary: dict,
-    scale_payloads: list[dict] | None = None,
     endpoint_summaries: list[dict] | None = None,
     *,
     canonical: bool = False,
@@ -1120,7 +942,6 @@ def write_latex(
     """Write the LaTeX publication report; canonical=True writes the JANA/PETS row-statistics tables."""
 
     rows = jana_table_rows(row_mr_summary) if canonical else table_rows(row_mr_summary)
-    scale_rows = scale_polish_table_rows(scale_payloads or [])
     endpoint_rows = (
         row_contract_table_rows(endpoint_summaries or [])
         if canonical
@@ -1209,7 +1030,7 @@ def write_latex(
             [
                 "",
                 endpoint_subheading,
-                r"\noindent Auto mode reports the requested resolution with full scales, the requested resolution with compact scales, and the final suggested row contract. These are not SHELXL endpoint statistics.",
+                r"\noindent Auto mode reports the rows at the requested resolution and at the suggested final resolution, with the full fitted scale curve. These are not SHELXL endpoint statistics.",
                 "",
             ]
         )
@@ -1239,25 +1060,6 @@ def write_latex(
                     rf"{tex_escape(row['Scale params'])} & {tex_escape(row['Nobs, Nall'])} & {row['Robs']} & {row['Rall']} & "
                     rf"{row['wRall']} & {row['MRobs']} & {row['MRall']} & {row['MwRall']} \\"
                 )
-        body.extend([r"\bottomrule\end{tabular}", ""])
-    if scale_rows:
-        body.extend(
-            [
-                "",
-                r"\subsection*{Compact scale-manifold accounting}",
-                r"\noindent The compact scale-manifold pass is a frozen-Bloch post-regularization audit. Positive residual deltas mean the compact model is worse than the full fitted scale curve.",
-                "",
-                r"\begin{tabular}{@{}lllllrrrr@{}}\toprule",
-                r"Dataset & Status & Model & Scale params & Total params & $\Delta R_{all}$ & $\Delta wR_{all}$ & $\Delta R1_{all}$ & $\Delta wR2_{all}$ \\ \midrule",
-            ]
-        )
-        for row in scale_rows:
-            body.append(
-                rf"{tex_escape(row['Dataset'])} & {tex_escape(row['Status'])} & {tex_escape(row['Model'])} & "
-                rf"{tex_escape(row['Scale params (full -> compact)'])} & {tex_escape(row['Total params (full -> compact)'])} & "
-                rf"{tex_escape(row['Penalty dRall pp'])} & {tex_escape(row['Penalty dwRall pp'])} & "
-                rf"{tex_escape(row['Penalty dR1all pp'])} & {tex_escape(row['Penalty dwR2all pp'])} \\"
-            )
         body.extend([r"\bottomrule\end{tabular}", ""])
     body.extend([r"\end{document}", ""])
     path.write_text("\n".join(body))
@@ -1307,19 +1109,15 @@ def main() -> None:
     ap.add_argument(
         "--selected-scale-contract",
         default="",
-        help="Selected multi-dataset scale contract: full, compact_bic, or compact_min_strict.",
+        help="full for a multi-dataset run: also report the selected rows with every crystal's full fitted scales.",
     )
     args = ap.parse_args()
     if not math.isfinite(float(args.instability_u)) or args.instability_u < 0.0:
         ap.error("--instability-u must be finite and nonnegative")
     if not math.isfinite(float(args.requested_min_d_spacing)) or args.requested_min_d_spacing < 0.0:
         ap.error("--requested-min-d-spacing must be finite and nonnegative")
-    if args.selected_scale_contract and args.selected_scale_contract not in {
-        "full",
-        "compact_bic",
-        "compact_min_strict",
-    }:
-        ap.error("--selected-scale-contract must be full, compact_bic, or compact_min_strict")
+    if args.selected_scale_contract and args.selected_scale_contract != "full":
+        ap.error("--selected-scale-contract must be full")
 
     out = Path(args.out_dir).expanduser()
     out.mkdir(parents=True, exist_ok=True)
@@ -1373,13 +1171,10 @@ def main() -> None:
         "full_control_input_rows": full_input_row_count,
         "full_control_retained_rows": len(full_rows),
     }
-    # GROND writes no scale-polish summaries; the report keeps its empty scale-polish block.
-    scale_payloads: list[dict] = []
     resolution_payloads = load_resolution_limit_payloads(args.resolution_limit)
     endpoint_summaries, endpoint_metadata = endpoint_summary_rows(
         rows,
         model,
-        scale_payloads,
         resolution_payloads,
         instability_u=args.instability_u,
         full_rows=full_rows,
@@ -1402,7 +1197,7 @@ def main() -> None:
         "row_mr": row_mr_summary,
         "per_dataset_row_mr": per_dataset_summary,
         "row_resolution_scale_contracts": {
-            "definition": "requested full-scale, requested compact-scale, and promoted suggested compact-scale JANA/PETS-style row statistics",
+            "definition": "JANA/PETS-style row statistics at the requested and the promoted suggested resolution, with full fitted scales",
             "metadata": endpoint_metadata,
             "contracts": endpoint_summaries,
             "table_rows": row_contract_table_rows(endpoint_summaries),
@@ -1413,18 +1208,13 @@ def main() -> None:
             "endpoints": endpoint_summaries,
             "table_rows": endpoint_table_rows(endpoint_summaries),
         },
-        "scale_polish": {
-            "definition": "compact scale-manifold parameter count and residual penalty relative to the full fitted scale curve",
-            "summaries": scale_payloads,
-            "table_rows": scale_polish_table_rows(scale_payloads),
-        },
     }
     json_path = out / "row_mr_metrics.json"
     md_path = out / "publication_table.md"
     tex_path = out / "publication_table.tex"
     json_path.write_text(json.dumps(payload, indent=2, allow_nan=True) + "\n")
-    write_markdown(md_path, args.title, meta, row_mr_summary, scale_payloads, endpoint_summaries)
-    write_latex(tex_path, args.title, meta, row_mr_summary, scale_payloads, endpoint_summaries)
+    write_markdown(md_path, args.title, meta, row_mr_summary, endpoint_summaries)
+    write_latex(tex_path, args.title, meta, row_mr_summary, endpoint_summaries)
     canonical_json_path = out / "JANA_ROW_STATISTICS.json"
     canonical_md_path = out / "JANA_ROW_STATISTICS.md"
     canonical_tex_path = out / "JANA_ROW_STATISTICS.tex"
@@ -1438,7 +1228,6 @@ def main() -> None:
         args.title,
         meta,
         row_mr_summary,
-        scale_payloads,
         endpoint_summaries,
         canonical=True,
     )
@@ -1447,7 +1236,6 @@ def main() -> None:
         args.title,
         meta,
         row_mr_summary,
-        scale_payloads,
         endpoint_summaries,
         canonical=True,
     )
@@ -1505,7 +1293,6 @@ def main() -> None:
         "per_dataset": per_dataset_summary,
         "row_resolution_scale_contracts": payload["row_resolution_scale_contracts"],
         "resolution_scale_endpoints": payload["resolution_scale_endpoints"],
-        "scale_polish": payload["scale_polish"],
     }
     (out / "publication_artifacts.json").write_text(json.dumps(result, indent=2, allow_nan=True) + "\n")
     print(json.dumps(result, indent=2, allow_nan=True))

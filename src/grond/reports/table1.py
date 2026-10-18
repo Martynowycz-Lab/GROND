@@ -52,8 +52,7 @@ def _quick_final_jana_row_summary(row_metrics: Mapping[str, object]) -> dict[str
     if not isinstance(candidates, list):
         return {}
     preferred = (
-        "suggested_resolution_compact_scales",
-        "requested_resolution_compact_scales",
+        "suggested_resolution_full_scales",
         "requested_resolution_full_scales",
     )
     by_label = {str(row.get("label")): row for row in candidates if isinstance(row, Mapping)}

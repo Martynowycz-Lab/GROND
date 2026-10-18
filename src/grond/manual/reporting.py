@@ -128,7 +128,7 @@ def _manual_scale_summary(
     workflow: Mapping[str, object],
     row_runs: Mapping[str, Path],
 ) -> dict[str, object]:
-    """Summarize the applied full scale parameters per crystal and the compact scale audit (not applied)."""
+    """Summarize the applied full scale parameters per crystal."""
 
     datasets: dict[str, object] = {}
     frame_total = 0
@@ -152,33 +152,15 @@ def _manual_scale_summary(
         }
     scales_stage = _stage(workflow, "scales")
     scale_outputs = scales_stage.get("outputs") if isinstance(scales_stage.get("outputs"), Mapping) else {}
-    audit_datasets = scale_outputs.get("datasets") if isinstance(scale_outputs.get("datasets"), Mapping) else {}
-    compact: dict[str, object] = {}
-    compact_frame_total = 0
-    compact_detector_total = 0
-    for name, audit in audit_datasets.items():
-        selected = audit.get("selected") if isinstance(audit, Mapping) else {}
-        selected = selected if isinstance(selected, Mapping) else {}
-        frame = int(selected.get("group_scale_params", 0) or 0)
-        detector = int(selected.get("detector_scale_params", 0) or 0)
-        compact_frame_total += frame
-        compact_detector_total += detector
-        compact[str(name)] = dict(selected)
     return {
         "applied_contract": "full pinned frame grouping",
-        "application_note": scale_outputs.get("application", "scale audit not run; full pinned scales remain active"),
+        "application_note": scale_outputs.get("application", "full pinned scales remain active"),
         "applied": {
             "rows": row_total,
             "frame_parameters": frame_total,
             "detector_parameters": detector_total,
             "rows_per_scale_parameter": row_total / max(frame_total + detector_total, 1),
             "datasets": datasets,
-        },
-        "compact_audit": {
-            "applied_to_endpoint": False,
-            "frame_parameters": compact_frame_total,
-            "detector_parameters": compact_detector_total,
-            "datasets": compact,
         },
     }
 
@@ -282,11 +264,10 @@ def _manual_markdown_summary(payload: Mapping[str, object]) -> str:
             f"{nuisance.get('thickness_grad_frac', 'n/a')} | {nuisance.get('frame_offset', 'n/a')} | "
             f"{scale_row.get('frame_parameters', 'n/a')} | {scale_row.get('detector_parameters', 'n/a')} |"
         )
-    compact = scales.get("compact_audit") if isinstance(scales.get("compact_audit"), Mapping) else {}
     lines.extend(
         [
             "",
-            f"The selected endpoint uses **{applied_scales.get('frame_parameters', 'n/a')} frame** and **{applied_scales.get('detector_parameters', 'n/a')} detector** parameters across {applied_scales.get('rows', 'n/a')} rows. The compact audit found {compact.get('frame_parameters', 'n/a')} frame and {compact.get('detector_parameters', 'n/a')} detector parameters, but **did not apply them to this endpoint**.",
+            f"The selected endpoint uses **{applied_scales.get('frame_parameters', 'n/a')} frame** and **{applied_scales.get('detector_parameters', 'n/a')} detector** parameters across {applied_scales.get('rows', 'n/a')} rows.",
             "",
             "## Feedback-cycle audit",
             "",

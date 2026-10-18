@@ -82,7 +82,6 @@ def read_row_table(path: Path) -> dict[str, object]:
         "pred": _column(rows, "dyn_scaled"),
         "split": np.asarray([str(r.get("split", "")).strip().lower() for r in rows], dtype=object),
         "sigma_column": sigma_column,
-        "scale_replay_model": sorted({str(r.get("scale_replay_model") or "") for r in rows} - {""}),
     }
 
 
@@ -468,8 +467,8 @@ def _loop_stop_reason(payload: Mapping[str, object]) -> str | None:
     return status if status in {"cap", "converged"} else None
 
 
-def _scale_contract(summary: Mapping[str, object], replay: list[str] | None = None) -> dict[str, object]:
-    """Return one run summary's frame-scale contract: kind, scale count, EDF, fit split and compact replays."""
+def _scale_contract(summary: Mapping[str, object]) -> dict[str, object]:
+    """Return one run summary's frame-scale contract: kind, scale count, EDF and fit split."""
 
     best = summary.get("best_native") if isinstance(summary.get("best_native"), Mapping) else {}
     scale_model = best.get("scale_model") if isinstance(best.get("scale_model"), Mapping) else {}
@@ -478,7 +477,6 @@ def _scale_contract(summary: Mapping[str, object], replay: list[str] | None = No
         "scale_count": best.get("scale_count"),
         "scale_edf": best.get("scale_edf"),
         "scale_fit_split": best.get("scale_fit_split"),
-        "compact_replay": list(replay or []),
     }
 
 
@@ -491,14 +489,13 @@ def scale_contract_consistency(out_dir: Path, tables: Mapping[str, Mapping[str, 
     runs = (adopted[-1].get("raw_runs") or adopted[-1].get("runs") or {}) if adopted else {}
     out: dict[str, object] = {}
     for name in tables:
-        publication = _scale_contract(summaries.get(name) or {}, tables[name].get("scale_replay_model"))
+        publication = _scale_contract(summaries.get(name) or {})
         feedback = _scale_contract(try_read_json(Path(str(runs[name])) / "summary.json")) if name in runs else None
         same = None
         if feedback is not None:
             same = (
                 feedback["kind"] == publication["kind"]
                 and feedback["scale_fit_split"] == publication["scale_fit_split"]
-                and not publication["compact_replay"]
                 and (publication["kind"] == "pspline" or feedback["scale_count"] == publication["scale_count"])
             )
         out[name] = {"feedback_last_adopted_cycle": feedback, "publication": publication, "same_scale_contract": same}
@@ -897,13 +894,12 @@ def _consistency_lines(block: Mapping[str, object] | None) -> list[str]:
         return []
 
     def text(contract):
-        """Format one scale contract as 'kind size on split rows', with its compact replay models when any."""
+        """Format one scale contract as 'kind size on split rows'."""
 
         if not contract:
             return "n/a"
         size = f"EDF {_num(contract.get('scale_edf'))}" if contract["kind"] == "pspline" else f"{contract.get('scale_count')} scales"
-        replay = f", compact replay {', '.join(contract['compact_replay'])}" if contract.get("compact_replay") else ""
-        return f"{contract['kind']} {size} on {contract.get('scale_fit_split')} rows{replay}"
+        return f"{contract['kind']} {size} on {contract.get('scale_fit_split')} rows"
 
     lines = ["### Frame-scale contract: structure feedback versus publication", "",
              "| crystal | last adopted feedback cycle | publication row table | same contract |", "|---|---|---|---|"]
