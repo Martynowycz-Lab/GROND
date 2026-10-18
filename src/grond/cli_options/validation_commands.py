@@ -5,8 +5,6 @@ from __future__ import annotations
 import argparse
 
 
-
-
 def register_runtime(sub: argparse._SubParsersAction) -> None:
     """Register runtime commands."""
 

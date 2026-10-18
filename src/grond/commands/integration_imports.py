@@ -1,13 +1,9 @@
-"""Import or export integration contracts and apply supported external model updates."""
+"""`grond import-dials` and `grond export-pets`."""
 
 from __future__ import annotations
 
 import argparse
 import json
-from collections.abc import Mapping
-from pathlib import Path
-
-from grond.cli_support.values import read_json
 
 
 def cmd_import_dials(args: argparse.Namespace) -> int:
@@ -41,52 +37,6 @@ def cmd_import_dials(args: argparse.Namespace) -> int:
         "hkl": str(bridge.hkl),
         "scan_points": str(bridge.scan_points),
         "summary": str(bridge.summary),
-    }
-    if bridge.prep:
-        payload["prep"] = str(bridge.prep)
-    print(json.dumps(payload, indent=2))
-    return 0
-
-
-def cmd_import_pets(args: argparse.Namespace) -> int:
-    """Import a native PETS2 observation/geometry contract into GROND rows."""
-
-    from grond.io.pets_import import import_pets_to_grond
-
-    try:
-        bridge = import_pets_to_grond(
-            args.cif_pets,
-            args.out_dir,
-            pets_hkl=args.pets_hkl or None,
-            allow_virtual_frames=bool(args.allow_virtual_frames),
-            klar_rsg=args.klar_rsg,
-            klar_dsg=float(args.klar_dsg),
-            exclude_systematic_absences=bool(args.exclude_systematic_absences),
-            jana_reflistout=args.jana_reflistout or None,
-            dataset_name=args.dataset_name,
-            space_group_number=int(args.space_group_number),
-            hkl_transform=args.hkl_transform,
-            structure=args.structure or None,
-            baseline_hkl=args.baseline_hkl or None,
-            prep_out=args.prep_out or None,
-        )
-    except (FileNotFoundError, OSError, RuntimeError, ValueError) as exc:
-        print(json.dumps({"status": "error", "error": str(exc)}, indent=2))
-        return 2
-    summary_payload = read_json(bridge.summary)
-    static_endpoint = summary_payload.get("static_endpoint_contract")
-    static_endpoint_ready = bool(isinstance(static_endpoint, Mapping) and static_endpoint.get("status") == "validated")
-    payload = {
-        "status": "complete",
-        "out_dir": str(bridge.out_dir),
-        "hkl": str(bridge.hkl),
-        "scan_points": str(bridge.scan_points),
-        "summary": str(bridge.summary),
-        "scope": (
-            "ordinary PETS row-space plus a validated SHELXL endpoint for AUTO"
-            if static_endpoint_ready
-            else "native PETS row-space calculation only; no validated static SHELXL endpoint"
-        ),
     }
     if bridge.prep:
         payload["prep"] = str(bridge.prep)
@@ -142,25 +92,3 @@ def cmd_export_pets(args: argparse.Namespace) -> int:
         )
     )
     return 0
-
-
-def cmd_apply_diffbloch_model(args: argparse.Namespace) -> int:
-    """Transfer a refined diffBloch CIF into an existing SHELX instruction model."""
-
-    from grond.diffbloch_endpoint import materialize_diffbloch_res
-
-    audit_path = args.audit_json or str(Path(args.out_res).with_suffix(".diffbloch_handoff.json"))
-    try:
-        payload = materialize_diffbloch_res(
-            args.source_res,
-            args.refined_cif,
-            args.out_res,
-            audit_json=audit_path,
-            max_cell_length_fraction=float(args.max_cell_length_deviation),
-            max_cell_angle_degrees=float(args.max_cell_angle_deviation),
-        )
-    except (OSError, RuntimeError, ValueError) as exc:
-        print(json.dumps({"status": "error", "error": str(exc)}, indent=2))
-        return 2
-    print(json.dumps(payload, indent=2, allow_nan=False))
-    return 0 if payload.get("status") == "complete" or args.allow_npd else 3
