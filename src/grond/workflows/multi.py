@@ -69,51 +69,35 @@ from grond.workflows.transform_selection import (
 
 def final_hand_evidence_datasets(
     prep: PrepConfig,
-    args: argparse.Namespace,
     final_dataset_policy: Mapping[str, object],
-    policy_active: Mapping[str, Path],
 ) -> dict[str, object]:
     """Crystals pooled in the final hand check.
 
-    ``--hand-evidence-datasets not-excluded`` (default) keeps every crystal except one the final dataset policy
-    excluded, and that exclusion must carry its recorded reason; a downweighted or completeness-only crystal is
-    demoted for the endpoint, not for the hand, and stays in the pooled evidence.  ``policy-active`` (legacy)
-    keeps the primary and downweighted crystals only.
+    Every crystal except one the final dataset policy excluded, and that exclusion must carry its recorded reason;
+    a downweighted or completeness-only crystal is demoted for the endpoint, not for the hand, and stays in the
+    pooled evidence.
     """
 
-    scope = str(getattr(args, "hand_evidence_datasets", "policy-active") or "policy-active")
     names = [dataset.name for dataset in prep.datasets]
     rows = policy_by_name(final_dataset_policy)
     roles = {name: str((rows.get(name) or {}).get("action") or "primary") for name in names}
-    if scope == "policy-active":
-        included = [name for name in names if name in policy_active]
-        excluded = {
-            name: list((rows.get(name) or {}).get("reasons") or [f"dataset policy action {roles[name]}"])
-            for name in names
-            if name not in policy_active
-        }
-        label = "primary_and_downweighted_policy_active_datasets_only"
-    elif scope == "not-excluded":
-        excluded = {}
-        for name in names:
-            if roles[name] != "exclude":
-                continue
-            reasons = [str(reason) for reason in (rows.get(name) or {}).get("reasons") or [] if str(reason).strip()]
-            if not reasons:
-                raise RuntimeError(
-                    f"the final dataset policy excluded {name} without a recorded reason; refusing to drop it "
-                    "from the pooled hand evidence"
-                )
-            excluded[name] = reasons
-        included = [name for name in names if name not in excluded]
-        label = "every_dataset_except_policy_excluded_with_recorded_reason"
-    else:
-        raise ValueError(f"unknown --hand-evidence-datasets {scope!r}; expected not-excluded or policy-active")
+    excluded = {}
+    for name in names:
+        if roles[name] != "exclude":
+            continue
+        reasons = [str(reason) for reason in (rows.get(name) or {}).get("reasons") or [] if str(reason).strip()]
+        if not reasons:
+            raise RuntimeError(
+                f"the final dataset policy excluded {name} without a recorded reason; refusing to drop it "
+                "from the pooled hand evidence"
+            )
+        excluded[name] = reasons
+    included = [name for name in names if name not in excluded]
     if not included:
         raise RuntimeError("no crystal is left for the final hand check; refusing to decide the hand on no evidence")
     return {
-        "scope": scope,
-        "policy_label": label,
+        "scope": "not-excluded",
+        "policy_label": "every_dataset_except_policy_excluded_with_recorded_reason",
         "included": included,
         "excluded": excluded,
         "roles": roles,
@@ -215,7 +199,7 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
     symmetry_policy = absolute_structure_policy(prep.structure)
     hand_settings = hand_decision_settings(args)
     hand_applicable = bool(args.hand_control and symmetry_policy.get("run_hand_control", True))
-    early_hand = bool(hand_applicable and str(getattr(args, "hand_decision_stage", "final")) == "early")
+    early_hand = hand_applicable
     shared_model = prep.structure
     early_hand_decision: dict = {}
     if early_hand:
@@ -284,11 +268,7 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
         ),
         "method": "nakane_negative_thickness_elastic_pair_v1",
         "decision_evidence": hand_settings["evidence"],
-        "absorption_policy": (
-            "uniform_absorption_kept_exact_pair"
-            if hand_settings["pair_absorption"] == "uniform"
-            else "disabled_for_hand_decision_only"
-        ),
+        "absorption_policy": "uniform_absorption_kept_exact_pair",
         "nuisance_refit": False,
         "jitter_refit": False,
         "known_configuration_used_for_selection": False,
@@ -492,7 +472,7 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
         full_input_runs = weighted_runs
         full_publication_runs = policy_active_runs(weighted_runs, final_dataset_policy)
         require_policy_active_runs(full_publication_runs, context="final publication")
-    hand_scope = final_hand_evidence_datasets(prep, args, final_dataset_policy, full_publication_runs)
+    hand_scope = final_hand_evidence_datasets(prep, final_dataset_policy)
     hand_dataset_names = set(hand_scope["included"])
     hand_prep = PrepConfig(
         structure=prep.structure,

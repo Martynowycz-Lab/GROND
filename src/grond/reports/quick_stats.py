@@ -76,10 +76,10 @@ from grond.workflows.finish_maps import _publication_endpoint_from_result
 REPORT_LAYOUTS = ("heldout-first", "legacy")
 
 
-def resolve_report_layout(args: argparse.Namespace, result: Mapping[str, object]) -> str:
-    """The run's --report-layout; ``grond finish`` reuses the layout the run recorded (legacy when none was)."""
+def resolve_report_layout(report_layout: str | None, result: Mapping[str, object]) -> str:
+    """AUTO writes heldout-first; ``grond finish`` reuses the layout the run recorded (legacy when none was)."""
 
-    value = getattr(args, "report_layout", None)
+    value = report_layout
     if value is None:
         quick = result.get("quick_stats") if isinstance(result.get("quick_stats"), Mapping) else {}
         console = quick.get("console") if isinstance(quick.get("console"), Mapping) else {}
@@ -105,7 +105,9 @@ def hand_decision_authority(heldout_report: Mapping[str, object] | None) -> str:
     return "not_evaluated" if recorded and not evaluated else "unrecorded"
 
 
-def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argparse.Namespace) -> dict:
+def write_quick_stats(
+    prep: PrepConfig, result: Mapping[str, object], args: argparse.Namespace, *, report_layout: str | None = None
+) -> dict:
     """Write a short human-first statistics summary at the run root."""
 
     out_dir = Path(args.out_dir).expanduser().resolve()
@@ -247,7 +249,7 @@ def write_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: argp
         },
         Path(str(diagnostic_endpoint.get("endpoint_lst"))) if diagnostic_endpoint.get("endpoint_lst") else None,
     )
-    report_layout = resolve_report_layout(args, result)
+    report_layout = resolve_report_layout(report_layout, result)
     heldout_report = heldout_report_for_run(
         out_dir, result, frozen_row_tables, publication_shelxl=publication_shelxl, report_layout=report_layout
     )

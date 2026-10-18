@@ -109,46 +109,6 @@ def hand_diagnostic_supports_other(stats: Mapping[str, object], args: argparse.N
     return not reasons, reasons
 
 
-def hand_preference_summary(
-    all_z: float,
-    *,
-    active_hand: str,
-    threshold: float,
-    calculation_valid: bool = True,
-) -> dict[str, object]:
-    """Report the measured preference separately from the exported representation."""
-
-    valid = bool(calculation_valid and math.isfinite(all_z))
-    opposite = "alternate" if active_hand == "original" else "original"
-    preferred = (
-        active_hand
-        if valid and all_z > 0.0
-        else opposite
-        if valid and all_z < 0.0
-        else "no_preference"
-        if valid
-        else "unavailable"
-    )
-    confidence = (
-        "calculation_error"
-        if not valid
-        else "no_sensitivity"
-        if all_z == 0.0
-        else "strong_conditional"
-        if abs(all_z) >= threshold
-        else "weak_conditional"
-    )
-    return {
-        "preferred_hand": preferred,
-        "hand_confidence": confidence,
-        "all_row_adjusted_z_positive_favors_active": all_z if valid else None,
-        "active_hand_before_selection": active_hand,
-        "primary_evidence": "all_rows",
-        "free_evidence_role": "diagnostic_warning_only",
-        "statistic_is_calibrated_probability": False,
-    }
-
-
 def _hand_evidence_warnings(
     *,
     all_z: float,

@@ -27,14 +27,6 @@ def add_decision_controls(ap: argparse.ArgumentParser) -> None:
         help="Trust the supplied --hkl-transform or prep-file transform and skip Bloch transform scouting while keeping the rest of auto-decision enabled.",
     )
     ap.add_argument(
-        "--hand-accept-delta",
-        dest="hand_accept_delta",
-        metavar="DELTA",
-        type=float,
-        default=0.015,
-        help="Adaptive score margin required before switching to the alternate hand.",
-    )
-    ap.add_argument(
         "--hand-flip-zkp-all",
         type=float,
         default=3.5,
@@ -42,51 +34,6 @@ def add_decision_controls(ap: argparse.ArgumentParser) -> None:
             "Legacy --hand-decision-evidence all-row-zkp only: invert the acentric model once when the "
             "all-row Klar-Palatinus adjusted Z favors the inverse by at least this magnitude (default 3.5). "
             "The ZKP is always reported as a diagnostic."
-        ),
-    )
-    ap.add_argument(
-        "--hand-decision-evidence",
-        choices=["heldout-orbit-sign", "all-row-zkp"],
-        default="heldout-orbit-sign",
-        help=(
-            "Evidence that may switch the hand. heldout-orbit-sign (default): out-of-fold work rows (3 salted "
-            "orbit folds, scales refitted on training orbits) plus free rows, pooled over crystals; switch iff "
-            "the orbit sign z favours the inverse by --hand-flip-orbit-z AND the paired orbit-bootstrap "
-            "delta R_obs 95%% CI excludes zero in favour of the inverse. all-row-zkp: legacy all-row ZKP rule."
-        ),
-    )
-    ap.add_argument(
-        "--hand-flip-orbit-z",
-        type=float,
-        default=3.0,
-        help="Minimum held-out orbit sign z in favour of the inverse before switching hands (default 3.0).",
-    )
-    ap.add_argument(
-        "--hand-decision-stage",
-        choices=["early", "final"],
-        default="early",
-        help=(
-            "early (default): decide the hand right after the screen on the hand-blind start model, so thickness, "
-            "gates and the SHELXL loop refine the chosen hand; the final elastic pair is then a confirmatory "
-            "check with the same rule. final: legacy, decide only after all refinement."
-        ),
-    )
-    ap.add_argument(
-        "--hand-pair-scale-fit-split",
-        choices=["work", "inherit"],
-        default="work",
-        help=(
-            "Rows used for both hands' scale fits in the elastic hand pair: work (default; free orbits held out) "
-            "or inherit (legacy: the source run's split, 'all' under --production-scales)."
-        ),
-    )
-    ap.add_argument(
-        "--hand-pair-absorption",
-        choices=["uniform", "strip"],
-        default="uniform",
-        help=(
-            "uniform (default): keep a uniform absorptive potential in the exact hand pair (H0 + i*mu*I) and "
-            "refuse non-uniform terms; strip: legacy, zero every absorption term for the hand decision."
         ),
     )
     ap.add_argument(
@@ -98,37 +45,6 @@ def add_decision_controls(ap: argparse.ArgumentParser) -> None:
             "clearly against switching (the mirrored rule does not hold), recompute the early exact pair at the "
             "final N/Q and final thickness points with the screen nuisance, before any refinement, and decide on "
             "that. off: legacy, the early decision uses the screen-fidelity pair only."
-        ),
-    )
-    ap.add_argument(
-        "--hand-evidence-datasets",
-        choices=["not-excluded", "policy-active"],
-        default="not-excluded",
-        help=(
-            "Crystals pooled in the final (confirmatory) hand check of a multi-crystal run. not-excluded "
-            "(default): every crystal except one the final dataset policy excluded for a recorded reason; "
-            "downweighted and completeness-only crystals stay in the evidence. policy-active: legacy, primary "
-            "and downweighted crystals only."
-        ),
-    )
-    ap.add_argument(
-        "--validation-console",
-        choices=["on", "off"],
-        default="on",
-        help=(
-            "on (default): print the validation numbers at every step (split, held-out R after the screen, hand "
-            "blocks, nuisance decisions, thickness, SHELXL macro-cycles), read back from the recorded JSON "
-            "artifacts. off: legacy console."
-        ),
-    )
-    ap.add_argument(
-        "--report-layout",
-        choices=["heldout-first", "legacy"],
-        default="heldout-first",
-        help=(
-            "heldout-first (default): FINAL_SUMMARY.md, QUICK_STATS.md and the terminal finish summary open with "
-            "the held-out validation and show the held-out hand evidence, with the all-row ZKP as a labelled "
-            "diagnostic. legacy: the summaries open with the all-row statistics, and the held-out block follows them."
         ),
     )
     ap.add_argument(

@@ -31,7 +31,6 @@ from grond.workflows.hand_statistics import (
     _combine_adjusted_hand_z,
     _hand_evidence_warnings,
     _pooled_hand_pair_statistics,
-    hand_preference_summary,
     heldout_hand_evidence,
     heldout_hand_rule,
     heldout_mirrored_rule,
@@ -43,7 +42,9 @@ from grond.workflows.model_selection import best_nuisance, dataset_baseline_hkl
 from grond.workflows.native_commands import native_stage_cmd
 from grond.workflows.nuisance_policy import resolve_final_n_basis, stage_n_points
 
-HAND_DECISION_EVIDENCE = ("heldout-orbit-sign", "all-row-zkp")
+# The hand switches only when the pooled held-out orbit sign z favours the inverse by at least this much (and the
+# paired orbit-bootstrap R_obs interval excludes zero); the all-row ZKP is reported only.
+HAND_FLIP_ORBIT_Z = 3.0
 # final-fidelity: an inconclusive early pair at screen fidelity is recomputed at the final N/Q before any refinement.
 HAND_EARLY_ESCALATION = ("final-fidelity", "off")
 HAND_BLOCK_KEYS = ("orbit_sign_z", "orbits_model_better", "orbits_inverse_better", "n_orbits", "n_rows")
@@ -59,32 +60,21 @@ def _grid_values(text: object, default: str) -> list[str]:
 
 
 def hand_decision_settings(args: argparse.Namespace) -> dict[str, object]:
-    """Resolve the hand-decision policy; namespaces without the options keep the legacy rule."""
+    """Resolve the hand-decision policy: the held-out orbit-sign rule, both hands' pair scales fitted on work rows,
+    and a uniform absorptive potential kept exactly in the pair."""
 
-    evidence = str(getattr(args, "hand_decision_evidence", "all-row-zkp"))
-    if evidence not in HAND_DECISION_EVIDENCE:
-        raise ValueError(f"unknown hand decision evidence {evidence!r}; expected one of {list(HAND_DECISION_EVIDENCE)}")
     zkp_threshold = float(getattr(args, "hand_flip_zkp_all", 3.5))
     if not math.isfinite(zkp_threshold) or zkp_threshold <= 0.0:
         raise ValueError("hand inversion threshold must be finite and positive")
-    orbit_threshold = float(getattr(args, "hand_flip_orbit_z", 3.0))
-    if not math.isfinite(orbit_threshold) or orbit_threshold <= 0.0:
-        raise ValueError("held-out orbit sign threshold must be finite and positive")
-    pair_split = str(getattr(args, "hand_pair_scale_fit_split", "inherit"))
-    if pair_split not in {"work", "inherit"}:
-        raise ValueError(f"unknown hand-pair scale-fit split {pair_split!r}")
-    absorption = str(getattr(args, "hand_pair_absorption", "strip"))
-    if absorption not in {"uniform", "strip"}:
-        raise ValueError(f"unknown hand-pair absorption policy {absorption!r}")
     escalation = str(getattr(args, "hand_early_escalation", "off"))
     if escalation not in HAND_EARLY_ESCALATION:
         raise ValueError(f"unknown early hand escalation {escalation!r}; expected one of {list(HAND_EARLY_ESCALATION)}")
     return {
-        "evidence": evidence,
+        "evidence": "heldout-orbit-sign",
         "hand_flip_zkp_all": zkp_threshold,
-        "hand_flip_orbit_z": orbit_threshold,
-        "pair_scale_fit_split": pair_split,
-        "pair_absorption": absorption,
+        "hand_flip_orbit_z": HAND_FLIP_ORBIT_Z,
+        "pair_scale_fit_split": "work",
+        "pair_absorption": "uniform",
         "early_escalation": escalation,
         "scale_model": "pspline",
         "scale_refit_config": {
@@ -136,9 +126,7 @@ def heldout_contract_base(stage: str, model: str, settings: Mapping[str, object]
         "schema_version": 1,
         "stage": stage,
         "evidence": str(settings["evidence"]),
-        "decision_authority": (
-            "heldout_orbit_sign" if settings["evidence"] == "heldout-orbit-sign" else "diagnostic_only"
-        ),
+        "decision_authority": "heldout_orbit_sign",
         "rule": rule,
         "model": str(model),
         "scale_model": str(settings["scale_model"]),
@@ -334,8 +322,8 @@ def _elastic_pair_records(
         n_basis = int(override["n_basis"]) if override else _positive_summary_int(config, "n_basis")
         n_points = int(override["n_points"]) if override else _positive_summary_int(config, "n_points")
         source_split = str(config.get("scale_fit_split") or "work")
-        # Both hands' pair scales are fitted on work rows unless the legacy split is requested.
-        scale_fit_split = "work" if settings["pair_scale_fit_split"] == "work" else source_split
+        # Both hands' pair scales are fitted on work rows.
+        scale_fit_split = "work"
         hand_args = _args_with_recorded_native_contract(args, config)
         if override:
             hand_args.final_thickness_points = int(override["thickness_points"])
@@ -356,9 +344,7 @@ def _elastic_pair_records(
             },
         }
         try:
-            elastic, source_absorption = elastic_hand_nuisance(
-                nuisance, absorption_policy=str(settings["pair_absorption"])
-            )
+            elastic, source_absorption = elastic_hand_nuisance(nuisance, absorption_policy="uniform")
         except ValueError as exc:
             # Non-uniform absorption: fail closed for this dataset, never approximate.
             record.update(
@@ -550,7 +536,7 @@ def _evaluate_pair_records(
         "heldout_payload": heldout_payload,
         "zkp_switch": zkp_switch,
         "heldout_switch": heldout_switch,
-        "switch": heldout_switch if settings["evidence"] == "heldout-orbit-sign" else zkp_switch,
+        "switch": heldout_switch,
     }
 
 
@@ -590,23 +576,13 @@ def early_escalation_trigger(evaluation: Mapping[str, object], settings: Mapping
     final check decides with the same rule.  "Clearly against" is the mirrored rule of the deciding evidence.
     """
 
-    heldout_mode = settings["evidence"] == "heldout-orbit-sign"
     payload = evaluation["heldout_payload"]
-    if evaluation["incomplete"] or (heldout_mode and payload.get("status") != "complete"):
+    if evaluation["incomplete"] or payload.get("status") != "complete":
         return False, "not_escalated_incomplete_evidence"
-    if heldout_mode:
-        threshold = float(settings["hand_flip_orbit_z"])
-        if payload.get("rule_met"):
-            return False, "not_needed_rule_met"
-        if heldout_mirrored_rule(payload.get("pooled") or {}, orbit_sign_z_min=threshold)[0]:
-            return False, "not_needed_clearly_against"
-        return True, "escalated"
-    zkp, threshold = float(evaluation["aggregate_all_zkp"]), float(settings["hand_flip_zkp_all"])
-    if not math.isfinite(zkp):
-        return False, "not_escalated_incomplete_evidence"
-    if zkp <= -threshold:
+    threshold = float(settings["hand_flip_orbit_z"])
+    if payload.get("rule_met"):
         return False, "not_needed_rule_met"
-    if zkp >= threshold:
+    if heldout_mirrored_rule(payload.get("pooled") or {}, orbit_sign_z_min=threshold)[0]:
         return False, "not_needed_clearly_against"
     return True, "escalated"
 
@@ -757,7 +733,6 @@ def run_elastic_hand_selection(
         raise ValueError(f"unknown hand decision stage {stage!r}")
     settings = hand_decision_settings(args)
     hand_flip_threshold = float(settings["hand_flip_zkp_all"])
-    heldout_mode = settings["evidence"] == "heldout-orbit-sign"
 
     artifact = root / "decisions" / f"shared_{stage}_elastic_hand_selection.json"
     heldout_artifact = root / "decisions" / f"hand_decision_heldout_{stage}.json"
@@ -777,11 +752,7 @@ def run_elastic_hand_selection(
         ),
         "selected_hand_before": selected_hand,
         "selected_model_before": model,
-        "absorption_policy": (
-            "uniform_absorption_kept_exact_pair"
-            if settings["pair_absorption"] == "uniform"
-            else "disabled_for_hand_decision_only"
-        ),
+        "absorption_policy": "uniform_absorption_kept_exact_pair",
         "decision_evidence": settings["evidence"],
         "hand_pair_scale_fit_split": settings["pair_scale_fit_split"],
         "shared_eigendecomposition": True,
@@ -915,22 +886,21 @@ def run_elastic_hand_selection(
         threshold=hand_flip_threshold,
     )
     agreement_by_crystal = None
-    if heldout_mode:
-        hand_warnings.extend(f"held-out hand evidence: {error}" for error in heldout_payload.get("errors") or [])
-        if heldout_payload.get("status") == "complete" and zkp_switch != heldout_switch:
-            hand_warnings.append(
-                "the legacy all-row ZKP rule and the held-out orbit rule disagree; the held-out rule decides"
-            )
-        if heldout_payload.get("status") == "complete" and len(heldout_payload.get("per_crystal") or {}) > 1:
-            agreement_by_crystal = per_crystal_hand_agreement(
-                heldout_payload.get("per_crystal") or {},
-                pooled_switches=switch,
-                orbit_sign_z_min=float(settings["hand_flip_orbit_z"]),
-            )
-            # Recorded always; warned with the validation console (--validation-console off keeps the legacy warnings).
-            for message in agreement_by_crystal["warnings"] if console_enabled(args) else []:
-                hand_warnings.append(f"per-crystal disagreement: {message}")
-                print(f"WARN hand ({stage}): {message}", flush=True)
+    hand_warnings.extend(f"held-out hand evidence: {error}" for error in heldout_payload.get("errors") or [])
+    if heldout_payload.get("status") == "complete" and zkp_switch != heldout_switch:
+        hand_warnings.append(
+            "the legacy all-row ZKP rule and the held-out orbit rule disagree; the held-out rule decides"
+        )
+    if heldout_payload.get("status") == "complete" and len(heldout_payload.get("per_crystal") or {}) > 1:
+        agreement_by_crystal = per_crystal_hand_agreement(
+            heldout_payload.get("per_crystal") or {},
+            pooled_switches=switch,
+            orbit_sign_z_min=float(settings["hand_flip_orbit_z"]),
+        )
+        # Recorded always; warned with the validation console (not in a dry run).
+        for message in agreement_by_crystal["warnings"] if console_enabled(args) else []:
+            hand_warnings.append(f"per-crystal disagreement: {message}")
+            print(f"WARN hand ({stage}): {message}", flush=True)
     if escalation is not None and escalation.get("status") == "failed":
         message = f"early hand escalation failed: {escalation.get('error')}; the input hand is kept"
         hand_warnings.append(message)
@@ -948,7 +918,7 @@ def run_elastic_hand_selection(
             )
         )
     status = "switched" if switch else "kept" if not incomplete else "incomplete_kept"
-    if heldout_mode and not incomplete and heldout_payload.get("status") != "complete":
+    if not incomplete and heldout_payload.get("status") != "complete":
         status = "heldout_evidence_error_kept"
     if escalation is not None and escalation.get("status") == "failed":
         status = "escalation_failed_kept"
@@ -964,16 +934,7 @@ def run_elastic_hand_selection(
         print(f"WARN hand: {message}", flush=True)
     elif agreement is not None and agreement.get("status") == "confirmed":
         print("hand: the final held-out check confirms the early hand decision", flush=True)
-    preference = (
-        _heldout_preference(heldout_payload, active_hand=selected_hand)
-        if heldout_mode
-        else hand_preference_summary(
-            aggregate_all_zkp,
-            active_hand=selected_hand,
-            threshold=hand_flip_threshold,
-            calculation_valid=not incomplete,
-        )
-    )
+    preference = _heldout_preference(heldout_payload, active_hand=selected_hand)
     result = {
         **base,
         **preference,
@@ -1012,10 +973,6 @@ def run_elastic_hand_selection(
             "declared threshold and the paired orbit-bootstrap R_obs(inverse) - R_obs(selected) 95% CI lies "
             "below zero; held-out rows are out-of-fold work orbits plus free orbits with scales refitted on "
             "training orbits only; the all-row ZKP is reported only"
-            if heldout_mode
-            else "switch once when every dataset has a complete exact row pair and the combined all-row "
-            "Klar-Palatinus adjusted Z favors the inverse by at least the declared threshold; held-out "
-            "evidence is reported and may warn but does not veto the all-row decision"
         ),
         "evidence_datasets": sorted(str(ds.name) for ds in prep.datasets),
     }

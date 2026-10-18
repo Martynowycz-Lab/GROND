@@ -60,7 +60,6 @@ from grond.workflows.hand_statistics import (
     _adjusted_hand_z_block,
     _hand_evidence_warnings,
     hand_diagnostic_supports_other,
-    hand_preference_summary,
 )
 from grond.workflows.heldout_gates import run_heldout_feature_gate, uses_heldout_gate
 from grond.workflows.model_selection import (
@@ -103,6 +102,8 @@ from grond.workflows.transform_selection import (
     choose_transform_by_scout,
 )
 
+# Score margin recorded with the single-crystal post-feedback hand check (the held-out orbit rule decides the hand).
+HAND_ACCEPT_DELTA = 0.015
 # Loop stops that reject a cycle's model but leave the model entering it valid (shelxl_feedback_loop). A failed
 # cycle (non-zero return) is not one of them: it still raises.
 FEEDBACK_SAFE_STOPS = frozenset({"stopped_adp_pathology", "stopped_unsafe_endpoint"})
@@ -396,16 +397,8 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
     absolute_structure_decision = absolute_structure_policy(prep.structure)
     active_hand = "original"
     hand_settings = hand_decision_settings(args)
-    hand_absorption_label = (
-        "uniform_absorption_kept_exact_pair"
-        if hand_settings["pair_absorption"] == "uniform"
-        else "disabled_for_hand_decision_only"
-    )
-    early_hand = bool(
-        args.hand_control
-        and absolute_structure_decision.get("run_hand_control", True)
-        and str(getattr(args, "hand_decision_stage", "final")) == "early"
-    )
+    hand_absorption_label = "uniform_absorption_kept_exact_pair"
+    early_hand = bool(args.hand_control and absolute_structure_decision.get("run_hand_control", True))
     early_hand_decision: dict = {}
     if early_hand:
         # Held-out hand decision on the hand-blind start model, before thickness, gates and refinement.
@@ -679,17 +672,13 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
             final_summary = read_json(final / "summary.json")
             final_config = final_summary.get("config") if isinstance(final_summary.get("config"), Mapping) else {}
             hand_nuisance, source_absorption = elastic_hand_nuisance(
-                best_nuisance(final) or regularized_nui, absorption_policy=str(hand_settings["pair_absorption"])
+                best_nuisance(final) or regularized_nui, absorption_policy="uniform"
             )
             hand_args = _args_with_recorded_native_contract(args, final_config)
             hand_n_basis = _positive_summary_int(final_config, "n_basis") or (20 if args.fast else final_n_basis)
             hand_n_points = _positive_summary_int(final_config, "n_points") or (5 if args.fast else args.n_points)
-            scale_fit_split = str(final_config.get("scale_fit_split") or "work")
-            if scale_fit_split not in {"work", "all"}:
-                scale_fit_split = "work"
-            if hand_settings["pair_scale_fit_split"] == "work":
-                # Both hands' pair scales exclude the free orbits.
-                scale_fit_split = "work"
+            # Both hands' pair scales exclude the free orbits.
+            scale_fit_split = "work"
             run_logged(
                 native_stage_cmd(
                     python,
@@ -774,7 +763,6 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
                 float("nan"),
             )
             hand_flip_threshold = float(getattr(args, "hand_flip_zkp_all", 3.5))
-            heldout_mode = hand_settings["evidence"] == "heldout-orbit-sign"
             hand_active_before = active_hand
             heldout_payload = heldout_hand_decision(
                 {
@@ -796,16 +784,7 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
                 expected_datasets=1,
             )
             post_feedback_hand_promotion = {
-                **(
-                    _heldout_preference(heldout_payload, active_hand=active_hand)
-                    if heldout_mode
-                    else hand_preference_summary(
-                        raw_all_zkp,
-                        active_hand=active_hand,
-                        threshold=hand_flip_threshold,
-                        calculation_valid=not hand_calculation_errors and hand_stats.get("status") == "ok",
-                    )
-                ),
+                **_heldout_preference(heldout_payload, active_hand=active_hand),
                 "status": "not_promoted",
                 "method": "nakane_negative_thickness_elastic_pair_v1",
                 "active_hand": active_hand,
@@ -813,13 +792,11 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
                 "final_score": final_score,
                 "opposite_score": other_score,
                 "score_delta_final_minus_opposite": post_feedback_delta,
-                "accept_delta": float(args.hand_accept_delta),
+                "accept_delta": HAND_ACCEPT_DELTA,
                 "diagnostic": str(stats_path),
                 "paired_run": str(hand_pair),
                 "source_absorption_nuisance": source_absorption,
-                "hand_decision_absorption": (
-                    "uniform_kept" if hand_settings["pair_absorption"] == "uniform" else "disabled"
-                ),
+                "hand_decision_absorption": "uniform_kept",
                 "hand_pair_scale_fit_split": scale_fit_split,
                 "decision_evidence": hand_settings["evidence"],
                 "heldout": {
@@ -841,18 +818,15 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
                 "matched_all_row_metrics": (hand_stats.get("all") or {}).get("matched_prediction_metrics", {}),
                 "matched_born_control": hand_stats.get("matched_born_control", {}),
             }
-            legacy_gate_ok, legacy_gate_reasons = hand_diagnostic_supports_other(
+            legacy_gate_ok, _legacy_gate_reasons = hand_diagnostic_supports_other(
                 hand_stats,
                 args,
             )
-            if heldout_mode:
-                diagnostic_gate_ok = bool(heldout_payload.get("supports_switch") and not hand_calculation_errors)
-                diagnostic_gate_reasons = [
-                    *list(heldout_payload.get("reasons") or []),
-                    *list(heldout_payload.get("errors") or []),
-                ]
-            else:
-                diagnostic_gate_ok, diagnostic_gate_reasons = legacy_gate_ok, legacy_gate_reasons
+            diagnostic_gate_ok = bool(heldout_payload.get("supports_switch") and not hand_calculation_errors)
+            diagnostic_gate_reasons = [
+                *list(heldout_payload.get("reasons") or []),
+                *list(heldout_payload.get("errors") or []),
+            ]
             post_feedback_hand_promotion["legacy_all_row_zkp_rule_would_switch"] = bool(legacy_gate_ok)
             post_feedback_hand_promotion["diagnostic_quality_gate_status"] = (
                 "switch_supported" if diagnostic_gate_ok else "keep_current"
@@ -940,13 +914,13 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
                     f"Hand calculation error: {error}" for error in hand_calculation_errors
                 )
                 absolute_structure_decision["status"] = "hand_calculation_error"
-            elif heldout_mode and heldout_payload.get("status") != "complete":
+            elif heldout_payload.get("status") != "complete":
                 post_feedback_hand_promotion["status"] = "heldout_evidence_error"
                 post_feedback_hand_promotion["warnings"].extend(
                     f"held-out hand evidence: {error}" for error in heldout_payload.get("errors") or []
                 )
                 absolute_structure_decision["status"] = "hand_heldout_evidence_error"
-            if heldout_mode and heldout_payload.get("status") == "complete" and legacy_gate_ok != diagnostic_gate_ok:
+            if heldout_payload.get("status") == "complete" and legacy_gate_ok != diagnostic_gate_ok:
                 post_feedback_hand_promotion["warnings"].append(
                     "the legacy all-row ZKP rule and the held-out orbit rule disagree; the held-out rule decides"
                 )

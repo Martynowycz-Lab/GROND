@@ -25,34 +25,11 @@ def register_scouts(sub: argparse._SubParsersAction) -> None:
     p_scout.add_argument("--workers", type=int, default=0)
     p_scout.add_argument("--max-core-fraction", type=float, default=0.85)
     p_scout.add_argument("--chunksize", type=int, default=0)
-    p_scout.add_argument("--scout-max-rows", type=int, default=1000)
-    p_scout.add_argument("--scout-n-basis", type=int, default=8)
-    p_scout.add_argument("--scout-n-points", type=int, default=3)
-    p_scout.add_argument("--transform-rerank-top", type=int, default=3)
-    p_scout.add_argument("--transform-rerank-n-basis", type=int, default=24)
-    p_scout.add_argument("--transform-rerank-n-points", type=int, default=10)
-    p_scout.add_argument("--transform-rerank-max-rows", type=int, default=0)
-    p_scout.add_argument("--transform-candidates", default="auto")
-    p_scout.add_argument("--transform-metric-tolerance", type=float, default=0.02)
     p_scout.add_argument(
         "--transform-parity-policy",
         choices=["proper-only", "all-diagnostic"],
         default="proper-only",
     )
-    p_scout.add_argument("--transform-canonicalization", choices=["point-group", "off"], default="point-group")
-    p_scout.add_argument("--split-candidate-set", choices=["shared-closure", "per-crystal"], default="shared-closure")
-    p_scout.add_argument("--transform-scout-jobs", type=int, default=0)
-    p_scout.add_argument("--transform-scout-workers-per-job", type=int, default=1)
-    p_scout.add_argument(
-        "--transform-metadata-prefilter",
-        choices=["auto", "on", "off"],
-        default="auto",
-    )
-    p_scout.add_argument("--transform-metadata-max-candidates", type=int, default=3)
-    p_scout.add_argument("--transform-metadata-min-pairs", type=int, default=100)
-    p_scout.add_argument("--transform-metadata-min-correlation", type=float, default=0.70)
-    p_scout.add_argument("--transform-metadata-min-correlation-gap", type=float, default=0.05)
-    p_scout.add_argument("--transform-metadata-max-rows", type=int, default=0)
     p_scout.add_argument(
         "--trust-hkl-transform",
         action="store_true",

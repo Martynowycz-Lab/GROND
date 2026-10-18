@@ -158,9 +158,8 @@ def estimate_run_steps(prep: PrepConfig, args: argparse.Namespace) -> int:
             # Two label-symmetric nuisance-grid evaluations followed by two
             # singleton evidence replays at the selected common nuisance.
             total += 4
-            if str(getattr(args, "hand_decision_stage", "final")) == "early":
-                # Early held-out hand pair and its paired-row diagnostic after the screen.
-                total += 2
+            # Early held-out hand pair and its paired-row diagnostic after the screen.
+            total += 2
         if not getattr(args, "fast", False):
             total += 1
             total += sum(

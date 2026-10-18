@@ -27,19 +27,15 @@ from grond.cli_support.values import try_read_json
 from grond.reports.heldout import _gap, _json_default, _shell_dmin, _split_block, read_row_table
 from grond.validation import heldout
 
-VALIDATION_CONSOLE = ("on", "off")
 SPLIT_SUMMARY_SCHEMA = "grond.split_summary.v1"
 STAGE_HELDOUT_SCHEMA = "grond.stage_heldout.v1"
 PREFIX = "VALIDATION"
 
 
 def console_enabled(args: argparse.Namespace) -> bool:
-    """Print validation lines? Namespaces without the option keep the legacy (silent) console."""
+    """Print validation lines (the AUTO workflows), except in a dry run."""
 
-    value = str(getattr(args, "validation_console", "off") or "off")
-    if value not in VALIDATION_CONSOLE:
-        raise ValueError(f"unknown --validation-console {value!r}; expected one of {list(VALIDATION_CONSOLE)}")
-    return value == "on" and not bool(getattr(args, "dry_run", False))
+    return not bool(getattr(args, "dry_run", False))
 
 
 def _emit(lines: Iterable[str]) -> None:

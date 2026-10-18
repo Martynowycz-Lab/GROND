@@ -54,7 +54,7 @@ def _finalize_quick_stats(prep: PrepConfig, result: Mapping[str, object], args: 
                 "No endpoint or row-level statistics were materialized."
             ),
         }
-    return write_quick_stats(prep, result, args)
+    return write_quick_stats(prep, result, args, report_layout="heldout-first")
 
 
 def _write_run_completion_artifacts(
