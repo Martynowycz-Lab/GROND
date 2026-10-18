@@ -133,6 +133,7 @@ def populate_nuisance_trials(
                                                             geometry_path_file=args.geometry_path,
                                                             profile_basis_mode=args.profile_basis_mode,
                                                             profile_coordinate=args.profile_coordinate,
+                                                            profile_normalization=getattr(args, "profile_normalization", "legacy"),
                                                             profile_angle_max_half_width_deg=args.profile_angle_max_half_width_deg,
                                                             profile_quadrature=args.profile_quadrature,
                                                             profile_accumulation=args.profile_accumulation,

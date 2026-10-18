@@ -38,6 +38,17 @@ def _default_double_precision() -> bool:
     raise ValueError(f"GROND_PRECISION must be float32 or float64, got {value!r}")
 
 
+def _default_centring_coset() -> bool:
+    """Default of Config.basis_centring_coset: GROND_BASIS_CENTRING_COSET=1 (or true/on/yes) turns it on."""
+
+    value = os.environ.get("GROND_BASIS_CENTRING_COSET", "0").strip().lower()
+    if value in {"1", "true", "on", "yes"}:
+        return True
+    if value in {"0", "false", "off", "no", ""}:
+        return False
+    raise ValueError(f"GROND_BASIS_CENTRING_COSET must be 0 or 1, got {value!r}")
+
+
 def resolve_double_precision(double_flag: bool | None = None) -> bool:
     """Prediction precision of the row engines: complex128 if --double is given, else from GROND_PRECISION."""
 
@@ -96,6 +107,7 @@ class Config:
     geometry_path_file: str = ""
     profile_basis_mode: str = "center"
     profile_coordinate: str = "target_sg"
+    profile_normalization: str = "legacy"
     profile_angle_max_half_width_deg: float = 2.0
     profile_quadrature: str = "uniform"
     profile_accumulation: str = "sum"
@@ -144,6 +156,11 @@ class Config:
     thickness_min_A: float = DEFAULT_THICKNESS_MIN_A
     thickness_max_A: float = DEFAULT_THICKNESS_MAX_A
     thickness_table_dt_A: float = DEFAULT_TABLE_DT_A
+    # Keep only top-up beams in the direct beam's lattice-centring coset (g . t integer for every centring
+    # translation t of the model). Beams of other cosets have no potential coupling to it (U of their difference
+    # is a centring absence), so the propagated amplitudes are unchanged while the matrices shrink. Default from
+    # GROND_BASIS_CENTRING_COSET (off: legacy pool), so that every stage of a run inherits one setting.
+    basis_centring_coset: bool = field(default_factory=_default_centring_coset)
 
     def __post_init__(self):
         """Raise ValueError for an out-of-range value or an unsupported combination of modes; fields are not changed."""
@@ -240,6 +257,8 @@ class Config:
                 "gaussian_cone currently requires profile_coordinate=direct_angle; "
                 "this keeps the physical scan interval explicit and avoids extra Sg roots"
             )
+        if str(self.profile_normalization).lower() != "legacy" and str(self.profile_coordinate).lower() != "direct_angle":
+            raise ValueError("profile_normalization=target_sg_equivalent_v1 requires profile_coordinate=direct_angle")
 
         choices = {
             "sg_window_mode": (
@@ -255,6 +274,7 @@ class Config:
                 self.profile_coordinate,
                 {"target_sg", "direct_angle"},
             ),
+            "profile_normalization": (self.profile_normalization, {"legacy", "target_sg_equivalent_v1"}),
             "profile_basis_mode": (
                 self.profile_basis_mode,
                 {"center", "common_profile"},
@@ -379,6 +399,7 @@ def frozen_kernel_contract(cfg: Config | None = None):
             "Sg": "(k^2 - |s0 + g(alpha)|^2) / (2*k)",
             "profile_mode": "target_sg_to_angle or explicit direct-angle integration",
             "profile_coordinate": (None if cfg is None else str(getattr(cfg, "profile_coordinate", "target_sg"))),
+            "profile_normalization": None if cfg is None else str(getattr(cfg, "profile_normalization", "legacy")),
             "profile_quadrature": None if cfg is None else str(getattr(cfg, "profile_quadrature", "uniform")),
             "profile_accumulation": None if cfg is None else str(getattr(cfg, "profile_accumulation", "sum")),
             "profile_weight_mode": "rocking-profile samples are summed by default; legacy normalized averaging is available as profile_accumulation=mean",

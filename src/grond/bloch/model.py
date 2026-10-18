@@ -898,7 +898,7 @@ def atom_dw(atom, hkl, cell_tuple):
 
 
 def atom_dw_array(atom, h, k, l, s2, cell_tuple):
-    """Return atom_dw elementwise for arrays of h, k and l, with precomputed s^2 = 1/(4 d^2)."""
+    """Return atom_dw elementwise; precomputed s^2 = 1/(4 d^2) is needed only for isotropic atoms."""
 
     if atom.get("adp_type") == "anis":
         ast, bst, cst = reciprocal_lengths(cell_tuple)
@@ -973,7 +973,10 @@ def fcalc_res_grid(model, h, k, l):
             mate_h = rot[0, 0] * h + rot[1, 0] * k + rot[2, 0] * l
             mate_k = rot[0, 1] * h + rot[1, 1] * k + rot[2, 1] * l
             mate_l = rot[0, 2] * h + rot[1, 2] * k + rot[2, 2] * l
-            mate_s2 = 0.25 * inv_d2_from_hkl_array(mate_h, mate_k, mate_l, model["cell"])
+            # Anisotropic attenuation uses the rotated indices directly.
+            mate_s2 = None
+            if atom.get("adp_type") != "anis":
+                mate_s2 = 0.25 * inv_d2_from_hkl_array(mate_h, mate_k, mate_l, model["cell"])
             dw = atom_dw_array(atom, mate_h, mate_k, mate_l, mate_s2, model["cell"])
             amp = float(atom["occ"]) * sf * dw
             phase = 2.0 * math.pi * (h * pos[0] + k * pos[1] + l * pos[2])

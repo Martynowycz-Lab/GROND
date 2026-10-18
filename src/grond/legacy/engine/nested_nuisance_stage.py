@@ -9,7 +9,8 @@ variants (mosaic cone x dose B), the thickness/scale grids and the support. The 
 1. keeps only work rows with a valid anchor prediction: free rows (engine split and orbit-hash free set) and
    excluded orbits are dropped before any spectrum is computed, so no free row enters a spectrum, fit or score;
 2. computes the spectra of each variant (grond.legacy.engine.spectra_stage, cached on disk) and loads them one
-   variant at a time;
+   variant at a time; with ``"response_tables": true`` it keeps only each variant's thickness table
+   (grond.legacy.engine.response_stage) and scores and evaluates every candidate on it;
 3. picks (variant, thickness family and parameters, P-spline n_basis/lambda) by inner 3-fold orbit CV R_all
    (grond.regularize.nested_selection.select_nested, model hand);
 4. writes the pick, the nuisance fields to pin downstream, the full CV R_all grid (variant x thickness x scale),
@@ -73,7 +74,8 @@ THICKNESS_NUISANCE_FIELDS = (
     "thickness_max_A",
     "thickness_table_dt_A",
 )
-VARIANT_NUISANCE_FIELDS = ("mosaicity_mode", "mosaicity_sigma_deg", "mosaicity_points", "dose_b_mode", "dose_b_per_frame")
+VARIANT_NUISANCE_FIELDS = ("mosaicity_mode", "mosaicity_sigma_deg", "mosaicity_points", "mosaicity_support_sigma_deg",
+                           "mosaicity_support_points", "mosaicity_support_width_sigma", "dose_b_mode", "dose_b_per_frame")
 ABSORPTION_NUISANCE_FIELDS = (
     "absorption_mode",
     "absorption_mu",
@@ -151,6 +153,9 @@ def validate_request(request: dict) -> None:
         raise ValueError("nested nuisance request needs at least one physics variant")
     if request["mode"] == "reselect" and len(variants) != 1:
         raise ValueError("a thickness re-selection keeps the physics variant fixed: exactly one variant")
+    if request.get("response_tables") and (request.get("evaluator", "auto") != "table"
+                                           or request.get("score_with", "table") != "table"):
+        raise ValueError("a response-table request needs evaluator 'table' and score_with 'table' (no spectra are kept)")
 
 
 def selection_rows(request: dict) -> dict:
@@ -292,6 +297,19 @@ def _cache_loader(path: str, identity: dict):
     return load
 
 
+def _table_loader(path: str, identity: dict):
+    """Loader of one variant's cached response table; the stored identity must still equal the computed one."""
+
+    from grond.legacy.engine.response_stage import load_response_table
+
+    def load() -> dict:
+        """Read this variant's response table, checking the stored identity."""
+
+        return load_response_table(Path(path), identity)
+
+    return load
+
+
 def run_selection(request: dict, *, workers: int | None = None, scratch_dir=None) -> dict:
     """Run one request and return its result record (see the module docstring).
 
@@ -308,8 +326,9 @@ def run_selection(request: dict, *, workers: int | None = None, scratch_dir=None
 
 
 def _run_selection(request: dict, *, workers: int | None, cache_dir: str) -> dict:
-    """Compute every variant's spectra into cache_dir, run the nested selection and return the result record."""
+    """Compute every variant's spectra (or response tables) into cache_dir, run the nested selection, return the record."""
 
+    from grond.legacy.engine.response_stage import compute_response_table
     from grond.legacy.engine.spectra_stage import compute_spectra
 
     t_start = time.perf_counter()
@@ -317,36 +336,44 @@ def _run_selection(request: dict, *, workers: int | None, cache_dir: str) -> dic
     rows = selection_rows(request)
     grids = grids_from_request(request["grids"])
     support = ThicknessSupport(**request["support"])
+    tables = bool(request.get("response_tables", False))
+    transform = str(request.get("hkl_transform") or "identity")
     variants: list[Variant] = []
     spectra_cost = []
     untilted: dict[str, str] = {}  # dose fields -> spectra file of the first nonzero cone width at that dose
     for item in request["variants"]:
         cfg = variant_config(request, item)
-        dose = json.dumps({k: v for k, v in (item.get("config") or {}).items() if not k.startswith("mosaicity")},
-                          sort_keys=True)
-        # Every nonzero cone width solves the same untilted block at a given dose; later widths reuse it exactly.
-        tilted = float(cfg.mosaicity_sigma_deg) > 0.0
-        reuse = [untilted[dose]] if tilted and dose in untilted else []
         t0 = time.perf_counter()
-        spec, info = compute_spectra(
-            request["hkl"], request["res"], cfg, rows["row_index"], hkl_transform=str(request.get("hkl_transform") or "identity"),
-            workers=workers, cache_dir=cache_dir, reuse=reuse,
-        )
-        if tilted and info["cache"]:
-            untilted.setdefault(dose, info["cache"])
+        if tables:
+            # Tables keep no spectra, so the untilted block of the cone widths is solved again for each width.
+            table, info = compute_response_table(request["hkl"], request["res"], cfg, rows["row_index"], support,
+                                                 hands=(1,), hkl_transform=transform, workers=workers,
+                                                 cache_dir=cache_dir)
+            del table
+            loaders = {"spectra": None, "table": _table_loader(info["cache"], info["identity"])}
+        else:
+            dose = json.dumps({k: v for k, v in (item.get("config") or {}).items() if not k.startswith("mosaicity")},
+                              sort_keys=True)
+            # Every nonzero cone width solves the same untilted block at a given dose; later widths reuse it exactly.
+            tilted = float(cfg.mosaicity_sigma_deg) > 0.0
+            reuse = [untilted[dose]] if tilted and dose in untilted else []
+            spec, info = compute_spectra(request["hkl"], request["res"], cfg, rows["row_index"], hkl_transform=transform,
+                                         workers=workers, cache_dir=cache_dir, reuse=reuse)
+            if tilted and info["cache"]:
+                untilted.setdefault(dose, info["cache"])
+            del spec  # one variant's spectra in memory at a time; the loader reads the cache file again
+            loaders = {"spectra": _cache_loader(info["cache"], info["identity"]), "table": None}
         spectra_cost.append({
             "label": str(item["label"]), "seconds": round(time.perf_counter() - t0, 3), "cache_status": info["cache_status"],
             "cache_key": info["key"], "profile_points_total": info["profile_points_total"],
-            "reused_points": info.get("reused_points", 0),
+            "reused_points": info.get("reused_points", 0), "kind": "response_table" if tables else "spectra",
             "basis_median": info["basis_median"], "basis_max": info["basis_max"], "mu_max": info["mu_max"],
         })
-        print(f"spectra {item['label']}: {info['n_rows']} work rows, {info['profile_points_total']} profile points "
-              f"({spectra_cost[-1]['reused_points']} reused), basis max {info['basis_max']}, "
-              f"{spectra_cost[-1]['seconds']:.1f} s ({info['cache_status']})", flush=True)
-        del spec  # one variant's spectra in memory at a time; the loader reads the cache file again
-        variants.append(Variant(str(item["label"]), _cache_loader(info["cache"], info["identity"]),
-                                params=dict(item.get("params") or {}),
-                                config=dict(item.get("config") or {})))
+        print(f"{'response table' if tables else 'spectra'} {item['label']}: {info['n_rows']} work rows, "
+              f"{info['profile_points_total']} profile points ({spectra_cost[-1]['reused_points']} reused), basis max "
+              f"{info['basis_max']}, {spectra_cost[-1]['seconds']:.1f} s ({info['cache_status']})", flush=True)
+        variants.append(Variant(str(item["label"]), loaders["spectra"], params=dict(item.get("params") or {}),
+                                config=dict(item.get("config") or {}), table=loaders["table"]))
     t_sel = time.perf_counter()
     selection = select_nested(
         variants, rows["y"], rows["sig"], rows["ang"], rows["keys"], np.ones(len(rows["y"]), dtype=bool),

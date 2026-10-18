@@ -297,6 +297,75 @@ def _jax_real_expm_propagate_batch(H_batch, thick, thick_w, backend: str, batch_
     return out
 
 
+def _elastic_matrix_dtype(matrices):
+    """Return float64 only when every elastic matrix passes the CPU real-H criterion; otherwise complex128.
+
+    Test each matrix separately: a large real matrix must not hide another matrix's meaningful imaginary part.
+    As before, accelerator solves use double precision; this decision uses the precision of the supplied matrices.
+    This helper is for elastic matrices only: a caller must split uniform loss or use a general complex solver.
+    """
+
+    matrices = np.asarray(matrices)
+    if matrices.ndim != 3 or matrices.shape[1] != matrices.shape[2] or matrices.shape[1] < 2:
+        raise ValueError(f"expected a stack of square matrices with direct and target beams, got {matrices.shape}")
+    if not np.all(np.isfinite(matrices)):
+        raise ValueError("Bloch matrices must be finite")
+    if np.iscomplexobj(matrices) and len(matrices):
+        real = matrices.real
+        bound = 8.0 * np.finfo(real.dtype).eps * np.max(np.abs(real), axis=(-2, -1))
+        if not np.all(np.max(np.abs(matrices.imag), axis=(-2, -1)) <= bound):
+            return np.complex128
+    return np.float64
+
+
+def _jax_eigensolver_input(matrices, *, absorption: bool) -> np.ndarray:
+    """Prepare a batch, retaining all absorptive entries even when their imaginary part is numerically small."""
+
+    matrices = np.asarray(matrices)
+    elastic_dtype = _elastic_matrix_dtype(matrices)  # Also checks shape and finite values.
+    dtype = np.complex128 if absorption else elastic_dtype
+    return np.ascontiguousarray(matrices.real if dtype == np.float64 else matrices, dtype=dtype)
+
+
+def _jax_general_eig_implementation(jax, devices):
+    """Select general complex cuSOLVER explicitly on GPU; never accept host LAPACK as GPU execution."""
+
+    platforms = {device.platform for device in devices}
+    if platforms == {"cpu"}:
+        return None
+    if platforms <= {"gpu", "cuda"}:
+        implementations = getattr(jax.lax.linalg, "EigImplementation", None)
+        cusolver = getattr(implementations, "CUSOLVER", None)
+        if cusolver is not None:
+            return cusolver
+    raise NotImplementedError(
+        "general absorptive GPU propagation requires JAX with explicit cuSOLVER eig support; "
+        "use the SciPy reference or a supported CUDA environment"
+    )
+
+
+def _inverse_condition_upper_bound(vectors, inverse, *, xp=np):
+    """Bound cond_2(V) using the computed inverse X, without another singular-value decomposition.
+
+    For R=I-VX with ||R||_F<1, V^-1=X(I-R)^-1 and
+    cond_2(V) <= ||V||_F ||X||_F / (1-||R||_F).
+    Allow for complex dot-product roundoff before using this bound. An uncertain inverse is rejected (infinity),
+    not assigned a favorable condition estimate. The same 1e10 acceptance threshold remains in the caller.
+    """
+
+    n = vectors.shape[-1]
+    residual = xp.eye(n, dtype=vectors.dtype) - vectors @ inverse
+    error = xp.linalg.norm(residual, ord="fro", axis=(-2, -1))
+    product = (xp.linalg.norm(vectors, ord="fro", axis=(-2, -1))
+               * xp.linalg.norm(inverse, ord="fro", axis=(-2, -1)))
+    rounding = 8.0 * n * xp.finfo(vectors.real.dtype).eps
+    gamma = rounding / (1.0 - rounding) if rounding < 1.0 else math.inf
+    product_upper = product * (1.0 + gamma)
+    error_upper = error + gamma * (product_upper + math.sqrt(n))
+    denominator = xp.where(error_upper < 1.0, 1.0 - error_upper, 1.0)
+    return xp.where(error_upper < 1.0, product_upper / denominator, xp.inf)
+
+
 def _jax_propagate_batch(H_batch, thick, thick_w, backend: str, absorption: bool, batch_size: int = 0):
     """Return thickness-averaged direct-to-target intensities for a matrix batch.
 
@@ -312,9 +381,7 @@ def _jax_propagate_batch(H_batch, thick, thick_w, backend: str, absorption: bool
     key = _jax_module_key(backend)
     jax, jnp = _jax_modules(key)
     devices = _jax_devices(backend)
-    H_batch = np.asarray(H_batch, dtype=np.complex128)
-    if H_batch.ndim != 3 or H_batch.shape[1] != H_batch.shape[2]:
-        raise ValueError(f"expected a stack of square matrices, got shape {H_batch.shape}")
+    H_batch = _jax_eigensolver_input(H_batch, absorption=absorption)
     n_real = int(H_batch.shape[0])
     if n_real == 0:
         return np.zeros(0, dtype=float)
@@ -326,7 +393,9 @@ def _jax_propagate_batch(H_batch, thick, thick_w, backend: str, absorption: bool
     chunk = max(n_devices, (chunk // n_devices) * n_devices)
     chunk = min(chunk, int(math.ceil(n_real / n_devices)) * n_devices)
     per_device = max(1, chunk // n_devices)
-    cache_key = (key, bool(absorption), n, len(thick), n_devices, per_device, tuple(str(d) for d in devices))
+    eig_implementation = _jax_general_eig_implementation(jax, devices) if absorption else None
+    cache_key = (key, bool(absorption), H_batch.dtype.str, str(eig_implementation), n, len(thick),
+                 n_devices, per_device, tuple(str(d) for d in devices))
 
     if cache_key not in _JAX_PROPAGATORS:
         if absorption:
@@ -338,9 +407,15 @@ def _jax_propagate_batch(H_batch, thick, thick_w, backend: str, absorption: bool
                 psi_target(t) = sum_j V[1, j] V^-1[j, 0] exp(2*pi*i*lambda_j*t).
                 """
 
-                vals, vecs = jnp.linalg.eig(Hs)
+                if eig_implementation is None:
+                    vals, vecs = jnp.linalg.eig(Hs)
+                else:
+                    vals, vecs = jax.lax.linalg.eig(
+                        Hs, compute_left_eigenvectors=False, compute_right_eigenvectors=True,
+                        implementation=eig_implementation,
+                    )
                 inv_vecs = jnp.linalg.inv(vecs)
-                condition = jnp.linalg.cond(vecs)
+                condition = _inverse_condition_upper_bound(vecs, inv_vecs, xp=jnp)
                 reconstruction = (vecs * vals[:, None, :]) @ inv_vecs
                 relative_error = jnp.linalg.norm(reconstruction - Hs, axis=(-2, -1)) / jnp.maximum(
                     jnp.linalg.norm(Hs, axis=(-2, -1)), jnp.finfo(jnp.float64).eps

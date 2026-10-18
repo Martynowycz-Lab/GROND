@@ -12,6 +12,20 @@ AUTO_MAX_SUPPORT_SG = 0.01
 AUTO_SG_WINDOW = 0.010
 
 
+def add_profile_coordinates(ap: argparse.ArgumentParser, *, continuation: bool = False) -> None:
+    """Expose the observation measure; continuations inherit saved values unless explicitly overridden."""
+
+    ap.add_argument("--profile-coordinate", choices=["target_sg", "direct_angle"],
+                    default=None if continuation else "target_sg")
+    ap.add_argument("--profile-normalization", choices=["legacy", "target_sg_equivalent_v1"],
+                    default=None if continuation else "legacy",
+                    help="Explicit direct-angle measure. target_sg_equivalent_v1 preserves the target-Sg row convention.")
+    ap.add_argument("--profile-angle-max-half-width-deg", type=float, default=None if continuation else 2.0,
+                    help="Direct-angle bound; target_sg_equivalent_v1 refuses truncation at this bound.")
+    ap.add_argument("--profile-basis-mode", choices=["center", "common_profile"],
+                    default=None if continuation else "center")
+
+
 def add_crystal_overrides(ap: argparse.ArgumentParser) -> None:
     """Use the same named controls for fresh runs and continuation."""
 
@@ -66,6 +80,31 @@ def add_backend(ap: argparse.ArgumentParser) -> None:
         ],
         default="scipy",
         help="Bloch prediction backend. SciPy eigensolver is the production reference; scipy_bethe uses an opt-in promoted Bethe/Schur strong-beam reduction; SciPy expm/expm_multiply, real-embedded JAX expm, and JAX eigensolver backends are experimental agreement/speed probes. *_padded JAX backends pad matrix dimensions into small buckets to reduce compilation churn.",
+    )
+    ap.add_argument(
+        "--shared-grid",
+        choices=["off", "auto", "force"],
+        default=None,
+        help=(
+            "Bloch evaluator (sets GROND_SHARED_GRID for every stage; unset keeps the environment's value, default "
+            "off). auto solves one eigensystem per scan orientation, shared by every reflection rocking through it, "
+            "when the physics is supported and the cost model says it is at least 3x cheaper than per-reflection "
+            "solves (rows x profile points x tilts x N^2.5 against grid points x N^2.5; at least 200 rows); "
+            "otherwise per reflection. force: whenever supported. See docs/SHARED_GRID.md."
+        ),
+    )
+    ap.add_argument(
+        "--shared-grid-gpus",
+        default=None,
+        help="CUDA devices for shared-grid prediction passes, e.g. 0,1,2 (sets GROND_SHARED_GRID_GPUS; used when the "
+        "grid basis has at least 2000 beams).",
+    )
+    ap.add_argument(
+        "--basis-centring-coset",
+        choices=["off", "on"],
+        default=None,
+        help="Keep only the direct beam's lattice-centring coset in the beam pool (exact; sets "
+        "GROND_BASIS_CENTRING_COSET for every stage; unset keeps the environment's value, default off).",
     )
     ap.add_argument(
         "--row-plan-cache",
@@ -250,6 +289,7 @@ def add_geometry(ap: argparse.ArgumentParser) -> None:
             "Sg(matrix) and diffBloch sg_max)."
         ),
     )
+    add_profile_coordinates(ap)
     ap.add_argument(
         "--profile-quadrature",
         choices=["uniform", "trapezoid", "gauss_legendre"],
@@ -436,11 +476,12 @@ def add_nuisance(ap: argparse.ArgumentParser) -> None:
     )
     ap.add_argument(
         "--mosaicity-mode",
-        choices=["none", "transverse_target"],
+        choices=["none", "transverse_target", "gaussian_cone"],
         default="transverse_target",
         help=(
             "Mosaic model tested per crystal by the mosaicity feature gate: transverse_target is the re-centred "
-            "transverse Gauss-Hermite cone. none disables the gate (legacy)."
+            "transverse Gauss-Hermite cone. gaussian_cone requires explicit direct_angle, "
+            "target_sg_equivalent_v1 normalization and a common support envelope. none disables the gate (legacy)."
         ),
     )
     ap.add_argument(
@@ -451,6 +492,12 @@ def add_nuisance(ap: argparse.ArgumentParser) -> None:
     ap.add_argument(
         "--mosaicity-points", type=int, default=3, help="Gauss-Hermite tilt points of the mosaic cone quadrature."
     )
+    ap.add_argument("--mosaicity-support-sigma-deg", type=float, default=0.0,
+                    help="Declared largest two-axis cone width; must cover every tested sigma.")
+    ap.add_argument("--mosaicity-support-points", type=int, default=5,
+                    help="Points per axis in the common beam-support envelope.")
+    ap.add_argument("--mosaicity-support-width-sigma", type=float, default=4.0,
+                    help="Half-width of the common beam-support envelope in support-sigma units.")
     ap.add_argument(
         "--physics-gate-selection",
         choices=["orbit-cv", "in-sample"],
@@ -503,6 +550,15 @@ def add_nuisance(ap: argparse.ArgumentParser) -> None:
         "--nested-families",
         default="uniform_gradient,gamma",
         help="Thickness-distribution families of the nested selection: uniform_gradient (t0, gradient) and/or gamma (mean, shape).",
+    )
+    ap.add_argument(
+        "--nested-response-tables",
+        action="store_true",
+        help=(
+            "Build the nested selection's thickness tables row by row and keep only the tables, not the spectra "
+            "(memory: the tables plus one row's spectra per worker; needed for large beam supports and full cones). "
+            "Every candidate and the pick are then evaluated on the 2 A table, never with the exact gamma average."
+        ),
     )
     ap.add_argument(
         "--feedback-thickness-update",

@@ -429,7 +429,8 @@ class GeometryMixin:
         as NaN instead of aborting or changing row membership.
         """
 
-        if str(getattr(self.cfg, "profile_coordinate", "target_sg")) == "direct_angle":
+        if (str(getattr(self.cfg, "profile_coordinate", "target_sg")) == "direct_angle"
+                and str(getattr(self.cfg, "profile_normalization", "legacy")) == "legacy"):
             return float(omega_center), True
         try:
             return float(self.solve_omega_for_sg(hkl, omega_center, 0.0)), True

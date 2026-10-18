@@ -86,6 +86,8 @@ class RowPlanMixin:
     def pets_exact_row_prediction_plan(self, row_idx):
         """Build one exact PETS direct-angle row plan without Sg root solving."""
 
+        if str(getattr(self.cfg, "profile_normalization", "legacy")) != "legacy":
+            raise ValueError("target_sg_equivalent_v1 describes XDS/DIALS rows, not PETS-owned exact rocking wedges")
         hkl = np.asarray(self.data.hkl[row_idx], dtype=int)
         orientations, offsets, profile_weights, semiangle, ordinal = self.pets_exact_orientation_samples(row_idx)
         center = np.asarray(self.data.pets_exact_a_center[ordinal], dtype=float)

@@ -20,7 +20,7 @@ from grond.bloch.cache import (
     write_ug_cache_atomic,
 )
 from grond.bloch.constants import UG_CACHE_SCHEMA
-from grond.bloch.model import fcalc_res_grid, inv_d2_from_hkl_array, model_content_hash
+from grond.bloch.model import fcalc_res_grid, inv_d2_from_hkl_array, lattice_translations_from_latt, model_content_hash
 from grond.bloch.thickness import (
     config_cf_parameters,
     config_table_nodes,
@@ -28,6 +28,36 @@ from grond.bloch.thickness import (
     resolved_config_evaluator,
     uniform_grid_spec,
 )
+
+
+def centring_coset_mask(hkls, latt) -> np.ndarray:
+    """True for the HKLs in the lattice-centring coset of the direct beam: g . t is an integer for every centring
+    translation t of SHELX LATT code ``latt`` (all True for a primitive lattice)."""
+
+    hkls = np.asarray(hkls, dtype=float).reshape(-1, 3)
+    keep = np.ones(len(hkls), dtype=bool)
+    for translation in lattice_translations_from_latt(abs(int(latt))):
+        phase = hkls @ np.asarray(translation, dtype=float)
+        keep &= np.abs(phase - np.round(phase)) < 1e-9
+    return keep
+
+
+_UG_BUILD: dict = {}
+
+
+def _ug_build_workers() -> int:
+    """Processes for the dense U_g cube build: GROND_UG_BUILD_WORKERS (default 1, serial); fork platforms only."""
+    import multiprocessing as mp
+    import os
+
+    value = int(os.environ.get("GROND_UG_BUILD_WORKERS", "1") or 1)
+    return max(1, value) if "fork" in mp.get_all_start_methods() else 1
+
+
+def _ug_slab(h_vals):
+    """fcalc_res_grid on one slab of h values (the U_g cube builder's worker)."""
+    hh, kk, ll = np.meshgrid(h_vals, _UG_BUILD["k"], _UG_BUILD["l"], indexing="ij")
+    return fcalc_res_grid(_UG_BUILD["model"], hh, kk, ll)
 
 
 class PotentialMixin:
@@ -116,20 +146,44 @@ class PotentialMixin:
         h_vals = np.arange(-self.h_lim, self.h_lim + 1, dtype=float)
         k_vals = np.arange(-self.k_lim, self.k_lim + 1, dtype=float)
         l_vals = np.arange(-self.l_lim, self.l_lim + 1, dtype=float)
-        hh, kk, ll = np.meshgrid(h_vals, k_vals, l_vals, indexing="ij")
         factor = float(self.gamma) / (math.pi * self.data.cell.volume)
-        cube = factor * fcalc_res_grid(self.model, hh, kk, ll)
+        workers = _ug_build_workers()
+        if workers > 1 and len(h_vals) > 1:
+            # Same values as the serial build: fcalc_res_grid is elementwise in (h, k, l), split here over h slabs.
+            import multiprocessing as mp
+
+            slabs = [h_vals[i::workers] for i in range(workers)]
+            _UG_BUILD.update(model=self.model, k=k_vals, l=l_vals)
+            try:
+                with mp.get_context("fork").Pool(min(workers, len(slabs))) as pool:
+                    parts = pool.map(_ug_slab, slabs)
+            finally:
+                _UG_BUILD.clear()
+            cube = np.empty((len(h_vals), len(k_vals), len(l_vals)), dtype=np.complex128)
+            for i, part in enumerate(parts):
+                cube[i::workers] = part
+            cube *= factor
+        else:
+            hh, kk, ll = np.meshgrid(h_vals, k_vals, l_vals, indexing="ij")
+            cube = factor * fcalc_res_grid(self.model, hh, kk, ll)
         return validate_ug_cube(cube, tuple(int(value) for value in plan["shape"]))
 
     def calculate_ug_array(self, hkls):
-        """Evaluate requested coefficients directly from the current model."""
+        """Evaluate each distinct integer HKL once, restoring the requested shape and order.
+
+        A dense Hamiltonian repeats many pair differences. This is an exact
+        lookup within one call; no coefficients persist across model changes.
+        """
 
         hkls = np.asarray(hkls, dtype=int)
         shape = hkls.shape[:-1]
         flat = hkls.reshape(-1, 3)
+        if not len(flat):
+            return np.empty(shape, dtype=np.complex128)
+        unique_hkls, inverse = np.unique(flat, axis=0, return_inverse=True)
         factor = float(self.gamma) / (math.pi * self.data.cell.volume)
-        values = factor * fcalc_res_grid(self.model, flat[:, 0], flat[:, 1], flat[:, 2])
-        return np.asarray(values, dtype=np.complex128).reshape(shape)
+        values = factor * fcalc_res_grid(self.model, unique_hkls[:, 0], unique_hkls[:, 1], unique_hkls[:, 2])
+        return np.asarray(values, dtype=np.complex128)[inverse.reshape(-1)].reshape(shape)
 
     def ug(self, hkl):
         """Return U_g of one HKL, from the dense cube inside its limits, else computed directly from the model."""
@@ -228,7 +282,11 @@ class PotentialMixin:
             uvals.append(np.asarray(self.ug_array(block), dtype=np.complex128))
         if not hkls:
             return np.zeros((0, 3), dtype=int), np.zeros(0, dtype=np.complex128)
-        return np.concatenate(hkls, axis=0), np.concatenate(uvals)
+        pool, ug = np.concatenate(hkls, axis=0), np.concatenate(uvals)
+        if bool(getattr(self.cfg, "basis_centring_coset", False)):
+            keep = centring_coset_mask(pool, self.model.get("shelx_latt", 1))
+            pool, ug = pool[keep], ug[keep]
+        return pool, ug
 
     def thickness_grid(self):
         """Return thickness nodes (Å) and weights for the configured thickness model and evaluator.

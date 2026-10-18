@@ -255,6 +255,11 @@ def cmd_push_endpoint(args: argparse.Namespace) -> int:
         "--max-rows",
         str(args.max_rows),
     ]
+    for field in ("profile_coordinate", "profile_normalization", "profile_angle_max_half_width_deg",
+                  "profile_basis_mode", "profile_quadrature", "profile_accumulation"):
+        value = getattr(args, field, None)
+        if value is not None:
+            cmd += ["--" + field.replace("_", "-"), str(value)]
     if args.hkl:
         cmd += ["--hkl", args.hkl]
     if args.baseline_hkl:

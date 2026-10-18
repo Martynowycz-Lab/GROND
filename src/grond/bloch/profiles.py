@@ -11,7 +11,7 @@ import numpy as np
 from numpy.polynomial.hermite import hermgauss
 from numpy.polynomial.legendre import leggauss
 
-from grond.bloch.errors import MissingObservedCentroidError
+from grond.bloch.errors import LocalSgCrossingError, MissingObservedCentroidError
 
 
 class ProfileMixin:
@@ -417,6 +417,39 @@ class ProfileMixin:
             )
         return omegas, tilts, weights, sg_resid, profile_meta, mosaicity_meta
 
+    def target_sg_angular_interval(self, row_idx, hkl, omega_center, center_sg, sg_window_i, meta):
+        """Exact untilted angular interval of the configured Sg window, on one monotonic branch.
+
+        The versioned direct-angle convention must integrate this entire interval. Truncation at an angular cap
+        would describe a different observation, so exceeding that explicit cap is an error rather than clipping.
+        """
+
+        targets = float(center_sg) + np.asarray([-0.5, 0.5]) * float(sg_window_i)
+        roots = np.asarray([self.solve_sg_profile_target(row_idx, hkl, omega_center, target, meta)
+                            for target in targets], dtype=float)
+        lower, upper = float(np.min(roots)), float(np.max(roots))
+        if not np.all(np.isfinite(roots)) or not lower < upper:
+            raise LocalSgCrossingError("target-Sg equivalent angular interval has non-finite or coincident endpoints")
+        maximum = float(self.cfg.profile_angle_max_half_width_deg)
+        excursion = float(np.max(np.abs(roots - float(omega_center))))
+        if excursion > maximum + 1e-12:
+            raise LocalSgCrossingError(
+                f"row {row_idx}: target_sg_equivalent_v1 needs angular interval [{lower:.9g}, {upper:.9g}] degrees "
+                f"about {float(omega_center):.9g}, exceeding profile_angle_max_half_width_deg={maximum:g}; "
+                "refusing to clip a different observation window. Review geometry before raising the explicit bound."
+            )
+        derivative = float(self.sg_derivative_per_deg(hkl, omega_center))
+        oscillation = abs(float(self.data.oscillation_range))
+        strict_bound = max(2.0 * oscillation, min(2.0, 10.0 * oscillation))
+        error = self.same_branch_interval_error(hkl, lower, upper, derivative, strict_bound)
+        if error:
+            raise LocalSgCrossingError(f"row {row_idx}: target-Sg equivalent interval leaves the selected branch: {error}")
+        residuals = np.asarray([float(self.sg_for_hkls(np.asarray([hkl]), omega)[0]) - target
+                                for omega, target in zip(roots, targets, strict=True)])
+        if np.max(np.abs(residuals)) > 1e-9:
+            raise LocalSgCrossingError(f"row {row_idx}: target-Sg angular endpoint residual exceeds 1e-9 inverse Angstrom")
+        return lower, upper, residuals
+
     def row_profile_omega_points(self, row_idx, hkl, omega_center, center_sg, sg_window_i):
         """Build solved base-profile angles convolved with direct angular mosaicity."""
 
@@ -432,6 +465,21 @@ class ProfileMixin:
             raw_half_width_deg = 0.5 * float(sg_window_i) / derivative
             maximum = float(getattr(self.cfg, "profile_angle_max_half_width_deg", 2.0))
             half_width_deg = min(raw_half_width_deg, maximum)
+            normalization = str(getattr(self.cfg, "profile_normalization", "legacy") or "legacy").lower()
+            endpoint_residuals = np.asarray([], dtype=float)
+            midpoint = float(omega_center)
+            normalization_factor = 1.0
+            if normalization == "target_sg_equivalent_v1":
+                lower, upper, endpoint_residuals = self.target_sg_angular_interval(
+                    row_idx, hkl, omega_center, center_sg, sg_window_i, jitter_meta
+                )
+                midpoint = 0.5 * (lower + upper)
+                half_width_deg = 0.5 * (upper - lower)
+                normalization_factor = self.window_integral_factor(sg_window_i)
+            elif normalization == "legacy":
+                lower, upper = midpoint - half_width_deg, midpoint + half_width_deg
+            else:
+                raise ValueError(f"unknown profile_normalization={normalization!r}")
             rule = str(getattr(self.cfg, "profile_quadrature", "uniform") or "uniform").lower()
             accumulation = str(getattr(self.cfg, "profile_accumulation", "sum") or "sum").lower()
             if n_base == 1:
@@ -456,9 +504,12 @@ class ProfileMixin:
                 base_weights /= max(float(np.sum(base_weights)), 1e-30)
             elif accumulation != "sum":
                 raise ValueError(f"unknown profile_accumulation={accumulation!r}")
+            # The legacy target-Sg weights are normalized angular weights times the adaptive Sg-width ratio.
+            # Using the exact same interval makes these two coordinates equivalent at quadrature convergence.
+            base_weights *= normalization_factor
             angular_offsets, angular_weights, mosaicity_meta = self.row_mosaicity_angle_points()
             sample_omegas = (
-                float(omega_center) + base_offsets[:, None] + np.asarray(angular_offsets, dtype=float)[None, :]
+                midpoint + base_offsets[:, None] + np.asarray(angular_offsets, dtype=float)[None, :]
             ).reshape(-1)
             profile_weights = (base_weights[:, None] * np.asarray(angular_weights, dtype=float)[None, :]).reshape(-1)
             jitter_meta.update(
@@ -469,12 +520,16 @@ class ProfileMixin:
                     "sg_profile_angle_jacobian": False,
                     "sg_profile_angle_half_width_deg": float(half_width_deg),
                     "sg_profile_angle_raw_half_width_deg": float(raw_half_width_deg),
-                    "sg_profile_angle_half_width_clipped": bool(half_width_deg < raw_half_width_deg),
+                    "sg_profile_angle_half_width_clipped": bool(normalization == "legacy" and half_width_deg < raw_half_width_deg),
+                    "sg_profile_angle_interval_deg": [lower, upper],
+                    "sg_profile_angle_center_offset_deg": midpoint - float(omega_center),
+                    "sg_profile_normalization": normalization,
+                    "sg_profile_normalization_factor": float(normalization_factor),
                     "sg_profile_weight_sum": float(np.sum(profile_weights)),
                     "sg_profile_points_total": int(len(profile_weights)),
-                    "sg_profile_same_branch_continuation_used": False,
-                    "sg_profile_same_branch_continuation_segments": 1,
-                    "sg_profile_root_search": "not_used_direct_angle",
+                    "sg_profile_same_branch_continuation_used": bool(jitter_meta.get("sg_profile_same_branch_continuation_used", False)),
+                    "sg_profile_same_branch_continuation_segments": int(jitter_meta.get("sg_profile_same_branch_continuation_segments", 1)),
+                    "sg_profile_root_search": "target_sg_endpoints" if normalization == "target_sg_equivalent_v1" else "not_used_direct_angle",
                     "sg_jitter_kernel_points": 1,
                     "sg_jitter_offset_abs_p95_inv_A": 0.0,
                 }
@@ -482,7 +537,7 @@ class ProfileMixin:
             return (
                 np.asarray(sample_omegas, dtype=float),
                 np.asarray(profile_weights, dtype=float),
-                np.asarray([], dtype=float),
+                endpoint_residuals,
                 jitter_meta,
                 mosaicity_meta,
             )

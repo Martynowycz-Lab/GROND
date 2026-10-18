@@ -398,6 +398,15 @@ class XDSBlochPort(
             return None
         return np.abs(uniform_grid_amplitudes(vals, coupling, *grid, inverse=inverse)[0]) ** 2
 
+    def elastic_spectrum_thickness_average(self, vals, coupling):
+        """Thickness average of the target intensity from one elastic eigensystem (eigenvalues, V[1] conj(V[0]))."""
+
+        per_t = self._uniform_table_intensities(vals, coupling)
+        if per_t is None:
+            phase = np.exp((2j * np.pi) * vals[:, None] * self.thick[None, :])
+            per_t = np.abs(np.sum(coupling[:, None] * phase, axis=0)) ** 2
+        return float(np.sum(self.thick_w * per_t))
+
     def propagate_direct_to_target_thickness_average(self, H):
         """Propagate one Bloch matrix and average over the configured thickness quadrature."""
 
@@ -425,14 +434,8 @@ class XDSBlochPort(
                     per_t = np.abs(np.sum(coupling[:, None] * phase, axis=0)) ** 2
                 per_t *= np.exp(-4.0 * np.pi * mu * self.thick)
                 return float(np.sum(self.thick_w * per_t))
-            else:
-                vals, vecs = hermitian_eigh(H)
-                coupling = vecs[1, :] * np.conj(vecs[0, :])
-            per_t = self._uniform_table_intensities(vals, coupling)
-            if per_t is None:
-                phase = np.exp((2j * np.pi) * vals[:, None] * self.thick[None, :])
-                per_t = np.abs(np.sum(coupling[:, None] * phase, axis=0)) ** 2
-            return float(np.sum(self.thick_w * per_t))
+            vals, vecs = hermitian_eigh(H)
+            return self.elastic_spectrum_thickness_average(vals, vecs[1, :] * np.conj(vecs[0, :]))
         if backend in {"scipy_expm", "expm", "scipy_expm_multiply", "expm_multiply"}:
             psi0 = np.zeros(H.shape[0], dtype=np.complex128)
             psi0[0] = 1.0 + 0.0j
@@ -625,6 +628,12 @@ def main():
         choices=["target_sg", "direct_angle"],
         default="target_sg",
         help="Integrate through solved target-Sg points or directly in recorded scan angle.",
+    )
+    ap.add_argument(
+        "--profile-normalization",
+        choices=["legacy", "target_sg_equivalent_v1"],
+        default="legacy",
+        help="Explicit direct-angle measure; target_sg_equivalent_v1 preserves target-Sg row normalization and endpoints.",
     )
     ap.add_argument(
         "--profile-angle-max-half-width-deg",
@@ -840,6 +849,7 @@ def main():
         geometry_path_file=args.geometry_path,
         profile_basis_mode=args.profile_basis_mode,
         profile_coordinate=args.profile_coordinate,
+        profile_normalization=args.profile_normalization,
         profile_angle_max_half_width_deg=args.profile_angle_max_half_width_deg,
         profile_quadrature=args.profile_quadrature,
         profile_accumulation=args.profile_accumulation,

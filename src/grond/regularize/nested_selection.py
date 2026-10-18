@@ -9,7 +9,9 @@ Inputs
   Every variant must hold the same rows in the same order (the rows of the arrays below).
 * ``Variant(label, spectra, params, config)``: ``params`` are the physics values of the variant used for edge
   flags (e.g. ``{"dose_b_total_A2": 2.0, "mosaicity_sigma_deg": 0.2}``); ``config`` are the Config overrides
-  that produced its spectra (returned in the pick so the engine can reproduce it).
+  that produced its spectra (returned in the pick so the engine can reproduce it). ``Variant(label, None, params,
+  config, table=...)`` gives a thickness response table instead (grond.legacy.engine.response_stage); the selection
+  then needs ``evaluator="table"`` and ``score_with="table"``.
 * Row arrays of one crystal: ``y`` (target intensity), ``sig`` (its sigma), ``ang`` (scan angle, deg), ``keys``
   (model Laue-orbit keys, grond.validation.heldout.orbit_keys) and ``work`` (bool). Only work rows are ever
   fitted, scored or selected on; free and excluded rows must be False in ``work``. The engine definitions are
@@ -213,20 +215,30 @@ class SelectionGrids:
 
 @dataclass
 class Variant:
-    """One physics variant (dose, cone, window, ...) with its spectra.
+    """One physics variant (dose, cone, window, ...) with its spectra or its thickness response table.
 
     ``spectra`` is the packed dict or a zero-argument loader returning it (for example from the spectra-stage
-    cache), so that select_nested holds one variant's spectra at a time instead of every variant's.
+    cache), so that select_nested holds one variant's spectra at a time instead of every variant's. A variant may
+    instead give ``table``, a thickness table (or its loader) as thickness_table or
+    grond.legacy.engine.response_stage returns it, with ``spectra`` None; the selection then needs
+    evaluator="table" and score_with="table".
     """
 
     label: str
-    spectra: dict | Callable[[], dict]
+    spectra: dict | Callable[[], dict] | None
     params: dict = field(default_factory=dict)
     config: dict = field(default_factory=dict)
+    table: dict | Callable[[], dict] | None = None
 
     def load(self) -> dict:
         """Return the packed spectra, calling the loader when one was given."""
+        if self.spectra is None:
+            raise ValueError(f"variant {self.label!r} has a response table and no spectra")
         return self.spectra() if callable(self.spectra) else self.spectra
+
+    def load_table(self) -> dict | None:
+        """Return the response table (None when the variant has spectra), calling the loader when one was given."""
+        return self.table() if callable(self.table) else self.table
 
 
 @dataclass
@@ -268,6 +280,37 @@ def validate_spectra(spec: dict, label: str = "spectra") -> int:
             raise ValueError(f"{label}: non-finite {key}")
     if not np.all(np.isfinite(np.asarray(spec["c"]))):
         raise ValueError(f"{label}: non-finite couplings")
+    return n
+
+
+def validate_table(table: dict, support: ThicknessSupport, hands=(1,), label: str = "response table") -> int:
+    """Number of rows of a thickness response table for this support and these hands; anything else fails closed.
+
+    The table needs ``row_ids`` and the per-row ``mu`` besides the thickness_table arrays. Intensities are checked
+    in row blocks, so the check needs no full-size temporary arrays.
+    """
+    for key in ("t", "support", "row_ids", "mu", "born"):
+        if key not in table:
+            raise ValueError(f"{label} lacks {key!r}")
+    if dict(table["support"]) != support.to_dict():
+        raise ValueError(f"{label} was built on support {dict(table['support'])}, not {support.to_dict()}")
+    t = np.asarray(table["t"])
+    if not np.array_equal(t, support.grid()):
+        raise ValueError(f"{label}: thickness nodes differ from the support grid")
+    missing = [h for h in hands if h not in table]
+    if missing:
+        raise ValueError(f"{label} has no hand {missing}")
+    n = len(np.asarray(table["row_ids"]))
+    if len(np.asarray(table["mu"])) != n:
+        raise ValueError(f"{label}: mu has {len(np.asarray(table['mu']))} values, expected {n}")
+    for key in [*hands, "born"]:
+        values = table[key]
+        if tuple(values.shape) != (n, len(t)):
+            raise ValueError(f"{label}: {key} has shape {tuple(values.shape)}, expected {(n, len(t))}")
+        for lo in range(0, n, 4096):
+            block = np.asarray(values[lo:lo + 4096])
+            if not np.all(np.isfinite(block)) or np.any(block < 0.0):
+                raise ValueError(f"{label}: {key} has non-finite or negative intensities")
     return n
 
 
@@ -578,17 +621,28 @@ def select_nested(variants: list[Variant], y, sig, ang, keys, work, *, grids: Se
         raise ValueError("nested selection needs work rows")
     if not np.all(np.isfinite(y[work]) & np.isfinite(sig[work]) & np.isfinite(ang[work])):
         raise ValueError("work rows have non-finite y, sigma or angle")
+    if any(v.table is not None for v in variants):
+        if any(v.table is not None and v.spectra is not None for v in variants):
+            raise ValueError("a physics variant gives spectra or a response table, not both")
+        if evaluator != "table" or score_with != "table":
+            raise ValueError("response-table variants need evaluator='table' and score_with='table' "
+                             "(the cf evaluator needs the spectra)")
     row_ids = None
     for v in variants:
-        spec = v.load()
-        if validate_spectra(spec, f"variant {v.label!r} spectra") != n:
-            raise ValueError(f"variant {v.label!r} spectra have a different number of rows than the row arrays")
-        ids = np.asarray(spec["row_ids"])
-        del spec
+        if v.table is not None:
+            kind, data = "response table", v.load_table()
+            count = validate_table(data, support, hands, f"variant {v.label!r} response table")
+        else:
+            kind, data = "spectra", v.load()
+            count = validate_spectra(data, f"variant {v.label!r} spectra")
+        if count != n:
+            raise ValueError(f"variant {v.label!r} {kind} have a different number of rows than the row arrays")
+        ids = np.asarray(data["row_ids"])
+        del data
         if row_ids is None:
             row_ids = ids
         elif not np.array_equal(ids, row_ids):
-            raise ValueError(f"variant {v.label!r} spectra hold different rows from variant {variants[0].label!r}")
+            raise ValueError(f"variant {v.label!r} {kind} hold different rows from variant {variants[0].label!r}")
 
     thick = grids.thickness_candidates()
     thick_mu = [(canonical_family(fam), prm, float(mu)) for fam, prm in thick for mu in grids.mu]
@@ -608,10 +662,11 @@ def select_nested(variants: list[Variant], y, sig, ang, keys, work, *, grids: Se
     table_scored = [qi for qi in range(n_q) if qi not in set(cf_scored)]
     best_table = {}
     for vi, v in enumerate(variants):
-        table = None
-        spec = v.load()
+        table = v.load_table()
+        spec = v.load() if table is None else None
         if table_scored:
-            table = thickness_table(spec, support, hands=hands, workers=workers)
+            if table is None:
+                table = thickness_table(spec, support, hands=hands, workers=workers)
             res = _parallel_map(_table_score_worker, table_scored, workers,
                                 {**base_shared, "table": table, "thick": thick_mu, "hands": hands})
             for qi, by_hand in zip(table_scored, res, strict=True):
@@ -654,12 +709,16 @@ def select_nested(variants: list[Variant], y, sig, ang, keys, work, *, grids: Se
         thickness = {"family": family_label, **prm}
         pick_eval = resolved[qi]
         score_eval = "cf" if qi in set(cf_scored) else "table"
-        spec = variants[vi].load()
+        given = variants[vi].load_table()
+        spec = variants[vi].load() if given is None else given  # a response table also carries the per-row mu
         if pick_eval == "cf":
             cf = cf_row_intensities(spec, thickness, mu, hands=(h,), workers=workers)
             dyn, born = cf[h], cf["born"]
         else:
-            tab = best_table[h][2] if best_table.get(h, (None,))[0] == vi else thickness_table(spec, support, (h,), workers)
+            if best_table.get(h, (None,))[0] == vi:
+                tab = best_table[h][2]
+            else:
+                tab = given if given is not None else thickness_table(spec, support, (h,), workers)
             dyn, born = table_row_intensities(tab, thickness, mu, h)
         oof_all = inner_cv_oof(dyn, y, sig, work, folds, [scale_options[si]], objective)
         oof = np.where(work, oof_all[0], np.nan)

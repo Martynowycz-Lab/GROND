@@ -130,3 +130,27 @@ GROND recalculates every crystal for your model with the saved thickness, mosaic
 | `man/00_setup` … `man/06_finish` | `grond manual` |
 | `recycleN/` | `grond refine` (use a new `--out-dir` each time) |
 | `logs/commands.jsonl`, `grond_progress.json` | every command and stage that ran, for resuming |
+
+## Two-axis mosaic cone
+
+For a two-axis Gaussian cone, use `--mosaicity-mode gaussian_cone`,
+`--profile-coordinate direct_angle` and
+`--profile-normalization target_sg_equivalent_v1`. Set
+`--mosaicity-support-sigma-deg` to cover the largest tested cone width. AUTO
+uses nested selection so that the zero-width and finite-width candidates share
+one declared beam-support envelope. Fixed native calculations and `grond refine`
+also retain this convention in their saved configurations and checkpoints.
+
+This opt-in convention uses the exact angular endpoints of the historical
+excitation-error window and preserves its intensity normalization. At zero cone
+width, the direct-angle and target-Sg calculations agree as quadrature converges.
+If the interval exceeds `--profile-angle-max-half-width-deg`, the calculation
+refuses to truncate it. Inspect the recorded interval and acquisition geometry
+before increasing that bound. Beam support and quadrature still require
+convergence checks at the fitted thickness distribution.
+
+The convention preserves the existing reduced-observation model; it does not
+reconstruct detector foreground masks or remove assumptions in DIALS partiality
+completion. Legacy calculations remain unchanged unless this option is selected.
+PETS-owned integration wedges and the experimental `native_structure_update`
+path do not support this convention and reject it explicitly.

@@ -21,6 +21,7 @@ PHYSICS_SOURCE_PATHS = (
     "bloch/config.py",
     "bloch/thickness.py",
     "bloch/backends.py",
+    "bloch/spectral_gpu.py",
     "bloch/cache.py",
     "io/xds.py",
     "bloch/splits.py",
@@ -33,6 +34,7 @@ PHYSICS_SOURCE_PATHS = (
     "bloch/row_plans.py",
     "bloch/row_cache.py",
     "bloch/prediction.py",
+    "bloch/shared_grid.py",
 )
 
 

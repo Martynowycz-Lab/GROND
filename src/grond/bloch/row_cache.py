@@ -79,6 +79,7 @@ class RowCacheMixin:
             "mosaicity_support_points": int(self.cfg.mosaicity_support_points),
             "mosaicity_support_width_sigma": float(self.cfg.mosaicity_support_width_sigma),
             "profile_coordinate": str(self.cfg.profile_coordinate),
+            "profile_normalization": str(self.cfg.profile_normalization),
             "profile_basis_mode": str(self.cfg.profile_basis_mode),
             "profile_angle_max_half_width_deg": float(self.cfg.profile_angle_max_half_width_deg),
             "geometry_path_sha256": (str(self.geometry_path["sha256"]) if self.geometry_path is not None else ""),

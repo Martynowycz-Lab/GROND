@@ -107,6 +107,7 @@ def stage_config(summary: dict) -> Config:
         geometry_path_file=str(c.get("geometry_path", "") or ""),
         profile_basis_mode=str(_need(c, "profile_basis_mode", where_c)),
         profile_coordinate=str(_need(c, "profile_coordinate", where_c)),
+        profile_normalization=str(c.get("profile_normalization", "legacy")),
         profile_angle_max_half_width_deg=float(_need(c, "profile_angle_max_half_width_deg", where_c)),
         profile_quadrature=str(_need(c, "profile_quadrature", where_c)),
         profile_accumulation=str(_need(c, "profile_accumulation", where_c)),
