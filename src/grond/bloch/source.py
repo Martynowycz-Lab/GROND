@@ -20,8 +20,6 @@ PHYSICS_SOURCE_PATHS = (
     "bloch/numerics.py",
     "bloch/config.py",
     "bloch/thickness.py",
-    "bloch/backends.py",
-    "bloch/spectral_gpu.py",
     "bloch/cache.py",
     "io/xds.py",
     "bloch/splits.py",

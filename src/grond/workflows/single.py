@@ -736,7 +736,6 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
                 best_nuisance(final) or regularized_nui, absorption_policy=str(hand_settings["pair_absorption"])
             )
             hand_args = _args_with_recorded_native_contract(args, final_config)
-            hand_args.compute_backend = "scipy"
             hand_n_basis = _positive_summary_int(final_config, "n_basis") or (20 if args.fast else final_n_basis)
             hand_n_points = _positive_summary_int(final_config, "n_points") or (5 if args.fast else args.n_points)
             scale_fit_split = str(final_config.get("scale_fit_split") or "work")

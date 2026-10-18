@@ -44,7 +44,6 @@ def _manual_checkpoint(workflow: Mapping[str, object], output: Path) -> dict[str
                 "n_basis",
                 "n_points",
                 "topup_d_min",
-                "compute_backend",
                 "row_plan_cache",
                 "chunksize",
                 "post_bloch_sigma_policy",

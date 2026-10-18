@@ -345,7 +345,6 @@ def _elastic_pair_records(
         # Both hands' pair scales are fitted on work rows unless the legacy split is requested.
         scale_fit_split = "work" if settings["pair_scale_fit_split"] == "work" else source_split
         hand_args = _args_with_recorded_native_contract(args, config)
-        hand_args.compute_backend = "scipy"
         if override:
             hand_args.final_thickness_points = int(override["thickness_points"])
         # The values the pair command uses: native_stage_cmd applies the crystal's fixed N/Q and settings.

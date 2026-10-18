@@ -33,7 +33,6 @@ if not __package__:
 
 import numpy as np
 from scipy.linalg import eig, expm
-from scipy.sparse.linalg import expm_multiply
 
 try:
     from grond.paths import runtime_cache_dir
@@ -52,17 +51,6 @@ DEFAULT_HKL = Path("INTEGRATE.HKL")
 DEFAULT_RES = Path("model.res")
 
 
-from grond.bloch.backends import (
-    _jax_backend_uses_real_expm as _jax_backend_uses_real_expm,
-    _jax_matrix_bucket_size as _jax_matrix_bucket_size,
-    _jax_module_key as _jax_module_key,
-    _jax_modules as _jax_modules,
-    _jax_propagate_batch as _jax_propagate_batch,
-    _jax_real_expm_propagate_batch as _jax_real_expm_propagate_batch,
-    _real_embedding_generator_batch as _real_embedding_generator_batch,
-    _stack_square_matrices as _stack_square_matrices,
-    promoted_bethe_effective_hamiltonian as promoted_bethe_effective_hamiltonian,
-)
 from grond.bloch.basis import (
     BasisMixin as BasisMixin,
 )
@@ -76,10 +64,6 @@ from grond.bloch.config import (
     frozen_kernel_contract as frozen_kernel_contract,
 )
 from grond.bloch.constants import (
-    ALL_JAX_BACKENDS as ALL_JAX_BACKENDS,
-    BETHE_BACKENDS as BETHE_BACKENDS,
-    COMPUTE_BACKEND_HELP as COMPUTE_BACKEND_HELP,
-    COMPUTE_BACKENDS as COMPUTE_BACKENDS,
     DEFAULT_MAX_SUPPORT_SG as DEFAULT_MAX_SUPPORT_SG,
     DENSE_UG_BUILD_BYTES_PER_VOXEL as DENSE_UG_BUILD_BYTES_PER_VOXEL,
     DENSE_UG_CACHE_LOAD_BYTES_PER_VOXEL as DENSE_UG_CACHE_LOAD_BYTES_PER_VOXEL,
@@ -317,49 +301,23 @@ class XDSBlochPort(
     def propagate_direct_to_target(self, H, thickness):
         """Return the target-beam intensity after propagating the direct beam through one thickness.
 
-        Beam 0 is the direct beam and beam 1 the target; thickness is in Å and H in Å⁻¹. The configured
-        compute backend chooses the eigensolver, expm or JAX path.
+        Beam 0 is the direct beam and beam 1 the target; thickness is in Å and H in Å⁻¹.
         """
 
-        backend = str(getattr(self.cfg, "compute_backend", "scipy") or "scipy").lower()
-        if backend in BETHE_BACKENDS:
-            H = promoted_bethe_effective_hamiltonian(H, self.cfg)
-            if self.absorption_enabled():
-                validate_passive_absorption(H, mode=f"Bethe {self.cfg.bethe_variant} approximation")
-            backend = "scipy"
-        if backend in {"scipy", "numpy_scipy_cpu"}:
-            if self.absorption_enabled():
-                uniform = self._uniform_scalar_absorption_decomposition(H)
-                if uniform is None:
-                    return float(self._nonhermitian_target_intensities(H, [thickness])[0])
-                elastic, mu = uniform
-                vals, vecs = hermitian_eigh(elastic)
-                coupling = vecs[1, :] * np.conj(vecs[0, :])
-                phase = np.exp(2j * np.pi * vals * thickness)
-                return float(abs(np.sum(coupling * phase)) ** 2 * math.exp(-4.0 * math.pi * mu * float(thickness)))
-            else:
-                vals, vecs = hermitian_eigh(H)
-                coupling = vecs[1, :] * np.conj(vecs[0, :])
+        if self.absorption_enabled():
+            uniform = self._uniform_scalar_absorption_decomposition(H)
+            if uniform is None:
+                return float(self._nonhermitian_target_intensities(H, [thickness])[0])
+            elastic, mu = uniform
+            vals, vecs = hermitian_eigh(elastic)
+            coupling = vecs[1, :] * np.conj(vecs[0, :])
             phase = np.exp(2j * np.pi * vals * thickness)
-            return abs(np.sum(coupling * phase)) ** 2
-        if backend in {"scipy_expm", "expm"}:
-            psi0 = np.zeros(H.shape[0], dtype=np.complex128)
-            psi0[0] = 1.0 + 0.0j
-            psi = expm((2j * np.pi * float(thickness)) * H) @ psi0
-            return float(abs(psi[1]) ** 2)
-        if backend in {"scipy_expm_multiply", "expm_multiply"}:
-            psi0 = np.zeros(H.shape[0], dtype=np.complex128)
-            psi0[0] = 1.0 + 0.0j
-            psi = expm_multiply((2j * np.pi * float(thickness)) * H, psi0)
-            return float(abs(psi[1]) ** 2)
-        if backend in ALL_JAX_BACKENDS:
-            values = _jax_propagate_batch(
-                np.asarray(H, dtype=np.complex128)[None, :, :],
-                np.asarray([float(thickness)]), np.asarray([1.0]), backend,
-                self.absorption_enabled(), int(getattr(self.cfg, "jax_batch_size", 0)),
-            )
-            return float(values[0])
-        raise NotImplementedError(f"unknown compute_backend={backend!r}; expected one of {COMPUTE_BACKEND_HELP}")
+            return float(abs(np.sum(coupling * phase)) ** 2 * math.exp(-4.0 * math.pi * mu * float(thickness)))
+        else:
+            vals, vecs = hermitian_eigh(H)
+            coupling = vecs[1, :] * np.conj(vecs[0, :])
+        phase = np.exp(2j * np.pi * vals * thickness)
+        return abs(np.sum(coupling * phase)) ** 2
 
     def propagate_direct_to_target_gamma_cf(self, H, cf):
         """Exact untruncated gamma thickness average of both hands from one Hermitian eigensystem.
@@ -413,51 +371,22 @@ class XDSBlochPort(
         cf = self.thickness_cf_parameters()
         if cf is not None:
             return self.propagate_direct_to_target_gamma_cf(H, cf)[0]
-        backend = str(getattr(self.cfg, "compute_backend", "scipy") or "scipy").lower()
-        if backend in BETHE_BACKENDS:
-            H = promoted_bethe_effective_hamiltonian(H, self.cfg)
-            if self.absorption_enabled():
-                validate_passive_absorption(H, mode=f"Bethe {self.cfg.bethe_variant} approximation")
-            backend = "scipy"
-        if backend in {"scipy", "numpy_scipy_cpu"}:
-            if self.absorption_enabled():
-                uniform = self._uniform_scalar_absorption_decomposition(H)
-                if uniform is None:
-                    per_t = self._nonhermitian_target_intensities(H, self.thick)
-                    return float(np.sum(self.thick_w * per_t))
-                elastic, mu = uniform
-                vals, vecs = hermitian_eigh(elastic)
-                coupling = vecs[1, :] * np.conj(vecs[0, :])
-                per_t = self._uniform_table_intensities(vals, coupling)
-                if per_t is None:
-                    phase = np.exp((2j * np.pi) * vals[:, None] * self.thick[None, :])
-                    per_t = np.abs(np.sum(coupling[:, None] * phase, axis=0)) ** 2
-                per_t *= np.exp(-4.0 * np.pi * mu * self.thick)
+        if self.absorption_enabled():
+            uniform = self._uniform_scalar_absorption_decomposition(H)
+            if uniform is None:
+                per_t = self._nonhermitian_target_intensities(H, self.thick)
                 return float(np.sum(self.thick_w * per_t))
-            vals, vecs = hermitian_eigh(H)
-            return self.elastic_spectrum_thickness_average(vals, vecs[1, :] * np.conj(vecs[0, :]))
-        if backend in {"scipy_expm", "expm", "scipy_expm_multiply", "expm_multiply"}:
-            psi0 = np.zeros(H.shape[0], dtype=np.complex128)
-            psi0[0] = 1.0 + 0.0j
-            per_t = []
-            for t in self.thick:
-                if backend in {"scipy_expm", "expm"}:
-                    psi = expm((2j * np.pi * float(t)) * H) @ psi0
-                else:
-                    psi = expm_multiply((2j * np.pi * float(t)) * H, psi0)
-                per_t.append(float(abs(psi[1]) ** 2))
-            return float(np.sum(self.thick_w * np.asarray(per_t, dtype=float)))
-        if backend in ALL_JAX_BACKENDS:
-            vals = _jax_propagate_batch(
-                np.asarray(H, dtype=np.complex128)[None, :, :],
-                self.thick,
-                self.thick_w,
-                backend,
-                self.absorption_enabled(),
-                int(getattr(self.cfg, "jax_batch_size", 0)),
-            )
-            return float(vals[0])
-        raise NotImplementedError(f"unknown compute_backend={backend!r}; expected one of {COMPUTE_BACKEND_HELP}")
+            elastic, mu = uniform
+            vals, vecs = hermitian_eigh(elastic)
+            coupling = vecs[1, :] * np.conj(vecs[0, :])
+            per_t = self._uniform_table_intensities(vals, coupling)
+            if per_t is None:
+                phase = np.exp((2j * np.pi) * vals[:, None] * self.thick[None, :])
+                per_t = np.abs(np.sum(coupling[:, None] * phase, axis=0)) ** 2
+            per_t *= np.exp(-4.0 * np.pi * mu * self.thick)
+            return float(np.sum(self.thick_w * per_t))
+        vals, vecs = hermitian_eigh(H)
+        return self.elastic_spectrum_thickness_average(vals, vecs[1, :] * np.conj(vecs[0, :]))
 
     def propagate_direct_to_target_thickness_average_pair(self, H):
         """Return original- and inverse-hand intensities from one eigensystem.
@@ -472,12 +401,6 @@ class XDSBlochPort(
         absorptive potential is rejected rather than silently approximated.
         """
 
-        backend = str(getattr(self.cfg, "compute_backend", "scipy") or "scipy").lower()
-        if backend not in {"scipy", "numpy_scipy_cpu"}:
-            raise NotImplementedError(
-                "paired inverse-hand propagation requires the full audited SciPy Hermitian "
-                "eigensolver; choose --compute-backend scipy"
-            )
         cf = self.thickness_cf_parameters()
         if cf is not None:
             return self.propagate_direct_to_target_gamma_cf(H, cf)
@@ -757,40 +680,6 @@ def main():
     )
     ap.add_argument("--workers", type=int, default=1)
     ap.add_argument("--chunksize", type=int, default=8)
-    ap.add_argument("--compute-backend", choices=COMPUTE_BACKENDS, default="scipy")
-    ap.add_argument(
-        "--jax-batch-size",
-        type=int,
-        default=0,
-        help="JAX matrix batch size. 0 chooses a conservative size from matrix dimension and device count.",
-    )
-    ap.add_argument(
-        "--jax-matrix-bucket-size",
-        type=int,
-        default=0,
-        help="Pad JAX matrix dimensions to this multiple. 0 keeps exact sizes unless a *_padded backend is selected, where 0 means 8.",
-    )
-    ap.add_argument(
-        "--bethe-strong-count",
-        type=int,
-        default=48,
-        help="Strong-beam block size for scipy_bethe. Values >= n_basis recover the dense SciPy matrix.",
-    )
-    ap.add_argument(
-        "--bethe-variant",
-        choices=["truncate", "schur0", "schur_target", "schur_mean"],
-        default="schur_target",
-        help="Strong/weak-beam reduction used by scipy_bethe.",
-    )
-    ap.add_argument(
-        "--bethe-promote-denom",
-        type=float,
-        default=0.005,
-        help="Promote weak beams whose diagonal denominator is this close to the Schur energy.",
-    )
-    ap.add_argument(
-        "--bethe-denom-eps", type=float, default=1e-5, help="Small-denominator floor for scipy_bethe Schur corrections."
-    )
     ap.add_argument(
         "--row-plan-cache",
         choices=["off", "exact", "readwrite", "rebuild"],
@@ -880,13 +769,6 @@ def main():
         dose_b_mode=args.dose_b_mode,
         dose_b_per_frame=args.dose_b_per_frame,
         dose_b_ref_frame=args.dose_b_ref_frame,
-        compute_backend=args.compute_backend,
-        jax_batch_size=args.jax_batch_size,
-        jax_matrix_bucket_size=args.jax_matrix_bucket_size,
-        bethe_strong_count=args.bethe_strong_count,
-        bethe_variant=args.bethe_variant,
-        bethe_promote_denom=args.bethe_promote_denom,
-        bethe_denom_eps=args.bethe_denom_eps,
         matrix_convention=args.matrix_convention,
         row_plan_cache=args.row_plan_cache,
         free_fraction=args.free_fraction,

@@ -127,14 +127,7 @@ def _args_with_recorded_native_contract(
         "selection_metric",
         "scale_smoothness",
         "prediction_cache_compression",
-        "compute_backend",
         "row_plan_cache",
-        "jax_batch_size",
-        "jax_matrix_bucket_size",
-        "bethe_strong_count",
-        "bethe_variant",
-        "bethe_promote_denom",
-        "bethe_denom_eps",
         "matrix_convention",
     )
     for key in direct_keys:

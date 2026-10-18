@@ -68,7 +68,6 @@ def _checkpoint_dataset_contract(
             "mosaicity_support_points",
             "mosaicity_support_width_sigma",
             "topup_d_min",
-            "compute_backend",
             "row_plan_cache",
             "chunksize",
             "post_bloch_sigma_policy",

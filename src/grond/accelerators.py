@@ -14,12 +14,9 @@ import sys
 PROBE_CODE = r"""
 import importlib
 import json
-import os
 import platform
 import sys
 
-os.environ.setdefault("JAX_ENABLE_X64", "True")
-os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 mods = {}
 for name in ["numpy", "scipy", "gemmi"]:
     try:
@@ -28,49 +25,21 @@ for name in ["numpy", "scipy", "gemmi"]:
     except Exception as exc:
         mods[name] = {"available": False, "error": f"{type(exc).__name__}: {str(exc)[:240]}"}
 
-jax_info = {"available": False}
-try:
-    import numpy as np
-    import jax
-    jax.config.update("jax_enable_x64", True)
-    jax_info = {
-        "available": True,
-        "default_backend": str(jax.default_backend()),
-        "devices": [str(d) for d in jax.devices()],
-        "x64": bool(jax.config.jax_enable_x64),
-    }
-except Exception as exc:
-    jax_info = {
-        "available": False,
-        "optional": True,
-        "status": "not_installed_optional",
-        "message": "JAX is not required for production GROND. The portable NumPy/SciPy Bloch solver is the reference path.",
-        "import_error": f"{type(exc).__name__}: {str(exc)[:500]}",
-    }
-
 print(json.dumps({
     "python": sys.executable,
     "python_version": sys.version.split()[0],
     "platform": platform.platform(),
     "machine": platform.machine(),
     "packages": mods,
-    "optional_packages": {"jax": jax_info},
-    "engine": {
-        "current_core": "numpy_scipy_cpu",
-        "optional_backends": ["jax", "jax_auto", "jax_cpu", "jax_mps", "jax_cuda", "jax_cpu_padded", "jax_cuda_padded"],
-        "reason": "The portable NumPy/SciPy Bloch solver remains the production reference; JAX backends are experimental and must pass complex eig/eigh agreement checks before use. Padded JAX backends bucket matrix dimensions to reduce recompilation on CPU/CUDA.",
-    },
+    "engine": {"current_core": "numpy_scipy_cpu"},
 }, indent=2))
 """
 
 
 BLOCH_OPS_PROBE_CODE = r"""
 import json
-import os
 import time
 
-os.environ.setdefault("JAX_ENABLE_X64", "True")
-os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 out = {}
 try:
     import numpy as np
@@ -89,35 +58,6 @@ try:
     out["scipy_cpu"] = rec
 except Exception as exc:
     out["scipy_cpu"] = {"import_error": f"{type(exc).__name__}: {str(exc)[:500]}"}
-
-try:
-    import jax
-    jax.config.update("jax_enable_x64", True)
-    import jax.numpy as jnp
-
-    H = jnp.asarray(np.eye(4, dtype=np.complex128) + (0.01 + 0.02j) * np.ones((4, 4), dtype=np.complex128))
-    Hh = H + jnp.conj(H.T)
-    rec = {
-        "default_backend": str(jax.default_backend()),
-        "devices": [str(d) for d in jax.devices()],
-    }
-    for name, func, mat in [("eig", jnp.linalg.eig, H), ("eigh", jnp.linalg.eigh, Hh)]:
-        try:
-            t = time.perf_counter()
-            vals, _vecs = func(mat)
-            vals.block_until_ready()
-            rec[name] = {"ok": True, "sec": time.perf_counter() - t, "dtype": str(vals.dtype)}
-        except Exception as exc:
-            rec[name] = {"ok": False, "error": f"{type(exc).__name__}: {str(exc)[:500]}"}
-    out["jax"] = rec
-except Exception as exc:
-    out["jax"] = {
-        "available": False,
-        "optional": True,
-        "status": "not_installed_optional",
-        "message": "JAX is optional and experimental; SciPy eig/eigh is the production Bloch kernel.",
-        "import_error": f"{type(exc).__name__}: {str(exc)[:500]}",
-    }
 
 print(json.dumps(out, indent=2))
 """

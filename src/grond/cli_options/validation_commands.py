@@ -12,7 +12,7 @@ def register_runtime(sub: argparse._SubParsersAction) -> None:
     from grond.commands.doctor import cmd_doctor
 
     p_doc = sub.add_parser(
-        "doctor", help="Report Python packages, accelerator visibility, and the active compute core."
+        "doctor", help="Report Python packages, the active compute core and external tools."
     )
     p_doc.add_argument("--python", default="")
     add_tool_config_args(p_doc)
@@ -28,7 +28,7 @@ def register_runtime(sub: argparse._SubParsersAction) -> None:
     p_doc.add_argument(
         "--all-tools",
         action="store_true",
-        help="Also report optional endpoint tools and experimental accelerator backends.",
+        help="Also report optional endpoint tools.",
     )
     p_doc.add_argument(
         "--strict",

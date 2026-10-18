@@ -6,7 +6,7 @@ import math
 import os
 from dataclasses import dataclass, field
 
-from grond.bloch.constants import COMPUTE_BACKENDS, DEFAULT_MAX_SUPPORT_SG, SITE_SYMMETRY_TOLERANCE_FRACTIONAL
+from grond.bloch.constants import DEFAULT_MAX_SUPPORT_SG, SITE_SYMMETRY_TOLERANCE_FRACTIONAL
 from grond.bloch.thickness import (
     DEFAULT_TABLE_DT_A,
     DEFAULT_THICKNESS_MAX_A,
@@ -136,13 +136,6 @@ class Config:
     dose_b_mode: str = "none"
     dose_b_per_frame: float = 0.0
     dose_b_ref_frame: float = float("nan")
-    compute_backend: str = "scipy"
-    jax_batch_size: int = 0
-    jax_matrix_bucket_size: int = 0
-    bethe_strong_count: int = 48
-    bethe_variant: str = "schur_target"
-    bethe_promote_denom: float = 0.005
-    bethe_denom_eps: float = 1e-5
     matrix_convention: str = "j_minus_i"
     row_plan_cache: str = "off"
     ug_storage_mode: str = "auto"
@@ -172,9 +165,6 @@ class Config:
             "mosaicity_points": (self.mosaicity_points, 1),
             "mosaicity_support_points": (self.mosaicity_support_points, 2),
             "thickness_points": (self.thickness_points, 1),
-            "jax_batch_size": (self.jax_batch_size, 0),
-            "jax_matrix_bucket_size": (self.jax_matrix_bucket_size, 0),
-            "bethe_strong_count": (self.bethe_strong_count, 2),
         }
         for name, (value, minimum) in integer_minima.items():
             if isinstance(value, bool) or int(value) != value or int(value) < minimum:
@@ -198,7 +188,6 @@ class Config:
             "thickness_A": self.thickness_A,
             "group_width_deg": self.group_width_deg,
             "ug_d_min": self.ug_d_min,
-            "bethe_denom_eps": self.bethe_denom_eps,
         }
         for name, value in positive_fields.items():
             if not math.isfinite(float(value)) or float(value) <= 0.0:
@@ -224,7 +213,6 @@ class Config:
             "absorption_mu_theta2": self.absorption_mu_theta2,
             "absorption_tds_b": self.absorption_tds_b,
             "dose_b_per_frame": self.dose_b_per_frame,
-            "bethe_promote_denom": self.bethe_promote_denom,
         }
         for name, value in nonnegative_fields.items():
             if not math.isfinite(float(value)) or float(value) < 0.0:
@@ -302,14 +290,6 @@ class Config:
                 },
             ),
             "dose_b_mode": (self.dose_b_mode, {"none", "linear_frame"}),
-            "compute_backend": (
-                self.compute_backend,
-                set(COMPUTE_BACKENDS) | {"bethe", "scipy_bethe_promoted"},
-            ),
-            "bethe_variant": (
-                self.bethe_variant,
-                {"truncate", "schur0", "schur_target", "schur_mean"},
-            ),
             "matrix_convention": (self.matrix_convention, {"j_minus_i", "i_minus_j"}),
             "row_plan_cache": (
                 self.row_plan_cache,
@@ -337,11 +317,6 @@ class Config:
         resolved_thickness = resolved_config_evaluator(self)
         if resolved_thickness == "table":
             config_table_nodes(self)  # fails closed when the distribution has no mass on the support
-        if resolved_thickness == "cf" and str(self.compute_backend).lower() not in {"scipy", "numpy_scipy_cpu"}:
-            raise ValueError(
-                "thickness_evaluator cf (exact gamma average) needs the Hermitian eigensystem of the SciPy backend; "
-                "choose --compute-backend scipy or thickness_evaluator table"
-            )
         if not math.isfinite(float(self.sg_jitter_student_df)) or self.sg_jitter_student_df <= 1.0:
             raise ValueError("sg_jitter_student_df must be greater than 1")
         if not 0.0 < float(self.free_fraction) < 1.0:
@@ -374,8 +349,6 @@ class Config:
                     "(mean, midgley_like, midgley) with absorption_mu >= 0 and zero absorption_frac, "
                     "absorption_mu_g2, absorption_mu_theta2 and absorption_tds_b"
                 )
-            if str(self.compute_backend).lower() not in {"scipy", "numpy_scipy_cpu"}:
-                raise ValueError("paired_inverse_hand currently requires the full SciPy Hermitian backend")
 
 
 def frozen_kernel_contract(cfg: Config | None = None):
@@ -445,7 +418,7 @@ def frozen_kernel_contract(cfg: Config | None = None):
                 "EXTI-like extinction inside the raw Bloch matrix",
                 "per-row fitted absorptive form factors",
             ],
-            "solver": "scipy.linalg.eigh/eig by default; optional experimental scipy expm/expm_multiply, promoted Bethe/Schur, and JAX batched paths only when explicitly requested and probed",
+            "solver": "scipy.linalg.eigh/eig; scipy expm for an ill-conditioned non-Hermitian eigensystem",
         },
         "basis": {
             "mode": "direct_target_topup",

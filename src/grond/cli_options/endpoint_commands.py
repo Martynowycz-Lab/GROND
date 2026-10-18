@@ -106,29 +106,6 @@ def register_push(sub: argparse._SubParsersAction) -> None:
     )
     p_push.add_argument("--workers", type=int, default=auto_worker_count(0, 0.85))
     p_push.add_argument("--chunksize", type=int, default=4)
-    p_push.add_argument(
-        "--compute-backend",
-        choices=[
-            "scipy",
-            "scipy_bethe",
-            "scipy_expm",
-            "scipy_expm_multiply",
-            "jax",
-            "jax_auto",
-            "jax_cpu",
-            "jax_mps",
-            "jax_cuda",
-            "jax_padded",
-            "jax_auto_padded",
-            "jax_cpu_padded",
-            "jax_mps_padded",
-            "jax_cuda_padded",
-            "jax_cpu_real_expm",
-            "jax_mps_real_expm",
-            "jax_mps_real_expm_padded",
-        ],
-        default="scipy",
-    )
     p_push.add_argument("--row-plan-cache", choices=["off", "exact", "readwrite", "rebuild"], default="off")
     p_push.add_argument(
         "--pinned-sg-jitter-fallback",
@@ -136,14 +113,6 @@ def register_push(sub: argparse._SubParsersAction) -> None:
         default="none",
         help="Revalidate an infeasible pinned Sg-jitter model against an explicit no-jitter candidate.",
     )
-    p_push.add_argument("--jax-batch-size", type=int, default=0)
-    p_push.add_argument("--jax-matrix-bucket-size", type=int, default=0)
-    p_push.add_argument("--bethe-strong-count", type=int, default=48)
-    p_push.add_argument(
-        "--bethe-variant", choices=["truncate", "schur0", "schur_target", "schur_mean"], default="schur_target"
-    )
-    p_push.add_argument("--bethe-promote-denom", type=float, default=0.005)
-    p_push.add_argument("--bethe-denom-eps", type=float, default=1e-5)
     p_push.add_argument("--min-d-spacing", type=float, default=0.0)
     p_push.add_argument(
         "--endpoint-min-d-spacing",

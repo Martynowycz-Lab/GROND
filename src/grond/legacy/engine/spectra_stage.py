@@ -11,10 +11,7 @@ V[1, j] conj(V[0, j]), the Born terms |H10|^2 and Re(H11 - H00), and mu. Spectra
 thickness distribution, uniform absorption strength or hand, so one spectra set serves every thickness candidate
 of grond.regularize.nested_selection.
 
-CPU rows are computed in parallel (one port per worker process). Device spectra use one spawned process, which
-exits before CPU nuisance evaluation begins; the calling process never initializes JAX through this stage.
-Standalone scripts calling compute_spectra with a device backend must use an ``if __name__ == "__main__":`` guard.
-Spectra are cached by a hash of the Config (thickness fields
+Rows are computed in parallel (one port per worker process). Spectra are cached by a hash of the Config (thickness fields
 excluded), the model file, the reflection file, the transform, the row list and the engine sources. Every profile
 point also stores a digest of its matrix bytes, so a later Config can reuse an identical matrix's spectrum exactly
 (every nonzero cone width solves the same untilted block).
@@ -47,7 +44,6 @@ if not __package__:
 import numpy as np  # noqa: E402
 
 from grond.bloch.config import Config  # noqa: E402
-from grond.bloch.constants import BETHE_BACKENDS, JAX_BACKENDS, JAX_PADDED_BACKENDS  # noqa: E402
 from grond.bloch.model import alternate_hand_model, parse_model  # noqa: E402
 from grond.bloch.numerics import hermitian_eigh  # noqa: E402
 from grond.bloch.source import physics_source_files  # noqa: E402
@@ -55,10 +51,6 @@ from grond.io.xds import XDSData  # noqa: E402
 
 SPECTRA_SCHEMA = "grond-spectra-v2"
 UNIFORM_ABSORPTION_RTOL = 2e-6
-# Backends whose rows are not the exact eigensystem of the row-plan Hamiltonians (the Bethe/Schur strong-beam
-# reduction). Their spectra would describe other physics than every engine stage that uses the pick, so they are
-# refused.
-UNREPRESENTED_BACKENDS = frozenset(BETHE_BACKENDS)
 # Config fields that change no spectrum: the thickness distribution and its evaluator.
 THICKNESS_FIELDS = (
     "thickness_A",
@@ -139,122 +131,10 @@ def row_spectrum(port, row: int, donor: dict | None = None):
     matrices = plan["_dyn_matrices"]
     keys = matrix_digests(matrices, absorptive)
     donor = donor or {}
-    backend = str(getattr(getattr(port, "cfg", None), "compute_backend", "scipy") or "scipy").lower()
-    if backend in JAX_BACKENDS | JAX_PADDED_BACKENDS:
-        parts = _device_matrix_spectra(matrices, keys, donor, absorptive, backend,
-                                       int(getattr(port.cfg, "jax_batch_size", 0) or 0))
-    else:
-        parts = [donor.get(key) or matrix_spectrum(matrices[i], absorptive) for i, key in enumerate(keys)]
+    parts = [donor.get(key) or matrix_spectrum(matrices[i], absorptive) for i, key in enumerate(keys)]
     return (int(row), w, np.asarray([p[0] for p in parts]), np.asarray([p[1] for p in parts]),
             np.asarray([p[2] for p in parts]), np.asarray([p[3] for p in parts]),
             float(np.mean([p[4] for p in parts])), keys, sum(key in donor for key in keys))
-
-
-def _compact_spectral_inputs(matrices, indices, absorptive):
-    """Static off-diagonal matrix and the selected profile diagonals, prepared exactly as the dense path would.
-
-    The diagonal addition keeps the matrices' native precision, and the Hermitian split and uniform-loss checks
-    are those of split_uniform_absorption. Returns (off_diagonal, diagonals[len(indices), N], h10, delta, mu).
-    """
-    from grond.bloch.backends import _jax_host_buffer_bytes
-
-    n = len(matrices.static)
-    working_bytes = (8 * n * n + 4 * len(indices) * n) * np.dtype(complex).itemsize
-    if working_bytes > _jax_host_buffer_bytes():
-        raise MemoryError("compact spectral working buffers exceed GROND_JAX_HOST_BUFFER_GIB")
-    # Select the points before adding, so a partial donor does not build every profile diagonal.
-    native_diagonal = np.diag(matrices.static)[None, :] + matrices.excitation[indices]
-    diagonal = np.asarray(native_diagonal, dtype=complex)
-    static = np.array(matrices.static, dtype=complex, copy=True)
-    if not np.all(np.isfinite(static)) or not np.all(np.isfinite(diagonal)):
-        raise ValueError("Bloch matrices must be finite")
-    h10 = float(abs(static[1, 0]) ** 2)
-    delta = np.real(diagonal[:, 1] - diagonal[:, 0])
-    np.fill_diagonal(static, 0)
-    scale = np.maximum(np.max(np.abs(static)), np.max(np.abs(diagonal), axis=1))
-    hermitian = 0.5 * (static + static.conj().T)
-    hermitian_diagonal = 0.5 * (diagonal + diagonal.conj())
-    mu = 0.0
-    if absorptive:
-        anti = 0.5 * (static - static.conj().T)
-        anti_diagonal = 0.5 * (diagonal - diagonal.conj())
-        if not np.all(np.isfinite(anti)) or not np.all(np.isfinite(anti_diagonal)):
-            raise ValueError("absorptive matrix split must be finite")
-        # Real excitation errors leave the imaginary diagonal unchanged; mu is its mean, as in the dense split.
-        if not np.array_equal(anti_diagonal, np.broadcast_to(anti_diagonal[0], anti_diagonal.shape)):
-            raise ValueError("real profile excitation changed the imaginary diagonal")
-        np.fill_diagonal(anti, anti_diagonal[0])
-        mu_diagonal = np.imag(np.diag(anti))
-        mu = float(np.mean(mu_diagonal))
-        variation = float(np.max(np.abs(mu_diagonal - mu)))
-        np.fill_diagonal(anti, 0)
-        off_diagonal = float(np.max(np.abs(anti)))
-        bound = UNIFORM_ABSORPTION_RTOL * np.maximum(scale, 1e-30)
-        if np.any(off_diagonal > bound) or np.any(variation > bound):
-            raise ValueError("spectra need a Hermitian Hamiltonian plus uniform loss; "
-                             "this absorption model is non-uniform or off-diagonal")
-    if not np.all(np.isfinite(hermitian)) or not np.all(np.isfinite(hermitian_diagonal)):
-        raise ValueError("Hermitian matrix split must be finite")
-    return hermitian, np.ascontiguousarray(hermitian_diagonal.real), h10, delta, mu
-
-
-def _device_matrix_spectra(matrices, keys, donor, absorptive, backend, batch_size):
-    """Solve missing spectra on the requested device, retaining exact donor entries.
-
-    Dense host buffers are bounded independently of the total number of cone
-    and rocking nodes. Nonuniform absorption still fails the v2 contract.
-    """
-    from grond.bloch.backends import _jax_host_buffer_bytes
-    from grond.bloch.hamiltonian import ProfileHamiltonians
-    from grond.bloch.spectral_gpu import hermitian_spectra, hermitian_spectra_from_static, spectral_host_chunk_size
-
-    parts = [donor.get(key) for key in keys]
-    missing = [i for i, value in enumerate(parts) if value is None]
-    if not missing:
-        return parts
-    if isinstance(matrices, ProfileHamiltonians):
-        static, diagonal, h10, delta, mu = _compact_spectral_inputs(matrices, missing, absorptive)
-        lam, coupling = hermitian_spectra_from_static(static, diagonal, backend, batch_size)
-        for j, i in enumerate(missing):
-            parts[i] = (lam[j], coupling[j], h10, float(delta[j]), mu)
-        return parts
-    n = np.asarray(matrices[missing[0]]).shape[0]
-    count = spectral_host_chunk_size(n, len(missing), backend, batch_size, _jax_host_buffer_bytes())
-    for start in range(0, len(missing), count):
-        indices = missing[start:start + count]
-        H0, details = [], []
-        for i in indices:
-            H = np.asarray(matrices[i], dtype=complex)
-            hermitian, mu = split_uniform_absorption(H) if absorptive else (0.5 * (H + H.conj().T), 0.0)
-            H0.append(hermitian)
-            details.append((float(abs(H[1, 0]) ** 2), float(np.real(H[1, 1] - H[0, 0])), mu))
-        lam, coupling = hermitian_spectra(np.asarray(H0), backend, batch_size)
-        for j, i in enumerate(indices):
-            parts[i] = (lam[j], coupling[j], *details[j])
-    return parts
-
-
-def device_row_prediction(port, row: int, backend: str = "jax_cuda", batch_size: int = 0) -> dict:
-    """One row's prediction with its profile eigensystems solved on a device; otherwise port.row_prediction.
-
-    For elastic profile Hamiltonians and a node-based thickness average (no gamma cf, no paired inverse hand). The
-    eigensolve keeps the matrices' native precision (float32 for complex64 matrices, as hermitian_eigh does) and the
-    thickness average is the port's own CPU code, so the row equals the CPU row to eigensolver rounding.
-    """
-    from grond.bloch.hamiltonian import ProfileHamiltonians
-    from grond.bloch.spectral_gpu import hermitian_spectra_from_static
-
-    plan = port.row_prediction_plan(int(row))
-    matrices = plan["_dyn_matrices"]
-    if not isinstance(matrices, ProfileHamiltonians):
-        return port.row_prediction(int(row))
-    single = np.dtype(matrices.static.dtype) == np.complex64
-    static, diagonal, _h10, _delta, _mu = _compact_spectral_inputs(matrices, list(range(len(matrices))), False)
-    lam, coupling = hermitian_spectra_from_static(static, diagonal, backend, batch_size, single_precision=single)
-    if single:  # the CPU solver returns float32 eigenvalues and complex64 eigenvectors for these matrices
-        lam, coupling = lam.astype(np.float32), coupling.astype(np.complex64)
-    values = [port.elastic_spectrum_thickness_average(lam[i], coupling[i]) for i in range(len(lam))]
-    return port.finish_row_prediction_plan(plan, values)
 
 
 def load_donor(paths) -> dict:
@@ -429,22 +309,12 @@ def compute_spectra(hkl, res, cfg: Config, rows, *, hkl_transform: str = "identi
     Rows must be unique and nonnegative. A cached file is used only when its stored identity equals the request; an unreadable
     or mismatched cache file is recomputed and replaced (recorded in the provenance). ``reuse`` lists spectra files of
     this engine whose byte-identical matrices are taken over instead of solved again.
-
-    Device backends always use one spawned worker, even when workers=1. This keeps JAX and its threads out of the
-    caller so later CPU stages can safely create process pools. Standalone callers need the usual main guard.
     """
     rows = np.asarray(rows, dtype=int)
     if rows.ndim != 1 or len(rows) == 0:
         raise ValueError("spectra need a non-empty one-dimensional row list")
     if np.any(rows < 0):
         raise ValueError("spectra row indices must be nonnegative")
-    backend = str(getattr(cfg, "compute_backend", "scipy") or "scipy").lower()
-    if backend in UNREPRESENTED_BACKENDS:
-        raise ValueError(
-            f"spectra are the exact eigensystems of the full row Hamiltonians; compute_backend {backend!r} predicts "
-            "rows from another Hamiltonian (Bethe/Schur reduction or the shared-grid predictor), so a selection on "
-            "these spectra would not describe its rows; use compute_backend scipy"
-        )
     if len(np.unique(rows)) != len(rows):
         raise ValueError("spectra row indices must be unique")
     ident = spectra_identity(hkl, res, cfg, rows, hkl_transform=hkl_transform, alternate_hand=alternate_hand)
@@ -462,17 +332,9 @@ def compute_spectra(hkl, res, cfg: Config, rows, *, hkl_transform: str = "identi
             print(f"warning: spectra cache {path} not usable ({info['cache_rebuild_reason']}); recomputing", flush=True)
     t0 = time.perf_counter()
     workers = max(1, int(workers))
-    device_spectra = backend in JAX_BACKENDS | JAX_PADDED_BACKENDS
-    if device_spectra:
-        # JAX is initialized only in the spawned child, which closes before CPU nuisance evaluation can fork.
-        workers = 1
-    if device_spectra or (workers > 1 and len(rows) > 1):
-        if device_spectra:
-            context = mp.get_context("spawn")
-            chunks = [rows[start:start + 32] for start in range(0, len(rows), 32)]
-        else:
-            context = _pool_context()
-            chunks = [c for c in np.array_split(rows, max(1, min(len(rows), 4 * workers))) if len(c)]
+    if workers > 1 and len(rows) > 1:
+        context = _pool_context()
+        chunks = [c for c in np.array_split(rows, max(1, min(len(rows), 4 * workers))) if len(c)]
         # A worker that dies (or cannot start, e.g. a spawned child re-running an unguarded caller script) raises
         # BrokenProcessPool here instead of hanging the stage.
         with ProcessPoolExecutor(max_workers=min(workers, len(chunks)), mp_context=context,
@@ -495,8 +357,7 @@ def compute_spectra(hkl, res, cfg: Config, rows, *, hkl_transform: str = "identi
         write_spectra(path, spec, ident)
         status = "rebuilt" if "cache_rebuild_reason" in info else "built"
     return spec, {**info, "cache_status": status if path is not None else "disabled", "seconds": seconds,
-                  "workers": workers, "spectral_backend": backend if device_spectra else "scipy",
-                  "device_process": "spawn" if device_spectra else None,
+                  "workers": workers,
                   "reused_points": int(sum(r[8] for r in records)), **_summary(spec)}
 
 

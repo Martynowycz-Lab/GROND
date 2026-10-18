@@ -306,10 +306,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         "final_basis_fallback": args.final_basis_fallback,
         "prediction_cache_scope": args.prediction_cache_scope,
         "prediction_cache_compression": args.prediction_cache_compression,
-        "compute_backend": args.compute_backend,
         "bloch_evaluator": args.bloch_evaluator_settings,
-        "jax_batch_size": args.jax_batch_size,
-        "jax_matrix_bucket_size": args.jax_matrix_bucket_size,
         "matrix_convention": args.matrix_convention,
         "structure_update": {
             "requested": args.structure_update,

@@ -2,45 +2,6 @@
 
 from __future__ import annotations
 
-JAX_BACKENDS = {"jax", "jax_auto", "jax_cpu", "jax_mps", "jax_cuda", "jax_gpu"}
-
-JAX_PADDED_BACKENDS = {
-    "jax_padded",
-    "jax_auto_padded",
-    "jax_cpu_padded",
-    "jax_mps_padded",
-    "jax_cuda_padded",
-    "jax_gpu_padded",
-}
-
-JAX_REAL_EXPM_BACKENDS = {"jax_cpu_real_expm", "jax_mps_real_expm"}
-
-JAX_REAL_EXPM_PADDED_BACKENDS = {"jax_mps_real_expm_padded"}
-
-ALL_JAX_BACKENDS = JAX_BACKENDS | JAX_PADDED_BACKENDS | JAX_REAL_EXPM_BACKENDS | JAX_REAL_EXPM_PADDED_BACKENDS
-
-COMPUTE_BACKENDS = [
-    "scipy",
-    "scipy_bethe",
-    "scipy_expm",
-    "scipy_expm_multiply",
-    "jax",
-    "jax_auto",
-    "jax_cpu",
-    "jax_mps",
-    "jax_cuda",
-    "jax_padded",
-    "jax_auto_padded",
-    "jax_cpu_padded",
-    "jax_mps_padded",
-    "jax_cuda_padded",
-    "jax_cpu_real_expm",
-    "jax_mps_real_expm",
-    "jax_mps_real_expm_padded",
-]
-
-COMPUTE_BACKEND_HELP = ", ".join(COMPUTE_BACKENDS)
-
 # Version 8 binds the parsed input snapshots and rejects source replacement.
 ROW_PLAN_CACHE_SCHEMA = 8
 
@@ -64,5 +25,3 @@ DENSE_UG_BUILD_BYTES_PER_VOXEL = 256
 DENSE_UG_CACHE_LOAD_BYTES_PER_VOXEL = 64
 
 DEFAULT_MAX_SUPPORT_SG = 0.01
-
-BETHE_BACKENDS = {"scipy_bethe", "bethe", "scipy_bethe_promoted"}

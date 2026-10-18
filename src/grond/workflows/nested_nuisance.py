@@ -37,7 +37,6 @@ import math
 from collections.abc import Mapping
 from pathlib import Path
 
-from grond.bloch.constants import BETHE_BACKENDS
 from grond.cli_support.values import read_json, try_read_json
 from grond.io.config import DatasetSpec, PrepConfig
 from grond.paths import engine_script
@@ -145,27 +144,17 @@ def nested_grids(args: argparse.Namespace) -> SelectionGrids:
     )
 
 
-# Backends whose Hermitian eigensystem the exact gamma (cf) evaluator needs downstream (grond.bloch.config).
-CF_BACKENDS = ("scipy", "numpy_scipy_cpu")
-# Backends whose rows are not the exact eigensystems the spectra hold (grond.legacy.engine.spectra_stage).
-UNREPRESENTED_BACKENDS = frozenset(BETHE_BACKENDS)
-
-
 def nested_evaluator(args: argparse.Namespace) -> tuple[str, str]:
     """(evaluator requested from the selection, reason).
 
-    ``auto`` resolves a gamma pick with less than 1e-6 of its mass outside the support to the exact ``cf`` average,
-    which the engine computes only on the SciPy backend; with any other --compute-backend the stage requests
-    ``table`` (the same support model to its 2 A interpolation error), so no pick can be one the later stages refuse.
-    Response tables (--nested-response-tables) keep no spectra, so they always request ``table``.
+    ``auto`` resolves a gamma pick with less than 1e-6 of its mass outside the support to the exact ``cf`` average
+    from the SciPy Hermitian eigensystem. Response tables (--nested-response-tables) keep no spectra, so they always
+    request ``table`` (the same support model to its 2 A interpolation error).
     """
 
     if bool(getattr(args, "nested_response_tables", False)):
         return "table", "response_tables_keep_no_spectra"
-    backend = str(getattr(args, "compute_backend", "scipy") or "scipy").lower()
-    if backend in CF_BACKENDS:
-        return "auto", "cf_available_scipy_backend"
-    return "table", f"cf_needs_scipy_backend_not_{backend}"
+    return "auto", "cf_available_scipy_backend"
 
 
 def validate_nested_nuisance_policy(args: argparse.Namespace, prep: PrepConfig | None = None) -> dict:
@@ -200,13 +189,6 @@ def validate_nested_nuisance_policy(args: argparse.Namespace, prep: PrepConfig |
             "--nuisance-selection nested keeps absorption off (uniform mu is degenerate with the thickness "
             "distribution; the spectra need H = H0 + i*mu*I); an absorption grid needs "
             "--nuisance-selection sequential"
-        )
-    backend = str(getattr(args, "compute_backend", "scipy") or "scipy").lower()
-    if backend in UNREPRESENTED_BACKENDS:
-        raise ValueError(
-            f"--nuisance-selection nested scores candidates on the exact eigensystems of the full row Hamiltonians; "
-            f"--compute-backend {backend} predicts rows from a Bethe/Schur-reduced Hamiltonian, so the pick would not "
-            "describe its rows; use --compute-backend scipy or --nuisance-selection sequential"
         )
     nested_grids(args)
     auto_mosaicity_grid(args)

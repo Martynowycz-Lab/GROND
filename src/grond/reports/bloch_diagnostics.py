@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import math
 from collections.abc import Mapping
 from pathlib import Path
 
 from grond.cli_support.values import try_read_json
 from grond.reports.distributions import _quick_csv_numeric_audit, _quick_distribution_row
-from grond.reports.values import _quick_best_native, _quick_float, _quick_nuisance, _quick_number
+from grond.reports.values import _quick_best_native, _quick_nuisance, _quick_number
 from grond.workflows.decision import safe_label
 
 
@@ -36,7 +35,6 @@ def _write_bloch_diagnostics_report(
     best_native = _quick_best_native(final_summary)
     nuisance = _quick_nuisance(final_summary)
     native_weight = best_native.get("native_weight") if isinstance(best_native.get("native_weight"), Mapping) else {}
-    basis_stats = best_native.get("basis_size_stats") if isinstance(best_native.get("basis_size_stats"), Mapping) else {}
     scale_model = best_native.get("scale_model") if isinstance(best_native.get("scale_model"), Mapping) else {}
     scale_text = (
         f"P-spline in scan angle; n_basis `{scale_model.get('n_basis', 'n/a')}`; lambda `{scale_model.get('lambda', 'n/a')}`; "
@@ -47,7 +45,6 @@ def _write_bloch_diagnostics_report(
     row_selection = final_summary.get("row_selection") if isinstance(final_summary.get("row_selection"), Mapping) else {}
     filters = final_summary.get("filters") if isinstance(final_summary.get("filters"), Mapping) else {}
     diagnostics = final_summary.get("diagnostics") if isinstance(final_summary.get("diagnostics"), Mapping) else {}
-    kernel = final_summary.get("bloch_kernel_contract") if isinstance(final_summary.get("bloch_kernel_contract"), Mapping) else {}
     metadata = row_metrics.get("metadata", {}) if isinstance(row_metrics.get("metadata"), Mapping) else {}
     columns = [
         "d_A",
@@ -74,23 +71,6 @@ def _write_bloch_diagnostics_report(
     ]
     audit = _quick_csv_numeric_audit(row_table, columns)
     column_stats = audit.get("columns") if isinstance(audit.get("columns"), Mapping) else {}
-    basis_summary = column_stats.get("basis_size") if isinstance(column_stats.get("basis_size"), Mapping) else {}
-    basis_median = _quick_float(basis_summary.get("median", basis_stats.get("median")))
-    basis_p95 = _quick_float(basis_summary.get("p95", basis_stats.get("p95")))
-    basis_max = _quick_float(basis_summary.get("max", basis_stats.get("max")))
-    bethe_strong = _quick_float(config.get("bethe_strong_count"), 0.0)
-    if not math.isfinite(bethe_strong) or bethe_strong <= 0.0:
-        bethe_strong = _quick_float(kernel.get("bethe_strong_count"), 0.0)
-
-    def strong_weak_text(basis_value: float) -> str:
-        """Split a basis size into Bethe strong and weak beams, 'N strong / M weak'; n/a when a count is unknown."""
-
-        if not math.isfinite(basis_value) or basis_value <= 0 or not math.isfinite(bethe_strong) or bethe_strong <= 0:
-            return "n/a"
-        strong = min(int(round(bethe_strong)), int(round(basis_value)))
-        weak = max(0, int(round(basis_value)) - strong)
-        return f"{strong} strong / {weak} weak"
-
     row_plan = diagnostics.get("row_plan_cache") if isinstance(diagnostics.get("row_plan_cache"), Mapping) else {}
     ug_cache = diagnostics.get("ug_cache") if isinstance(diagnostics.get("ug_cache"), Mapping) else {}
     geometry = row_selection.get("geometry_filter") if isinstance(row_selection.get("geometry_filter"), Mapping) else {}
@@ -115,7 +95,6 @@ def _write_bloch_diagnostics_report(
         "",
         "| item | value |",
         "|---|---|",
-        f"| backend | `{config.get('compute_backend', kernel.get('compute_backend', 'n/a'))}` |",
         f"| N / Q | `{config.get('n_basis', metadata.get('n_basis', 'n/a'))}` / `{config.get('n_points', metadata.get('n_points', 'n/a'))}` |",
         f"| matrix convention | `{config.get('matrix_convention', nuisance.get('matrix_convention', 'n/a'))}` |",
         f"| profile quadrature / accumulation | `{config.get('profile_quadrature', 'n/a')}` / `{config.get('profile_accumulation', 'n/a')}` |",
@@ -123,19 +102,6 @@ def _write_bloch_diagnostics_report(
         f"| top-up dmin | `{_quick_number(config.get('topup_d_min'), 3)}` A |",
         f"| row-plan cache | `{row_plan.get('status', row_plan or config.get('row_plan_cache', 'n/a'))}`; unique diffs `{diagnostics.get('row_plan_cache_unique_diffs', 0)}` |",
         f"| U_g cache | `{ug_cache.get('status', ug_cache or 'n/a')}` |",
-        "",
-        "## Bethe Approximation",
-        "",
-        "| item | value |",
-        "|---|---|",
-        f"| backend requested | `{config.get('compute_backend', 'n/a')}` |",
-        f"| strong-beam request | `{config.get('bethe_strong_count', 'n/a')}` |",
-        f"| variant / promote denom / eps | `{config.get('bethe_variant', 'n/a')}` / `{config.get('bethe_promote_denom', 'n/a')}` / `{config.get('bethe_denom_eps', 'n/a')}` |",
-        f"| median basis strong/weak | `{strong_weak_text(basis_median)}` |",
-        f"| p95 basis strong/weak | `{strong_weak_text(basis_p95)}` |",
-        f"| max basis strong/weak | `{strong_weak_text(basis_max)}` |",
-        "",
-        "If the backend is not `scipy_bethe`, the strong/weak counts are only the configured Bethe diagnostic capacity and no Schur reduction was used for the final prediction.",
         "",
         "## Sg, Rocking, And Quadrature",
         "",

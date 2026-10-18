@@ -141,12 +141,6 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     # of this diagnostic. Do not silently substitute another healthy Python.
     python = str(getattr(args, "python", "") or "").strip() or choose_python("")
     payload = probe_accelerators(python)
-    if not bool(getattr(args, "all_tools", False)):
-        payload.pop("optional_packages", None)
-        engine = payload.get("engine")
-        if isinstance(engine, dict):
-            engine.pop("optional_backends", None)
-            engine["optional_backends_note"] = "Use --all-tools to report experimental JAX backends."
     package_init = PACKAGE_ROOT / "__init__.py"
     absolute_structure_script = engine_script("absolute_structure_diagnostic.py")
     absolute_structure_text = _source_text("legacy/engine/absolute_structure_diagnostic.py")
@@ -195,10 +189,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     }
     payload["ready_scope"] = str(getattr(args, "workflow", "core") or "core")
     if args.probe_bloch:
-        bloch_ops = probe_bloch_ops(python)
-        if not bool(getattr(args, "all_tools", False)):
-            bloch_ops.pop("jax", None)
-        payload["bloch_ops"] = bloch_ops
+        payload["bloch_ops"] = probe_bloch_ops(python)
     failures = _doctor_readiness_failures(
         payload,
         require_bloch=bool(args.probe_bloch),

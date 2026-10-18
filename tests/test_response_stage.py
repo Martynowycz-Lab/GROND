@@ -72,8 +72,6 @@ def test_bad_requests_fail_closed(dataset):
         RS.compute_response_table(hkl, res, CONFIG, [1, 1], SUPPORT)
     with pytest.raises(ValueError, match="hands"):
         RS.compute_response_table(hkl, res, CONFIG, [1], SUPPORT, hands=(2,))
-    with pytest.raises(ValueError, match="reduction"):
-        RS.compute_response_table(hkl, res, Config(n_basis=8, compute_backend="bethe"), [1], SUPPORT)
 
 
 # ----------------------------------------------------------------------------- selection on tables

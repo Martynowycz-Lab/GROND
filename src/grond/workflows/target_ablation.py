@@ -82,8 +82,6 @@ def _target_ablation_auto_command(args: argparse.Namespace, variant: str, out_di
         f"{float(args.max_core_fraction):g}",
         "--chunksize",
         str(int(args.chunksize)),
-        "--compute-backend",
-        str(args.compute_backend),
         "--row-plan-cache",
         str(args.row_plan_cache),
         "--prediction-cache-compression",

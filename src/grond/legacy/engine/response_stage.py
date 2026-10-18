@@ -25,7 +25,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import multiprocessing as mp
 import os
 import shutil
 import sys
@@ -43,7 +42,6 @@ if not __package__:
 import numpy as np  # noqa: E402
 
 from grond.bloch.config import Config  # noqa: E402
-from grond.bloch.constants import JAX_BACKENDS, JAX_PADDED_BACKENDS  # noqa: E402
 from grond.legacy.engine import spectra_stage as spectra  # noqa: E402
 from grond.regularize import nested_selection  # noqa: E402
 from grond.regularize.nested_selection import ThicknessSupport, thickness_table  # noqa: E402
@@ -167,8 +165,7 @@ def compute_response_table(hkl, res, cfg: Config, rows, support: ThicknessSuppor
     Rows must be unique and nonnegative. A cached table is used only when its stored identity equals the request; an
     unreadable or mismatched one is recomputed and replaced. Rows are written to the table files as they arrive,
     so the parent never holds more than the table; without ``cache_dir`` the files go to a temporary directory that
-    is removed after the table is read back. Device backends use one spawned worker, as in
-    spectra_stage.compute_spectra.
+    is removed after the table is read back.
     """
     rows = np.asarray(rows, dtype=int)
     if rows.ndim != 1 or len(rows) == 0:
@@ -180,13 +177,10 @@ def compute_response_table(hkl, res, cfg: Config, rows, support: ThicknessSuppor
     hands = tuple(dict.fromkeys(int(h) for h in hands))
     if not hands or any(h not in (1, -1) for h in hands):
         raise ValueError("hands must be +1 (model) and/or -1 (inverse)")
-    backend = str(getattr(cfg, "compute_backend", "scipy") or "scipy").lower()
-    if backend in spectra.UNREPRESENTED_BACKENDS:
-        raise ValueError(f"response tables need the exact row eigensystems; compute_backend {backend!r} is a reduction")
     from grond.bloch import shared_grid
 
     grid_port = None
-    if shared_grid.mode() != "off" and backend not in JAX_BACKENDS | JAX_PADDED_BACKENDS:
+    if shared_grid.mode() != "off":
         if ug_cache_dir is None and cache_dir is not None:
             # One U_g cube per model for every variant of a selection (dose and cone do not change it).
             ug_cache_dir = Path(cache_dir) / "ug_cache"
@@ -226,8 +220,7 @@ def compute_response_table(hkl, res, cfg: Config, rows, support: ThicknessSuppor
                   for k in [*(hand_key(h) for h in hands), "born"]}
         per_row = {"row_ids": np.empty(len(rows), int), "mu": np.empty(len(rows)), "n_p": np.empty(len(rows), int),
                    "n_b": np.empty(len(rows), int), "reused_points": np.empty(len(rows), int)}
-        device = backend in JAX_BACKENDS | JAX_PADDED_BACKENDS
-        workers = 1 if device else max(1, int(workers))
+        workers = max(1, int(workers))
 
         def store(position: int, entry: dict) -> None:
             for name, values in arrays.items():
@@ -242,11 +235,11 @@ def compute_response_table(hkl, res, cfg: Config, rows, support: ThicknessSuppor
             for name, values in per_row.items():
                 values[:] = arrays_grid[name]
             del arrays_grid
-        elif device or workers > 1:
+        elif workers > 1:
             # One or a few rows per task keeps every worker busy to the end; results arrive in row order.
             size = max(1, min(8, len(rows) // (4 * workers)))
             chunks = [rows[i:i + size] for i in range(0, len(rows), size)]
-            context = mp.get_context("spawn") if device else spectra._pool_context()
+            context = spectra._pool_context()
             with ProcessPoolExecutor(max_workers=min(workers, len(chunks)), mp_context=context, initializer=_init_worker,
                                      initargs=(str(hkl), str(hkl_transform), str(res), cfg, bool(alternate_hand),
                                                None if ug_cache_dir is None else str(ug_cache_dir), support,
@@ -284,7 +277,6 @@ def compute_response_table(hkl, res, cfg: Config, rows, support: ThicknessSuppor
         shutil.rmtree(work, ignore_errors=True)
         raise
     return table, {**info, "cache_status": status, "seconds": seconds, "workers": workers,
-                   "spectral_backend": backend if device else "scipy", "device_process": "spawn" if device else None,
                    "reused_points": int(np.sum(table["reused_points"])), **_summary(table)}
 
 

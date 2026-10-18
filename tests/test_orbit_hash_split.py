@@ -369,9 +369,7 @@ def test_single_dataset_shelxl_feedback_cycles_replay_the_orbit_hash_split(tmp_p
         lambda_grid="1", shelxl="shelxl", shelxl_iterations=1, endpoint_ls_cycles=1,
         post_bloch_sigma_policy="none", post_bloch_sigma_holdout_fraction=0.2,
         post_bloch_sigma_min_scale=0.25, post_bloch_sigma_max_scale=4.0,
-        rescale="none", workers=1, chunksize=1, cache_compression="none", compute_backend="scipy",
-        jax_batch_size=0, jax_matrix_bucket_size=0, bethe_strong_count=48,
-        bethe_variant="schur_target", bethe_promote_denom=0.005, bethe_denom_eps=1e-5, max_rows=0,
+        rescale="none", workers=1, chunksize=1, cache_compression="none", max_rows=0,
     )
     # The source summary records the engine config (vars(args)) of an AUTO orbit-hash stage.
     config = {

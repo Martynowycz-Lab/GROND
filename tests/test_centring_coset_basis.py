@@ -1,7 +1,9 @@
 """Beams outside the direct beam's lattice-centring coset do not couple to it, so dropping them changes nothing."""
 
 import numpy as np
+import pytest
 
+from grond.bloch import config as config_module
 from grond.bloch.config import Config
 from grond.bloch.potential import centring_coset_mask
 from grond.legacy.engine import spectra_stage as S
@@ -53,3 +55,14 @@ def test_coset_basis_reproduces_the_full_basis_intensities(tmp_path):
     coset = thickness_table(S.pack_spectra(coset_records), support, hands=(1, -1))
     for key in (1, -1, "born"):
         np.testing.assert_allclose(coset[key], full[key], rtol=1e-10, atol=1e-14 * np.max(full[key]))
+
+
+def test_centring_coset_default_comes_from_the_environment(monkeypatch):
+    monkeypatch.delenv("GROND_BASIS_CENTRING_COSET", raising=False)
+    assert Config().basis_centring_coset is False
+    monkeypatch.setenv("GROND_BASIS_CENTRING_COSET", "1")
+    assert Config().basis_centring_coset is True
+    assert Config(basis_centring_coset=False).basis_centring_coset is False
+    monkeypatch.setenv("GROND_BASIS_CENTRING_COSET", "maybe")
+    with pytest.raises(ValueError, match="GROND_BASIS_CENTRING_COSET"):
+        config_module._default_centring_coset()

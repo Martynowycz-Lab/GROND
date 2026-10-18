@@ -3,6 +3,7 @@
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from grond.bloch.hamiltonian import ProfileHamiltonians
 from grond.legacy.engine import spectra_stage as S
@@ -45,3 +46,24 @@ def test_digests_change_with_any_matrix_byte():
     assert keys[0] != keys[1]
     assert keys[0] != S.matrix_digests(ProfileHamiltonians(static, excitation), True)[0]
     assert keys[0] != S.matrix_digests(ProfileHamiltonians(static.astype(np.complex128), excitation), False)[0]
+
+
+def test_solver_source_change_invalidates_cache_identity(monkeypatch, tmp_path):
+    helper = tmp_path / "hamiltonian.py"
+    helper.write_text("first implementation\n")
+    monkeypatch.setattr(S, "physics_source_files", lambda: (helper,))
+    first = S.engine_source_sha256()
+    helper.write_text("changed implementation\n")
+    assert S.engine_source_sha256() != first
+
+
+@pytest.mark.parametrize("identity", [{}, {"schema": S.SPECTRA_SCHEMA},
+                                       {"schema": S.SPECTRA_SCHEMA, "engine_sha256": "stale-source"},
+                                       {"schema": "old-spectra", "engine_sha256": "stale-source"}])
+def test_unbound_or_stale_donor_is_rejected(tmp_path, identity):
+    static = np.eye(3, dtype=np.complex128) * 1e-4
+    record = S.row_spectrum(_port(static, np.zeros((1, 3))), 1)
+    path = tmp_path / "donor.npz"
+    S.write_spectra(path, S.pack_spectra([record]), identity)
+    with pytest.raises(ValueError, match="identity|source|engine|schema"):
+        S.load_donor([path])
