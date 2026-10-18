@@ -20,20 +20,11 @@ def register_scouts(sub: argparse._SubParsersAction) -> None:
     p_scout.add_argument("--out-dir", required=True)
     p_scout.add_argument("--python", default="")
     add_tool_config_args(p_scout)
-    p_scout.add_argument("--dry-run", action="store_true")
-    p_scout.add_argument("--resume", action=argparse.BooleanOptionalAction, default=True)
     p_scout.add_argument("--workers", type=int, default=0)
-    p_scout.add_argument("--max-core-fraction", type=float, default=0.85)
-    p_scout.add_argument("--chunksize", type=int, default=0)
     p_scout.add_argument(
         "--transform-parity-policy",
         choices=["proper-only", "all-diagnostic"],
         default="proper-only",
-    )
-    p_scout.add_argument(
-        "--trust-hkl-transform",
-        action="store_true",
-        help="Skip scouting and freeze the proper transform already recorded in the prep file.",
     )
     p_scout.set_defaults(func=cmd_scout)
 
@@ -47,11 +38,7 @@ def register_scouts(sub: argparse._SubParsersAction) -> None:
     p_hand.add_argument("--out-dir", required=True)
     p_hand.add_argument("--python", default="")
     add_tool_config_args(p_hand)
-    p_hand.add_argument("--dry-run", action="store_true")
-    p_hand.add_argument("--resume", action=argparse.BooleanOptionalAction, default=True)
     p_hand.add_argument("--workers", type=int, default=0)
-    p_hand.add_argument("--max-core-fraction", type=float, default=0.85)
-    p_hand.add_argument("--chunksize", type=int, default=0)
     p_hand.add_argument(
         "--row-plan-cache",
         choices=["off", "exact", "readwrite", "rebuild"],
@@ -85,18 +72,6 @@ def register_scouts(sub: argparse._SubParsersAction) -> None:
             "negative-thickness identity. preserve is available only with explicit "
             "coordinate inversion."
         ),
-    )
-    p_hand.add_argument(
-        "--hand-check-n-basis",
-        type=int,
-        default=0,
-        help="Override the source N value. Zero reuses the exact source value.",
-    )
-    p_hand.add_argument(
-        "--hand-check-n-points",
-        type=int,
-        default=0,
-        help="Override the source Q value. Zero reuses the exact source value.",
     )
     p_hand.set_defaults(func=cmd_hand_check)
 
@@ -136,41 +111,4 @@ def register_thickness(sub: argparse._SubParsersAction) -> None:
         default=True,
         help="Use local thickness/gradient grids for basis values after the first broad scout.",
     )
-    p_thick.add_argument("--local-window-nm", type=float, default=30.0)
-    p_thick.add_argument("--local-step-nm", type=float, default=10.0)
-    p_thick.add_argument("--local-gradient-window", type=float, default=0.2)
-    p_thick.add_argument("--local-gradient-step", type=float, default=0.2)
-    p_thick.add_argument("--thickness-min-nm", type=float, default=10.0)
-    p_thick.add_argument("--thickness-max-nm", type=float, default=500.0)
-    p_thick.add_argument("--gradient-min", type=float, default=0.0)
-    p_thick.add_argument("--gradient-max", type=float, default=1.0)
-    p_thick.add_argument(
-        "--warning-shift-nm",
-        type=float,
-        default=75.0,
-        help="Warn when a selected thickness is this far from the promoted reference.",
-    )
-    p_thick.add_argument(
-        "--thickness-scout-max-rows",
-        type=int,
-        default=0,
-        help="Optional row cap for scout runs. 0 uses the selected production row set.",
-    )
-    p_thick.add_argument(
-        "--thickness-scout-thickness-points",
-        type=int,
-        default=5,
-        help="Thickness quadrature points inside each candidate thickness model.",
-    )
-    p_thick.add_argument("--thickness-scout-final-sg-jitter-mode", default="gaussian")
-    p_thick.add_argument("--thickness-scout-final-sg-jitter-sigma0", type=float, default=0.0015)
-    p_thick.add_argument("--thickness-scout-final-sg-jitter-sigma-d-inv", type=float, default=0.0)
-    p_thick.add_argument("--thickness-scout-final-sg-jitter-sigma-frame", type=float, default=0.0)
-    p_thick.add_argument("--thickness-scout-final-sg-jitter-points", type=int, default=3)
-    p_thick.add_argument("--thickness-scout-final-absorption-mode", default="midgley_like")
-    p_thick.add_argument("--thickness-scout-final-absorption-mu", type=float, default=0.00005)
-    p_thick.add_argument("--thickness-scout-final-absorption-frac", type=float, default=0.02)
-    p_thick.add_argument("--thickness-scout-final-absorption-mu-g2", type=float, default=0.0)
-    p_thick.add_argument("--thickness-scout-final-absorption-mu-theta2", type=float, default=0.0)
-    p_thick.add_argument("--thickness-scout-final-absorption-tds-b", type=float, default=0.0)
     p_thick.set_defaults(func=cmd_thickness_scout)

@@ -120,8 +120,8 @@ def cmd_hand_check(args: argparse.Namespace) -> int:
     args.workers = auto_worker_count(args.workers, args.max_core_fraction)
     args.chunksize = auto_chunksize(args.chunksize, args.workers)
     args.dataset_row_contracts = {dataset.name: row_table}
-    n_basis = int(args.hand_check_n_basis or source_config.get("n_basis") or 20)
-    n_points = int(args.hand_check_n_points or source_config.get("n_points") or 10)
+    n_basis = int(source_config.get("n_basis") or 20)
+    n_points = int(source_config.get("n_points") or 10)
     inverse_structure = make_alternate_hand_model(
         python,
         structure,

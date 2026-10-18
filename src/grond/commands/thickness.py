@@ -37,6 +37,18 @@ from grond.workflows.thickness_scout import (
     _write_thickness_scout_report,
 )
 
+# Local confirmation grids around the first broad pick (thickness in nm, uniform-gradient fraction) and their
+# bounds; a selected thickness this far from the promoted reference is warned about.
+LOCAL_WINDOW_NM = 30.0
+LOCAL_STEP_NM = 10.0
+LOCAL_GRADIENT_WINDOW = 0.2
+LOCAL_GRADIENT_STEP = 0.2
+THICKNESS_MIN_NM = 10.0
+THICKNESS_MAX_NM = 500.0
+GRADIENT_MIN = 0.0
+GRADIENT_MAX = 1.0
+WARNING_SHIFT_NM = 75.0
+
 
 def cmd_thickness_scout(args: argparse.Namespace) -> int:
     """Run a diagnostic thickness contract-sensitivity scout."""
@@ -99,20 +111,20 @@ def cmd_thickness_scout(args: argparse.Namespace) -> int:
                     thick_values_A = (
                         centered_grid(
                             center_A,
-                            window=10.0 * float(args.local_window_nm),
-                            step=10.0 * float(args.local_step_nm),
-                            lower=10.0 * float(args.thickness_min_nm),
-                            upper=10.0 * float(args.thickness_max_nm),
+                            window=10.0 * LOCAL_WINDOW_NM,
+                            step=10.0 * LOCAL_STEP_NM,
+                            lower=10.0 * THICKNESS_MIN_NM,
+                            upper=10.0 * THICKNESS_MAX_NM,
                         )
                         or full_grid_A
                     )
                     grad_values = (
                         centered_grid(
                             center_grad,
-                            window=float(args.local_gradient_window),
-                            step=float(args.local_gradient_step),
-                            lower=float(args.gradient_min),
-                            upper=float(args.gradient_max),
+                            window=LOCAL_GRADIENT_WINDOW,
+                            step=LOCAL_GRADIENT_STEP,
+                            lower=GRADIENT_MIN,
+                            upper=GRADIENT_MAX,
                         )
                         or gradient_grid
                     )
@@ -186,7 +198,7 @@ def cmd_thickness_scout(args: argparse.Namespace) -> int:
             thickness_nm = _float_from_mapping(row, "thickness_nm")
             if math.isfinite(reference_thickness) and math.isfinite(thickness_nm):
                 delta_nm = abs(thickness_nm - reference_thickness)
-                if delta_nm >= float(args.warning_shift_nm):
+                if delta_nm >= WARNING_SHIFT_NM:
                     warnings.append(
                         f"{row.get('dataset')} {row.get('feature_mode')} N{row.get('n_basis')} selected {thickness_nm:.1f} nm, {delta_nm:.1f} nm away from the promoted reference. Treat this as row-contract sensitivity, not a new physical thickness."
                     )
@@ -207,7 +219,7 @@ def cmd_thickness_scout(args: argparse.Namespace) -> int:
         "policy": {
             "interpretation": "GROND thickness is row-contract effective thickness, not a direct microscope thickness unless independently calibrated.",
             "auto_recommendation": "Use the early bare thickness for auto, pin it through LS1, and treat final-feature movement as a warning.",
-            "warning_shift_nm": float(args.warning_shift_nm),
+            "warning_shift_nm": WARNING_SHIFT_NM,
         },
         "promoted_reference": promoted_reference,
         "runs": rows,
