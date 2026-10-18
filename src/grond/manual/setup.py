@@ -85,7 +85,7 @@ def manual_setup(args) -> int:
     if baseline is not None and str(args.shelxl or "shelxl") != "shelxl":
         baseline_dir = setup_dir / "fresh_conventional_baseline"
         command_line = [
-            str(Path(args.python).expanduser().resolve())
+            str(Path(args.python).expanduser().absolute())  # keep a venv symlink
             if str(getattr(args, "python", "") or "").strip()
             else sys.executable,
             str(PACKAGE_ROOT / "engine" / "run_shelxl_baseline.py"),
@@ -111,7 +111,7 @@ def manual_setup(args) -> int:
         "datasets": [asdict(dataset) for dataset in datasets],
         "runtime_defaults": {
             "workers": int(getattr(args, "workers", 0) or 0),
-            "python": str(Path(args.python).expanduser().resolve())
+            "python": str(Path(args.python).expanduser().absolute())  # keep a venv symlink
             if str(getattr(args, "python", "") or "").strip()
             else "",
             "config": str(Path(args.config).expanduser().resolve())
