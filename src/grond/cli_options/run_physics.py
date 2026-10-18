@@ -103,7 +103,7 @@ def add_basis(ap: argparse.ArgumentParser) -> None:
         "--n-basis",
         type=int,
         default=0,
-        help="Basis size for pinned final polish runs. Default 0 scans Sg support and uses max support plus margin.",
+        help="Beams per observation in the final rounds. Default 0 scans Sg support and uses the maximum support plus margin.",
     )
     ap.add_argument(
         "--n-points",
@@ -123,7 +123,7 @@ def add_basis(ap: argparse.ArgumentParser) -> None:
         "--final-basis-margin",
         type=int,
         default=10,
-        help="Extra beams above the observed maximum support for final polish.",
+        help="Extra beams above the observed maximum support in the final rounds.",
     )
     ap.add_argument("--final-basis-min", type=int, default=20)
     ap.add_argument("--final-basis-max", type=int, default=500, help="Most beams per observation in the final rounds (default %(default)s).")
@@ -240,7 +240,7 @@ def add_nuisance(ap: argparse.ArgumentParser) -> None:
             "nested: per crystal, after the screen and the early hand decision, select mosaic cone x dose B x thickness "
             "distribution (uniform_gradient or gamma) x P-spline lambda jointly by inner orbit CV on work rows from Bloch "
             "spectra, and pin the pick for every later stage (the cone and dose gates do not run). sequential: the "
-            "discrete/continuous thickness polish followed by the cone and dose gates. Legacy: sequential."
+            "discrete thickness polish followed by the cone and dose gates. Legacy: sequential."
         ),
     )
     ap.add_argument(

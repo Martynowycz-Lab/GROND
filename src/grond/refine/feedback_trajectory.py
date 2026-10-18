@@ -105,7 +105,7 @@ def atom_xyz(res_path: Path) -> dict[str, np.ndarray]:
 
     Keys are the atom names for atoms outside RESI/PART blocks.  Inside a residue or a
     disorder part, or for a repeated name, the key also carries the RESI and PART context and the
-    occurrence, so a macromolecular model (N, CA, C, O in every residue) is compared atom by atom
+    occurrence, so a model with residues (N, CA, C, O in every residue) is compared atom by atom
     instead of the last residue overwriting all the others.
     """
 

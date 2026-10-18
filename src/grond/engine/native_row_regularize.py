@@ -1949,7 +1949,7 @@ def main():
         "endpoint_factor_decision": endpoint_factor_decision,
         "baseline_exti": baseline,
         "wall_seconds": time.perf_counter() - t0,
-        "caveat": "This is fixed-structure nuisance regularization. Coordinates, ADPs, occupancies, and restraints still require a cctbx/SHELXL gradient bridge.",
+        "caveat": "This is fixed-structure nuisance regularization. SHELXL refines coordinates, ADPs, occupancies and restraints.",
     }
     native_gate = {
         "bloch_beats_born_all_wR2": bool(best["metrics"]["all"]["dyn"]["wR2_all"] < best["metrics"]["all"]["born"]["wR2_all"]),
@@ -2062,12 +2062,6 @@ def main():
         lines.extend(["", "## Maps", ""])
         for name, rec in maps.items():
             lines.append(f"`{name}`: `{rec.get('map')}`")
-    lines.extend([
-        "",
-        "## Next Implementation Boundary",
-        "",
-        "The next real structure-update layer should pass this native target into cctbx as an external least-squares target with analytic or finite-difference derivatives for coordinates, ADPs, occupancies, and restraint terms. This script deliberately keeps that out of the nuisance fit so the current endpoint remains auditable.",
-    ])
     (out / "REPORT.md").write_text("\n".join(lines) + "\n")
     print(json.dumps({"out_dir": str(out.resolve()), "best_endpoint": summary["best_endpoint"], "report": str((out / "REPORT.md").resolve())}, indent=2, allow_nan=True))
 

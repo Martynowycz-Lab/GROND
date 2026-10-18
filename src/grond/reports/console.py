@@ -522,7 +522,7 @@ def _score(value: object) -> str:
 def feature_decision_line(record: Mapping[str, object]) -> str:
     """Format one nuisance-feature decision record as a console line.
 
-    The format depends on the family: discrete or continuous thickness polish, an orbit-CV family with its
+    The format depends on the family: discrete thickness polish, an orbit-CV family with its
     candidates and paired test, or a score-gated family.
     """
 

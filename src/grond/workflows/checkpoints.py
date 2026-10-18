@@ -154,7 +154,7 @@ def write_continue_checkpoint(prep: PrepConfig, result: Mapping[str, object], ar
         "notes": [
             "Use this for deliberate continuation from a changed model while reusing the pinned GROND row/nuisance contract.",
             "For multi-dataset checkpoints, GROND recomputes each dataset from the edited shared model, merges corrected endpoint observations, then runs one shared SHELXL LS step per macrocycle.",
-            "Checkpoint dataset source runs retain the full physical native calculations; any selected compact scale contract is endpoint provenance only. Multi-dataset push refits the pinned full grouping and does not automatically rerun compact scale selection, so a changed-model publication endpoint needs a separate post-push compact-scale selection.",
+            "Checkpoint dataset source runs keep the full native calculations. Multi-dataset push refits the pinned full frame grouping.",
             "For an interrupted GROND auto run, rerun the original command with the same --out-dir instead.",
         ],
     }
