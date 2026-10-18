@@ -1,59 +1,35 @@
 # GROND
 
-**Global Regularization Of Non-kinematical Diffraction**
+GROND (Global Regularization Of Non-kinematical Diffraction) corrects electron-diffraction intensities for multiple
+scattering. It reads unmerged observations integrated by DIALS or XDS and a solved SHELX model, calculates every
+observation with Bloch waves, and writes an HKLF 4 file of corrected intensities that SHELXL or Olex2 refine as
+usual. GROND recalculates the correction for each new model until the model stops moving.
 
-GROND adds dynamical (Bloch-wave) corrections to electron-diffraction data integrated with **XDS or DIALS**, and hands the corrected intensities to **SHELXL or olex2.refine** as an ordinary HKLF 4 file. You keep your integration program and your refinement program; GROND sits between them.
-
-GROND is research software. Read [LIMITATIONS.md](LIMITATIONS.md) before relying on a result.
-
-## How it works
-
-For every unmerged observation, GROND calculates two intensities from the current model at the orientations where the observation was recorded:
-
-- the dynamical intensity $I_\mathrm{dyn}$, from a Bloch-wave calculation;
-- the kinematic intensity $I_\mathrm{kin}$, from the same beams, rocking range and thickness.
-
-It fits the few experimental settings that this calculation needs, on working observations only:
-
-- smooth frame scales for each crystal;
-- a thickness distribution (gamma or wedge);
-- a mosaic spread;
-- a radiation-damage term.
-
-It then writes corrected intensities
-
-```text
-I_corr = κ |Fc|² · I_obs / (s · I_dyn)
-```
-
-which take the calculated dynamical effect out of each measurement and keep its measured deviation from the model. SHELXL refines the corrected data like X-ray data, GROND recalculates the correction for the new model, and the two alternate until no non-hydrogen atom moves by more than 0.002 Å (at most five rounds). Because the corrected amplitudes are the usual dynamical map coefficients, SHELXL's own Fo − Fc maps are dynamically corrected difference maps.
-
-Validation is built in. GROND holds out a free set of about 10% of the unique reflections, starts from a model refined without them, chooses every setting by cross-validation on the working observations, and reports R factors on the free set with bootstrap confidence intervals. For non-centrosymmetric structures it compares the model with its inverse on held-out reflections.
+The method is described in the paper (preprint link to follow). This repository holds the code used for it.
 
 ## Install
 
-GROND needs Python 3.11 or later and a SHELXL executable. Importing DIALS data also needs a Python that can import `dials` (for example the one shipped with DIALS).
+Python 3.11 or later on Linux or macOS, and SHELXL. NumPy, SciPy and gemmi are installed with the package.
 
 ```bash
 git clone https://github.com/Martynowycz-Lab/GROND.git
 cd GROND
-python3 -m venv .venv
-source .venv/bin/activate
+python3 -m venv .venv && source .venv/bin/activate
 python -m pip install .
-grond init-config --out grond.config.json     # then set the path to SHELXL in this file
-grond doctor --workflow small-molecule --config grond.config.json   # checks the installation and SHELXL
+grond init-config --out grond.config.json      # put the SHELXL path in this file
+grond doctor --workflow small-molecule --config grond.config.json
 ```
 
-More detail is in [docs/INSTALL.md](docs/INSTALL.md).
+Details are in [docs/INSTALL.md](docs/INSTALL.md).
 
 ## Inputs
 
-- A SHELX `.res` model with numeric electron scattering factors on its SFAC lines (`grond sfac-check` checks this), and the merged HKLF 4 file it was refined against.
-- The unmerged observations of each crystal:
-  - **XDS**: a directory with `INTEGRATE.HKL` from a summation run (`PROFILE_FITTING=FALSE`) and `XPARM.XDS` or `GXPARM.XDS`;
-  - **DIALS**: the `integrated.refl` and `integrated.expt` files, converted once per crystal with `grond import-dials`.
-
-XDS and DIALS crystals can be mixed in one run.
+- A SHELX `.res` model with numeric electron scattering factors on its SFAC lines (`grond sfac-check` checks this),
+  and the HKLF 4 file it was refined against.
+- For each crystal, the unmerged summation intensities and the scan geometry:
+  - DIALS: `integrated.refl` and `integrated.expt`, converted once with `grond import-dials`
+    ([docs/DIALS.md](docs/DIALS.md));
+  - XDS: a directory with `INTEGRATE.HKL` from a run with `PROFILE_FITTING= FALSE` ([docs/XDS.md](docs/XDS.md)).
 
 ## Run
 
@@ -66,49 +42,54 @@ grond auto --prep prep.json --config grond.config.json --workers 40 --out-dir ru
 grond finish --run-dir run
 ```
 
-- `grond auto --preset fast` gives a quick answer with every check kept; use it to try a new data set.
-- Repeating a stopped command with the same output directory resumes it.
-- `grond manual` runs the same calculation one stage at a time, and `grond refine` recalculates the corrections for a model you refined yourself in SHELXL or Olex2. See [docs/USAGE.md](docs/USAGE.md).
+`grond auto --preset fast` gives a quick answer with every check kept. Rerunning a stopped command with the same
+`--out-dir` resumes it. `grond <command> -h` lists the common options; `-h -v` and `-h -vv` list the rest.
 
-**Free set.** By default (`--free-set off`) GROND holds out the free set while it chooses every setting and reports the held-out validation, then refines the chosen model once more against all reflections and writes that as the result. With `--free-set on` the free reflections stay out of the final model as well.
+| Command | What it does |
+|---|---|
+| `auto` | Full run: indexing check, held-out set, settings by cross-validation, hand test, SHELXL rounds. |
+| `manual` | The same calculation one stage at a time, for inspection. |
+| `refine` | Recalculates the corrections for a model you refined yourself, with the settings saved by `auto`. |
+| `finish` | Writes the maps and summary tables of a finished run. |
+| `prep` | Writes the input file for one model and one or more crystals. |
+| `import-dials` | Converts a DIALS `integrated.refl`/`.expt` pair. |
+| `export-pets` | Writes DIALS or XDS observations as PETS2 `cif_pets` files, for Jana2020 or diffBloch. |
+| `sfac-check`, `init-config`, `doctor` | Check the model, write the tool config, check the installation. |
 
-## Results
+## What `auto` does
 
-Open these first in the output directory:
+1. Holds out 10% of the unique reflections (a salted hash of each reflection under the Laue class) and refines the
+   supplied model again without them.
+2. For each observation, selects the beams with |S_g| ≤ 0.01 Å⁻¹ and diagonalizes the Bloch-wave matrix with SciPy
+   (`eigh`, single precision) at each rocking point and mosaic tilt. One diagonalization gives every thickness and
+   both hands.
+3. Chooses the thickness distribution (gamma or wedge), mosaic spread, radiation damage and the smoothness of a
+   B-spline frame scale for each crystal by threefold cross-validation on the working reflections.
+4. Writes I_corr = κ |F_c|² I_obs / (s I_dyn), fits a two-parameter error model and runs SHELXL. It recalculates
+   I_dyn from the refined model, for up to five rounds or until no non-hydrogen atom moves by more than 0.002 Å.
+5. Tests the hand of non-centrosymmetric models with a sign test over unique reflections, and reports R factors on
+   the held-out reflections with bootstrap confidence intervals.
 
-- `TABLE1_FINAL_STATISTICS.md`: SHELXL statistics of the conventional and GROND models, R factors of the observations, and the held-out validation;
-- `FINAL_SUMMARY.md` and `HELDOUT_VALIDATION.md`;
-- the refined model and the corrected reflection file;
-- the maps written by `grond finish`.
+The run ends by listing the files to open first: `TABLE1_FINAL_STATISTICS.md`, `FINAL_SUMMARY.md`,
+`HELDOUT_VALIDATION.md`, the refined model with its corrected HKL file, and `grond_continue_checkpoint.json` for
+`grond refine`.
 
-[docs/OUTPUTS.md](docs/OUTPUTS.md) describes every file.
+By default (`--free-set off`) the chosen model is refined once more against all reflections at the end. With
+`--free-set on` the held-out reflections stay out of the final model. All runs in the paper used `--free-set on`.
 
-## Documentation
+Large cells (SU-102 has about 800 beams per matrix) need `--shared-grid auto`, which diagonalizes each matrix once
+per scan orientation and interpolates onto the rocking points of every reflection.
 
-- [Installation](docs/INSTALL.md)
-- [Usage](docs/USAGE.md) and the [stage-by-stage workflow](docs/MANUAL_WORKFLOW.md)
-- [XDS data](docs/XDS_WORKFLOW.md), [DIALS data](docs/DIALS_WORKFLOW.md) and [several crystals](docs/MULTI_DATASET.md)
-- [Outputs](docs/OUTPUTS.md) and [file formats](docs/FILE_FORMATS.md)
-- [Other integration programs](docs/PORTABLE_INPUTS_AND_ENDPOINTS.md) and [export to PETS, Jana2020 and diffBloch](docs/INTEROPERABILITY.md)
-- [Macromolecules (experimental)](docs/MACROMOLECULES.md)
-- [Troubleshooting](docs/TROUBLESHOOTING.md)
-- [Source-code map](docs/CODE_MAP.md) and [development](docs/DEVELOPMENT.md)
-- [References](docs/REFERENCES.md)
+Read [LIMITATIONS.md](LIMITATIONS.md) before relying on a result.
 
-## Development
+## Tests
 
 ```bash
 python -m pip install -e ".[dev]"
-python -m ruff check src/grond tests scripts
 python -m pytest
 ```
 
 ## License and citation
 
-GROND is released under the [MIT License](LICENSE). Please cite the software with [CITATION.cff](CITATION.cff) and the methods listed in [docs/REFERENCES.md](docs/REFERENCES.md).
-
-The name comes from Tolkien: "Grond, the Hammer of the Underworld" (*The Silmarillion*).
-
-## Acknowledgements
-
-See [ACKNOWLEDGMENTS.md](ACKNOWLEDGMENTS.md). The code and documentation were developed with the help of the AI assistants Gemini (Google), ChatGPT (OpenAI) and Claude (Anthropic).
+MIT ([LICENSE](LICENSE)). Please cite the paper and the software ([CITATION.cff](CITATION.cff)). AI coding assistants
+were used to write and test this code; the authors checked the algorithms and the numbers.

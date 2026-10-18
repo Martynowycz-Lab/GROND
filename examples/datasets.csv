@@ -1,2 +1,0 @@
-include,name,hkl,baseline_hkl,hkl_transform,min_d_spacing,min_peak,target_mode,include_nonpositive,geometry_percentile
-true,crystal_a,/data/project/crystal_a/INTEGRATE.HKL,,identity,0.7,90.0,iobs,false,99.0

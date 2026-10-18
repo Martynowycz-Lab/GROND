@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "grond"
-version = "0.2.2"
-description = "Global Regularization Of Non-kinematical Diffraction for electron-diffraction data."
+version = "0.3.0"
+description = "Bloch-wave corrections of electron-diffraction intensities for SHELXL refinement."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
@@ -30,24 +30,18 @@ dependencies = [
 
 [project.urls]
 Homepage = "https://github.com/Martynowycz-Lab/GROND"
-Documentation = "https://github.com/Martynowycz-Lab/GROND/tree/main/docs"
 Repository = "https://github.com/Martynowycz-Lab/GROND"
 Issues = "https://github.com/Martynowycz-Lab/GROND/issues"
-Changelog = "https://github.com/Martynowycz-Lab/GROND/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "ruff>=0.8", "build>=1.2"]
+dev = ["pytest>=8", "ruff>=0.8"]
 config = ["PyYAML>=6"]
 
 [project.scripts]
 grond = "grond.cli:main"
-GROND = "grond.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-
-[tool.setuptools.package-data]
-grond = ["schemas/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

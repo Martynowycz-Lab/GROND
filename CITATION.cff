@@ -1,10 +1,35 @@
 cff-version: 1.2.0
+message: "If you use GROND, please cite the paper and this software."
 title: "GROND: Global Regularization Of Non-kinematical Diffraction"
 type: software
 authors:
-  - name: Martynowycz Lab
-version: 0.2.2
+  - name: "Martynowycz Lab"
+version: 0.3.0
 license: MIT
-message: "If GROND helps your work, please cite the software and the relevant dynamical-diffraction literature."
 repository-code: "https://github.com/Martynowycz-Lab/GROND"
-url: "https://github.com/Martynowycz-Lab/GROND"
+preferred-citation:
+  type: article
+  title: "Correcting Multiple Scattering Enables Dynamical Electron Crystallography in Standard Workflows"
+  authors:
+    - family-names: Hopkins
+      given-names: Denver R.
+    - family-names: Low-Beer
+      given-names: Timothy
+    - family-names: Ding
+      given-names: Zhiyuan
+    - family-names: Vasireddy
+      given-names: Purna Chandra Rao
+    - family-names: Spoth
+      given-names: Katherine A.
+    - family-names: Crawley
+      given-names: Matthew R.
+    - family-names: Clabbers
+      given-names: Max T. B.
+    - family-names: Nakane
+      given-names: Takanori
+    - family-names: Gallagher-Jones
+      given-names: Marcus
+    - family-names: Martynowycz
+      given-names: Michael W.
+  year: 2026
+  # Preprint DOI and URL to be added at posting.

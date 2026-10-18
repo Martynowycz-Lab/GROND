@@ -1,7 +1,0 @@
-{
-  "tools": {
-    "shelxl": "",
-    "shelx2map": ""
-  },
-  "notes": "SHELXL is required for the default small-molecule LS1 endpoint. shelx2map is optional; native dynamical maps need no external map program. Empty values use environment variables and PATH."
-}

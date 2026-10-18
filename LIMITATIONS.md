@@ -1,32 +1,28 @@
 # Limitations
 
-GROND is research software. It writes its decisions, tables and logs so that every result can be checked, but an automatic choice is not guaranteed to be right for every data set. Inspect the output, especially when the data are weak, incomplete, poorly integrated, strongly damaged or very thick.
+GROND writes its decisions, tables and logs so that each result can be checked. An automatic choice can still be
+wrong for a given data set. Inspect the output, especially for weak, incomplete, badly integrated, strongly damaged
+or very thick crystals.
 
-## Scope
+- GROND starts from integrated summation intensities and a solved model. It does not integrate images, solve
+  structures or replace SHELXL.
+- The correction is held fixed during each SHELXL refinement and recalculated afterwards. The result is close to a
+  full dynamical refinement but not identical to one, and the standard uncertainties from SHELXL do not include the
+  uncertainty of the correction.
+- The fitted thickness distribution, mosaic spread and damage term are effective parameters of the calculation. They
+  are not measurements of the crystal.
+- Absorption, twinning, disorder models and solvent masks are not modelled. HKLF 5, TWIN, BASF and SWAT in the input
+  model are refused.
+- An observation uses at most 500 beams by default. Large cells need a convergence check and higher limits
+  (`--final-basis-max`, `--nested-n-basis`) and, for speed, `--shared-grid auto`.
+- The hand test says whether the data prefer the supplied coordinates or their inverse. An absolute configuration also
+  depends on the sense of the rotation axis and of the processing chain, which GROND cannot check. A crystal of known
+  configuration processed the same way fixes the sign.
+- `grond manual` is a simpler version of the calculation for inspection. It has no leak-free start, no
+  cross-validated choice of mosaic spread and damage, and one SHELXL call per round. Use `grond auto` for reported
+  results.
+- R_complete is not implemented. Holding out reflections (`--free-set`) is the validation GROND provides.
 
-GROND is written for small-molecule and peptide electron-diffraction data that start from XDS or DIALS integrated intensities and a solved structure. It does not integrate images and does not replace XDS, DIALS, SHELXL or Olex2. The macromolecular interface (`grond export-mtz`, `grond protein-ls1`) is experimental.
-
-For DIALS data GROND reads the summation intensities and keeps the DIALS variances (`--sigma-mode raw`); a detector-gain model is available with `--sigma-mode detector_gain`. Check `dials_bridge_summary.json` for row counts, partiality and dropped flags.
-
-## The model is an approximation
-
-- The correction freezes the dynamical-to-kinematic ratio during each SHELXL refinement and recalculates it afterwards. The refined model is therefore close to, but not the same as, the result of a full dynamical refinement, and the standard uncertainties reported by SHELXL do not include the uncertainty of the correction.
-- The fitted thickness distribution, mosaic spread and damage term are effective parameters of the calculation, not measurements of the crystal.
-- Absorption is off by default. Twinning, disorder and solvent masks are not modelled; HKLF 5, TWIN, BASF and SWAT are not supported.
-- By default an observation uses at most 500 beams. Large or strongly coupled cells need a convergence check and, if necessary, a higher limit (`--final-basis-max`, `--nested-n-basis`).
-
-Residuals can come from integration, background, detector effects, geometry, partiality, scaling, indexing or the structure itself. GROND can point to some of these, but more beams do not repair bad observations.
-
-## Hand
-
-The held-out hand test states whether the data prefer the supplied coordinates or their inverse. It does not name an absolute configuration: that also requires the sense of the rotation axis and of the whole processing chain, which GROND cannot check. A crystal of known configuration processed the same way is needed to fix the sign.
-
-## `grond manual`
-
-`grond manual` is a simpler, stage-by-stage version of the calculation for inspection. It has no leak-free start and no cross-validated choice of mosaic spread and damage, its hand stage uses the all-observation statistic, and it makes one SHELXL cycle per round. Use `grond auto` for reported results.
-
-## Validation
-
-Validate GROND on known structures before trusting it on new chemistry, microscopes, detectors or integration strategies. A result that lowers one R factor while degrading the maps, displacement parameters or the held-out statistics should not be accepted.
-
-GROND is provided without warranty under the MIT License. External programs such as SHELXL are not bundled and have their own licenses.
+Validate GROND on known structures before using it on new chemistry, microscopes, detectors or integration
+strategies. Do not accept a result that lowers an R factor while the maps, displacement parameters or held-out
+statistics get worse.
