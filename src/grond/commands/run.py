@@ -246,8 +246,6 @@ def cmd_run(args: argparse.Namespace) -> int:
     result = run_single(prep, args, python, logs) if len(prep.datasets) == 1 else run_multi(prep, args, python, logs)
     result["conventional_baseline"] = conventional_baseline
     result["leak_free_start"] = leak_free_start
-    # The P-spline scales are never replayed through compact scale contracts; QUICK_STATS reports this record.
-    result["endpoint_calibration"] = {"status": "disabled", "reason": "scale_model_pspline"}
     result["publication_endpoint_chooser"] = run_publication_endpoint_chooser(prep, result, args)
     # --free-set off: the published endpoint refined once more against work and free reflections
     result["final_all_data_refinement"] = run_all_data_refinement(prep, result, args)

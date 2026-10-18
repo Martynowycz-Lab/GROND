@@ -261,10 +261,6 @@ def _format_terminal_finish_summary(payload: Mapping[str, object]) -> str:
         endpoint_lines.append(
             f"  Endpoint source/scales: {_quick_endpoint_scale_text(endpoint)}, WGHT {endpoint.get('wght_mode', 'n/a')}"
         )
-        if endpoint.get("selection_policy") or endpoint.get("information_criterion"):
-            endpoint_lines.append(
-                f"  Scale selector: {endpoint.get('selection_policy', 'n/a')} / {endpoint.get('information_criterion', 'n/a')} = {_quick_number(endpoint.get('information_value'), 3)}"
-            )
     if endpoint_warning:
         endpoint_lines.append(f"  Warning: {endpoint_warning}")
     for warning in (endpoint.get("baseline_comparison") or {}).get("warnings", []):

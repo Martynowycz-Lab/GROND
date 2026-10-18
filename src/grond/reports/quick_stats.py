@@ -115,12 +115,6 @@ def write_quick_stats(
     final_summary_path = out_dir / "FINAL_SUMMARY.md"
     row_metrics_path = out_dir / "tables" / "row_mr_metrics.json"
     row_metrics = try_read_json(row_metrics_path)
-    endpoint_calibration = (
-        result.get("endpoint_calibration") if isinstance(result.get("endpoint_calibration"), Mapping) else {}
-    )
-    endpoint_selection = (
-        endpoint_calibration.get("publication_selection", {}) if isinstance(endpoint_calibration, Mapping) else {}
-    )
     publication_endpoint = _publication_endpoint_from_result(result)
     diagnostic_endpoint = _chooser_diagnostic_endpoint(result)
     metadata = row_metrics.get("metadata", {}) if isinstance(row_metrics.get("metadata"), Mapping) else {}
@@ -445,8 +439,6 @@ def write_quick_stats(
 
     _append_quick_stats_endpoint_selection(
         bloch_diagnostics_path=bloch_diagnostics_path,
-        endpoint_calibration=endpoint_calibration,
-        endpoint_selection=endpoint_selection,
         file_block=file_block,
         frozen_row_file_lines=frozen_row_file_lines,
         lines=lines,
@@ -461,7 +453,6 @@ def write_quick_stats(
 
     console, selected_row = _prepare_quick_stats_console(
         diagnostic_endpoint=diagnostic_endpoint,
-        endpoint_selection=endpoint_selection,
         file_block=file_block,
         final_feedback_shelxl=final_feedback_shelxl,
         final_summary=final_summary,
@@ -1111,7 +1102,7 @@ def _append_quick_stats_model_panels(
                     _quick_delta_percent(input_shelxl.get("R1_all"), final_feedback_shelxl.get("R1_all")),
                     _quick_delta_percent(input_shelxl.get("wR2_all"), final_feedback_shelxl.get("wR2_all")),
                     "n/a",
-                    "unreplayed corrected-HKL endpoint change before publication scale selection",
+                    "corrected-HKL endpoint change from the last LS1 feedback cycle",
                 ]
             )
             + " |",
@@ -1123,7 +1114,7 @@ def _append_quick_stats_model_panels(
                     _quick_delta_percent(final_feedback_shelxl.get("R1_all"), publication_shelxl.get("R1_all")),
                     _quick_delta_percent(final_feedback_shelxl.get("wR2_all"), publication_shelxl.get("wR2_all")),
                     "n/a",
-                    "cost or gain of the publication endpoint replay relative to the direct LS1 candidate",
+                    "change from the direct LS1 endpoint to the endpoint the chooser selected",
                 ]
             )
             + " |",
@@ -1209,8 +1200,6 @@ def _append_quick_stats_resolution_rows(
 def _append_quick_stats_endpoint_selection(
     *,
     bloch_diagnostics_path,
-    endpoint_calibration,
-    endpoint_selection,
     file_block,
     frozen_row_file_lines,
     lines,
@@ -1220,22 +1209,14 @@ def _append_quick_stats_endpoint_selection(
     row_metrics_path,
     table1,
 ):
-    """Append model-handoff selection, calibration branches and exact artifact links."""
+    """Append the model-handoff endpoint and exact artifact links."""
 
-    selection_policy = (
-        str(endpoint_selection.get("selection_policy", "n/a")) if isinstance(endpoint_selection, Mapping) else "n/a"
-    )
-    information_criterion = (
-        str(endpoint_selection.get("information_criterion", "n/a"))
-        if isinstance(endpoint_selection, Mapping)
-        else "n/a"
-    )
     lines.extend(
         [
             "",
             "## Recommended Model-Handoff Endpoint",
             "",
-            "This is the endpoint GROND recommends opening, inspecting, and continuing in the user's modeling program. Warnings remain attached; they do not hide an otherwise usable model. The endpoint-calibration table below remains the conservative scale-replay audit.",
+            "This is the endpoint GROND recommends opening, inspecting, and continuing in the user's modeling program. Warnings remain attached; they do not hide an otherwise usable model.",
             "",
             "| source | kind/spec | WGHT | scales | R1(F)gt | R1(F)all | wR2(F^2)all | GooF | params/restraints | pathology |",
             "|---|---|---|---:|---:|---:|---:|---:|---:|---|",
@@ -1263,55 +1244,8 @@ def _append_quick_stats_endpoint_selection(
             ),
             *["**Endpoint warning:** " + str(warning) for warning in
               (publication_endpoint.get("baseline_no_harm_gate") or {}).get("warnings", [])],
-            "## Endpoint Calibration",
-            "",
-            f"Status: `{endpoint_calibration.get('status', 'n/a') if isinstance(endpoint_calibration, Mapping) else 'n/a'}`. {endpoint_calibration.get('reason', '') if isinstance(endpoint_calibration, Mapping) else ''}",
-            "",
-            f"Selection policy: `{selection_policy}`; information criterion: `{information_criterion}`.",
-            "",
-            "| branch | spec | WGHT | scales | free row Rall | free row wRall | work row Rall | R1(F)all report | wR2(F^2)all report | GooF |",
-            "|---|---|---|---:|---:|---:|---:|---:|---:|---:|",
         ]
     )
-    branch_rows = [
-        (
-            "selected_scale_replay",
-            endpoint_selection.get("publication_endpoint") if isinstance(endpoint_selection, Mapping) else None,
-        ),
-        (
-            "low_R_diagnostic",
-            endpoint_selection.get("low_r_diagnostic") if isinstance(endpoint_selection, Mapping) else None,
-        ),
-        (
-            "best_heldout_row",
-            endpoint_selection.get("best_heldout_row") if isinstance(endpoint_selection, Mapping) else None,
-        ),
-    ]
-    wrote_branch = False
-    for label, row in branch_rows:
-        if not isinstance(row, Mapping):
-            continue
-        wrote_branch = True
-        lines.append(
-            "| "
-            + " | ".join(
-                [
-                    label,
-                    str(row.get("spec", "n/a")),
-                    str(row.get("wght_mode", "n/a")),
-                    str(row.get("scale_params", "n/a")),
-                    _quick_percent(row.get("row_free_Rall")),
-                    _quick_percent(row.get("row_free_wRall")),
-                    _quick_percent(row.get("row_work_Rall")),
-                    _quick_percent(row.get("shelxl_R1all")),
-                    _quick_percent(row.get("shelxl_wR2all")),
-                    _quick_number(row.get("shelxl_GooF"), 3),
-                ]
-            )
-            + " |"
-        )
-    if not wrote_branch:
-        lines.append("| n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a |")
 
     lines.extend(
         [
@@ -1335,10 +1269,9 @@ def _append_quick_stats_endpoint_selection(
             f"- Publication SHELXL LST with the reported R/GooF values: `{file_block['publication_lst']}`",
             f"- Publication endpoint manifest: `{file_block['publication_manifest']}`",
             *frozen_row_file_lines,
-            f"- Endpoint replay row table after compact scale selection: `{file_block['publication_row_table']}`",
+            f"- Publication endpoint row table: `{file_block['publication_row_table']}`",
             f"- Bloch matrix and row-contract diagnostics: `{bloch_diagnostics_path}`",
             f"- Detailed row/MR table: `{row_metrics_path}`",
-            f"- Endpoint calibration report: `{endpoint_calibration.get('report', '') if isinstance(endpoint_calibration, Mapping) else ''}`",
             f"- Publication endpoint chooser: `{out_dir / 'endpoint_chooser' / 'PUBLICATION_ENDPOINT_CHOOSER.md'}`",
             "",
         ]
@@ -1348,7 +1281,6 @@ def _append_quick_stats_endpoint_selection(
 def _prepare_quick_stats_console(
     *,
     diagnostic_endpoint,
-    endpoint_selection,
     file_block,
     final_feedback_shelxl,
     final_summary,
@@ -1579,15 +1511,6 @@ def _prepare_quick_stats_console(
             "active_wght_b": publication_shelxl.get("active_wght_b"),
             "source": selected_row.get("selection_source", ""),
             "source_kind": selected_row.get("source_kind", ""),
-            "selection_policy": endpoint_selection.get("selection_policy", "")
-            if isinstance(endpoint_selection, Mapping)
-            else "",
-            "information_criterion": endpoint_selection.get("information_criterion", "")
-            if isinstance(endpoint_selection, Mapping)
-            else "",
-            "information_value": endpoint_selection.get("selected_information_criterion", "")
-            if isinstance(endpoint_selection, Mapping)
-            else "",
         },
         "diagnostic_endpoint": {
             "R1gt": _quick_fraction(diagnostic_endpoint.get("shelxl_R1gt")),
@@ -1637,22 +1560,11 @@ def _write_quick_stats_final_summary(
 ):
     """Render and write the short final summary after the complete quick report exists."""
 
-    policy = str(console["publication_endpoint"].get("selection_policy") or "").strip()
-    criterion = str(console["publication_endpoint"].get("information_criterion") or "").strip()
-    criterion_value = console["publication_endpoint"].get("information_value")
-    if not selected_row:
-        endpoint_note = "No endpoint chooser-approved physical endpoint was selected. Endpoint-calibration scale replays are diagnostic only for this run."
-    elif policy or criterion:
-        endpoint_note = (
-            f"Endpoint calibration used `{policy or 'n/a'}` with `{criterion or 'n/a'}` = "
-            f"`{_quick_number(criterion_value, 3)}`. If the endpoint chooser selected another endpoint, "
-            "that endpoint is reported above and the calibration replay remains an audit branch."
-        )
-    else:
-        endpoint_note = (
-            "The endpoint chooser selected the publication endpoint. Endpoint-calibration replay details, when present, "
-            "are listed in `QUICK_STATS.md` as an audit branch."
-        )
+    endpoint_note = (
+        "The endpoint chooser selected the publication endpoint."
+        if selected_row
+        else "No endpoint chooser-approved physical endpoint was selected."
+    )
     endpoint_warning = _quick_goof_warning(publication_shelxl.get("GooF"))
     input_endpoint_available = _quick_fraction(input_shelxl.get("R1_all")) is not None
     publication_endpoint_available = _quick_fraction(publication_shelxl.get("R1_all")) is not None

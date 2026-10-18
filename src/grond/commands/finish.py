@@ -14,10 +14,7 @@ from grond.reports.progress import _quick_progress_finish_info
 from grond.reports.quick_stats import write_quick_stats
 from grond.reports.terminal import _format_terminal_finish_summary
 from grond.workflows.decision import safe_float
-from grond.workflows.endpoint_selection import (
-    _multi_endpoint_calibration_not_applicable,
-    run_publication_endpoint_chooser,
-)
+from grond.workflows.endpoint_selection import run_publication_endpoint_chooser
 from grond.workflows.finish_maps import _finish_run_dir, _publication_endpoint_from_result, run_finish_maps
 
 
@@ -35,10 +32,6 @@ def cmd_finish(args: argparse.Namespace) -> int:
         raise SystemExit(f"Could not read completed GROND prep file: {prep_path}")
     prep = load_prep(prep_path)
     if result.get("combined"):
-        result["endpoint_calibration"] = {
-            **_multi_endpoint_calibration_not_applicable(result),
-            "refreshed_by_finish": True,
-        }
         run_config = try_read_json(run_dir / "run_config.json")
         chooser_config = run_config.get("publication_endpoint_chooser")
         chooser_config = chooser_config if isinstance(chooser_config, Mapping) else {}

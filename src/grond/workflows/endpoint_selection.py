@@ -164,22 +164,16 @@ def run_publication_endpoint_chooser(prep: PrepConfig, result: dict, args: argpa
     )
 
 
-def _recorded_native_row_tables(
-    result: Mapping[str, object],
-    *,
-    include_endpoint_only: bool = False,
-) -> dict[str, str]:
+def _recorded_native_row_tables(result: Mapping[str, object]) -> dict[str, str]:
     """Return the native row tables that define the raw-row result.
 
     ``publication_runs`` excludes completeness-only crystals from raw-row
-    metrics while retaining primary and downweighted datasets.  The broader
-    ``combined_input_runs`` contract is useful only when endpoint-completeness
-    provenance is explicitly requested.
+    metrics while retaining primary and downweighted datasets.
     """
 
     if result.get("combined"):
         runs = (
-            (result.get("combined_input_runs") if include_endpoint_only else result.get("publication_runs"))
+            result.get("publication_runs")
             or result.get("combined_input_runs")
             or result.get("runs")
             or {}
@@ -193,23 +187,3 @@ def _recorded_native_row_tables(
         return {}
     primary = str(result.get("primary_run") or "").strip()
     return {"dataset": str(Path(primary).expanduser() / "native_dyn_calc.csv")} if primary else {}
-
-
-def _multi_endpoint_calibration_not_applicable(result: Mapping[str, object]) -> dict[str, object]:
-    """The endpoint-calibration record grond finish writes for a multi run; GROND runs no scale replay."""
-
-    combined = Path(str(result.get("combined") or "")).expanduser()
-    row_tables = _recorded_native_row_tables(result, include_endpoint_only=True)
-    return {
-        "status": "not_applicable_multi_dataset",
-        "reason": (
-            "Multi-dataset scale contracts remain independent by crystal. The single-table endpoint-calibration "
-            "replay would incorrectly share frame groups and detector scales, and would bypass the validated "
-            "per-dataset sigma, policy-weight, overlap-scale, symmetry-merge, and overdispersion sequence. "
-            "The combined corrected-HKL endpoint and publication chooser remain authoritative."
-        ),
-        "combined_summary": str(combined / "combined_summary.json") if str(combined) not in {"", "."} else "",
-        "row_tables": row_tables,
-        "row_tables_exist": {name: Path(path).exists() for name, path in row_tables.items()},
-        "future_contract": "replay each scale candidate independently per dataset, then evaluate through the normal combined endpoint path",
-    }
