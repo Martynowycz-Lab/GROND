@@ -44,6 +44,8 @@ from grond.workflows.nested_nuisance import (
 )
 from grond.workflows.nuisance_policy import (
     FEATURE_GATE_FAMILIES,
+    FINAL_BASIS_FALLBACK,
+    SCREEN_N_BASIS,
     compact_base_nuisance,
     configure_auto_physics,
     configure_cell_esd,
@@ -51,7 +53,6 @@ from grond.workflows.nuisance_policy import (
     stage_n_points,
 )
 from grond.workflows.report_commands import combine_cmd
-from grond.workflows.sg_window_selection import run_sg_window_scout
 from grond.workflows.shared_refinement import run_multi_shelxl_feedback_loop
 from grond.workflows.single import run_feature_gate
 from grond.workflows.thickness_materialization import (
@@ -174,7 +175,7 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
                 dataset_baseline_hkl(prep, ds),
                 run_dir,
                 args,
-                n_basis=args.screen_n_basis,
+                n_basis=SCREEN_N_BASIS,
                 n_points=stage_n_points(args, ds, screen=True),
                 stage="screen",
                 pinned=compact_base_nuisance(args),
@@ -235,7 +236,7 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
                         dataset_baseline_hkl(prep, ds),
                         run_dir,
                         args,
-                        n_basis=args.screen_n_basis,
+                        n_basis=SCREEN_N_BASIS,
                         n_points=stage_n_points(args, ds, screen=True),
                         stage="screen",
                         pinned=compact_base_nuisance(args),
@@ -330,7 +331,7 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
                     dataset_baseline_hkl(prep, ds),
                     thick,
                     args,
-                    n_basis=args.screen_n_basis,
+                    n_basis=SCREEN_N_BASIS,
                     n_points=stage_n_points(args, ds, screen=True),
                     stage="multi_thickness_polish",
                     pinned=thickness_polish_nuisance(thickness_baseline, screen_frame_offsets),
@@ -403,7 +404,6 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
             structure_feedback = {"status": "unsupported_strategy", "strategy": structure_strategy}
     final_runs: dict[str, Path] = {}
     resolution_limits: dict[str, dict] = {}
-    sg_window_scout_runs: dict[str, dict] = {}
     for ds in prep.datasets:
         run_dir = root / "runs" / ds.name / "final"
         final_n_basis = resolve_final_n_basis(prep, ds, args, python, logs, root, final_model, "final")
@@ -529,7 +529,7 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
                     dataset_baseline_hkl(prep, ds),
                     selected_run,
                     selected_args,
-                    n_basis=_positive_summary_int(source_config, "n_basis") or int(args.final_basis_fallback),
+                    n_basis=_positive_summary_int(source_config, "n_basis") or FINAL_BASIS_FALLBACK,
                     n_points=_positive_summary_int(source_config, "n_points") or int(args.n_points),
                     stage="final",
                     pinned=source_nuisance,
@@ -623,18 +623,6 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
         title=f"GROND merged resolution-limit promotion: {', '.join(ds.name for ds in prep.datasets)}",
         scope="merged",
     )
-    for ds in prep.datasets:
-        sg_window_scout_runs[ds.name] = run_sg_window_scout(
-            python,
-            prep,
-            ds,
-            final_model,
-            final_runs[ds.name],
-            root / "sg_window_scout" / ds.name,
-            logs,
-            f"{ds.name}_final",
-            args,
-        )
     return {
         "combined": str(combined),
         "model": final_model,
@@ -655,7 +643,6 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
         "structure_feedback": structure_feedback,
         "resolution_limits": resolution_limits,
         "merged_resolution_limit": merged_resolution_limit,
-        "sg_window_scout": sg_window_scout_runs,
         "dataset_policy": {
             "structure_update": structure_dataset_policy,
             "final": final_dataset_policy,

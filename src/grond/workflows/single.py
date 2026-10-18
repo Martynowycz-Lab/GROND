@@ -80,6 +80,8 @@ from grond.workflows.nested_nuisance import (
 )
 from grond.workflows.nuisance_policy import (
     FEATURE_GATE_FAMILIES,
+    FINAL_BASIS_FALLBACK,
+    SCREEN_N_BASIS,
     compact_base_nuisance,
     configure_auto_physics,
     configure_cell_esd,
@@ -89,7 +91,6 @@ from grond.workflows.nuisance_policy import (
     resolved_final_n_points,
     stage_n_points,
 )
-from grond.workflows.sg_window_selection import run_sg_window_scout
 from grond.workflows.thickness_materialization import (
     discrete_thickness_baseline_nuisance,
     discrete_thickness_promotion_record,
@@ -193,7 +194,7 @@ def run_feature_gate(
                 dataset_baseline_hkl(prep, ds),
                 gate_dir,
                 args,
-                n_basis=args.screen_n_basis,
+                n_basis=SCREEN_N_BASIS,
                 n_points=stage_n_points(args, ds, screen=True),
                 stage=f"adaptive_{family}_gate",
                 pinned=feature_grid(args, family, active_nui, ds=ds),
@@ -355,7 +356,7 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
             dataset_baseline_hkl(prep, ds),
             screen,
             args,
-            n_basis=args.screen_n_basis,
+            n_basis=SCREEN_N_BASIS,
             n_points=args.screen_n_points,
             stage="adaptive_screen",
             pinned=compact_base_nuisance(args),
@@ -422,7 +423,7 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
                     dataset_baseline_hkl(prep, ds),
                     screen,
                     args,
-                    n_basis=args.screen_n_basis,
+                    n_basis=SCREEN_N_BASIS,
                     n_points=args.screen_n_points,
                     stage="adaptive_screen",
                     pinned=compact_base_nuisance(args),
@@ -506,7 +507,7 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
                 dataset_baseline_hkl(prep, ds),
                 thickness_run,
                 args,
-                n_basis=args.screen_n_basis,
+                n_basis=SCREEN_N_BASIS,
                 n_points=args.screen_n_points,
                 stage="adaptive_thickness_polish",
                 pinned=thickness_candidates,
@@ -546,7 +547,7 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
             )
 
     final_model = active_model
-    final_n_basis = int(args.final_basis_fallback)
+    final_n_basis = FINAL_BASIS_FALLBACK
     structure_strategy = resolve_structure_update_strategy(args, multi_dataset=False)
     structure_update_run = None
     structure_feedback_fallback: dict = {}
@@ -1053,17 +1054,6 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
         title=f"GROND resolution-limit promotion: {ds.name}",
         scope="dataset",
     )
-    sg_window_scout = run_sg_window_scout(
-        python,
-        prep,
-        ds,
-        final_model,
-        final,
-        root / "sg_window_scout" / ds.name,
-        logs,
-        f"{ds.name}_adaptive_final",
-        args,
-    )
     decision_summary = {
         "status": "ok",
         "dataset": ds.name,
@@ -1090,7 +1080,6 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
         "post_feedback_hand_promotion": post_feedback_hand_promotion,
         "final_row_model_contract": final_row_model_contract,
         "resolution_limit": resolution_limit,
-        "sg_window_scout": sg_window_scout,
         "screen_run": str(screen),
         "thickness_run": str(thickness_run),
         "final_run": str(final),
@@ -1106,7 +1095,6 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
         "post_feedback_hand_promotion": post_feedback_hand_promotion,
         "final_row_model_contract": final_row_model_contract,
         "resolution_limits": {ds.name: resolution_limit},
-        "sg_window_scout": {ds.name: sg_window_scout},
         "decision_tree": str(root / "decisions" / ds.name / "decision_tree.json"),
     }
 

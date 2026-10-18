@@ -54,6 +54,7 @@ from grond.workflows.decision import write_json
 from grond.workflows.model_selection import best_nuisance, dataset_baseline_hkl
 from grond.workflows.native_commands import native_stage_cmd
 from grond.workflows.nuisance_policy import (
+    SCREEN_N_BASIS,
     auto_mosaicity_grid,
     dose_b_per_frame_grid,
     feature_is_enabled,
@@ -392,7 +393,7 @@ def run_nested_nuisance_stage(
     run_logged(
         native_stage_cmd(
             python, ds, active_model, dataset_baseline_hkl(prep, ds), anchor, args,
-            n_basis=args.screen_n_basis, n_points=screen_points, stage=f"{run_prefix}_nested_rows",
+            n_basis=SCREEN_N_BASIS, n_points=screen_points, stage=f"{run_prefix}_nested_rows",
             pinned=active_nui, make_maps=False, endpoint=False, scale_fit_split_override="work",
             allow_pinned_jitter_fallback=False, trial_rows_npz=rows_npz,
         ),
@@ -415,7 +416,7 @@ def run_nested_nuisance_stage(
     run_logged(
         native_stage_cmd(
             python, ds, active_model, dataset_baseline_hkl(prep, ds), selected, args,
-            n_basis=args.screen_n_basis, n_points=screen_points, stage=f"{run_prefix}_nested_selected",
+            n_basis=SCREEN_N_BASIS, n_points=screen_points, stage=f"{run_prefix}_nested_selected",
             pinned=pinned, make_maps=False, endpoint=False, scale_fit_split_override="work",
             allow_pinned_jitter_fallback=False,
         ),

@@ -46,7 +46,7 @@ from grond.validation.heldout import (
 )
 from grond.workflows.model_selection import best_nuisance, dataset_baseline_hkl
 from grond.workflows.native_commands import native_stage_cmd
-from grond.workflows.nuisance_policy import dose_b_per_frame_grid, feature_grid, stage_n_points
+from grond.workflows.nuisance_policy import SCREEN_N_BASIS, dose_b_per_frame_grid, feature_grid, stage_n_points
 
 HELDOUT_GATE_FAMILIES = ("mosaicity", "dose")
 FAMILY_FIELDS = {
@@ -289,7 +289,7 @@ def run_heldout_feature_gate(
                 dataset_baseline_hkl(prep, ds),
                 gate_dir,
                 args,
-                n_basis=args.screen_n_basis,
+                n_basis=SCREEN_N_BASIS,
                 n_points=stage_n_points(args, ds, screen=True),
                 stage=f"adaptive_{family}_gate",
                 pinned=feature_grid(args, family, active_nui, ds=ds),
@@ -330,7 +330,7 @@ def run_heldout_feature_gate(
                 dataset_baseline_hkl(prep, ds),
                 selected_dir,
                 args,
-                n_basis=args.screen_n_basis,
+                n_basis=SCREEN_N_BASIS,
                 n_points=stage_n_points(args, ds, screen=True),
                 stage=f"adaptive_{family}_selected",
                 pinned=scored["selected_nuisance"],

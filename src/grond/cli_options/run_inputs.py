@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 
 from grond.cli_support.tools import add_tool_config_args
-from grond.cli_support.values import XDS_TARGET_MODES
 
 
 def add_inputs(ap: argparse.ArgumentParser) -> None:
@@ -45,7 +44,6 @@ def add_inputs(ap: argparse.ArgumentParser) -> None:
     )
     ap.add_argument("--structure", default="")
     ap.add_argument("--baseline-hkl", default="")
-    ap.add_argument("--dataset-name", default="dataset")
     ap.add_argument("--out-dir", required=True, help="Output directory. Run the same command again to resume.")
 
 
@@ -93,8 +91,6 @@ def add_observations_and_outputs(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--min-d-spacing", type=float, default=0.70, help="Resolution limit of the observations in Å (default %(default)s).")
     ap.add_argument("--min-peak", type=float, default=90.0, help="Minimum XDS PEAK, or 100 x DIALS partiality, of an observation (default %(default)s).")
     ap.add_argument("--geometry-percentile", type=float, default=99.0)
-    ap.add_argument("--target-mode", choices=list(XDS_TARGET_MODES), default="iobs", help=argparse.SUPPRESS)
-    ap.add_argument("--include-nonpositive", action="store_true")
     ap.add_argument(
         "--make-maps",
         dest="make_maps",
@@ -102,7 +98,6 @@ def add_observations_and_outputs(ap: argparse.ArgumentParser) -> None:
         default=False,
         help="Also write SHELXL Fo-Fc maps with shelx2map at the end of the run.",
     )
-    ap.add_argument("--no-maps", dest="make_maps", action="store_false")
     ap.add_argument(
         "--h-omit",
         choices=["off", "on", "only", "both"],

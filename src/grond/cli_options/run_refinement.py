@@ -20,17 +20,6 @@ def add_scales_and_screening(ap: argparse.ArgumentParser) -> None:
     )
 
 
-def add_structure_updates(ap: argparse.ArgumentParser) -> None:
-    """Add structure updates options in the established order."""
-
-    ap.add_argument(
-        "--structure-update",
-        choices=["auto", "shelxl_feedback", "off"],
-        default="auto",
-        help="Structure-update engine. Auto uses the high-N/Q SHELXL feedback loop for full runs when SHELXL is available, otherwise off.",
-    )
-
-
 def add_resolution(ap: argparse.ArgumentParser) -> None:
     """Add resolution options in the established order."""
 

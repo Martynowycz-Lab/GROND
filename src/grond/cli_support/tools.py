@@ -152,17 +152,11 @@ def required_external_tool_errors(
     endpoint_expected = shelx_like and not native_only and mode in {"bloch", "regularize", "auto"}
     if endpoint_expected and not statuses.get("shelxl", {}).get("available"):
         errors.append(
-            "SHELXL is required for corrected-HKL endpoint polishing/statistics; set tools.shelxl in a GROND config, set SHELXL, or use --native-only."
+            "SHELXL is required for corrected-HKL endpoint polishing/statistics; set tools.shelxl in a GROND config or set SHELXL."
         )
     if endpoint_expected and getattr(args, "make_maps", False) and not statuses.get("shelx2map", {}).get("available"):
         errors.append(
-            "shelx2map is required for automatic map generation; set tools.shelx2map in a GROND config, set SHELX2MAP, or add --no-maps."
-        )
-    if getattr(args, "structure_update", "auto") == "shelxl_feedback" and not statuses.get("shelxl", {}).get(
-        "available"
-    ):
-        errors.append(
-            "The requested --structure-update shelxl_feedback needs SHELXL; set tools.shelxl or choose off."
+            "shelx2map is required for automatic map generation; set tools.shelx2map in a GROND config, set SHELX2MAP, or leave out --make-maps."
         )
     return errors
 

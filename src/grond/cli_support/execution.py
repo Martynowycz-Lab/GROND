@@ -10,7 +10,7 @@ import threading
 import time
 from pathlib import Path
 
-from grond.cli_support.values import parse_numeric_grid, try_read_json
+from grond.cli_support.values import try_read_json
 from grond.io.config import PrepConfig
 from grond.paths import PACKAGE_ROOT
 from grond.progress import ProgressState, format_seconds
@@ -128,18 +128,6 @@ def _estimated_resolution_steps(args: argparse.Namespace) -> int:
     return 1
 
 
-def _estimated_sg_window_scout_steps(args: argparse.Namespace) -> int:
-    """Estimate late-stage rocking-window scout commands."""
-
-    from grond.workflows.sg_window_selection import scout_widths
-
-    mode = getattr(args, "sg_window_scout", "auto")
-    if mode == "off":
-        return 0
-    grid = parse_numeric_grid(getattr(args, "sg_window_scout_grid", ""))
-    return len(scout_widths(grid, float(getattr(args, "sg_window", 0.004))))
-
-
 def estimate_run_steps(prep: PrepConfig, args: argparse.Namespace) -> int:
     """Estimate how many external stages this run will launch."""
 
@@ -175,7 +163,6 @@ def estimate_run_steps(prep: PrepConfig, args: argparse.Namespace) -> int:
         if getattr(args, "h_omit", "off") in {"on", "both", "only"}:
             total += 2
         total += _estimated_resolution_steps(args)
-        total += _estimated_sg_window_scout_steps(args)
     if len(prep.datasets) > 1:
         if getattr(args, "hand_control", True):
             # One shared opposite-model materialization plus one native

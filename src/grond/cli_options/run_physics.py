@@ -90,14 +90,6 @@ def add_backend(ap: argparse.ArgumentParser) -> None:
 def add_basis(ap: argparse.ArgumentParser) -> None:
     """Add basis options in the established order."""
 
-    add_crystal_overrides(ap)
-    ap.add_argument(
-        "--crystal-parameters-from", default="", metavar="CHECKPOINT",
-        help="Fresh run: copy per-crystal beam/rocking settings and thickness distributions from a completed run's checkpoint. Scout indexing and fit other nuisance terms again; do not copy coordinates or transforms.",
-    )
-    ap.add_argument(
-        "--screen-n-basis", type=int, default=24, help="Basis size for initial nuisance/geometry screening."
-    )
     ap.add_argument(
         "--screen-n-points",
         type=int,
@@ -135,7 +127,6 @@ def add_basis(ap: argparse.ArgumentParser) -> None:
     )
     ap.add_argument("--final-basis-min", type=int, default=20)
     ap.add_argument("--final-basis-max", type=int, default=500, help="Most beams per observation in the final rounds (default %(default)s).")
-    ap.add_argument("--final-basis-fallback", type=int, default=128, help="Dry-run fallback when --n-basis=0.")
 
 
 def add_geometry(ap: argparse.ArgumentParser) -> None:
@@ -168,39 +159,6 @@ def add_geometry(ap: argparse.ArgumentParser) -> None:
     )
     ap.add_argument("--sg-window-scale", type=float, default=1.0)
     ap.add_argument("--sg-window-frame-floor", type=float, default=0.50)
-    ap.add_argument(
-        "--sg-window-scout",
-        choices=["auto", "on", "off"],
-        default="off",
-        help="Late held-out scout over simple fixed Sg rocking-window widths after final scale and resolution gates. Off is the production default; use auto/on when auditing rocking-width sensitivity.",
-    )
-    ap.add_argument(
-        "--sg-window-scout-grid",
-        default="0.003,0.004,0.006,0.008",
-        help="Comma-separated fixed Sg widths tested by the late rocking-window scout; the run's own width is always added.",
-    )
-    ap.add_argument("--sg-window-scout-n-basis", type=int, default=24, help="Basis size for the late Sg-window scout.")
-    ap.add_argument(
-        "--sg-window-scout-n-points", type=int, default=10, help="Quadrature points for the late Sg-window scout."
-    )
-    ap.add_argument(
-        "--sg-window-scout-max-rows",
-        type=int,
-        default=0,
-        help="Optional row cap for the late Sg-window scout; 0 uses the final row set.",
-    )
-    ap.add_argument(
-        "--sg-window-scout-min-wR2-gain",
-        type=float,
-        default=0.002,
-        help="Minimum wR2 gain required before a non-baseline Sg width can be promoted (all rows; work rows under --nuisance-score-rows work).",
-    )
-    ap.add_argument(
-        "--sg-window-scout-free-wR2-tolerance",
-        type=float,
-        default=0.003,
-        help="Maximum held-out wR2 penalty allowed when promoting a non-baseline Sg width (--nuisance-score-rows legacy only; work uses no free-row penalty).",
-    )
     ap.add_argument(
         "--topup-d-min",
         type=float,

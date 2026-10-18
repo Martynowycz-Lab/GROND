@@ -20,7 +20,6 @@ from grond.reports.quick_stats import write_quick_stats
 from grond.reports.terminal import _format_terminal_finish_summary
 from grond.runtime import auto_chunksize, auto_worker_count
 from grond.workflows.all_data_refinement import all_data_console_line, run_all_data_refinement
-from grond.workflows.auto_crystal_parameters import configure_auto_crystals
 from grond.workflows.checkpoints import write_continue_checkpoint
 from grond.workflows.conventional_baseline import run_fresh_conventional_baseline
 from grond.workflows.endpoint_selection import run_publication_endpoint_chooser, run_publication_report
@@ -129,7 +128,6 @@ def cmd_run(args: argparse.Namespace) -> int:
             "the calculation is a retrospective strip-H sensitivity control, not a prospective never-H experiment.",
             flush=True,
         )
-    configure_auto_crystals(prep, args)
     args.workers = auto_worker_count(args.workers, args.max_core_fraction)
     args.chunksize = auto_chunksize(args.chunksize, args.workers)
     original_structure = prep.structure
@@ -169,7 +167,6 @@ def cmd_run(args: argparse.Namespace) -> int:
     write_prep(Path(args.out_dir) / "run_prep.json", prep)
     tools = external_tool_statuses(args)
     config = {
-        "crystal_parameters": getattr(args, "crystal_parameters", {}),
         "created": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "python": python,
         "tool_config": {
@@ -195,13 +192,11 @@ def cmd_run(args: argparse.Namespace) -> int:
         "final_basis_margin": args.final_basis_margin,
         "final_basis_min": args.final_basis_min,
         "final_basis_max": args.final_basis_max,
-        "final_basis_fallback": args.final_basis_fallback,
         "prediction_cache_scope": args.prediction_cache_scope,
         "prediction_cache_compression": args.prediction_cache_compression,
         "bloch_evaluator": args.bloch_evaluator_settings,
         "matrix_convention": args.matrix_convention,
         "structure_update": {
-            "requested": args.structure_update,
             "resolved": resolve_structure_update_strategy(args, multi_dataset=len(prep.datasets) > 1),
             "shelxl": args.shelxl,
             "shelxl_feedback_cycles": args.shelxl_feedback_cycles,
@@ -227,15 +222,6 @@ def cmd_run(args: argparse.Namespace) -> int:
         },
         "scale_model": scale_model_policy,
         "nuisance_selection": nuisance_selection_policy,
-        "sg_window_scout": {
-            "mode": args.sg_window_scout,
-            "grid": args.sg_window_scout_grid,
-            "n_basis": args.sg_window_scout_n_basis,
-            "n_points": args.sg_window_scout_n_points,
-            "max_rows": args.sg_window_scout_max_rows,
-            "min_wR2_gain": args.sg_window_scout_min_wR2_gain,
-            "free_wR2_tolerance": args.sg_window_scout_free_wR2_tolerance,
-        },
         "dataset_policy": {
             "mode": args.dataset_policy,
         },

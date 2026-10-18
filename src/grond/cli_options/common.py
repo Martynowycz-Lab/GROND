@@ -12,7 +12,6 @@ from .run_refinement import (
     add_dataset_policy,
     add_resolution,
     add_scales_and_screening,
-    add_structure_updates,
 )
 
 
@@ -26,7 +25,6 @@ def add_common_run_args(ap: argparse.ArgumentParser, *, expose_lambda_controls: 
     add_observations_and_outputs(ap)
     add_scales_and_screening(ap)
     add_basis(ap)
-    add_structure_updates(ap)
     add_geometry(ap)
     add_endpoints(ap, expose_lambda_controls=expose_lambda_controls)
     add_resolution(ap)

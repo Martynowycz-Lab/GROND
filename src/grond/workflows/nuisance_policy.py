@@ -35,6 +35,11 @@ MOSAICITY_MAX_SIGMA_DEG = 0.5
 # two profile broadenings exclude each other and the cone is the geometrically defined one.
 FEATURE_GATE_FAMILIES = ("row_resolution", "absorption", "mosaicity", "sg_jitter", "sigma_error", "dose")
 
+# Beams of the screen, gate and nested-selection stages.
+SCREEN_N_BASIS = 24
+# Final beam count when the support scan recommends none (and in a dry run).
+FINAL_BASIS_FALLBACK = 128
+
 
 def error_model_sigma_active(args: argparse.Namespace) -> bool:
     """Whether the per-crystal error model sets the SHELXL/merge sigmas (--dataset-sigma-policy error_model)."""
@@ -144,7 +149,7 @@ def resolve_final_n_basis(
     if int(args.n_basis) > 0:
         return int(args.n_basis)
     if args.dry_run:
-        return int(args.final_basis_fallback)
+        return FINAL_BASIS_FALLBACK
     scan = root / "decisions" / ds.name / f"{safe_label(stage)}_support_basis.json"
     cmd = [
         python,
@@ -217,7 +222,7 @@ def resolve_final_n_basis(
         ]
     run_logged(cmd, logs, f"{ds.name}_{safe_label(stage)}_support_basis", dry_run=args.dry_run)
     payload = read_json(scan)
-    n_basis = int(payload.get("recommended_n_basis") or args.final_basis_fallback)
+    n_basis = int(payload.get("recommended_n_basis") or FINAL_BASIS_FALLBACK)
     return max(int(args.final_basis_min), min(int(args.final_basis_max), n_basis))
 
 

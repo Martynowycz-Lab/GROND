@@ -15,9 +15,6 @@ DEFAULT_ELECTRON_WAVELENGTH_A = 0.025079
 DEFAULT_MAX_SUPPORT_SG = 0.01
 
 
-XDS_TARGET_MODES = ("iobs", "iobs_over_rlp", "iobs_times_peak", "recorded_proxy")
-
-
 XDS_TARGET_MODE_LABELS = {
     "iobs": "IOBS",
     "iobs_over_rlp": "IOBS/RLP",

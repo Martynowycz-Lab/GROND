@@ -15,7 +15,6 @@ from grond.io.config import (
     write_datasets_csv,
     write_prep,
 )
-from grond.workflows.decision import safe_label
 
 
 def prep_from_args(args: argparse.Namespace) -> PrepConfig:
@@ -43,7 +42,7 @@ def prep_from_args(args: argparse.Namespace) -> PrepConfig:
             from grond.io.dials_bridge import convert_dials_to_grond
 
             bridge_dir = (
-                Path(args.out_dir).expanduser().resolve() / "prepared" / f"dials_{safe_label(args.dataset_name)}"
+                Path(args.out_dir).expanduser().resolve() / "prepared" / "dials_dataset"
             )
             try:
                 bridge = convert_dials_to_grond(
@@ -54,7 +53,7 @@ def prep_from_args(args: argparse.Namespace) -> PrepConfig:
                     row_selection=args.dials_row_selection,
                     sigma_mode=args.dials_sigma_mode,
                     dials_python=args.dials_python,
-                    dataset_name=args.dataset_name,
+                    dataset_name="dataset",
                 )
             except (FileNotFoundError, OSError, RuntimeError, ValueError) as exc:
                 raise SystemExit(f"DIALS import failed: {exc}") from exc
@@ -71,14 +70,12 @@ def prep_from_args(args: argparse.Namespace) -> PrepConfig:
             geometry_percentile=args.geometry_percentile,
             datasets=[
                 DatasetSpec(
-                    name=args.dataset_name,
+                    name="dataset",
                     hkl=hkl,
                     xds_dir=xds_dir,
                     hkl_transform=args.hkl_transform,
                     min_d_spacing=args.min_d_spacing,
                     min_peak=args.min_peak,
-                    target_mode=args.target_mode,
-                    include_nonpositive=args.include_nonpositive,
                     geometry_percentile=args.geometry_percentile,
                 )
             ],
