@@ -40,7 +40,7 @@ def shelx_model_is_usable(path: Path | str) -> bool:
 
     p = Path(path)
     try:
-        from grond.legacy.engine.native_row_regularize import shelx_res_health
+        from grond.engine.native_row_regularize import shelx_res_health
 
         health = shelx_res_health(p, p.with_suffix(".lst"))
     except (ImportError, OSError, TypeError, ValueError):
@@ -89,7 +89,7 @@ def shelxl_feedback_record_safe_for_reuse(record: Mapping[str, object]) -> bool:
     try:
         if output.resolve() != health_path.resolve():
             return False
-        from grond.legacy.engine.native_row_regularize import shelx_res_health
+        from grond.engine.native_row_regularize import shelx_res_health
 
         current = shelx_res_health(output, output.with_suffix(".lst"))
     except (ImportError, OSError, TypeError, ValueError):

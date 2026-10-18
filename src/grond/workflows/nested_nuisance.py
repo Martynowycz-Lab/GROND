@@ -9,7 +9,7 @@ Nested nuisance stage (per crystal, after the screen and the early hand decision
     1. an anchor native run of the active (screen) nuisance at screen fidelity writes the row identity, targets,
        sigmas, scan angles, orbit keys and engine split of every row (``trial_rows.npz``) and records the exact
        spectral Config it used;
-    2. ``grond.legacy.engine.nested_nuisance_stage`` computes the spectra of every physics variant (cone sigma grid
+    2. ``grond.engine.nested_nuisance_stage`` computes the spectra of every physics variant (cone sigma grid
        x dose total-B grid; window, points and support of the resolved AUTO physics at ``--nested-n-basis``) on work
        rows only and picks (variant, family in ``--nested-families``, its parameters, P-spline lambda) by inner
        3-fold orbit CV R_all (grond.regularize.nested_selection);
@@ -25,7 +25,7 @@ Nested nuisance stage (per crystal, after the screen and the early hand decision
 Per-macro-cycle thickness update (``--feedback-thickness-update``, default on under nested)
     Before each SHELXL macro-cycle whose entering model was not selected on yet (every cycle after the first), and
     once for the final model, the thickness distribution and lambda are re-selected on the spectra of that
-    structure with the physics variant fixed (grond.legacy.engine.nested_nuisance_stage mode ``reselect``), and the
+    structure with the physics variant fixed (grond.engine.nested_nuisance_stage mode ``reselect``), and the
     cycle's correction uses them.  The loop trajectory records the thickness of every cycle, and the final,
     hand-pair and publication stages use the thickness selected for the kept model.
 """
@@ -287,7 +287,7 @@ def selection_row_policy(args: argparse.Namespace) -> dict:
 def nested_request(args: argparse.Namespace, ds: DatasetSpec, *, model: str, rows_npz: Path, base_config: dict) -> dict:
     """Build the request the nested nuisance stage engine reads for one crystal."""
 
-    from grond.legacy.engine.nested_nuisance_stage import REQUEST_SCHEMA
+    from grond.engine.nested_nuisance_stage import REQUEST_SCHEMA
 
     contract = scale_model_from_args(args)
     return {
@@ -375,7 +375,7 @@ def run_nested_nuisance_stage(
     """
 
     from grond.cli_support.execution import run_logged
-    from grond.legacy.engine.nested_nuisance_stage import spectral_base_config
+    from grond.engine.nested_nuisance_stage import spectral_base_config
 
     policy = validate_nested_nuisance_policy(args, prep)
     root = Path(root)
@@ -513,7 +513,7 @@ class MultiFeedbackThickness:
         """
 
         from grond.cli_support.execution import run_logged
-        from grond.legacy.engine.nested_nuisance_stage import FeedbackThickness
+        from grond.engine.nested_nuisance_stage import FeedbackThickness
 
         self.logs = logs
         self.crystals = {}
@@ -531,7 +531,7 @@ class MultiFeedbackThickness:
     def pinned(self, name: str, nuisance: Mapping[str, object], model: str, base_run: Path | None, label: str) -> tuple[dict, dict]:
         """(nuisance with the thickness selected for ``model``, its record); re-selects an unknown model."""
 
-        from grond.legacy.engine.nested_nuisance_stage import apply_thickness
+        from grond.engine.nested_nuisance_stage import apply_thickness
 
         tracker = self.crystals[name]
         if not tracker.known(model):
@@ -545,7 +545,7 @@ class MultiFeedbackThickness:
     def drift(self, name: str, model: str, recorded: Mapping[str, object]) -> list[str]:
         """Thickness fields a cycle's native run did not reproduce for ``model`` (nested_nuisance_stage.thickness_drift)."""
 
-        from grond.legacy.engine.nested_nuisance_stage import thickness_drift
+        from grond.engine.nested_nuisance_stage import thickness_drift
 
         return thickness_drift(self.crystals[name].fields(model), dict(recorded))
 
@@ -565,7 +565,7 @@ class MultiFeedbackThickness:
 def feedback_final_nuisance(nuisance: Mapping[str, dict], structure_feedback: Mapping[str, object]) -> dict[str, dict]:
     """Per-crystal nuisance with the thickness selected for the kept feedback model (unchanged without an update)."""
 
-    from grond.legacy.engine.nested_nuisance_stage import apply_thickness
+    from grond.engine.nested_nuisance_stage import apply_thickness
 
     update = structure_feedback.get("thickness_update") if isinstance(structure_feedback, Mapping) else None
     final = (update or {}).get("final") if isinstance(update, Mapping) else None

@@ -9,7 +9,7 @@ from pathlib import Path
 
 import numpy as np
 
-from grond.legacy.engine.bloch_engine import (
+from grond.engine.bloch_engine import (
     XDSData,
     sha256,
 )

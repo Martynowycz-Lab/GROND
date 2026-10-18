@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from grond.bloch.config import Config
-from grond.legacy.engine import response_stage as RS, spectra_stage as S
+from grond.engine import response_stage as RS, spectra_stage as S
 from grond.regularize import nested_selection as NS
 from tests._nested_support import random_spectra, synthetic_rows, write_dataset
 
@@ -149,7 +149,7 @@ def _stage_request(tmp_path, hkl, res, n_rows, **extra):
 
 
 def test_stage_on_response_tables_equals_stage_on_spectra(tmp_path):
-    from grond.legacy.engine import nested_nuisance_stage as stage
+    from grond.engine import nested_nuisance_stage as stage
 
     hkl, res = write_dataset(tmp_path / "data", max_rows=60)
     n_rows = len([line for line in hkl.read_text().splitlines() if not line.startswith("!")])

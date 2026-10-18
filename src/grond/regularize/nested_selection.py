@@ -5,12 +5,12 @@ API note (for the AUTO nuisance stage built on this module)
 Inputs
 
 * Spectra, one dict per physics variant, in the packed format (tests/reference/reference_lib.py pack_spectra) that
-  ``grond.legacy.engine.spectra_stage.compute_spectra`` writes: ``row_ids, n_p, n_b, w, lam, c, h10, delta, mu``.
+  ``grond.engine.spectra_stage.compute_spectra`` writes: ``row_ids, n_p, n_b, w, lam, c, h10, delta, mu``.
   Every variant must hold the same rows in the same order (the rows of the arrays below).
 * ``Variant(label, spectra, params, config)``: ``params`` are the physics values of the variant used for edge
   flags (e.g. ``{"dose_b_total_A2": 2.0, "mosaicity_sigma_deg": 0.2}``); ``config`` are the Config overrides
   that produced its spectra (returned in the pick so the engine can reproduce it). ``Variant(label, None, params,
-  config, table=...)`` gives a thickness response table instead (grond.legacy.engine.response_stage); the selection
+  config, table=...)`` gives a thickness response table instead (grond.engine.response_stage); the selection
   then needs ``evaluator="table"`` and ``score_with="table"``.
 * Row arrays of one crystal: ``y`` (target intensity), ``sig`` (its sigma), ``ang`` (scan angle, deg), ``keys``
   (model Laue-orbit keys, grond.validation.heldout.orbit_keys) and ``work`` (bool). Only work rows are ever
@@ -220,7 +220,7 @@ class Variant:
     ``spectra`` is the packed dict or a zero-argument loader returning it (for example from the spectra-stage
     cache), so that select_nested holds one variant's spectra at a time instead of every variant's. A variant may
     instead give ``table``, a thickness table (or its loader) as thickness_table or
-    grond.legacy.engine.response_stage returns it, with ``spectra`` None; the selection then needs
+    grond.engine.response_stage returns it, with ``spectra`` None; the selection then needs
     evaluator="table" and score_with="table".
     """
 

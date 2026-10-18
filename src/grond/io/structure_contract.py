@@ -121,7 +121,7 @@ def check_sfac_contract(structure: str | Path) -> dict[str, object]:
             )
             return embedded_report
         try:
-            from grond.legacy.engine.bloch_engine import parse_cif
+            from grond.engine.bloch_engine import parse_cif
 
             model = parse_cif(path)
         except (OSError, RuntimeError, ValueError) as exc:

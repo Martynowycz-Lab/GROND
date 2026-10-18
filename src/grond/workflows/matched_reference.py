@@ -13,9 +13,9 @@ import numpy as np
 
 from grond.bloch.config import Config
 from grond.bloch.model import parse_model
+from grond.engine.bloch_engine import XDSData
+from grond.engine.combine_native_nuisance_runs import read_hkl, read_rows as read_native_rows
 from grond.hashing import sha256_file
-from grond.legacy.engine.bloch_engine import XDSData
-from grond.legacy.engine.combine_native_nuisance_runs import read_hkl, read_rows as read_native_rows
 from grond.regularize.multidataset import (
     endpoint_key_function,
     endpoint_rows_and_corrections_from_native,

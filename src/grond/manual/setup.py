@@ -88,7 +88,7 @@ def manual_setup(args) -> int:
             str(Path(args.python).expanduser().resolve())
             if str(getattr(args, "python", "") or "").strip()
             else sys.executable,
-            str(PACKAGE_ROOT / "legacy" / "engine" / "run_shelxl_baseline.py"),
+            str(PACKAGE_ROOT / "engine" / "run_shelxl_baseline.py"),
             "--res",
             str(structure),
             "--hkl",

@@ -12,7 +12,7 @@ from pathlib import Path
 
 from grond.cli_support.values import parse_numeric_grid, try_read_json
 from grond.io.config import PrepConfig
-from grond.paths import LEGACY_ROOT
+from grond.paths import PACKAGE_ROOT
 from grond.progress import ProgressState, format_seconds
 from grond.runtime import apply_thread_limits, auto_worker_count
 from grond.workflows.conventional_baseline import _publication_baseline_hkl
@@ -190,7 +190,7 @@ def estimate_run_steps(prep: PrepConfig, args: argparse.Namespace) -> int:
     return max(total, 1)
 
 
-def run_logged(cmd: list[str], log_dir: Path, label: str, *, dry_run: bool = False, cwd: Path = LEGACY_ROOT) -> None:
+def run_logged(cmd: list[str], log_dir: Path, label: str, *, dry_run: bool = False, cwd: Path = PACKAGE_ROOT) -> None:
     """Run one engine command with logs, progress, resume state, and timings."""
 
     log_dir.mkdir(parents=True, exist_ok=True)

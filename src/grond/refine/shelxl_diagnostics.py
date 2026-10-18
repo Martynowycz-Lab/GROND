@@ -6,11 +6,11 @@ import math
 import re
 from pathlib import Path
 
-from grond.legacy.engine.bloch_engine import (
+from grond.engine.bloch_engine import (
     parse_model,
     sha256,
 )
-from grond.legacy.engine.shelx_diagnostics import parse_shelx_lst_pathologies, shelx_pathology_safe_for_feedback
+from grond.engine.shelx_diagnostics import parse_shelx_lst_pathologies, shelx_pathology_safe_for_feedback
 
 from .shelx_input import _iter_recommended_wght_terms, parse_shelx_wght_terms
 

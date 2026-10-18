@@ -36,7 +36,7 @@ for _name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "VEC
 
 if not __package__:
     # Direct legacy execution must import this checkout, not another installed GROND.
-    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import numpy as np
 import scipy
@@ -259,7 +259,7 @@ def _prediction_engine_source_fingerprint() -> str:
     from grond.bloch.source import physics_source_files
     from grond.regularize.source import regularization_source_files
 
-    package_root = Path(__file__).resolve().parents[2]
+    package_root = Path(__file__).resolve().parents[1]
     paths = dict.fromkeys((*physics_source_files(), *regularization_source_files()))
     digest = hashlib.sha256()
     for path in sorted(paths, key=lambda item: item.relative_to(package_root).as_posix()):

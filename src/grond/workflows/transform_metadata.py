@@ -8,8 +8,8 @@ from pathlib import Path
 
 import numpy as np
 
-from grond.legacy.engine.bloch_engine import parse_hkl_transform
-from grond.legacy.engine.shelx_hkl import parse_hkl_observation_line
+from grond.engine.bloch_engine import parse_hkl_transform
+from grond.engine.shelx_hkl import parse_hkl_observation_line
 
 
 def read_hkl_intensity_rows(path: str | Path, *, max_rows: int = 0) -> list[tuple[int, int, int, float, float]]:

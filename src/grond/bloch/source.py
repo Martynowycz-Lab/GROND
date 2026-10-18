@@ -12,7 +12,7 @@ PHYSICS_SOURCE_PATHS = (
     "hkl_transform.py",
     "io/row_contract.py",
     "paths.py",
-    "legacy/engine/bloch_engine.py",
+    "engine/bloch_engine.py",
     "bloch/source.py",
     "bloch/constants.py",
     "bloch/errors.py",

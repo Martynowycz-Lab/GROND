@@ -12,7 +12,7 @@ from typing import Any
 
 import numpy as np
 
-from grond.legacy.engine.native_row_regularize import native_metrics
+from grond.engine.native_row_regularize import native_metrics
 
 
 def _sha256(path: Path) -> str:

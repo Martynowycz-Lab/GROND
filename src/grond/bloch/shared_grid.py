@@ -178,7 +178,7 @@ def estimate_costs(port, indices, workers: int = 1, purpose: str = "predict") ->
     sample = rows if len(rows) <= 8 else rng.choice(rows, 8, replace=False)
     pool = np.asarray(port.pool_hkl, dtype=int)
     cut = float(cfg.max_support_sg)
-    n_row, omegas, half = [], [], []
+    n_row, half = [], []
     for r in sample:
         oc = port.omega_from_z(port.data.zcal[int(r)])
         hkl = port.data.hkl[int(r)]

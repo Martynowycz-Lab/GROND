@@ -32,7 +32,7 @@ import gemmi
 import numpy as np
 
 from grond.bloch.model import shelx_u_cart_matrix
-from grond.legacy.engine.bloch_engine import fcalc_res_grid, inv_d2_from_hkl_array, parse_model
+from grond.engine.bloch_engine import fcalc_res_grid, inv_d2_from_hkl_array, parse_model
 
 DEFAULT_ELECTRON_WAVELENGTH_A = 0.025079
 

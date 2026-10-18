@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 from scipy.linalg import expm
 
-from grond.legacy.engine.bloch_engine import (
+from grond.engine.bloch_engine import (
     Config,
     XDSBlochPort,
     alternate_hand_model,
@@ -215,7 +215,7 @@ def test_two_beam_exact_analytic_solution(coupling, delta, thickness):
 
 
 def test_one_beam_phase_and_uniform_absorption_are_analytic():
-    from grond.legacy.engine.bloch_engine import validate_passive_absorption
+    from grond.engine.bloch_engine import validate_passive_absorption
     port = minimal_port(absorption_mode='mean', absorption_mu=5e-5)
     port.ug_array = lambda hkls: np.ones(hkls.shape[:-1], dtype=complex) * 123
     H = port.hamiltonian(np.array([[0, 0, 0]]), np.array([.0123]))
@@ -275,7 +275,7 @@ def test_thickness_quadrature_matches_distribution_moments(model, grad, sigma, v
 def test_nonhermitian_passivity_check_rejects_gain_and_exception_is_picklable():
     import pickle
 
-    from grond.legacy.engine.bloch_engine import NonPassiveAbsorptionError, validate_passive_absorption
+    from grond.engine.bloch_engine import NonPassiveAbsorptionError, validate_passive_absorption
     H = (1 + .02j) * np.array([[0, .001], [.001, 0]])
     # Independent demonstration: the proposed generator really creates intensity.
     assert np.sum(abs(expm(2j * np.pi * H * 1000) @ [1,0])**2) > 1.03
@@ -294,7 +294,7 @@ def test_nonhermitian_passivity_check_rejects_gain_and_exception_is_picklable():
 
 
 def test_passivity_rejection_applies_to_uncached_and_cached_row_matrices():
-    from grond.legacy.engine.bloch_engine import NonPassiveAbsorptionError
+    from grond.engine.bloch_engine import NonPassiveAbsorptionError
     port = minimal_port(absorption_mode='midgley_like', absorption_mu=0, absorption_frac=.02)
     port.ug_array = lambda hkls: np.ones(hkls.shape[:-1], dtype=complex) * .08
     basis = np.array([[0,0,0], [1,0,0]])
@@ -332,7 +332,7 @@ def test_born_limit_at_finite_detuning_converges_quadratically():
 
 
 def test_proper_reciprocal_setting_change_preserves_skew_cell_factors(tmp_path):
-    from grond.legacy.engine.bloch_engine import cell_from_real_matrix, cell_orthogonalization_matrix
+    from grond.engine.bloch_engine import cell_from_real_matrix, cell_orthogonalization_matrix
     model = parse_model(res_file(tmp_path, ['C1 1 .13 .27 .31 11 .02', 'C2 1 .23 .17 .49 11 .04'],
         latt=-1, cell='10 11 12 82 97 106'))
     T = np.array([[0,1,0],[0,0,-1],[-1,0,0]])
@@ -370,7 +370,7 @@ def test_elastic_reciprocity_and_coordinate_inversion_use_same_hamiltonian(tmp_p
 
 
 def test_anisotropic_dw_matches_cartesian_displacement_covariance(tmp_path):
-    from grond.legacy.engine.bloch_engine import cell_orthogonalization_matrix
+    from grond.engine.bloch_engine import cell_orthogonalization_matrix
     model = parse_model(res_file(tmp_path, ['C1 1 .13 .27 .31 11 .02 .03 .04 .006 -.002 .005'],
         latt=-1,cell='10 11 12 82 97 106'))
     atom=model['atoms'][0]

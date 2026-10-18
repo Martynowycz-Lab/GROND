@@ -3,7 +3,7 @@
 
 The nested selection scores every thickness candidate on a table of each row's profile-summed intensity I(t) on
 the support grid, one table per hand plus the Born term (grond.regularize.nested_selection.thickness_table).
-Building that table from packed spectra (grond.legacy.engine.spectra_stage) holds every row's eigensystems in
+Building that table from packed spectra (grond.engine.spectra_stage) holds every row's eigensystems in
 memory at once, which for full-cone matrices of a large data set is hundreds of GB. Here each worker computes one
 row's spectra, reduces them to the row's table entries with thickness_table itself and drops them, so memory is the
 table plus one row's spectra per worker. The table values equal those thickness_table computes from the packed
@@ -16,7 +16,7 @@ change NumPy's matrix-vector summation and so the last bits of the selection sco
 The exact characteristic-function evaluator (cf) needs the spectra, so a selection on tables scores and evaluates
 every candidate on the table: it needs evaluator="table" and score_with="table".
 
-  python -m grond.legacy.engine.response_stage --hkl INTEGRATE.HKL --res model.res --config-json cfg.json \
+  python -m grond.engine.response_stage --hkl INTEGRATE.HKL --res model.res --config-json cfg.json \
       --row-index-file rows.txt --out-dir DIR [--hands 1 -1] [--workers 8]
 """
 
@@ -37,12 +37,12 @@ for _name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "VEC
     os.environ.setdefault(_name, "1")
 
 if not __package__:
-    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import numpy as np  # noqa: E402
 
 from grond.bloch.config import Config  # noqa: E402
-from grond.legacy.engine import spectra_stage as spectra  # noqa: E402
+from grond.engine import spectra_stage as spectra  # noqa: E402
 from grond.regularize import nested_selection  # noqa: E402
 from grond.regularize.nested_selection import ThicknessSupport, thickness_table  # noqa: E402
 

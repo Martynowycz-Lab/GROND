@@ -7,12 +7,11 @@ import sys
 from pathlib import Path
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
-LEGACY_ROOT = PACKAGE_ROOT / "legacy"
-ENGINE_ROOT = LEGACY_ROOT / "engine"
+ENGINE_ROOT = PACKAGE_ROOT / "engine"
 
 
 def engine_script(name: str) -> Path:
-    """Return the path of a command-line engine script in grond/legacy/engine."""
+    """Return the path of a command-line engine script in grond/engine."""
 
     return ENGINE_ROOT / name
 

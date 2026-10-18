@@ -24,8 +24,8 @@ import subprocess
 import time
 from pathlib import Path
 
-from grond.legacy.engine.shelx_diagnostics import parse_shelx_lst_pathologies
-from grond.legacy.engine.shelx_hkl import audit_fixed_width_hklf4
+from grond.engine.shelx_diagnostics import parse_shelx_lst_pathologies
+from grond.engine.shelx_hkl import audit_fixed_width_hklf4
 
 from .shelx_input import Q_PEAK_RE, parse_basf_values, parse_shelx_wght_terms
 from .shelxl_diagnostics import parse_lst, parse_recommended_wght

@@ -21,7 +21,7 @@ from pathlib import Path
 
 if not __package__:
     # Direct legacy execution must import this checkout, not another installed GROND.
-    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import numpy as np
 

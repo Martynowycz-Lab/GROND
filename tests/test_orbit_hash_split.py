@@ -225,7 +225,7 @@ def _engine(tmp_path: Path, name: str, *extra: str) -> tuple[list[dict], dict]:
     subprocess.run(
         [
             sys.executable,
-            str(REPO / "src" / "grond" / "legacy" / "engine" / "native_row_regularize.py"),
+            str(REPO / "src" / "grond" / "engine" / "native_row_regularize.py"),
             "--hkl", str(hkl), "--res", str(model), "--out-dir", str(out),
             "--prediction-cache-dir", str(tmp_path / "cache" / "predictions"),
             "--ug-cache-dir", str(tmp_path / "cache" / "ug"),
@@ -321,7 +321,7 @@ def _native_parser():
     import argparse
     from unittest.mock import patch
 
-    from grond.legacy.engine import native_row_regularize as nr
+    from grond.engine import native_row_regularize as nr
 
     captured = {}
 
@@ -343,8 +343,8 @@ def test_single_dataset_shelxl_feedback_cycles_replay_the_orbit_hash_split(tmp_p
     import argparse
 
     from grond.bloch.model import parse_model
+    from grond.engine import shelxl_feedback_loop as feedback
     from grond.io.xds import XDSData
-    from grond.legacy.engine import shelxl_feedback_loop as feedback
 
     hkl = tmp_path / "x.HKL"
     model = tmp_path / "m.res"

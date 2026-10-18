@@ -27,7 +27,7 @@ from pathlib import Path
 
 if not __package__:
     # Direct legacy execution must import this checkout, not another installed GROND.
-    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from grond.refine.arguments_feedback import build_parser as build_feedback_parser
 from grond.refine.feedback_contract import (
@@ -424,7 +424,7 @@ def _thickness_tracker(args: argparse.Namespace, out: Path, env: dict[str, str])
         return None
     if not str(getattr(args, "nested_nuisance_contract", "") or "").strip():
         raise SystemExit("--feedback-thickness-update on needs --nested-nuisance-contract")
-    from grond.legacy.engine.nested_nuisance_stage import FeedbackThickness
+    from grond.engine.nested_nuisance_stage import FeedbackThickness
 
     def run_stage(request_path, result_path, label):
         """Run nested_nuisance_stage.py on one re-selection request; raise if it fails."""
@@ -451,7 +451,7 @@ def main() -> None:
 
     With ``--feedback-thickness-update on`` every structure the loop corrects with (each entering model and the
     final model) has its own thickness distribution and lambda, re-selected on its spectra with the nested
-    physics variant fixed (grond.legacy.engine.nested_nuisance_stage); each trajectory entry records it.
+    physics variant fixed (grond.engine.nested_nuisance_stage); each trajectory entry records it.
     """
 
     ap = build_feedback_parser(
@@ -516,7 +516,7 @@ def main() -> None:
 
         if thickness is None:
             return source_summary, None
-        from grond.legacy.engine.nested_nuisance_stage import apply_thickness
+        from grond.engine.nested_nuisance_stage import apply_thickness
 
         if not thickness.known(model):
             if last_run_dir is None:
@@ -572,7 +572,7 @@ def main() -> None:
         if thickness_record is not None:
             rec["thickness"] = thickness_record
             if rec["returncode"] == 0:
-                from grond.legacy.engine.nested_nuisance_stage import thickness_drift
+                from grond.engine.nested_nuisance_stage import thickness_drift
 
                 run_summary = Path(rec["run_dir"]) / "summary.json"
                 recorded = ((read_json(run_summary) if run_summary.exists() else {}).get("best_native") or {}).get("nuisance") or {}

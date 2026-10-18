@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from grond.bloch.config import Config
-from grond.legacy.engine.bloch_engine import XDSBlochPort
+from grond.engine.bloch_engine import XDSBlochPort
 
 
 def stub_port(sigma: float, points: int = 5, n_points: int = 5):

@@ -8,9 +8,9 @@ variants (mosaic cone x dose B), the thickness/scale grids and the support. The 
 
 1. keeps only work rows with a valid anchor prediction: free rows (engine split and orbit-hash free set) and
    excluded orbits are dropped before any spectrum is computed, so no free row enters a spectrum, fit or score;
-2. computes the spectra of each variant (grond.legacy.engine.spectra_stage, cached on disk) and loads them one
+2. computes the spectra of each variant (grond.engine.spectra_stage, cached on disk) and loads them one
    variant at a time; with ``"response_tables": true`` it keeps only each variant's thickness table
-   (grond.legacy.engine.response_stage) and scores and evaluates every candidate on it;
+   (grond.engine.response_stage) and scores and evaluates every candidate on it;
 3. picks (variant, thickness family and parameters, P-spline n_basis/lambda) by inner 3-fold orbit CV R_all
    (grond.regularize.nested_selection.select_nested, model hand);
 4. writes the pick, the nuisance fields to pin downstream, the full CV R_all grid (variant x thickness x scale),
@@ -20,7 +20,7 @@ variants (mosaic cone x dose B), the thickness/scale grids and the support. The 
 Mode ``reselect`` is the per-macro-cycle thickness update: one fixed variant (the physics of the entering model's
 feedback cycle), the thickness and scale grids re-searched on the spectra of the new structure.
 
-  python -m grond.legacy.engine.nested_nuisance_stage --request request.json --out result.json [--workers 8]
+  python -m grond.engine.nested_nuisance_stage --request request.json --out result.json [--workers 8]
 """
 
 from __future__ import annotations
@@ -40,7 +40,7 @@ for _name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "VEC
     os.environ.setdefault(_name, "1")
 
 if not __package__:
-    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import numpy as np  # noqa: E402
 
@@ -287,7 +287,7 @@ def thickness_summary(pick: dict) -> dict:
 def _cache_loader(path: str, identity: dict):
     """Loader of one variant's cached spectra; the stored identity must still equal the computed one."""
 
-    from grond.legacy.engine.spectra_stage import _read_cache
+    from grond.engine.spectra_stage import _read_cache
 
     def load() -> dict:
         """Read this variant's cached spectra, checking the stored identity."""
@@ -300,7 +300,7 @@ def _cache_loader(path: str, identity: dict):
 def _table_loader(path: str, identity: dict):
     """Loader of one variant's cached response table; the stored identity must still equal the computed one."""
 
-    from grond.legacy.engine.response_stage import load_response_table
+    from grond.engine.response_stage import load_response_table
 
     def load() -> dict:
         """Read this variant's response table, checking the stored identity."""
@@ -328,8 +328,8 @@ def run_selection(request: dict, *, workers: int | None = None, scratch_dir=None
 def _run_selection(request: dict, *, workers: int | None, cache_dir: str) -> dict:
     """Compute every variant's spectra (or response tables) into cache_dir, run the nested selection, return the record."""
 
-    from grond.legacy.engine.response_stage import compute_response_table
-    from grond.legacy.engine.spectra_stage import compute_spectra
+    from grond.engine.response_stage import compute_response_table
+    from grond.engine.spectra_stage import compute_spectra
 
     t_start = time.perf_counter()
     workers = max(1, int(workers if workers is not None else request.get("workers", 1)))

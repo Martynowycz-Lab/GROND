@@ -107,8 +107,8 @@ def _selected_hand_summary(workflow: Mapping[str, object]) -> dict[str, object]:
 def _manual_row_statistics(row_runs: Mapping[str, Path], model: Path) -> tuple[dict[str, object], dict[str, object]]:
     """Return the combined and per-crystal row R statistics of the selected rows for ``model``."""
 
-    from grond.legacy.engine.bloch_engine import parse_model
-    from grond.legacy.engine.row_mr_report import (
+    from grond.engine.bloch_engine import parse_model
+    from grond.engine.row_mr_report import (
         compute_per_dataset_row_mr,
         compute_row_mr_summary,
         read_csv_rows,

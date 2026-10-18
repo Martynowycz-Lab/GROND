@@ -6,7 +6,7 @@ import hashlib
 
 import numpy as np
 
-from grond.legacy.engine.detector_scale_regularization import (
+from grond.engine.detector_scale_regularization import (
     detector_field_diagnostics,
 )
 

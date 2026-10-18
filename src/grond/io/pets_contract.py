@@ -46,7 +46,7 @@ def _operation_key(rotation: np.ndarray, translation: np.ndarray) -> tuple[float
 def _validate_structure_setting(structure: Path, *, space_group_number: int, pets_cell: np.ndarray) -> dict[str, Any]:
     """Require the supplied model to use the declared PETS space-group setting."""
 
-    from grond.legacy.engine.bloch_engine import parse_model
+    from grond.engine.bloch_engine import parse_model
 
     path = Path(structure).expanduser().resolve()
     model = parse_model(path)

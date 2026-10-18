@@ -192,7 +192,7 @@ def dataset_transform_candidates(
         source = "trusted" if getattr(args, "trust_hkl_transform", False) else "declared"
         return {"source": source, "hkl": hkl_path, "hkl_transform": declared, "generated": [declared],
                 "retained": [declared], "metric_filter": {}}
-    from grond.legacy.engine.bloch_engine import metric_filter_signed_axis_transforms
+    from grond.engine.bloch_engine import metric_filter_signed_axis_transforms
 
     if not Path(hkl_path).is_file():
         raise ValueError(f"transform candidates: the HKL file of dataset {ds.name!r} does not exist: {ds.hkl}")
@@ -352,7 +352,7 @@ def _materialize_transform_hand_split_contract(
     candidates under --split-candidate-set per-crystal); ``candidate_set`` records the shared closure.
     """
 
-    from grond.legacy.engine.bloch_engine import (
+    from grond.engine.bloch_engine import (
         build_transform_split_contract,
         validate_transform_split_contract,
     )

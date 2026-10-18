@@ -8,8 +8,8 @@ from pathlib import Path
 
 import numpy as np
 
-from grond.legacy.engine.bloch_engine import sha256
-from grond.legacy.engine.endpoint_modulation import modulation_manifest_fields
+from grond.engine.bloch_engine import sha256
+from grond.engine.endpoint_modulation import modulation_manifest_fields
 from grond.refine.shelx_input import ABSOLUTE_HKL_KAPPA
 
 ENDPOINT_Q_RATIO_BOUNDS = (0.05, 20.0)

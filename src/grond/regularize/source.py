@@ -28,9 +28,9 @@ REGULARIZATION_SOURCE_PATHS = (
     'regularize/prediction_cache.py',
     'regularize/scales.py',
     'regularize/selection.py',
-    'legacy/engine/combine_native_nuisance_runs.py',
-    'legacy/engine/native_row_regularize.py',
-    'legacy/engine/shelxl_feedback_loop.py',
+    'engine/combine_native_nuisance_runs.py',
+    'engine/native_row_regularize.py',
+    'engine/shelxl_feedback_loop.py',
 )
 
 

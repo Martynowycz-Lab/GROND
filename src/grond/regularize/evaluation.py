@@ -7,8 +7,8 @@ from dataclasses import asdict
 
 import numpy as np
 
-from grond.legacy.engine.bloch_engine import XDSData
-from grond.legacy.engine.detector_scale_regularization import detector_field_diagnostics
+from grond.engine.bloch_engine import XDSData
+from grond.engine.detector_scale_regularization import detector_field_diagnostics
 from grond.validation import heldout
 
 from .contracts import Nuisance, ScaleModel

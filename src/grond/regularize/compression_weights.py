@@ -10,7 +10,7 @@ import math
 
 import numpy as np
 
-from grond.legacy.engine.detector_scale_regularization import (
+from grond.engine.detector_scale_regularization import (
     infer_square_grid_size,
     solve_regularized_detector_field,
 )

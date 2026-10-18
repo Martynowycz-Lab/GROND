@@ -4,7 +4,7 @@ import numpy as np
 
 from grond.bloch import shared_grid as SG
 from grond.bloch.config import Config
-from grond.legacy.engine import spectra_stage as S
+from grond.engine import spectra_stage as S
 from grond.regularize.nested_selection import ThicknessSupport
 from tests._nested_support import write_dataset
 

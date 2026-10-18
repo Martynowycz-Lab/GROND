@@ -6,7 +6,7 @@ import pytest
 from grond.bloch import config as config_module
 from grond.bloch.config import Config
 from grond.bloch.potential import centring_coset_mask
-from grond.legacy.engine import spectra_stage as S
+from grond.engine import spectra_stage as S
 from grond.regularize.nested_selection import ThicknessSupport, thickness_table
 from tests._nested_support import write_dataset
 

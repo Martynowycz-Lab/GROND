@@ -29,7 +29,7 @@ for _name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "VEC
 
 if not __package__:
     # Direct legacy scripts still resolve the same installed/source package.
-    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import numpy as np
 from scipy.linalg import eig, expm

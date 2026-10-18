@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from grond.legacy.engine.bloch_engine import XDSBlochPort
+from grond.engine.bloch_engine import XDSBlochPort
 
 
 @pytest.mark.parametrize("selector", ["center", "cone", "profile", "pets"])

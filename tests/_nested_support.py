@@ -52,8 +52,8 @@ def _row(h, z, iobs, *, bbox=None) -> str:
 
 def write_dataset(tmp_path: Path, *, dials_bbox: bool = False, seed: int = 0, max_rows: int = 24) -> tuple[Path, Path]:
     """INTEGRATE.HKL-style rows at their Bragg crossings (P2_12_12_1 cell 8 x 9 x 10 A) plus a three-atom model."""
+    from grond.engine.bloch_engine import Config, XDSBlochPort, parse_model
     from grond.io.xds import XDSData
-    from grond.legacy.engine.bloch_engine import Config, XDSBlochPort, parse_model
 
     tmp_path.mkdir(parents=True, exist_ok=True)
     res = tmp_path / "model.res"

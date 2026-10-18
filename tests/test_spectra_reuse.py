@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from grond.bloch.hamiltonian import ProfileHamiltonians
-from grond.legacy.engine import spectra_stage as S
+from grond.engine import spectra_stage as S
 
 
 def _port(static, excitation):

@@ -2,7 +2,7 @@
 
 A single-crystal AUTO run publishes a per-crystal endpoint of the native engine (source_kind ``native_corrected_hkl``):
 ``<cycle>/endpoint_lam_<l>_B_<b>_<exti>/dyn_nuisance_corrected.{res,hkl,lst}``, which export_corrected_endpoint
-(legacy/engine/native_row_regularize.py) wrote from the rows of the same command's row table ``<cycle>/native_dyn_calc.csv``.
+(engine/native_row_regularize.py) wrote from the rows of the same command's row table ``<cycle>/native_dyn_calc.csv``.
 The command's record is ``<cycle>/summary.json`` (``config``: its arguments; ``inputs``: the entering model and its SHA-256;
 ``artifacts``: the row table and its SHA-256) and the endpoint's ``manifest.json`` (lambda, q policy, the error-model passes
 and the one kept).  The replay reads those records and predicts and refines nothing, like the combine engine's
@@ -153,8 +153,8 @@ def rebuild_native_endpoint(
     """
 
     from grond.bloch.model import fcalc_res_grid, parse_model
-    from grond.legacy.engine.native_row_regularize import _merge_rows, exact_hkl_merge
-    from grond.legacy.engine.post_bloch_sigma import apply_error_model_sigma, fit_error_model_sigma
+    from grond.engine.native_row_regularize import _merge_rows, exact_hkl_merge
+    from grond.engine.post_bloch_sigma import apply_error_model_sigma, fit_error_model_sigma
     from grond.refine.shelx_input import enforce_hkl_row_width
     from grond.regularize.multidataset import endpoint_correction_denominators
 
@@ -228,8 +228,8 @@ def replay_native_endpoint(published: Mapping[str, object], out_dir: Path, *, sh
     """
 
     from grond.bloch.model import parse_model
-    from grond.legacy.engine.combine_native_nuisance_runs import _fixed_width_rows, _hkl_lines, score_only_inputs
-    from grond.legacy.engine.native_row_regularize import _merge_rows
+    from grond.engine.combine_native_nuisance_runs import _fixed_width_rows, _hkl_lines, score_only_inputs
+    from grond.engine.native_row_regularize import _merge_rows
     from grond.refine.shelx_input import write_hkl
     from grond.regularize.multidataset import canonical_model_friedel
 

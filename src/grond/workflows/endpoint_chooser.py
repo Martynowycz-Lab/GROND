@@ -12,9 +12,9 @@ import math
 from collections.abc import Mapping
 from pathlib import Path
 
+from grond.engine.shelx_diagnostics import parse_shelx_lst_metrics, parse_shelx_lst_pathologies
+from grond.engine.shelx_hkl import audit_fixed_width_precision
 from grond.forensics.resolution import classify_endpoint_candidate
-from grond.legacy.engine.shelx_diagnostics import parse_shelx_lst_metrics, parse_shelx_lst_pathologies
-from grond.legacy.engine.shelx_hkl import audit_fixed_width_precision
 
 
 def _float(value, fallback: float = float("nan")) -> float:

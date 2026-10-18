@@ -12,8 +12,8 @@ from pathlib import Path
 
 from grond.cli_support.tools import external_tool_statuses
 from grond.cli_support.values import try_read_json
+from grond.engine.shelx_diagnostics import parse_shelx_lst_metrics
 from grond.hashing import sha256_file
-from grond.legacy.engine.shelx_diagnostics import parse_shelx_lst_metrics
 from grond.maps.ccp4 import normalize_ccp4_map
 from grond.maps.model_box import (
     DEFAULT_MODEL_BOX_MARGIN_A,

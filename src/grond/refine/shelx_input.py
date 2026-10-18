@@ -12,7 +12,7 @@ import math
 import re
 from pathlib import Path
 
-from grond.legacy.engine.shelx_hkl import safe_fixed_width_factor, write_fixed_width_hkl
+from grond.engine.shelx_hkl import safe_fixed_width_factor, write_fixed_width_hkl
 
 DEFAULT_ELECTRON_WAVELENGTH_A = 0.025079
 

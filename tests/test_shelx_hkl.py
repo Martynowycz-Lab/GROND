@@ -2,8 +2,8 @@ from pathlib import Path
 
 import pytest
 
-from grond.legacy.engine.native_row_regularize import enforce_hkl_row_width
-from grond.legacy.engine.shelx_hkl import (
+from grond.engine.native_row_regularize import enforce_hkl_row_width
+from grond.engine.shelx_hkl import (
     adaptive_observation_field,
     audit_fixed_width_precision,
     format_fixed_width_row,
@@ -32,7 +32,7 @@ def test_adaptive_export_keeps_small_sigmas_beside_large_ones(tmp_path):
 
 
 def test_both_hkl_readers_keep_touching_fixed_columns_and_trailing_batches(tmp_path):
-    from grond.legacy.engine.combine_native_nuisance_runs import read_hkl
+    from grond.engine.combine_native_nuisance_runs import read_hkl
     from grond.workflows.transform_metadata import read_hkl_intensity_rows
 
     rows = [(1, -2, 3, 1234.567, 1.234e11), (4, 5, -6, -123.456, 0.00001234)]
@@ -46,7 +46,7 @@ def test_both_hkl_readers_keep_touching_fixed_columns_and_trailing_batches(tmp_p
 @pytest.mark.parametrize("line", ["1 2 3 123456789012 1.0", "1.0 2.0 3.0 123456789012 1.0",
                                   "1.0e0 2.0e0 3.0e0 123456789012 1.0"])
 def test_free_format_large_values_and_float_written_indices_are_unambiguous(line):
-    from grond.legacy.engine.shelx_hkl import parse_hkl_observation_line
+    from grond.engine.shelx_hkl import parse_hkl_observation_line
 
     assert parse_hkl_observation_line(line) == (1, 2, 3, 123456789012.0, 1.0)
 

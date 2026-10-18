@@ -9,7 +9,7 @@ from collections.abc import Mapping
 from grond import __version__
 from grond.accelerators import probe_accelerators, probe_bloch_ops
 from grond.cli_support.tools import choose_python, external_tool_statuses
-from grond.paths import LEGACY_ROOT, PACKAGE_ROOT, engine_script
+from grond.paths import ENGINE_ROOT, PACKAGE_ROOT, engine_script
 
 
 def _doctor_readiness_failures(
@@ -98,11 +98,11 @@ def _installed_features() -> dict[str, bool]:
     """
 
     health = _source_text("refine/shelxl_diagnostics.py")
-    feedback = _source_text("legacy/engine/shelxl_feedback_loop.py")
+    feedback = _source_text("engine/shelxl_feedback_loop.py")
     feedback_contract = _source_text("refine/feedback_contract.py")
     model_selection = _source_text("workflows/model_selection.py")
     shelx_input = _source_text("refine/shelx_input.py")
-    absolute_structure = _source_text("legacy/engine/absolute_structure_diagnostic.py")
+    absolute_structure = _source_text("engine/absolute_structure_diagnostic.py")
     transforms = _source_text("hkl_transform.py")
     transform_selection = _source_text("workflows/transform_selection.py")
     return {
@@ -143,13 +143,13 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     payload = probe_accelerators(python)
     package_init = PACKAGE_ROOT / "__init__.py"
     absolute_structure_script = engine_script("absolute_structure_diagnostic.py")
-    absolute_structure_text = _source_text("legacy/engine/absolute_structure_diagnostic.py")
+    absolute_structure_text = _source_text("engine/absolute_structure_diagnostic.py")
     required_features = _installed_features()
     payload["grond"] = {
         "version": __version__,
         "package": str(package_init.resolve()),
         "cli": str((PACKAGE_ROOT / "cli.py").resolve()),
-        "engine_root": str(LEGACY_ROOT.resolve()),
+        "engine_root": str(ENGINE_ROOT.resolve()),
         "absolute_structure_diagnostic": str(absolute_structure_script.resolve()),
         "absolute_structure_uses_pandas": "import pandas" in absolute_structure_text
         or "pd.read_csv" in absolute_structure_text,

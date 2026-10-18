@@ -19,7 +19,7 @@ def _quick_progress_source_roots(out_dir: Path) -> list[tuple[str, int]]:
     progress = try_read_json(out_dir / "grond_progress.json")
     completed = progress.get("completed", {}) if isinstance(progress.get("completed"), Mapping) else {}
     counts: dict[str, int] = {}
-    marker = "/src/grond/legacy/engine/"
+    marker = "/src/grond/engine/"
     for record in completed.values():
         if not isinstance(record, Mapping):
             continue

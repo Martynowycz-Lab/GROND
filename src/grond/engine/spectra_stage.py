@@ -16,7 +16,7 @@ excluded), the model file, the reflection file, the transform, the row list and 
 point also stores a digest of its matrix bytes, so a later Config can reuse an identical matrix's spectrum exactly
 (every nonzero cone width solves the same untilted block).
 
-  python -m grond.legacy.engine.spectra_stage --hkl INTEGRATE.HKL --res model.res --config-json cfg.json \
+  python -m grond.engine.spectra_stage --hkl INTEGRATE.HKL --res model.res --config-json cfg.json \
       --out spectra.npz [--row-index-file rows.txt] [--workers 8] [--cache-dir DIR]
 """
 
@@ -39,7 +39,7 @@ for _name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "VEC
     os.environ.setdefault(_name, "1")
 
 if not __package__:
-    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import numpy as np  # noqa: E402
 
@@ -184,7 +184,7 @@ _DONOR: dict = {}
 def build_port(hkl: str, hkl_transform: str, res: str, cfg: Config, alternate_hand: bool = False, ug_cache_dir=None):
     """Build the Bloch port for one reflection file and model, optionally with the model hand inverted."""
 
-    from grond.legacy.engine.bloch_engine import XDSBlochPort
+    from grond.engine.bloch_engine import XDSBlochPort
 
     data = XDSData(Path(hkl), hkl_transform=hkl_transform)
     model = parse_model(Path(res))

@@ -7,8 +7,8 @@ import time
 from collections.abc import Mapping
 from pathlib import Path
 
+from grond.engine.shelx_diagnostics import parse_shelx_lst_metrics, parse_shelx_lst_pathologies
 from grond.io.config import load_prep
-from grond.legacy.engine.shelx_diagnostics import parse_shelx_lst_metrics, parse_shelx_lst_pathologies
 from grond.manual.execution import _command_elapsed
 from grond.manual.reporting import (
     _manual_markdown_summary,

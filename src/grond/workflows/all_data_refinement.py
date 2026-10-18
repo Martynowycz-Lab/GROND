@@ -110,7 +110,7 @@ def run_all_data_refinement(prep: PrepConfig, result: Mapping[str, object], args
         return {"status": "dry_run"}
     if str(getattr(args, "endpoint_free_validation", "on")) != "on":
         return {"status": "not_available", "reason": "--endpoint-free-validation off writes no free reflections"}
-    from grond.legacy.engine.combine_native_nuisance_runs import endpoint_native_outputs, run_shelxl
+    from grond.engine.combine_native_nuisance_runs import endpoint_native_outputs, run_shelxl
     from grond.refine.shelx_input import write_endpoint_ins
     from grond.refine.shelxl_iterations import endpoint_initial_wght
     from grond.workflows.finish_maps import _publication_endpoint_from_result

@@ -9,7 +9,7 @@ from scipy.integrate import quad
 
 from grond.bloch.config import Config, frozen_kernel_contract
 from grond.bloch.errors import LocalSgCrossingError
-from grond.legacy.engine.bloch_engine import XDSBlochPort
+from grond.engine.bloch_engine import XDSBlochPort
 
 
 def port(*, coordinate="direct_angle", normalization="target_sg_equivalent_v1", derivative=0.01,

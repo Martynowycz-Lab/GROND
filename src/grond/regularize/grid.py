@@ -11,7 +11,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from grond.bloch.config import resolve_double_precision
-from grond.legacy.engine.bloch_engine import Config, InfeasibleSgJitterProfileError, NonPassiveAbsorptionError
+from grond.engine.bloch_engine import Config, InfeasibleSgJitterProfileError, NonPassiveAbsorptionError
 
 from .contracts import (
     Nuisance,

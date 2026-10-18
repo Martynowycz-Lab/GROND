@@ -24,7 +24,7 @@ from pathlib import Path
 import numpy as np
 
 if __package__:
-    from ...forensics.resolution import promote_resolution_limit
+    from ..forensics.resolution import promote_resolution_limit
     from .row_mr_report import (
         canonical_hkl,
         compute_model_metrics,
@@ -36,7 +36,7 @@ if __package__:
 else:  # pragma: no cover - direct script execution
     import sys
 
-    src_root = Path(__file__).resolve().parents[3]
+    src_root = Path(__file__).resolve().parents[2]
     if str(src_root) not in sys.path:
         sys.path.insert(0, str(src_root))
 

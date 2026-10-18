@@ -8,9 +8,9 @@ import pytest
 
 from grond.bloch.config import Config
 from grond.cli_options.parser import build_parser
+from grond.engine import nested_nuisance_stage as nested_stage
+from grond.engine.shelxl_feedback_loop import native_command
 from grond.io.config import DatasetSpec
-from grond.legacy.engine import nested_nuisance_stage as nested_stage
-from grond.legacy.engine.shelxl_feedback_loop import native_command
 from grond.refine.arguments_feedback import build_parser as feedback_parser
 from grond.regularize.arguments_native import build_parser as native_parser
 from grond.regularize.contracts import TARGET_MODES, Nuisance
