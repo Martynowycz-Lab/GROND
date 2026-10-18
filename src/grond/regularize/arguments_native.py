@@ -295,7 +295,7 @@ def build_parser(description: str, *, default_hkl, default_res, default_baseline
 
 
 def add_scale_model_arguments(ap: argparse.ArgumentParser, *, default: str) -> None:
-    """Frame-scale family options shared by the native row and continuous-thickness engines."""
+    """Frame-scale family options of the native row engine."""
 
     ap.add_argument(
         "--scale-model",

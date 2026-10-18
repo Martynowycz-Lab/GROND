@@ -194,6 +194,4 @@ def crystal_arguments(args: argparse.Namespace, name: str) -> argparse.Namespace
         resolved.fixed_thickness = record.get("fixed_thickness", {})
         resolved.fixed_n_basis = settings.get("n_basis")
         resolved.fixed_n_points = settings.get("n_points")
-        if resolved.fixed_thickness:
-            resolved.continuous_thickness_polish = "off"
     return resolved

@@ -544,13 +544,6 @@ def feature_decision_line(record: Mapping[str, object]) -> str:
             f"-> candidate {_score(record.get('candidate_full_row_score'))} "
             f"(free rows in selection {record.get('free_rows_in_selection')})"
         )
-    if family == "continuous_thickness_materialization":
-        return (
-            f"  thickness (continuous polish): {status}; {record.get('selection_rows', 'n/a')}-row score baseline "
-            f"{_score(record.get('baseline_score'))} -> candidate {_score(record.get('candidate_score'))} "
-            f"(gain {_signed(record.get('full_row_score_gain'), 5)}; free rows in selection "
-            f"{record.get('free_rows_in_selection')})"
-        )
     if isinstance(record.get("candidates"), list):
         keys = CV_FAMILY_KEYS.get(family, ())
         scheme = record.get("heldout_scheme") if isinstance(record.get("heldout_scheme"), Mapping) else {}

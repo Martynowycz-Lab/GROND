@@ -26,7 +26,6 @@ from grond.cli_options.parser import build_parser
 from grond.io.config import DatasetSpec
 from grond.validation import heldout as H
 from grond.workflows.native_commands import native_stage_cmd
-from grond.workflows.thickness_materialization import continuous_thickness_cmd
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "tests" / "reference"))
@@ -277,9 +276,6 @@ def test_auto_defaults_forward_orbit_hash_split_and_legacy_flags_restore_it(tmp_
     assert cmd[cmd.index("--split-scheme") + 1] == "orbit-hash"
     assert cmd[cmd.index("--split-salt") + 1] == H.DEFAULT_FREE_SALT
     assert "--exclude-orbits-json" not in cmd
-    continuous = continuous_thickness_cmd("python", ds, "m.res", tmp_path / "c", args, {}, n_basis=8, n_points=3, stage="c")
-    assert continuous[continuous.index("--split-scheme") + 1] == "orbit-hash"
-    assert continuous[continuous.index("--split-contract") + 1] == ds.split_contract
 
     lock_args = build_parser().parse_args([*base, "--exclude-orbits-json", str(lock_path)])
     cmd = native_stage_cmd("python", ds, "m.res", "", tmp_path / "run", lock_args, n_basis=8, n_points=3, stage="screen")
@@ -288,8 +284,6 @@ def test_auto_defaults_forward_orbit_hash_split_and_legacy_flags_restore_it(tmp_
     legacy = build_parser().parse_args([*base, "--split-scheme", "legacy", "--split-seed", "42"])
     cmd = native_stage_cmd("python", ds, "m.res", "", tmp_path / "run", legacy, n_basis=8, n_points=3, stage="screen")
     assert cmd[cmd.index("--split-scheme") + 1] == "legacy"
-    continuous = continuous_thickness_cmd("python", ds, "m.res", tmp_path / "c", legacy, {}, n_basis=8, n_points=3, stage="c")
-    assert "--split-contract" not in continuous
     # Parsers without the new options keep the legacy split.
     old = SimpleNamespace(**{k: v for k, v in vars(legacy).items() if k not in {"split_scheme", "split_salt"}})
     cmd = native_stage_cmd("python", ds, "m.res", "", tmp_path / "run", old, n_basis=8, n_points=3, stage="screen")

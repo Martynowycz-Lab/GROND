@@ -12,7 +12,6 @@ from grond.cli_support.values import read_json, try_read_json
 from grond.io.config import DatasetSpec, PrepConfig, write_datasets_csv
 from grond.io.structure_contract import absolute_structure_policy
 from grond.reports.console import report_feature_decisions, report_macro_cycles, report_split, report_stage_heldout
-from grond.workflows.crystal_parameters import crystal_arguments
 from grond.workflows.dataset_gates import (
     apply_dataset_policy_to_nuisance,
     policy_active_runs,
@@ -57,12 +56,8 @@ from grond.workflows.sg_window_selection import run_sg_window_scout
 from grond.workflows.shared_refinement import run_multi_shelxl_feedback_loop
 from grond.workflows.single import run_feature_gate
 from grond.workflows.thickness_materialization import (
-    continuous_thickness_cmd,
-    continuous_thickness_enabled,
-    continuous_thickness_seed_nuisance,
     discrete_thickness_baseline_nuisance,
     discrete_thickness_promotion_record,
-    materialize_continuous_nuisance_run,
 )
 from grond.workflows.transform_selection import (
     choose_transform_by_scout,
@@ -374,45 +369,6 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
             active_run = thick
             active_nui = best_nuisance(thick) or active_nui
             feature_records: list[dict] = [discrete_thickness_promotion_record(thick, dry_run=bool(args.dry_run))]
-            continuous_seed = continuous_thickness_seed_nuisance(args, active_nui)
-            if continuous_thickness_enabled(crystal_arguments(args, ds.name)) and continuous_seed:
-                continuous_baseline_run = active_run
-                continuous = root / "runs" / ds.name / "multi_thickness_continuous"
-                run_logged(
-                    continuous_thickness_cmd(
-                        python,
-                        ds,
-                        shared_model,
-                        continuous,
-                        args,
-                        continuous_seed,
-                        n_basis=args.screen_n_basis,
-                        n_points=stage_n_points(args, ds, screen=True),
-                        stage="multi_thickness_continuous",
-                    ),
-                    logs,
-                    f"{ds.name}_multi_thickness_continuous",
-                    dry_run=args.dry_run,
-                )
-                active_nui = best_nuisance(continuous) or active_nui or continuous_seed
-                active_nui, active_run, materialization_record = materialize_continuous_nuisance_run(
-                    prep,
-                    ds,
-                    args,
-                    python,
-                    logs,
-                    active_model=shared_model,
-                    baseline_run=continuous_baseline_run,
-                    continuous_run=continuous,
-                    selected_nuisance=active_nui,
-                    n_basis=args.screen_n_basis,
-                    n_points=stage_n_points(args, ds, screen=True),
-                    stage="multi_thickness_continuous_materialized",
-                )
-            else:
-                materialization_record = None
-            if materialization_record is not None:
-                feature_records.append(materialization_record)
             for family in FEATURE_GATE_FAMILIES:
                 active_nui, active_run, record = run_feature_gate(
                     prep,

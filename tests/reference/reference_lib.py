@@ -28,7 +28,6 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from grond.regularize.spline_scales import PSplineScaleFitter  # noqa: E402
-from grond.regularize.thickness_response import thickness_grid  # noqa: E402
 
 # Salt of the three development folds the tests compare against.
 DEV_SALT = "GROND-DEV-20260925"
@@ -270,6 +269,19 @@ def orbit_sign_test(y, pred_model, pred_inverse, orbit, sel) -> dict:
 
 
 # ----------------------------------------------------------------------------- thickness distributions
+
+def thickness_grid(t0: float, grad: float, points: int):
+    """GROND's uniform-gradient quadrature: Gauss-Legendre nodes on t0*(1 +- grad), t > 0, weights summing to 1."""
+    t0, grad = float(t0), float(grad)
+    if not (math.isfinite(t0) and t0 > 0.0 and math.isfinite(grad) and 0.0 <= grad <= 1.0):
+        raise ValueError(f"invalid thickness t={t0!r}, grad={grad!r}")
+    if int(points) <= 1 or grad <= 0.0:
+        return np.asarray([t0]), np.asarray([1.0])
+    x, w = np.polynomial.legendre.leggauss(int(points))
+    t = t0 * (1.0 + grad * x)
+    ok = t > 0.0
+    return t[ok], w[ok] / np.sum(w[ok])
+
 
 def thickness_nodes(family: str, params: dict, n: int):
     """Quadrature (t, w) of a thickness distribution.

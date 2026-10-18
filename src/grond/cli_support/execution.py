@@ -18,7 +18,6 @@ from grond.runtime import apply_thread_limits, auto_worker_count
 from grond.workflows.conventional_baseline import _publication_baseline_hkl
 from grond.workflows.decision import expand_transform_candidates, safe_float, safe_label
 from grond.workflows.nuisance_policy import FEATURE_GATE_FAMILIES, feature_is_enabled
-from grond.workflows.thickness_materialization import continuous_thickness_enabled
 
 _PROGRESS: ProgressState | None = None
 
@@ -166,11 +165,6 @@ def estimate_run_steps(prep: PrepConfig, args: argparse.Namespace) -> int:
                 total += 2
         if not getattr(args, "fast", False):
             total += 1
-            if continuous_thickness_enabled(args):
-                # The optimizer works on its bounded diagnostic row subset.  A
-                # second stage materializes the selected nuisance on the full
-                # native row contract before any downstream gate consumes it.
-                total += 2
             total += sum(
                 1
                 for family in FEATURE_GATE_FAMILIES

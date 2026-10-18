@@ -227,13 +227,6 @@ def resolve_final_n_basis(
     return max(int(args.final_basis_min), min(int(args.final_basis_max), n_basis))
 
 
-def first(value: str, fallback: str) -> str:
-    """Return the first comma-separated grid value or a fallback."""
-
-    text = str(value or "").strip()
-    return text.split(",")[0] if text else fallback
-
-
 def grid_from_nuisance(nui: dict, key: str, fallback: str) -> str:
     """Return a single-value grid string from a pinned nuisance parameter."""
 

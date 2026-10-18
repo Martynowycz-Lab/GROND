@@ -261,48 +261,6 @@ def add_nuisance(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--thickness-model-grid", default="uniform_gradient")
     ap.add_argument("--thickness-grad-grid", default="0.4,1.0")
     ap.add_argument(
-        "--continuous-thickness-polish",
-        choices=["auto", "on", "off"],
-        default="auto",
-        help="After the coarse thickness grid, polish continuous thickness/gradient by reusing cached Bloch eigensystems. Auto is on for GROND auto except --fast.",
-    )
-    ap.add_argument(
-        "--continuous-thickness-metric",
-        choices=["work_wR2", "all_wR2", "free_wR2", "all_R1", "all_R1gt"],
-        default="work_wR2",
-        help="Objective used by continuous thickness polish. Work-row wR2 keeps free rows held out.",
-    )
-    ap.add_argument(
-        "--continuous-thickness-strong-rows",
-        type=int,
-        default=0,
-        help="Rows used by continuous thickness polish; 0 uses all selected rows. Strong-row-only scouts are diagnostic and are not the default.",
-    )
-    ap.add_argument(
-        "--continuous-thickness-max-rows",
-        type=int,
-        default=0,
-        help="Hard row limit for continuous thickness polish; 0 uses all rows selected by the data filters.",
-    )
-    ap.add_argument(
-        "--continuous-thickness-bracket-frac",
-        type=float,
-        default=0.35,
-        help="Local fractional thickness bracket around the coarse-grid winner.",
-    )
-    ap.add_argument(
-        "--continuous-thickness-grid-step", type=float, default=100.0, help="Guard-grid thickness step in Angstrom."
-    )
-    ap.add_argument(
-        "--continuous-thickness-grad-step", type=float, default=0.2, help="Guard-grid thickness-gradient step."
-    )
-    ap.add_argument(
-        "--continuous-thickness-powell-maxiter",
-        type=int,
-        default=18,
-        help="Maximum Powell iterations for the final phase-only thickness/gradient polish.",
-    )
-    ap.add_argument(
         "--continuous-thickness-min-gain",
         type=float,
         default=5e-5,
@@ -450,9 +408,8 @@ def add_nuisance(ap: argparse.ArgumentParser) -> None:
         choices=["matched", "legacy"],
         default="matched",
         help=(
-            "Scale-fit split of the continuous-thickness polish and the in-sample feature gates. matched fits the "
-            "continuous polish on work rows and every gate on its baseline's split, so each comparison uses one "
-            "split; legacy follows --production-scales."
+            "Scale-fit split of the in-sample feature gates. matched fits every gate on its baseline's split, so "
+            "each comparison uses one split; legacy follows --production-scales."
         ),
     )
     ap.add_argument(

@@ -94,12 +94,8 @@ from grond.workflows.nuisance_policy import (
 )
 from grond.workflows.sg_window_selection import run_sg_window_scout
 from grond.workflows.thickness_materialization import (
-    continuous_thickness_cmd,
-    continuous_thickness_enabled,
-    continuous_thickness_seed_nuisance,
     discrete_thickness_baseline_nuisance,
     discrete_thickness_promotion_record,
-    materialize_continuous_nuisance_run,
 )
 from grond.workflows.transform_selection import _selected_transform_claim_contract, choose_transform_by_scout
 
@@ -552,42 +548,6 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
         regularized_nui = best_nuisance(thickness_run) or active_nui
         feature_source = thickness_run
         feature_records.append(discrete_thickness_promotion_record(thickness_run, dry_run=bool(args.dry_run)))
-        continuous_seed = continuous_thickness_seed_nuisance(args, regularized_nui, active_nui)
-        if continuous_thickness_enabled(args) and continuous_seed:
-            continuous_baseline_run = feature_source
-            continuous_run = root / "runs" / ds.name / "adaptive_thickness_continuous"
-            run_logged(
-                continuous_thickness_cmd(
-                    python,
-                    ds,
-                    active_model,
-                    continuous_run,
-                    args,
-                    continuous_seed,
-                    n_basis=args.screen_n_basis,
-                    n_points=args.screen_n_points,
-                    stage="adaptive_thickness_continuous",
-                ),
-                logs,
-                f"{ds.name}_adaptive_thickness_continuous",
-                dry_run=args.dry_run,
-            )
-            regularized_nui = best_nuisance(continuous_run) or regularized_nui or continuous_seed
-            regularized_nui, feature_source, materialization_record = materialize_continuous_nuisance_run(
-                prep,
-                ds,
-                args,
-                python,
-                logs,
-                active_model=active_model,
-                baseline_run=continuous_baseline_run,
-                continuous_run=continuous_run,
-                selected_nuisance=regularized_nui,
-                n_basis=args.screen_n_basis,
-                n_points=args.screen_n_points,
-                stage="adaptive_thickness_continuous_materialized",
-            )
-            feature_records.append(materialization_record)
         for family in FEATURE_GATE_FAMILIES:
             regularized_nui, feature_source, record = run_feature_gate(
                 prep,

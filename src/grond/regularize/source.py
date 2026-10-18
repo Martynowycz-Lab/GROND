@@ -13,7 +13,6 @@ REGULARIZATION_SOURCE_PATHS = (
     'regularize/grid.py',
     'regularize/arguments_native.py',
     'regularize/arguments_combination.py',
-    'regularize/arguments_thickness.py',
     'refine/arguments_feedback.py',
     'regularize/source.py',
     'refine/feedback_contract.py',
@@ -29,9 +28,7 @@ REGULARIZATION_SOURCE_PATHS = (
     'regularize/prediction_cache.py',
     'regularize/scales.py',
     'regularize/selection.py',
-    'regularize/thickness_response.py',
     'legacy/engine/combine_native_nuisance_runs.py',
-    'legacy/engine/continuous_thickness_polish.py',
     'legacy/engine/native_row_regularize.py',
     'legacy/engine/shelxl_feedback_loop.py',
 )
