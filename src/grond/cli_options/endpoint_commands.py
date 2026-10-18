@@ -1,4 +1,4 @@
-"""Register the endpoint commands: push-endpoint (alias refine), check-shelx, validate-endpoint, finish, publish."""
+"""Options of `grond refine` and `grond finish`."""
 
 from __future__ import annotations
 
@@ -17,9 +17,8 @@ def register_push(sub: argparse._SubParsersAction) -> None:
     from grond.commands.push import cmd_push_endpoint
 
     p_push = sub.add_parser(
-        "push-endpoint",
-        aliases=["refine"],
-        help="Continue a pinned GROND endpoint from an existing summary and start model.",
+        "refine",
+        help="Recalculate the corrections for a model you refined yourself, with the saved settings of a run.",
     )
     p_push.add_argument("--checkpoint", default="", help="grond_continue_checkpoint.json from a completed auto run.")
     p_push.add_argument(
@@ -291,72 +290,6 @@ def register_push(sub: argparse._SubParsersAction) -> None:
     p_push.set_defaults(func=cmd_push_endpoint)
 
 
-def register_check_shelx(sub: argparse._SubParsersAction) -> None:
-    """Register the SHELXL endpoint readiness checker."""
-
-    from grond.cli_support.tools import default_shelxl_executable
-    from grond.commands.check_shelx import cmd_check_shelx
-
-    p_check = sub.add_parser(
-        "check-shelx",
-        help=(
-            "Run SHELXL once on a copy of an endpoint (.res/.hkl) and report WGHT convergence, GooF, NPD atoms, "
-            "BASF sanity and .res/.hkl/.fcf consistency, as Olex2 and SHELXLE users will see them."
-        ),
-    )
-    p_check.add_argument("path", help="Endpoint directory (one .res with a matching .hkl) or the .res file.")
-    p_check.add_argument("--stem", default="", help="Endpoint file stem when the directory holds several.")
-    p_check.add_argument("--shelxl", default=default_shelxl_executable(), help="SHELXL executable.")
-    p_check.add_argument(
-        "--out-dir",
-        default="",
-        help="Empty or new directory for the check run (default: PATH/check_shelx_<timestamp>); the endpoint is never modified.",
-    )
-    p_check.add_argument("--acta", action="store_true", help="Add ACTA so SHELXL also writes a CIF of the endpoint.")
-    p_check.add_argument("--json", action="store_true", help="Print the JSON report instead of the summary.")
-    p_check.set_defaults(func=cmd_check_shelx)
-
-
-def register_validate_endpoint(sub: argparse._SubParsersAction) -> None:
-    """Register the post-hoc held-out SHELXL validation of a finished run."""
-
-    from grond.commands.validate_endpoint import cmd_validate_endpoint
-
-    p_validate = sub.add_parser(
-        "validate-endpoint",
-        help=(
-            "Held-out SHELXL validation of a finished AUTO run, written to a new directory (the run is only read): "
-            "by default the endpoint the run published, scored at L.S. 0 on its rebuilt HKL without re-refinement "
-            "(--endpoint final re-runs combine_final instead), and the leak-free conventional model scored on the "
-            "free orbits; reporting only."
-        ),
-    )
-    p_validate.add_argument("--run-dir", required=True, help="Finished AUTO run directory (read only).")
-    p_validate.add_argument("--out-dir", required=True, help="New (or empty) directory outside the run for every output.")
-    p_validate.add_argument(
-        "--endpoint",
-        choices=["published", "final"],
-        default="published",
-        help="published (default): the endpoint the run published (the endpoint chooser's best physical endpoint in "
-        "grond_summary.json, e.g. the kept feedback cycle's combine). The combine command that wrote it is replayed "
-        "without refining: its rows are rebuilt with the recorded recipe, the rebuilt work HKL must equal the "
-        "published HKL byte for byte, and the published .res itself is scored at L.S. 0 with the WGHT its last "
-        "refinement applied; merged endpoint only. final: re-run the last recorded combine_final and score its "
-        "re-refined runs/combined endpoints, which must reproduce the recorded ones exactly (the behaviour before "
-        "this option; runs/combined is the published endpoint only when the chooser published the final combine).",
-    )
-    p_validate.add_argument(
-        "--shelxl", default="", help="SHELXL executable (default: the one the run recorded for combine_final)."
-    )
-    p_validate.add_argument("--python", default="", help="Python for the combine engine (default: this interpreter).")
-    p_validate.add_argument(
-        "--unmerged",
-        choices=["recorded", "on"],
-        default="recorded",
-        help="--endpoint final only. recorded (default): validate the endpoints the run wrote. on: also write, refine "
-        "and validate the unmerged batch endpoint when the run had none (the merged endpoint is unchanged by it).",
-    )
-    p_validate.set_defaults(func=cmd_validate_endpoint)
 
 
 def add_model_box_args(parser: argparse.ArgumentParser) -> None:
@@ -451,33 +384,3 @@ def register_finish(sub: argparse._SubParsersAction) -> None:
     p_finish.add_argument("--json", action="store_true", help="Print the compact JSON payload used by automation.")
     p_finish.set_defaults(func=cmd_finish)
 
-    p_publish = sub.add_parser(
-        "publish",
-        help="Alias for finish: regenerate final summaries, native dynamical maps, and the GROND dynamic CIF.",
-    )
-    p_publish.add_argument(
-        "--run-dir", default=".", help="Completed GROND auto/run output directory. Defaults to the current directory."
-    )
-    p_publish.add_argument(
-        "--checkpoint", default="", help="Optional grond_continue_checkpoint.json; its run_dir is used."
-    )
-    p_publish.add_argument(
-        "--model",
-        default="",
-        help="Optional model override for native dynamical map phases. Defaults to the selected publication endpoint RES.",
-    )
-    p_publish.add_argument(
-        "--shelxl",
-        default=default_shelxl_executable(),
-        help="SHELXL executable used for zero-cycle LIST 6 endpoint-map replay when needed.",
-    )
-    add_tool_config_args(p_publish)
-    p_publish.add_argument("--make-maps", action=argparse.BooleanOptionalAction, default=True)
-    p_publish.add_argument("--map-mode", choices=["native", "shelx2map", "both", "off"], default="native")
-    p_publish.add_argument("--native-map-spacing", type=float, default=0.25)
-    p_publish.add_argument("--native-map-d-min", type=float, default=0.0)
-    p_publish.add_argument("--native-map-min-i-over-sigma", type=float, default=0.0)
-    p_publish.add_argument("--native-map-max-grid-points", type=int, default=8_000_000)
-    add_model_box_args(p_publish)
-    p_publish.add_argument("--json", action="store_true")
-    p_publish.set_defaults(func=cmd_finish)

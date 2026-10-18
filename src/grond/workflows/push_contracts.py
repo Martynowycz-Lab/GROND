@@ -291,7 +291,7 @@ def hydrate_push_args_for_multi(
     args.continuation_contract = continuation_contract_record(contract)
     warn_historical_continuation_defaults(contract)
     defaults = build_parser().parse_args(
-        ["run", "--out-dir", ".", "--hkl", "INTEGRATE.HKL", "--structure", "model.res"]
+        ["auto", "--out-dir", ".", "--hkl", "INTEGRATE.HKL", "--structure", "model.res"]
     )
     for key, value in vars(defaults).items():
         if not hasattr(args, key) or getattr(args, key) is None:

@@ -34,7 +34,7 @@ def parser(tmp_path):
 
 
 def source_and_args(tmp_path):
-    args = build_parser().parse_args(["run", "--hkl", str(tmp_path/"input.hkl"), "--structure", str(tmp_path/"model.res"),
+    args = build_parser().parse_args(["auto", "--hkl", str(tmp_path/"input.hkl"), "--structure", str(tmp_path/"model.res"),
                                       "--out-dir", str(tmp_path/"run"), *OPTIONS, "--mosaicity-mode", "gaussian_cone",
                                       "--mosaicity-support-sigma-deg", "0.3", "--dose-b-mode-grid", "none"])
     ds = DatasetSpec(name="one", hkl=str(tmp_path/"input.hkl"))

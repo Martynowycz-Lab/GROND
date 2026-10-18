@@ -487,29 +487,3 @@ def test_engine_max_rows_subset_is_ranked_without_excluded_orbits(tmp_path: Path
     allowed = np.asarray([G.orbit_key(*h) not in lockbox for h in np.asarray(data.hkl, dtype=int)], dtype=bool)
     expected = row_selection(data, np.where(allowed, target, np.nan), True, 0.5, 0.0, 40, 100.0)
     assert sorted(int(r["row_index"]) for r in rows) == sorted(int(i) for i in expected)
-
-
-def test_expert_hand_check_replays_the_source_split_scheme(tmp_path: Path):
-    """grond hand check re-runs one recorded stage; its split must be the source run's, not the new default."""
-
-    from grond.commands.hand import _apply_source_physics_to_hand_args
-
-    lock_path = tmp_path / "lockbox.json"
-    _write_lockbox(lock_path, ["2|0|0"])
-    base = ["auto", "--out-dir", str(tmp_path / "o"), "--hkl", "x.HKL", "--structure", "m.res"]
-    ds = DatasetSpec(name="d", hkl="x.HKL", split_contract=str(tmp_path / "split.json"))
-
-    historical = build_parser().parse_args(base)
-    _apply_source_physics_to_hand_args(historical, {"free_fraction": 0.10, "split_seed": 42, "scale_fit_split": "all"})
-    cmd = native_stage_cmd("python", ds, "m.res", "", tmp_path / "h", historical, n_basis=8, n_points=3, stage="hand")
-    assert cmd[cmd.index("--split-scheme") + 1] == "legacy" and "--exclude-orbits-json" not in cmd
-
-    recorded = build_parser().parse_args(base)
-    _apply_source_physics_to_hand_args(
-        recorded,
-        {"split_scheme": "orbit-hash", "split_salt": "S", "exclude_orbits_json": str(lock_path), "scale_fit_split": "work"},
-    )
-    cmd = native_stage_cmd("python", ds, "m.res", "", tmp_path / "h", recorded, n_basis=8, n_points=3, stage="hand")
-    assert cmd[cmd.index("--split-scheme") + 1] == "orbit-hash"
-    assert cmd[cmd.index("--split-salt") + 1] == "S"
-    assert cmd[cmd.index("--exclude-orbits-json") + 1] == str(lock_path.resolve())

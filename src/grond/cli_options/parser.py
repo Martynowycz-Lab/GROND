@@ -1,46 +1,89 @@
-"""Build the public command grammar in its established display order."""
+"""Build the `grond` command line.
+
+`grond <command> -h` lists the options most runs need, `-h -v` adds the settings the paper's runs changed and
+`-h -vv` lists every option. Unlisted options still work.
+"""
 
 from __future__ import annotations
 
 import argparse
 
-from .diagnostic_commands import register_diagnostics
-from .endpoint_commands import register_check_shelx, register_finish, register_push, register_validate_endpoint
-from .figure_maps import register_figure_maps
+from .endpoint_commands import register_finish, register_push
 from .input_commands import register_inputs
 from .integration_commands import register_integration
 from .manual_commands import register_manual
-from .never_h import register_never_h
-from .protein_commands import register_protein
 from .run_commands import register_runs
-from .scout_commands import register_scouts, register_thickness
-from .splits_commands import register_splits
-from .validation_commands import register_ls1, register_runtime
+from .validation_commands import register_runtime
+
+# Help level of each option, per command. Options not listed here are level 2.
+HELP_LEVELS = {
+    "auto": {
+        0: ["--prep", "--out-dir", "--config", "--workers", "--preset", "--free-set", "--make-maps", "--min-d-spacing",
+            "--shelxl"],
+        1: ["--python", "--resume", "--endpoint-min-d-spacing", "--min-peak", "--h-omit", "--max-support-sg",
+            "--n-points", "--nested-n-points", "--nested-n-basis", "--final-basis-max", "--final-basis-scan-limit",
+            "--mosaicity-mode", "--nested-response-tables", "--shelxl-feedback-cycles", "--chunksize",
+            "--prediction-cache-dir", "--row-plan-cache", "--shared-grid", "--basis-centring-coset"],
+    },
+    "refine": {
+        0: ["--checkpoint", "--start-res", "--out-dir", "--cycles", "--workers", "--config", "--shelxl"],
+        1: ["--python", "--resume"],
+    },
+    "finish": {
+        0: ["--run-dir", "--config", "--map-mode", "--native-map-spacing"],
+        1: ["--checkpoint", "--model", "--shelxl", "--make-maps", "--publication-feedback-cycles", "--json"],
+    },
+}
 
 
-def build_parser() -> argparse.ArgumentParser:
-    """Create the top-level GROND argument parser."""
+def help_level(argv: list[str]) -> int:
+    """Count -v, -vv, -vvv and --verbose on the command line."""
+
+    level = 0
+    for arg in argv:
+        if arg == "--verbose":
+            level += 1
+        elif len(arg) > 1 and arg[0] == "-" and set(arg[1:]) == {"v"}:
+            level += len(arg) - 1
+    return level
+
+
+def _apply_help_levels(name: str, parser: argparse.ArgumentParser, level: int) -> None:
+    """Hide the options of one command above the requested help level."""
+
+    parser.add_argument("-v", "--verbose", action="count", default=0, help="with -h: -v lists more options, -vv all")
+    levels = HELP_LEVELS.get(name)
+    if not levels:
+        return
+    shown = {flag: lvl for lvl, flags in levels.items() for flag in flags}
+    hidden = 0
+    for action in parser._actions:
+        flags = [flag for flag in action.option_strings if flag.startswith("--")]
+        if not flags or flags[0] in ("--help", "--verbose"):
+            continue
+        if min(shown.get(flag, 2) for flag in flags) > level:
+            action.help = argparse.SUPPRESS
+            hidden += 1
+    if hidden:
+        parser.epilog = f"{hidden} more options not listed; use -h {'-v or -vv' if level == 0 else '-vv'} to see them."
+
+
+def build_parser(level: int = 0) -> argparse.ArgumentParser:
+    """Create the parser; `level` is the help level from help_level()."""
 
     parser = argparse.ArgumentParser(
-        prog="GROND",
-        description="GROND: Global Regularization Of Non-kinematical Diffraction.",
+        prog="grond",
+        description="GROND (Global Regularization Of Non-kinematical Diffraction): Bloch-wave corrections for "
+        "electron-diffraction intensities between DIALS/XDS and SHELXL.",
     )
-    sub = parser.add_subparsers(dest="command", required=True)
-    register_manual(sub)
-    register_inputs(sub)
-    register_protein(sub)
-    register_integration(sub)
-    register_scouts(sub)
-    register_splits(sub)
+    sub = parser.add_subparsers(dest="command", required=True, metavar="command")
     register_runs(sub)
-    register_diagnostics(sub)
-    register_thickness(sub)
-    register_ls1(sub)
+    register_manual(sub)
     register_push(sub)
-    register_never_h(sub)
     register_finish(sub)
-    register_figure_maps(sub)
-    register_check_shelx(sub)
-    register_validate_endpoint(sub)
+    register_inputs(sub)
+    register_integration(sub)
     register_runtime(sub)
+    for name, subparser in sub.choices.items():
+        _apply_help_levels(name, subparser, level)
     return parser
