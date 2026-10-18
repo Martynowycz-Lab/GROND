@@ -14,11 +14,11 @@ def register_integration(sub: argparse._SubParsersAction) -> None:
     )
 
     p_dials = sub.add_parser(
-        "import-dials", help="Convert DIALS integrated.refl/integrated.expt into a GROND row directory."
+        "import-dials", help="Convert a DIALS integrated.refl/integrated.expt pair for GROND."
     )
     p_dials.add_argument("--refl", required=True, help="DIALS integrated.refl or scaled.refl file.")
     p_dials.add_argument("--expt", required=True, help="DIALS integrated.expt or scaled.expt file.")
-    p_dials.add_argument("--out-dir", required=True)
+    p_dials.add_argument("--out-dir", required=True, help="Output directory.")
     p_dials.add_argument("--dials-python", default="", help="Python executable that can import dials and dxtbx.")
     p_dials.add_argument("--intensity-mode", choices=["sum_complete", "sum_raw", "scale"], default="sum_complete")
     p_dials.add_argument(
@@ -55,12 +55,12 @@ def register_integration(sub: argparse._SubParsersAction) -> None:
 
     p_pets = sub.add_parser(
         "export-pets",
-        help="Export DIALS or XDS observations to PETS/Jana2020/Dyngo/diffBloch cif_pets files.",
+        help="Write DIALS or XDS observations as PETS2 cif_pets files.",
     )
     p_pets.add_argument("--dials-refl", default="", help="DIALS integrated.refl or scaled.refl input.")
     p_pets.add_argument("--dials-expt", default="", help="DIALS integrated.expt or scaled.expt input.")
     p_pets.add_argument("--xds-dir", default="", help="XDS directory containing XDS.INP and INTEGRATE.HKL.")
-    p_pets.add_argument("--out-dir", required=True)
+    p_pets.add_argument("--out-dir", required=True, help="Output directory.")
     p_pets.add_argument("--dataset-name", default="dataset")
     p_pets.add_argument("--dials-python", default="", help="Python executable that can import dials and dxtbx.")
     p_pets.add_argument(

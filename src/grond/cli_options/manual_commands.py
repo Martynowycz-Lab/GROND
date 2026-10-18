@@ -15,7 +15,7 @@ def register_manual(sub: argparse._SubParsersAction) -> None:
 
     p_manual = sub.add_parser(
         "manual",
-        help="Run a readable, resumable expert workflow one stage at a time.",
+        help="Run the calculation one stage at a time, for inspection.",
         description=(
             "Run GROND as explicit setup, transform-scout, thickness, hand, shared-feedback, "
             "scale-audit, and finish stages. Each stage reads the same manual_workflow.json "
@@ -43,12 +43,12 @@ def register_manual(sub: argparse._SubParsersAction) -> None:
             "--workers",
             type=int,
             default=0,
-            help="Parallel workers. Zero lets GROND choose from available CPUs.",
+            help="Worker processes (default 0: 85%% of the cores).",
         )
         stage_parser.add_argument(
             "--python",
             default="",
-            help="Python used for the underlying expert command. Defaults to the current interpreter.",
+            help="Python for the calculation subprocesses (default: the one running grond).",
         )
         stage_parser.add_argument(
             "--verbose-child-output",
@@ -62,7 +62,7 @@ def register_manual(sub: argparse._SubParsersAction) -> None:
         help="Create the workflow state from a model, merged HKL, and one or more dataset directories.",
         description="Create 00_setup/prep.json and the manual_workflow.json used by every later stage.",
     )
-    p_manual_setup.add_argument("--out-dir", required=True, help="New workflow root directory.")
+    p_manual_setup.add_argument("--out-dir", required=True, help="Directory for the stages of this manual run.")
     p_manual_setup.add_argument("--structure", required=True, help="Starting SHELX RES or INS model.")
     p_manual_setup.add_argument(
         "--baseline-hkl",
@@ -87,22 +87,22 @@ def register_manual(sub: argparse._SubParsersAction) -> None:
         "--workers",
         type=int,
         default=0,
-        help="Default worker count stored in the workflow and printed in later compute-stage commands.",
+        help="Worker processes (default 0: 85%% of the cores).",
     )
     p_manual_setup.add_argument(
         "--python",
         default="",
-        help="Default Python for child stages; stored as an absolute path when supplied.",
+        help="Python for the calculation subprocesses (default: the one running grond).",
     )
     p_manual_setup.add_argument(
         "--config",
         default="",
-        help="Default GROND tool config persisted into later compute-stage commands.",
+        help="Config file with the SHELXL and shelx2map paths (default: $GROND_CONFIG or grond.config.json).",
     )
     p_manual_setup.add_argument(
         "--shelxl",
         default="shelxl",
-        help="Default SHELXL executable persisted into the feedback command.",
+        help="SHELXL executable (default: from --config or PATH).",
     )
     p_manual_setup.add_argument("--notes", default="", help="Free-text provenance note stored in prep.json.")
     p_manual_setup.set_defaults(func=cmd_manual)
@@ -174,7 +174,7 @@ def register_manual(sub: argparse._SubParsersAction) -> None:
         "--n-points",
         type=int,
         default=20,
-        help="Requested rocking quadrature Q; thickness caps the scout at Q=10.",
+        help="Rocking points per observation; the thickness scout uses at most 10.",
     )
     p_manual_thickness.set_defaults(func=cmd_manual)
 
@@ -221,7 +221,7 @@ def register_manual(sub: argparse._SubParsersAction) -> None:
     )
     add_manual_compute_args(p_manual_feedback)
     p_manual_feedback.add_argument(
-        "--shelxl", default="shelxl", help="SHELXL executable used for the one shared LS1 endpoint update."
+        "--shelxl", default="shelxl", help="SHELXL executable (default: from --config or PATH)."
     )
     p_manual_feedback.add_argument("--cycles", type=int, default=5, help="Maximum Bloch/shared-LS1 macrocycles.")
     p_manual_feedback.add_argument(
@@ -230,7 +230,7 @@ def register_manual(sub: argparse._SubParsersAction) -> None:
         default=0,
         help="Fixed production basis size; zero retains adaptive production selection.",
     )
-    p_manual_feedback.add_argument("--n-points", type=int, default=20, help="Rocking quadrature points Q for feedback.")
+    p_manual_feedback.add_argument("--n-points", type=int, default=20, help="Rocking points per observation (default %(default)s).")
     p_manual_feedback.set_defaults(func=cmd_manual)
 
     p_manual_scales = manual_stages.add_parser(

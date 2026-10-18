@@ -11,7 +11,7 @@ from grond.cli_support.values import XDS_TARGET_MODES
 def add_inputs(ap: argparse.ArgumentParser) -> None:
     """Add inputs options in the established order."""
 
-    ap.add_argument("--prep", default="")
+    ap.add_argument("--prep", default="", help="Input file written by `grond prep`.")
     ap.add_argument("--hkl", default="")
     ap.add_argument("--xds-dir", default="")
     ap.add_argument(
@@ -102,7 +102,7 @@ def add_inputs(ap: argparse.ArgumentParser) -> None:
             "single-dataset run. For multi-dataset prep files, record it per dataset."
         ),
     )
-    ap.add_argument("--out-dir", required=True)
+    ap.add_argument("--out-dir", required=True, help="Output directory. Run the same command again to resume.")
 
 
 def add_execution(ap: argparse.ArgumentParser) -> None:
@@ -114,9 +114,7 @@ def add_execution(ap: argparse.ArgumentParser) -> None:
         choices=["standard", "fast"],
         default="standard",
         help=(
-            "Named AUTO settings. standard: the AUTO defaults. fast: lower fidelity and search breadth for a quick "
-            "answer, with every validation step kept. A preset fills only "
-            "options not given on the command line and is recorded in run_config.json and the reports."
+            "standard (default) or fast: fewer rocking points, beams and candidate settings, every check kept."
         ),
     )
     ap.add_argument(
@@ -143,7 +141,7 @@ def add_execution(ap: argparse.ArgumentParser) -> None:
     )
     ap.add_argument("--no-auto-decide", dest="auto_decide", action="store_false")
     ap.add_argument("--native-only", action="store_true", help="Do not write corrected-HKL endpoints.")
-    ap.add_argument("--python", default="")
+    ap.add_argument("--python", default="", help="Python for the calculation subprocesses (default: the one running grond).")
     add_tool_config_args(ap)
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument(
@@ -155,13 +153,13 @@ def add_execution(ap: argparse.ArgumentParser) -> None:
         "--resume",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Reuse completed stages recorded in OUT/grond_progress.json.",
+        help="Reuse the stages already finished in --out-dir (default on).",
     )
     ap.add_argument(
         "--workers",
         type=int,
         default=0,
-        help="Worker processes. Default 0 uses --max-core-fraction of detected CPU cores.",
+        help="Worker processes (default 0: 85%% of the cores).",
     )
     ap.add_argument(
         "--max-core-fraction", type=float, default=0.85, help="Fraction of detected CPU cores to use when --workers=0."
@@ -170,7 +168,7 @@ def add_execution(ap: argparse.ArgumentParser) -> None:
         "--chunksize",
         type=int,
         default=0,
-        help="Multiprocessing chunksize. Default 0 chooses a small value for load balancing.",
+        help="Observations per worker task (default 0: chosen from --workers).",
     )
 
 
@@ -178,8 +176,8 @@ def add_observations_and_outputs(ap: argparse.ArgumentParser) -> None:
     """Add observations and outputs options in the established order."""
 
     ap.add_argument("--hkl-transform", default="identity")
-    ap.add_argument("--min-d-spacing", type=float, default=0.70)
-    ap.add_argument("--min-peak", type=float, default=90.0)
+    ap.add_argument("--min-d-spacing", type=float, default=0.70, help="Resolution limit of the observations in Å (default %(default)s).")
+    ap.add_argument("--min-peak", type=float, default=90.0, help="Minimum XDS PEAK, or 100 x DIALS partiality, of an observation (default %(default)s).")
     ap.add_argument("--geometry-percentile", type=float, default=99.0)
     ap.add_argument("--target-mode", choices=list(XDS_TARGET_MODES), default="iobs", help=argparse.SUPPRESS)
     ap.add_argument("--include-nonpositive", action="store_true")
@@ -188,7 +186,7 @@ def add_observations_and_outputs(ap: argparse.ArgumentParser) -> None:
         dest="make_maps",
         action="store_true",
         default=False,
-        help="Generate legacy quick corrected-HKL endpoint maps with shelx2map. Native dynamical maps are made afterward with `GROND finish` and need no external map program.",
+        help="Also write SHELXL Fo-Fc maps with shelx2map at the end of the run.",
     )
     ap.add_argument("--no-maps", dest="make_maps", action="store_false")
     ap.add_argument(
@@ -196,9 +194,7 @@ def add_observations_and_outputs(ap: argparse.ArgumentParser) -> None:
         choices=["off", "on", "only", "both"],
         default="off",
         help=(
-            "Single-dataset retrospective sensitivity control: strip H from the final H-containing model and "
-            "calculate omit endpoints. This is not prospective never-H evidence. Multi-dataset use fails "
-            "explicitly. only/both are deprecated aliases for on."
+            "Hydrogen-omit maps of the final model of one crystal: off (default) or on."
         ),
     )
     ap.add_argument(

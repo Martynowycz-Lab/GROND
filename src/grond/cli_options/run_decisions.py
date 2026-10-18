@@ -282,11 +282,7 @@ def add_decision_controls(ap: argparse.ArgumentParser) -> None:
         choices=["off", "on"],
         default="off",
         help=(
-            "Whether the final model keeps the free set out. Either way GROND chooses hand, nuisance settings and "
-            "endpoint with the orbit-hash free set held out and reports the held-out validation of that endpoint. "
-            "off (default): the chosen endpoint is then refined once more against all reflections, work and free "
-            "(corrected the same way), and that all-data model is the result (OUT/final_all_data). on: the free "
-            "reflections stay out of every fit, the final model included."
+            "off (default): after validation, refine the chosen model once more against all reflections. on: keep the held-out reflections out of the final model (all runs in the paper)."
         ),
     )
     ap.add_argument(

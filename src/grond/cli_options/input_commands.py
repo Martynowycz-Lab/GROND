@@ -15,7 +15,7 @@ def register_inputs(sub: argparse._SubParsersAction) -> None:
         cmd_sfac_check,
     )
 
-    p_prep = sub.add_parser("prep", help="Write a JSON prep file for one structure and one or more XDS datasets.")
+    p_prep = sub.add_parser("prep", help="Write the input file for one model and one or more crystals.")
     p_prep.add_argument("--structure", required=True)
     p_prep.add_argument("--baseline-hkl", default="")
     p_prep.add_argument("--dataset", action="append", required=True)
@@ -36,14 +36,14 @@ def register_inputs(sub: argparse._SubParsersAction) -> None:
     add_tool_config_args(p_prep)
     p_prep.set_defaults(func=cmd_prep)
 
-    p_cfg = sub.add_parser("init-config", help="Write a GROND JSON/YAML external-tool config template.")
+    p_cfg = sub.add_parser("init-config", help="Write a config file with the paths of SHELXL and shelx2map.")
     p_cfg.add_argument("--out", default="grond.config.json")
     p_cfg.add_argument("--format", choices=["json", "yaml"], default="json")
     p_cfg.add_argument("--overwrite", action="store_true")
     p_cfg.set_defaults(func=cmd_init_config)
 
     p_sfac = sub.add_parser(
-        "sfac-check", help="Check a RES/INS model for explicit electron SFAC rows and endpoint wavelength readiness."
+        "sfac-check", help="Check that a SHELX model has numeric electron scattering factors."
     )
     p_sfac.add_argument("--structure", required=True, help="SHELX .res/.ins model to check.")
     p_sfac.add_argument("--out", default="", help="Optional JSON report path.")

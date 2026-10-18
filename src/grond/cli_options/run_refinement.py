@@ -134,8 +134,7 @@ def add_resolution(ap: argparse.ArgumentParser) -> None:
         type=float,
         default=0.0,
         help=(
-            "Optional additional d-spacing cutoff for final combined row statistics and corrected-HKL endpoints. "
-            "Zero keeps the row-selection cutoff; use an explicit value for an apples-to-apples reporting endpoint."
+            "Resolution limit of the corrected HKL file and its statistics in Å (default 0: as --min-d-spacing)."
         ),
     )
     ap.add_argument(

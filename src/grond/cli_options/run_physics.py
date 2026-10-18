@@ -43,7 +43,7 @@ def add_backend(ap: argparse.ArgumentParser) -> None:
     """Add backend options in the established order."""
 
     ap.add_argument(
-        "--prediction-cache-dir", default="", help="Optional root for prediction caches. Default is OUT/cache."
+        "--prediction-cache-dir", default="", help="Directory for cached predictions (default OUT/cache)."
     )
     ap.add_argument(
         "--prediction-cache-scope",
@@ -62,29 +62,21 @@ def add_backend(ap: argparse.ArgumentParser) -> None:
         choices=["off", "auto", "force"],
         default=None,
         help=(
-            "Bloch evaluator (sets GROND_SHARED_GRID for every stage; unset keeps the environment's value, default "
-            "off). auto solves one eigensystem per scan orientation, shared by every reflection rocking through it, "
-            "when the physics is supported and the cost model says it is at least 3x cheaper than per-reflection "
-            "solves (rows x profile points x tilts x N^2.5 against grid points x N^2.5; at least 200 rows); "
-            "otherwise per reflection. force: whenever supported. See docs/SHARED_GRID.md."
+            "off (default), auto or force. auto diagonalizes each matrix once per scan orientation and interpolates onto the rocking points of every reflection, when that is at least 3x cheaper. Used for SU-102."
         ),
     )
     ap.add_argument(
         "--basis-centring-coset",
         choices=["off", "on"],
         default=None,
-        help="Keep only the direct beam's lattice-centring coset in the beam pool (exact; sets "
-        "GROND_BASIS_CENTRING_COSET for every stage; unset keeps the environment's value, default off).",
+        help="on: use only beams in the lattice-centring coset of the direct beam (exact). Used for SU-102.",
     )
     ap.add_argument(
         "--row-plan-cache",
         choices=["auto", "off", "exact", "readwrite", "rebuild"],
         default="auto",
         help=(
-            "Row-geometry cache policy. auto uses model-keyed exact reuse only "
-            "for fixed-model grids with at least 16 predictions per geometry key "
-            "and disables it for moving-model updates; readwrite explicitly "
-            "freezes the builder basis across model updates."
+            "Reuse of per-observation geometry between stages: auto (default), off, exact, readwrite or rebuild."
         ),
     )
     ap.add_argument(
@@ -126,16 +118,14 @@ def add_basis(ap: argparse.ArgumentParser) -> None:
         type=int,
         default=None,
         help=(
-            "Quadrature points for pinned final, feedback and hand runs. Default derives it per crystal from the "
-            "rocking window: fixed windows keep 0.0002 1/A spacing (0.010: 50), the DIALS bbox window uses 60; PETS "
-            "exact rows keep 20 over their own wedge. Legacy: 20."
+            "Rocking points per observation in the final rounds (default: 60 for DIALS, 50 for XDS)."
         ),
     )
     ap.add_argument(
         "--final-basis-scan-limit",
         type=int,
         default=500,
-        help="Upper limit used by the cheap support-only scan when --n-basis=0.",
+        help="Largest beam count considered when the final beam count is chosen (default %(default)s).",
     )
     ap.add_argument(
         "--final-basis-margin",
@@ -144,7 +134,7 @@ def add_basis(ap: argparse.ArgumentParser) -> None:
         help="Extra beams above the observed maximum support for final polish.",
     )
     ap.add_argument("--final-basis-min", type=int, default=20)
-    ap.add_argument("--final-basis-max", type=int, default=500)
+    ap.add_argument("--final-basis-max", type=int, default=500, help="Most beams per observation in the final rounds (default %(default)s).")
     ap.add_argument("--final-basis-fallback", type=int, default=128, help="Dry-run fallback when --n-basis=0.")
 
 
@@ -222,8 +212,7 @@ def add_geometry(ap: argparse.ArgumentParser) -> None:
         type=float,
         default=AUTO_MAX_SUPPORT_SG,
         help=(
-            "Beam-inclusion cutoff: maximum |Sg| for beam-basis support in A^-1 (default 0.01, as JANA2020 "
-            "Sg(matrix) and diffBloch sg_max)."
+            "Beams with |S_g| up to this value (1/Å) at the observation centre enter the calculation (default %(default)s)."
         ),
     )
     add_profile_coordinates(ap)
@@ -374,9 +363,7 @@ def add_nuisance(ap: argparse.ArgumentParser) -> None:
         choices=["none", "transverse_target", "gaussian_cone"],
         default="transverse_target",
         help=(
-            "Mosaic model tested per crystal by the mosaicity feature gate: transverse_target is the re-centred "
-            "transverse Gauss-Hermite cone. gaussian_cone requires explicit direct_angle, "
-            "target_sg_equivalent_v1 normalization and a common support envelope. none disables the gate (legacy)."
+            "Mosaic model: transverse_target (default; Gaussian tilt about the axis normal to the beam and the rotation axis) or none."
         ),
     )
     ap.add_argument(
@@ -428,16 +415,14 @@ def add_nuisance(ap: argparse.ArgumentParser) -> None:
         type=int,
         default=64,
         help=(
-            "Beam limit of the nested-selection spectra (screen profile points, AUTO window and support)."
+            "Most beams per observation while the settings are chosen (default %(default)s)."
         ),
     )
     ap.add_argument(
         "--nested-n-points",
         default="final",
         help=(
-            "Profile points of the nested-selection spectra and of the per-cycle thickness updates: final (default; "
-            "the crystal's final points, 60 for DIALS bridges and 50 for the fixed 0.010 window), screen (30 and 25; "
-            "about half the spectra cost) or an integer. The anchor and replay runs stay at screen fidelity."
+            "Rocking points while the settings are chosen: final (default), screen or a number."
         ),
     )
     ap.add_argument(
@@ -449,9 +434,7 @@ def add_nuisance(ap: argparse.ArgumentParser) -> None:
         "--nested-response-tables",
         action="store_true",
         help=(
-            "Build the nested selection's thickness tables row by row and keep only the tables, not the spectra "
-            "(memory: the tables plus one row's spectra per worker; needed for large beam supports and full cones). "
-            "Every candidate and the pick are then evaluated on the 2 A table, never with the exact gamma average."
+            "Keep only the thickness tables while the settings are chosen (less memory; needed with --shared-grid and for large cells)."
         ),
     )
     ap.add_argument(

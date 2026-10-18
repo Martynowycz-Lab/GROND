@@ -12,9 +12,9 @@ def register_runtime(sub: argparse._SubParsersAction) -> None:
     from grond.commands.doctor import cmd_doctor
 
     p_doc = sub.add_parser(
-        "doctor", help="Report Python packages, the active compute core and external tools."
+        "doctor", help="Check the Python packages and the external programs."
     )
-    p_doc.add_argument("--python", default="")
+    p_doc.add_argument("--python", default="", help="Python to check (default: the one running grond).")
     add_tool_config_args(p_doc)
     p_doc.add_argument(
         "--probe-bloch", action="store_true", help="Also test complex eig/eigh support needed by the Bloch wave kernel."

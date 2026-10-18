@@ -17,9 +17,9 @@ def register_push(sub: argparse._SubParsersAction) -> None:
 
     p_push = sub.add_parser(
         "refine",
-        help="Recalculate the corrections for a model you refined yourself, with the saved settings of a run.",
+        help="Recalculate the corrections for a model you refined yourself, with the settings of a run.",
     )
-    p_push.add_argument("--checkpoint", default="", help="grond_continue_checkpoint.json from a completed auto run.")
+    p_push.add_argument("--checkpoint", default="", help="grond_continue_checkpoint.json of a finished `grond auto` run.")
     p_push.add_argument(
         "--source-summary",
         default="",
@@ -28,10 +28,10 @@ def register_push(sub: argparse._SubParsersAction) -> None:
     p_push.add_argument(
         "--start-res",
         default="",
-        help="Starting RES model to continue from. Overrides the checkpoint model when provided.",
+        help="Model to continue from, for example one you refined in SHELXL or Olex2.",
     )
-    p_push.add_argument("--out-dir", required=True)
-    p_push.add_argument("--python", default="")
+    p_push.add_argument("--out-dir", required=True, help="Output directory.")
+    p_push.add_argument("--python", default="", help="Python for the calculation subprocesses (default: the one running grond).")
     add_tool_config_args(p_push)
     p_push.add_argument("--dry-run", action="store_true")
     p_push.add_argument("--hkl", default="", help="Override HKL path if the source summary does not record it.")
@@ -55,7 +55,7 @@ def register_push(sub: argparse._SubParsersAction) -> None:
         default="",
         help="For multi-dataset checkpoints, corrected-HKL merge key before each shared SHELXL LS step. Defaults to the checkpoint value or model_symmetry.",
     )
-    p_push.add_argument("--cycles", type=int, default=3, help="Additional Bloch/SHELXL macrocycles.")
+    p_push.add_argument("--cycles", type=int, default=3, help="Rounds of Bloch calculation and SHELXL refinement (default %(default)s).")
     p_push.add_argument(
         "--recompute-final-rows",
         action="store_true",
@@ -65,14 +65,14 @@ def register_push(sub: argparse._SubParsersAction) -> None:
         ),
     )
     p_push.add_argument("--n-basis", type=int, default=None, help="Override the beam count for all continuation crystals; otherwise retain each saved count (single-dataset default: 108).")
-    p_push.add_argument("--n-points", type=int, default=None, help="Override rocking samples for all continuation crystals; otherwise retain each saved count (single-dataset default: 20).")
+    p_push.add_argument("--n-points", type=int, default=None, help="Rocking points per observation (default: the count saved by the run).")
     p_push.add_argument("--final-n-basis", type=int, default=0, help="Single-dataset final beam override; for multiple crystals use --dataset-n-basis or --n-basis.")
     p_push.add_argument("--final-n-points", type=int, default=20)
     add_crystal_overrides(p_push)
     add_profile_coordinates(p_push, continuation=True)
     p_push.add_argument("--profile-quadrature", choices=["uniform", "trapezoid", "gauss_legendre"], default=None)
     p_push.add_argument("--profile-accumulation", choices=["sum", "mean"], default=None)
-    p_push.add_argument("--shelxl", default=default_shelxl_executable())
+    p_push.add_argument("--shelxl", default=default_shelxl_executable(), help="SHELXL executable (default: from --config or PATH).")
     p_push.add_argument("--shelxl-iterations", type=int, default=1, help="SHELXL executable calls per macrocycle.")
     p_push.add_argument(
         "--shelxl-feedback-xyz-tol",
@@ -104,9 +104,9 @@ def register_push(sub: argparse._SubParsersAction) -> None:
         default=None,
         help="Override the checkpoint native row-weight b term for every continuation dataset.",
     )
-    p_push.add_argument("--workers", type=int, default=auto_worker_count(0, 0.85))
-    p_push.add_argument("--chunksize", type=int, default=4)
-    p_push.add_argument("--row-plan-cache", choices=["off", "exact", "readwrite", "rebuild"], default="off")
+    p_push.add_argument("--workers", type=int, default=auto_worker_count(0, 0.85), help="Worker processes (default: 85%% of the cores).")
+    p_push.add_argument("--chunksize", type=int, default=4, help="Observations per worker task (default %(default)s).")
+    p_push.add_argument("--row-plan-cache", choices=["off", "exact", "readwrite", "rebuild"], default="off", help="Reuse of per-observation geometry: off (default), exact, readwrite or rebuild.")
     p_push.add_argument(
         "--pinned-sg-jitter-fallback",
         choices=["none", "off"],
@@ -118,7 +118,7 @@ def register_push(sub: argparse._SubParsersAction) -> None:
         "--endpoint-min-d-spacing",
         type=float,
         default=0.0,
-        help="Optional cutoff applied again to each combined corrected-HKL endpoint; zero follows --min-d-spacing.",
+        help="Resolution limit of the corrected HKL file and its statistics in Å (default 0: as --min-d-spacing).",
     )
     p_push.add_argument("--topup-d-min", type=float, default=None, help="Override the beam-pool resolution; otherwise use each checkpoint value (single-dataset default: 0.7 Angstrom).")
     p_push.add_argument("--min-peak", type=float, default=-1.0)
@@ -279,50 +279,48 @@ def register_finish(sub: argparse._SubParsersAction) -> None:
 
     p_finish = sub.add_parser(
         "finish",
-        help="Regenerate final summaries, native dynamical maps, and the GROND dynamic CIF from a completed run.",
+        help="Write the maps and summary tables of a finished run.",
     )
     p_finish.add_argument(
         "--publication-feedback-cycles",
         choices=["kept", "all"],
         default=None,
-        help="SHELXL feedback cycles the refreshed publication chooser may pick: kept (default; also for runs whose "
-        "run_config predates the setting) or all (every adopted cycle, ranked by in-sample R1).",
+        help="Rounds the final model may come from: kept (default) or all.",
     )
     p_finish.add_argument(
-        "--run-dir", default=".", help="Completed GROND auto/run output directory. Defaults to the current directory."
+        "--run-dir", default=".", help="Output directory of a finished run (default: the current directory)."
     )
     p_finish.add_argument(
-        "--checkpoint", default="", help="Optional grond_continue_checkpoint.json; its run_dir is used."
+        "--checkpoint", default="", help="grond_continue_checkpoint.json; its run directory is used."
     )
     p_finish.add_argument(
         "--model",
         default="",
-        help="Optional model override for native dynamical map phases. Defaults to the selected publication endpoint RES.",
+        help="Model for the map phases (default: the final model of the run).",
     )
     p_finish.add_argument(
         "--shelxl",
         default=default_shelxl_executable(),
-        help="SHELXL executable used for zero-cycle LIST 6 endpoint-map replay when needed.",
+        help="SHELXL executable, for maps that need a zero-cycle refinement.",
     )
     add_tool_config_args(p_finish)
     p_finish.add_argument(
         "--make-maps",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Generate finish maps (see --map-mode); use --no-make-maps to skip.",
+        help="Write maps (default on).",
     )
     p_finish.add_argument(
         "--map-mode",
         choices=["native", "shelx2map", "both", "off"],
         default="both",
-        help="native writes row-level dynamical maps; shelx2map writes quick corrected-HKL endpoint maps; both "
-        "(default, as in every paper run) writes both.",
+        help="native (dynamical maps), shelx2map (SHELXL Fo-Fc maps), both (default) or off.",
     )
     p_finish.add_argument(
         "--native-map-spacing",
         type=float,
         default=0.1,
-        help="Approximate CCP4 grid spacing in Angstroms for native dynamical maps (default 0.1, as in every paper run).",
+        help="Grid spacing of the maps in Å (default %(default)s).",
     )
     p_finish.add_argument(
         "--native-map-d-min",
@@ -343,6 +341,6 @@ def register_finish(sub: argparse._SubParsersAction) -> None:
         help="Safety cap on native dynamical map grid points.",
     )
     add_model_box_args(p_finish)
-    p_finish.add_argument("--json", action="store_true", help="Print the compact JSON payload used by automation.")
+    p_finish.add_argument("--json", action="store_true", help="Print a JSON summary.")
     p_finish.set_defaults(func=cmd_finish)
 

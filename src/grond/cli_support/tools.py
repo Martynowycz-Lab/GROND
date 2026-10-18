@@ -71,7 +71,7 @@ def add_tool_config_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument(
         "--config",
         default="",
-        help="JSON/YAML file that points GROND to external tools such as SHELXL and shelx2map. Defaults to GROND_CONFIG or grond.config.json in this tree.",
+        help="Config file with the SHELXL and shelx2map paths (default: $GROND_CONFIG or grond.config.json).",
     )
     ap.add_argument(
         "--allow-missing-tools",

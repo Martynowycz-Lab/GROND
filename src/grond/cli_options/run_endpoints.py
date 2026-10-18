@@ -104,13 +104,13 @@ def add_endpoints(ap: argparse.ArgumentParser, *, expose_lambda_controls: bool) 
     ap.add_argument(
         "--shelxl",
         default=default_shelxl_executable(),
-        help="SHELXL executable used for corrected-HKL endpoints and SHELXL feedback loops.",
+        help="SHELXL executable (default: from --config or PATH).",
     )
     ap.add_argument(
         "--shelxl-feedback-cycles",
         type=int,
         default=5,
-        help="Maximum number of high-N/Q Bloch -> converged-SHELXL macro-cycles used by the automatic SHELXL structure-update strategy.",
+        help="Most rounds of Bloch calculation and SHELXL refinement (default %(default)s).",
     )
     ap.add_argument(
         "--shelxl-feedback-shelxl-iterations",
