@@ -11,10 +11,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from grond.cli_support.execution import (
+    TRANSFORM_RERANK_TOP,
+    TRANSFORM_SCOUT_WORKERS_PER_JOB,
     run_logged,
     transform_scout_job_count,
     transform_scout_semaphore,
-    transform_scout_worker_count,
 )
 from grond.cli_support.values import read_json
 from grond.hashing import sha256_file
@@ -40,24 +41,23 @@ from grond.workflows.parity_evidence import replay_transform_work_born
 from grond.workflows.transform_metadata import metadata_prefilter_transforms
 
 TRANSFORM_SCOUT_SG_WINDOW = 0.004  # 1/A; the window the transform ranking was validated with
-TRANSFORM_SCOUT_WINDOWS = ("fixed-0.004", "inherit")
+# Transform scouts: coarse stage at N=8/Q=3 on at most 1000 rows, then the top candidates at N=24/Q=10 on the same rows.
+SCOUT_MAX_ROWS = 1000
+SCOUT_N_BASIS = 8
+SCOUT_N_POINTS = 3
+TRANSFORM_RERANK_N_BASIS = 24
+TRANSFORM_RERANK_N_POINTS = 10
+# Maximum relative Frobenius mismatch of the reciprocal-cell metrics before a signed-axis transform is rejected.
+TRANSFORM_METRIC_TOLERANCE = 0.02
 
 
-def transform_scout_window_overrides(args: argparse.Namespace) -> dict:
-    """native_stage_cmd window overrides of a transform scout for --transform-scout-window.
+def transform_scout_window_overrides() -> dict:
+    """native_stage_cmd window overrides of a transform scout.
 
-    fixed-0.004 keeps the fixed window the transform ranking was validated with; the AUTO physics window
-    (0.010 or the per-row DIALS bbox) is for the refinement stages, not a Q3/Q10 Born scout.  inherit
-    passes no override, so the scouts use --sg-window and the resolved mode.
+    The scouts use the fixed 0.004 1/A window the transform ranking was validated with; the AUTO physics window
+    (0.010 or the per-row DIALS bbox) is for the refinement stages, not a Q3/Q10 Born scout.
     """
 
-    policy = str(getattr(args, "transform_scout_window", "fixed-0.004") or "fixed-0.004")
-    if policy not in TRANSFORM_SCOUT_WINDOWS:
-        raise ValueError(
-            f"unknown --transform-scout-window {policy!r}; use one of {', '.join(TRANSFORM_SCOUT_WINDOWS)}"
-        )
-    if policy == "inherit":
-        return {"sg_window_override": None, "sg_window_mode_override": None}
     return {"sg_window_override": TRANSFORM_SCOUT_SG_WINDOW, "sg_window_mode_override": "fixed"}
 
 
@@ -153,30 +153,6 @@ def _transform_candidate_generation_contract(
     }
 
 
-def split_candidate_set_policy(args: argparse.Namespace) -> str:
-    """--split-candidate-set: shared-closure (default) or per-crystal."""
-
-    from grond.bloch.splits import SPLIT_CANDIDATE_SETS
-
-    policy = str(getattr(args, "split_candidate_set", "shared-closure") or "shared-closure")
-    if policy not in SPLIT_CANDIDATE_SETS:
-        raise ValueError(f"unknown --split-candidate-set {policy!r}; use one of {', '.join(SPLIT_CANDIDATE_SETS)}")
-    return policy
-
-
-def transform_canonicalization_policy(args: argparse.Namespace) -> str:
-    """--transform-canonicalization: point-group (default) or off (scout every retained candidate)."""
-
-    from grond.bloch.splits import TRANSFORM_CANONICALIZATIONS
-
-    policy = str(getattr(args, "transform_canonicalization", "point-group") or "point-group")
-    if policy not in TRANSFORM_CANONICALIZATIONS:
-        raise ValueError(
-            f"unknown --transform-canonicalization {policy!r}; use one of {', '.join(TRANSFORM_CANONICALIZATIONS)}"
-        )
-    return policy
-
-
 def dataset_transform_candidates(
     prep: PrepConfig, ds: DatasetSpec, args: argparse.Namespace, *, scouted: bool
 ) -> dict[str, object]:
@@ -198,14 +174,13 @@ def dataset_transform_candidates(
         raise ValueError(f"transform candidates: the HKL file of dataset {ds.name!r} does not exist: {ds.hkl}")
     generated = expand_transform_candidates(
         ds.hkl_transform,
-        args.transform_candidates,
         parity_policy=str(getattr(args, "transform_parity_policy", "proper-only")),
     )
     retained, metric_filter = metric_filter_signed_axis_transforms(
         Path(ds.hkl),
         Path(prep.structure),
         generated,
-        relative_tolerance=float(getattr(args, "transform_metric_tolerance", 0.02)),
+        relative_tolerance=TRANSFORM_METRIC_TOLERANCE,
         dataset_label=ds.name,
     )
     return {"source": "scout", "hkl": hkl_path, "hkl_transform": declared, "generated": list(generated),
@@ -241,26 +216,22 @@ def exclude_metric_incompatible_datasets(
 
     One mis-indexed or badly calibrated crystal must not stop a multi-crystal run: it is excluded before any scout
     or split contract, loudly and with its recorded reason, and the run fails only when no crystal is left.
-    With --metric-incompatible-datasets fail the first rejection stops the run instead.
     """
 
     from dataclasses import replace as dc_replace
 
-    policy = str(getattr(args, "metric_incompatible_datasets", "fail") or "fail")
-    if policy not in {"exclude", "fail"}:
-        raise ValueError(f"unknown --metric-incompatible-datasets {policy!r}")
     kept, excluded = [], {}
     for ds in prep.datasets:
         try:
             dataset_transform_candidates(prep, ds, args, scouted=True)
         except ValueError as exc:
-            if policy == "fail" or METRIC_REJECTION_MARKER not in str(exc):
+            if METRIC_REJECTION_MARKER not in str(exc):
                 raise
             excluded[ds.name] = {"hkl": str(ds.hkl), "reason": str(exc)}
             print(f"WARN dataset {ds.name} excluded: {exc}", flush=True)
             continue
         kept.append(ds)
-    record = {"policy": policy, "excluded": excluded, "kept": [ds.name for ds in kept]}
+    record = {"policy": "exclude", "excluded": excluded, "kept": [ds.name for ds in kept]}
     if excluded:
         write_json(Path(root) / "decisions" / "metric_excluded_datasets.json", record)
     if not kept:
@@ -292,10 +263,10 @@ def plan_split_candidates(
 ) -> dict[str, object]:
     """One split candidate set per crystal, fixed from cell metrics before any scout reads an intensity.
 
-    Under --split-candidate-set shared-closure every crystal's contract is built from the shared closure of all
-    crystals' retained candidates (grond.bloch.splits.shared_candidate_closure), so a Laue orbit is free or excluded in
-    every crystal or in none, whichever transform each crystal's scout later selects.  Each crystal still scouts only
-    its own retained candidates.  Under per-crystal each contract uses that crystal's own retained candidates.
+    Every crystal's contract is built from the shared closure of all crystals' retained candidates
+    (grond.bloch.splits.shared_candidate_closure), so a Laue orbit is free or excluded in every crystal or in none,
+    whichever transform each crystal's scout later selects.  Each crystal still scouts only its own retained
+    candidates.
 
     A declared or trusted dataset that already carries a shared-closure split contract (GROND scout's
     scouted_prep.json) keeps that contract in every native stage, so the plan is the closure the contracts recorded:
@@ -303,21 +274,17 @@ def plan_split_candidates(
     """
 
     from grond.bloch.model import parse_model
-    from grond.bloch.splits import per_crystal_candidate_sets, shared_candidate_closure
+    from grond.bloch.splits import shared_candidate_closure
 
     datasets = list(prep.datasets if datasets is None else datasets)
     if scouted is None:
-        scouted = bool(getattr(args, "auto_decide", True)) and not bool(getattr(args, "trust_hkl_transform", False))
+        scouted = not bool(getattr(args, "trust_hkl_transform", False))
     candidates = {ds.name: dataset_transform_candidates(prep, ds, args, scouted=scouted) for ds in datasets}
     retained = {name: list(entry["retained"]) for name, entry in candidates.items()}
-    policy = split_candidate_set_policy(args)
-    recorded = {} if scouted or policy == "per-crystal" else _recorded_contract_candidate_sets(datasets)
+    recorded = {} if scouted else _recorded_contract_candidate_sets(datasets)
     for name, block in recorded.items():
         retained[name] = [str(value) for value in block.get("dataset_retained_candidates") or []]
-    if policy == "per-crystal":
-        union = per_crystal_candidate_sets(retained)
-    else:
-        union = shared_candidate_closure(retained, parse_model(Path(prep.structure)).get("symmetry_ops"))
+    union = shared_candidate_closure(retained, parse_model(Path(prep.structure)).get("symmetry_ops"))
     if recorded:
         mismatched = sorted(
             name
@@ -334,7 +301,7 @@ def plan_split_candidates(
         union["closure_from_split_contracts"] = sorted(recorded)
     for name, entry in candidates.items():
         union["datasets"][name].update({"hkl": entry["hkl"], "candidate_source": entry["source"]})
-    return {"split_candidate_set": policy, "datasets": candidates, "union": union}
+    return {"split_candidate_set": "shared-closure", "datasets": candidates, "union": union}
 
 
 def _materialize_transform_hand_split_contract(
@@ -492,7 +459,7 @@ def run_cross_crystal_split_check(
             "refuse when a Laue orbit is free in one crystal and work in another, or excluded in one crystal "
             "and used (work or free) in another"
         ),
-        "split_candidate_set": split_candidate_set_policy(args),
+        "split_candidate_set": "shared-closure",
     }
     if bool(getattr(args, "dry_run", False)):
         write_json(path, {**record, "status": "skipped_dry_run"})
@@ -648,7 +615,7 @@ def transform_scout_records(
     from grond.workflows.crystal_parameters import crystal_arguments
 
     args = crystal_arguments(args, ds.name)
-    window_overrides = transform_scout_window_overrides(args)
+    window_overrides = transform_scout_window_overrides()
     n_basis = getattr(args, "fixed_n_basis", None) or n_basis
     n_points = getattr(args, "fixed_n_points", None) or n_points
     frozen_nuisance = {**transform_scout_nuisance(args), **getattr(args, "fixed_thickness", {})}
@@ -697,7 +664,7 @@ def transform_scout_records(
                 make_maps=False,
                 endpoint=False,
                 max_rows_override=max_rows,
-                workers_override=transform_scout_worker_count(args),
+                workers_override=TRANSFORM_SCOUT_WORKERS_PER_JOB,
                 scale_fit_split_override="work",
                 selection_metric_override="work_born_wR2",
                 **window_overrides,
@@ -795,7 +762,7 @@ def choose_transform_by_scout(
 
     ``split_plan`` (``plan_split_candidates`` over every crystal of the run) fixes this crystal's retained
     candidates and its split candidate set; without it the plan covers this dataset alone.  Retained candidates that
-    are one indexing under the model point group's proper rotations are scouted once (--transform-canonicalization).
+    are one indexing under the model point group's proper rotations are scouted once.
     """
 
     parity_policy = str(getattr(args, "transform_parity_policy", "proper-only"))
@@ -854,11 +821,7 @@ def choose_transform_by_scout(
         return dataset_with_transform(ds, selected_transform), payload
 
     from grond.bloch.model import parse_model
-    from grond.bloch.splits import (
-        contract_candidate_set,
-        transform_equivalence_classes,
-        transform_equivalence_disabled,
-    )
+    from grond.bloch.splits import contract_candidate_set, transform_equivalence_classes
 
     plan = split_plan if split_plan is not None else plan_split_candidates(prep, args, [ds], scouted=True)
     plan_datasets = plan.get("datasets") if isinstance(plan.get("datasets"), Mapping) else {}
@@ -887,12 +850,7 @@ def choose_transform_by_scout(
             f"dataset {ds.name!r}: the split candidate closure differs from the one recorded at the start of the run "
             "(decisions/split_summary.json); the model cell or the transform candidate options changed"
         )
-    if transform_canonicalization_policy(args) == "point-group":
-        equivalence = transform_equivalence_classes(
-            candidates, parse_model(Path(prep.structure)).get("symmetry_ops")
-        )
-    else:
-        equivalence = transform_equivalence_disabled(candidates)
+    equivalence = transform_equivalence_classes(candidates, parse_model(Path(prep.structure)).get("symmetry_ops"))
     scouted_candidates = list(equivalence["representatives"])
     if int(equivalence["collapsed_candidate_count"]):
         print(
@@ -901,7 +859,7 @@ def choose_transform_by_scout(
             flush=True,
         )
     candidate_generation = _transform_candidate_generation_contract(
-        str(args.transform_candidates),
+        "auto",
         generated_candidates,
         candidates,
         metric_filter_contract,
@@ -925,41 +883,27 @@ def choose_transform_by_scout(
     metadata_transform_decision: dict = {}
     metadata_candidate_elimination_used = False
     baseline_hkl = dataset_baseline_hkl(prep, ds)
-    if getattr(args, "transform_metadata_prefilter", "auto") != "off" and baseline_hkl:
-        metadata_candidates, metadata_transform_decision = metadata_prefilter_transforms(
-            ds.hkl,
-            baseline_hkl,
-            candidates,
-            mode=getattr(args, "transform_metadata_prefilter", "auto"),
-            max_candidates=int(getattr(args, "transform_metadata_max_candidates", 3)),
-            min_pairs=int(getattr(args, "transform_metadata_min_pairs", 100)),
-            min_correlation=float(getattr(args, "transform_metadata_min_correlation", 0.70)),
-            min_correlation_gap=float(getattr(args, "transform_metadata_min_correlation_gap", 0.05)),
-            max_rows=int(getattr(args, "transform_metadata_max_rows", 0)),
+    if baseline_hkl:
+        _metadata_candidates, metadata_transform_decision = metadata_prefilter_transforms(
+            ds.hkl, baseline_hkl, candidates
         )
-        metadata_mode = str(getattr(args, "transform_metadata_prefilter", "auto"))
-        if metadata_mode == "on":
-            candidates = metadata_candidates
-            metadata_candidate_elimination_used = True
-        else:
-            # Default auto mode may order the expensive proper candidates but
-            # may not eliminate any of them: its all-row overlap is not part
-            # of the held-out-safe transform selection target.
-            ranked_names = [
-                str(record.get("transform"))
-                for record in (metadata_transform_decision.get("records") or [])
-                if isinstance(record, Mapping)
-            ]
-            candidates = [
-                *[name for name in ranked_names if name in candidates],
-                *[name for name in candidates if name not in ranked_names],
-            ]
-            metadata_transform_decision["prefilter_status"] = metadata_transform_decision.get("status")
-            metadata_transform_decision["status"] = "diagnostic_order_only"
-            metadata_transform_decision["selected_transforms"] = list(candidates)
+        # The metadata overlap may order the expensive proper candidates but may not eliminate any of them: its
+        # all-row overlap is not part of the held-out-safe transform selection target.
+        ranked_names = [
+            str(record.get("transform"))
+            for record in (metadata_transform_decision.get("records") or [])
+            if isinstance(record, Mapping)
+        ]
+        candidates = [
+            *[name for name in ranked_names if name in candidates],
+            *[name for name in candidates if name not in ranked_names],
+        ]
+        metadata_transform_decision["prefilter_status"] = metadata_transform_decision.get("status")
+        metadata_transform_decision["status"] = "diagnostic_order_only"
+        metadata_transform_decision["selected_transforms"] = list(candidates)
         metadata_transform_decision["candidate_elimination_used"] = metadata_candidate_elimination_used
     scout_root = root / "decisions" / ds.name / "transform_scout"
-    coarse_max_rows = args.scout_max_rows if scout_max_rows is None else scout_max_rows
+    coarse_max_rows = SCOUT_MAX_ROWS if scout_max_rows is None else scout_max_rows
     coarse_records = transform_scout_records(
         prep,
         ds,
@@ -969,8 +913,8 @@ def choose_transform_by_scout(
         scout_root,
         candidates,
         scout_stage="coarse",
-        n_basis=args.scout_n_basis,
-        n_points=args.scout_n_points,
+        n_basis=SCOUT_N_BASIS,
+        n_points=SCOUT_N_POINTS,
         max_rows=coarse_max_rows,
     )
     ranked_coarse = ranked_transform_records(coarse_records, dry_run=args.dry_run)
@@ -982,15 +926,13 @@ def choose_transform_by_scout(
         raise RuntimeError(f"all transform scouts failed for dataset {ds.name}; see {scout_root}")
 
     coarse_selected = ranked_coarse[0] if ranked_coarse else {"transform": ds.hkl_transform}
-    rerank_top = max(0, int(getattr(args, "transform_rerank_top", 0)))
+    rerank_top = TRANSFORM_RERANK_TOP
     rerank_records: list[dict] = []
     selected = coarse_selected
     if len(candidates) > 1 and rerank_top > 0 and ranked_coarse:
         top_records = ranked_coarse[: min(rerank_top, len(ranked_coarse))]
         top_transforms = [str(r["transform"]) for r in top_records]
-        rerank_max_rows = int(getattr(args, "transform_rerank_max_rows", 0) or 0)
-        if rerank_max_rows <= 0:
-            rerank_max_rows = int(coarse_max_rows)
+        rerank_max_rows = int(coarse_max_rows)
         rerank_records = transform_scout_records(
             prep,
             ds,
@@ -1000,8 +942,8 @@ def choose_transform_by_scout(
             scout_root / "updated",
             top_transforms,
             scout_stage="updated",
-            n_basis=int(args.transform_rerank_n_basis),
-            n_points=int(args.transform_rerank_n_points),
+            n_basis=TRANSFORM_RERANK_N_BASIS,
+            n_points=TRANSFORM_RERANK_N_POINTS,
             max_rows=rerank_max_rows,
         )
         ranked_rerank = ranked_transform_records(rerank_records, dry_run=args.dry_run)
@@ -1042,7 +984,7 @@ def choose_transform_by_scout(
         "selected_transform_claim_contract": claim_contract,
         "scout_parallelism": {
             "max_concurrent_scout_jobs": transform_scout_job_count(args),
-            "workers_per_scout_job": transform_scout_worker_count(args),
+            "workers_per_scout_job": TRANSFORM_SCOUT_WORKERS_PER_JOB,
             "coarse_candidate_count": len(candidates),
             "coarse_parallel_jobs": transform_scout_job_count(args, len(candidates)),
             "reranked_candidate_count": len(rerank_records),

@@ -97,7 +97,11 @@ from grond.workflows.thickness_materialization import (
     discrete_thickness_baseline_nuisance,
     discrete_thickness_promotion_record,
 )
-from grond.workflows.transform_selection import _selected_transform_claim_contract, choose_transform_by_scout
+from grond.workflows.transform_selection import (
+    SCOUT_MAX_ROWS,
+    _selected_transform_claim_contract,
+    choose_transform_by_scout,
+)
 
 # Loop stops that reject a cycle's model but leave the model entering it valid (shelxl_feedback_loop). A failed
 # cycle (non-zero return) is not one of them: it still raises.
@@ -337,7 +341,7 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
         ds0,
         requested_min_peak=ds0.min_peak,
         requested_geometry_percentile=ds0.geometry_percentile,
-        requested_scout_rows=args.scout_max_rows,
+        requested_scout_rows=SCOUT_MAX_ROWS,
     )
     write_json(root / "decisions" / ds0.name / "preflight.json", preflight)
     for warning in preflight.warnings:
@@ -345,7 +349,7 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
     if preflight.status == "fatal":
         raise RuntimeError(f"fatal preflight failure for {ds0.name}: {preflight.warnings}")
     ds = apply_preflight(ds0, preflight)
-    scout_rows = preflight.scout_max_rows if preflight.scout_max_rows > 0 else args.scout_max_rows
+    scout_rows = preflight.scout_max_rows if preflight.scout_max_rows > 0 else SCOUT_MAX_ROWS
     if preflight.status == "bad" and args.stop_on_bad_preflight:
         return {"status": "stopped_bad_preflight", "preflight": str(root / "decisions" / ds0.name / "preflight.json")}
 
@@ -1154,152 +1158,8 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
 
 
 def run_single(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Path) -> dict:
-    """Run either the automatic or fixed single-dataset workflow."""
+    """Run the automatic single-dataset workflow."""
 
     configure_auto_physics(prep, args)
     args = crystal_arguments(args, prep.datasets[0].name)
-    if args.auto_decide:
-        return run_single_adaptive(prep, args, python, logs)
-    ds = prep.datasets[0]
-    root = Path(args.out_dir)
-    make_maps = args.make_maps
-    n_basis = 20 if args.fast else args.screen_n_basis
-    n_points = 5 if args.fast else args.screen_n_points
-    configure_cell_esd(prep.structure, [ds], args)
-    screen = root / "runs" / ds.name / ("fast_N20_Q5" if args.fast else "screen")
-    run_logged(
-        native_stage_cmd(
-            python,
-            ds,
-            prep.structure,
-            dataset_baseline_hkl(prep, ds),
-            screen,
-            args,
-            n_basis=n_basis,
-            n_points=n_points,
-            stage="screen",
-            make_maps=make_maps and args.mode == "bloch",
-        ),
-        logs,
-        f"{ds.name}_bloch",
-        dry_run=args.dry_run,
-    )
-    nui = best_nuisance(screen)
-    if args.mode in {"regularize", "auto"} and not args.fast and not args.dry_run and not nui:
-        raise RuntimeError(f"No best nuisance result found in {screen}; refusing to launch an unpinned final grid.")
-    final_model = prep.structure
-    final = screen
-    absolute_structure_diagnostic = ""
-    if args.mode in {"regularize", "auto"} and not args.fast:
-        final = root / "runs" / ds.name / "final"
-        final_n_basis = resolve_final_n_basis(prep, ds, args, python, logs, root, final_model, "final")
-        run_logged(
-            native_stage_cmd(
-                python,
-                ds,
-                final_model,
-                dataset_baseline_hkl(prep, ds),
-                final,
-                args,
-                n_basis=final_n_basis,
-                n_points=args.n_points,
-                stage="final",
-                pinned=nui,
-                make_maps=make_maps,
-            ),
-            logs,
-            f"{ds.name}_final",
-            dry_run=args.dry_run,
-        )
-    hand_policy = absolute_structure_policy(final_model)
-    if args.hand_control and hand_policy.get("run_hand_control", True) and not args.dry_run:
-        hand_run = root / "runs" / ds.name / "hand_alt"
-        run_logged(
-            native_stage_cmd(
-                python,
-                ds,
-                final_model,
-                dataset_baseline_hkl(prep, ds),
-                hand_run,
-                args,
-                n_basis=20 if args.fast else args.hand_n_basis,
-                n_points=5 if args.fast else args.hand_n_points,
-                stage="hand",
-                pinned=best_nuisance(final) or nui,
-                alternate_hand=True,
-                make_maps=False,
-            ),
-            logs,
-            f"{ds.name}_hand_alt",
-            dry_run=args.dry_run,
-        )
-        stats_path = root / "runs" / ds.name / "absolute_structure_diagnostic.json"
-        run_logged(
-            [
-                python,
-                str(engine_script("absolute_structure_diagnostic.py")),
-                "--best",
-                str(final / "native_dyn_calc.csv"),
-                "--other",
-                str(hand_run / "native_dyn_calc.csv"),
-                "--out",
-                str(stats_path),
-            ],
-            logs,
-            f"{ds.name}_absolute_structure_diagnostic",
-            dry_run=args.dry_run,
-        )
-        absolute_structure_diagnostic = str(stats_path)
-    no_h_run = None
-    if args.h_omit in {"on", "both", "only"} and is_shelx_model(final_model):
-        no_h = make_noh_model(python, final_model, root, logs, args.dry_run)
-        no_h_run = root / "runs" / ds.name / "final_noH"
-        no_h_n_basis = resolve_final_n_basis(prep, ds, args, python, logs, root, str(no_h), "final_noH")
-        run_logged(
-            native_stage_cmd(
-                python,
-                ds,
-                str(no_h),
-                dataset_baseline_hkl(prep, ds),
-                no_h_run,
-                args,
-                n_basis=20 if args.fast else no_h_n_basis,
-                n_points=5 if args.fast else args.n_points,
-                stage="noH",
-                pinned=best_nuisance(final) or nui,
-                make_maps=make_maps,
-            ),
-            logs,
-            f"{ds.name}_final_noH",
-            dry_run=args.dry_run,
-        )
-    resolution_limit = run_resolution_limit_gate(
-        python,
-        {ds.name: final},
-        final_model,
-        root / "resolution_limits" / ds.name,
-        logs,
-        ds.name,
-        args,
-        title=f"GROND resolution-limit promotion: {ds.name}",
-        scope="dataset",
-    )
-    sg_window_scout = run_sg_window_scout(
-        python,
-        prep,
-        ds,
-        final_model,
-        final,
-        root / "sg_window_scout" / ds.name,
-        logs,
-        f"{ds.name}_final",
-        args,
-    )
-    return {
-        "primary_run": str(final),
-        "no_h_run": str(no_h_run) if no_h_run else "",
-        "model": final_model,
-        "absolute_structure_diagnostic": absolute_structure_diagnostic,
-        "resolution_limits": {ds.name: resolution_limit},
-        "sg_window_scout": {ds.name: sg_window_scout},
-    }
+    return run_single_adaptive(prep, args, python, logs)

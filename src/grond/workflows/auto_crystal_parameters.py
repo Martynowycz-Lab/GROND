@@ -23,10 +23,10 @@ def configure_auto_crystals(prep: PrepConfig, args: argparse.Namespace) -> None:
     source = str(args.crystal_parameters_from or "")
     if not (source or beams or centers):
         return
-    if args.fast or args.full_fast or args.native_only:
+    if args.fast or args.native_only:
         raise SystemExit(
             "Fixed per-crystal parameters require the ordinary SHELXL feedback workflow. "
-            "Remove --fast/--full-fast/--native-only."
+            "Remove --fast/--native-only."
         )
     if args.structure_update == "auto":
         args.structure_update = "shelxl_feedback"

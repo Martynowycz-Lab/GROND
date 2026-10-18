@@ -29,7 +29,6 @@ from grond.workflows.model_selection import resolve_structure_update_strategy
 from grond.workflows.multi import run_multi
 from grond.workflows.nested_nuisance import validate_nested_nuisance_policy
 from grond.workflows.nuisance_policy import (
-    apply_speed_profile,
     refuse_sigma_weight_startup_conflicts,
     resolved_dataset_sigma_policy,
     resolved_merge_sigma_policy,
@@ -130,7 +129,6 @@ def cmd_run(args: argparse.Namespace) -> int:
             "the calculation is a retrospective strip-H sensitivity control, not a prospective never-H experiment.",
             flush=True,
         )
-    profile = apply_speed_profile(args)
     configure_auto_crystals(prep, args)
     args.workers = auto_worker_count(args.workers, args.max_core_fraction)
     args.chunksize = auto_chunksize(args.chunksize, args.workers)
@@ -183,8 +181,6 @@ def cmd_run(args: argparse.Namespace) -> int:
         "accelerators": probe_accelerators(python),
         "mode": args.mode,
         "fast": args.fast,
-        "full_fast": args.full_fast,
-        "speed_profile": profile,
         "preset": preset,
         "datasets": [ds.__dict__ for ds in prep.datasets],
         "structure": prep.structure,

@@ -191,7 +191,7 @@ def build_split_record(
 
     from grond.bloch.model import parse_model
     from grond.bloch.splits import load_split_exclusion
-    from grond.workflows.transform_selection import plan_split_candidates, transform_canonicalization_policy
+    from grond.workflows.transform_selection import plan_split_candidates
 
     scheme = str(getattr(args, "split_scheme", "orbit-hash") or "orbit-hash")
     exclusion_path = str(getattr(args, "exclude_orbits_json", "") or "").strip()
@@ -259,7 +259,7 @@ def build_split_record(
             else None
         ),
         "split_candidate_set": candidate_set,
-        "transform_canonicalization": transform_canonicalization_policy(args),
+        "transform_canonicalization": "point-group",
         "model": {"path": str(Path(prep.structure).expanduser().resolve()), "sha256": _file_sha256(Path(prep.structure))},
         "crystals": crystals,
         "pooled": pooled,

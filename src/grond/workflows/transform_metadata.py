@@ -148,31 +148,21 @@ def metadata_prefilter_transforms(
     moving_hkl: str | Path,
     baseline_hkl: str | Path,
     transforms: list[str],
-    *,
-    mode: str = "auto",
-    max_candidates: int = 3,
-    min_pairs: int = 100,
-    min_correlation: float = 0.70,
-    min_correlation_gap: float = 0.05,
-    max_rows: int = 0,
 ) -> tuple[list[str], dict]:
-    """Use solved-HKL overlap to shrink the expensive Bloch transform-scout list."""
+    """Rank the transforms by solved-HKL overlap (a diagnostic order; the caller never drops a candidate)."""
 
-    payload = rank_transforms_from_baseline_hkl(moving_hkl, baseline_hkl, transforms, max_rows=max_rows)
+    max_candidates, min_pairs, min_correlation, min_correlation_gap = 3, 100, 0.70, 0.05
+    payload = rank_transforms_from_baseline_hkl(moving_hkl, baseline_hkl, transforms, max_rows=0)
     payload.update(
         {
-            "mode": mode,
-            "max_candidates": int(max_candidates),
-            "min_pairs": int(min_pairs),
-            "min_correlation": float(min_correlation),
-            "min_correlation_gap": float(min_correlation_gap),
+            "mode": "auto",
+            "max_candidates": max_candidates,
+            "min_pairs": min_pairs,
+            "min_correlation": min_correlation,
+            "min_correlation_gap": min_correlation_gap,
             "input_transforms": list(transforms),
         }
     )
-    if mode == "off":
-        payload["status"] = "disabled"
-        payload["selected_transforms"] = list(transforms)
-        return list(transforms), payload
     records = payload.get("records") or []
     if not records:
         payload["status"] = payload.get("status") or "missing_input"
@@ -188,11 +178,11 @@ def metadata_prefilter_transforms(
     second_corr = float(records[1].get("log_intensity_corr", float("nan"))) if len(records) > 1 else float("-inf")
     corr_gap = best_corr - second_corr if math.isfinite(second_corr) else float("inf")
     payload["correlation_gap"] = corr_gap
-    if mode == "on" or corr_gap >= min_correlation_gap:
+    if corr_gap >= min_correlation_gap:
         payload["status"] = "promoted"
         payload["selected_transforms"] = [str(best["transform"])]
         return [str(best["transform"])], payload
-    selected = [str(row["transform"]) for row in records[: max(1, int(max_candidates))]]
+    selected = [str(row["transform"]) for row in records[:max_candidates]]
     payload["status"] = "ambiguous_top_candidates"
     payload["selected_transforms"] = selected
     return selected, payload

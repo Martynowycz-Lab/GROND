@@ -167,13 +167,11 @@ def apply_run_preset(args: argparse.Namespace, explicit: Iterable[str] | None = 
     if mode != "auto":
         # The preset's record states that every AUTO validation step is kept; that is not true of other modes.
         raise SystemExit(f"--preset {name} applies to the AUTO workflow (--mode auto), not --mode {mode}")
-    for legacy in ("fast", "full_fast"):
-        if bool(getattr(args, legacy, False)):
-            raise SystemExit(
-                f"--preset {name} cannot be combined with --{legacy.replace('_', '-')}: --fast is the quick-look "
-                "frozen-model run and --full-fast the cheap-N/Q profile; the preset keeps the standard AUTO "
-                "stages at lower fidelity"
-            )
+    if bool(getattr(args, "fast", False)):
+        raise SystemExit(
+            f"--preset {name} cannot be combined with --fast: --fast is the quick-look frozen-model run; the preset "
+            "keeps the standard AUTO stages at lower fidelity"
+        )
     if explicit is None:
         recorded = getattr(args, "explicit_options", None)
         given = frozenset(recorded) if recorded is not None else _non_default_dests(args)

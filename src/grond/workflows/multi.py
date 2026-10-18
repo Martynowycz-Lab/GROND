@@ -59,6 +59,7 @@ from grond.workflows.thickness_materialization import (
     discrete_thickness_promotion_record,
 )
 from grond.workflows.transform_selection import (
+    SCOUT_MAX_ROWS,
     choose_transform_by_scout,
     exclude_metric_incompatible_datasets,
     plan_split_candidates,
@@ -126,57 +127,55 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
 
     root = Path(args.out_dir)
     configure_auto_physics(prep, args)
-    if args.auto_decide:
-        # Every crystal's split contract comes from one candidate set fixed by cell metrics before any scout, so an
-        # orbit is free (or excluded) in every crystal or in none (--split-candidate-set; trusted transforms write
-        # no contract).
-        if not getattr(args, "trust_hkl_transform", False) and len(prep.datasets) > 1:
-            prep, _metric_exclusions = exclude_metric_incompatible_datasets(prep, args, root)
-        split_plan = None if getattr(args, "trust_hkl_transform", False) else plan_split_candidates(prep, args)
+    # Every crystal's split contract comes from one candidate set fixed by cell metrics before any scout, so an
+    # orbit is free (or excluded) in every crystal or in none (trusted transforms write no contract).
+    if not getattr(args, "trust_hkl_transform", False) and len(prep.datasets) > 1:
+        prep, _metric_exclusions = exclude_metric_incompatible_datasets(prep, args, root)
+    split_plan = None if getattr(args, "trust_hkl_transform", False) else plan_split_candidates(prep, args)
 
-        def decide_dataset(ds0: DatasetSpec) -> tuple[DatasetSpec, int]:
-            """Preflight one crystal and choose its HKL transform by scout; return the dataset and its scout row cap."""
-            preflight = preflight_dataset(
-                ds0,
-                requested_min_peak=ds0.min_peak,
-                requested_geometry_percentile=ds0.geometry_percentile,
-                requested_scout_rows=args.scout_max_rows,
-            )
-            write_json(root / "decisions" / ds0.name / "preflight.json", preflight)
-            for warning in preflight.warnings:
-                print(f"WARN preflight {ds0.name}: {warning}", flush=True)
-            if preflight.status == "fatal":
-                raise RuntimeError(f"fatal preflight failure for {ds0.name}: {preflight.warnings}")
-            ds = apply_preflight(ds0, preflight)
-            scout_rows = preflight.scout_max_rows if preflight.scout_max_rows > 0 else args.scout_max_rows
-            ds, _transform_decision = choose_transform_by_scout(
-                prep, ds, args, python, logs, root, scout_max_rows=scout_rows, split_plan=split_plan
-            )
-            return ds, int(scout_rows)
-
-        if len(prep.datasets) > 1 and not args.dry_run:
-            decided_by_name: dict[str, DatasetSpec] = {}
-            max_workers = min(len(prep.datasets), transform_scout_job_count(args))
-            with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="grond-dataset-transform") as pool:
-                futures = {pool.submit(decide_dataset, ds0): ds0.name for ds0 in prep.datasets}
-                for future in as_completed(futures):
-                    decided, _scout_rows = future.result()
-                    decided_by_name[decided.name] = decided
-            decided = [decided_by_name[ds0.name] for ds0 in prep.datasets]
-        else:
-            decided_rows = [decide_dataset(ds0) for ds0 in prep.datasets]
-            decided = [item[0] for item in decided_rows]
-        prep = PrepConfig(
-            structure=prep.structure,
-            datasets=decided,
-            baseline_hkl=prep.baseline_hkl,
-            notes=prep.notes,
-            default_hkl_transform=prep.default_hkl_transform,
-            geometry_percentile=prep.geometry_percentile,
-            parity_setup_id=prep.parity_setup_id,
-            parity_setup_manifest_sha256=prep.parity_setup_manifest_sha256,
-            metadata=prep.metadata,
+    def decide_dataset(ds0: DatasetSpec) -> tuple[DatasetSpec, int]:
+        """Preflight one crystal and choose its HKL transform by scout; return the dataset and its scout row cap."""
+        preflight = preflight_dataset(
+            ds0,
+            requested_min_peak=ds0.min_peak,
+            requested_geometry_percentile=ds0.geometry_percentile,
+            requested_scout_rows=SCOUT_MAX_ROWS,
         )
+        write_json(root / "decisions" / ds0.name / "preflight.json", preflight)
+        for warning in preflight.warnings:
+            print(f"WARN preflight {ds0.name}: {warning}", flush=True)
+        if preflight.status == "fatal":
+            raise RuntimeError(f"fatal preflight failure for {ds0.name}: {preflight.warnings}")
+        ds = apply_preflight(ds0, preflight)
+        scout_rows = preflight.scout_max_rows if preflight.scout_max_rows > 0 else SCOUT_MAX_ROWS
+        ds, _transform_decision = choose_transform_by_scout(
+            prep, ds, args, python, logs, root, scout_max_rows=scout_rows, split_plan=split_plan
+        )
+        return ds, int(scout_rows)
+
+    if len(prep.datasets) > 1 and not args.dry_run:
+        decided_by_name: dict[str, DatasetSpec] = {}
+        max_workers = min(len(prep.datasets), transform_scout_job_count(args))
+        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="grond-dataset-transform") as pool:
+            futures = {pool.submit(decide_dataset, ds0): ds0.name for ds0 in prep.datasets}
+            for future in as_completed(futures):
+                decided, _scout_rows = future.result()
+                decided_by_name[decided.name] = decided
+        decided = [decided_by_name[ds0.name] for ds0 in prep.datasets]
+    else:
+        decided_rows = [decide_dataset(ds0) for ds0 in prep.datasets]
+        decided = [item[0] for item in decided_rows]
+    prep = PrepConfig(
+        structure=prep.structure,
+        datasets=decided,
+        baseline_hkl=prep.baseline_hkl,
+        notes=prep.notes,
+        default_hkl_transform=prep.default_hkl_transform,
+        geometry_percentile=prep.geometry_percentile,
+        parity_setup_id=prep.parity_setup_id,
+        parity_setup_manifest_sha256=prep.parity_setup_manifest_sha256,
+        metadata=prep.metadata,
+    )
     configure_cell_esd(prep.structure, prep.datasets, args)
     screen_runs: dict[str, Path] = {}
     initial_runs: dict[str, Path] = {}

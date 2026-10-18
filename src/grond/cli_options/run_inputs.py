@@ -64,26 +64,6 @@ def add_execution(ap: argparse.ArgumentParser) -> None:
     ap.add_argument(
         "--fast", action="store_true", help="Use N=20/Q=5, no absorption/non-Hermitian terms, and no structure moves."
     )
-    ap.add_argument(
-        "--full-fast",
-        action="store_true",
-        help="Run the automatic gates with cheap N/Q and no structure update, and skip expensive final polish.",
-    )
-    ap.add_argument(
-        "--full-fast-n-basis",
-        type=int,
-        default=24,
-        help="Pinned basis size used by --full-fast final and screening stages. Use 10 for an even cheaper stress test.",
-    )
-    ap.add_argument("--full-fast-n-points", type=int, default=10, help="Quadrature points used by --full-fast.")
-    ap.add_argument(
-        "--auto-decide",
-        dest="auto_decide",
-        action="store_true",
-        default=True,
-        help="Run preflight, transform scouting, adaptive nuisance decisions, and the final elastic hand check.",
-    )
-    ap.add_argument("--no-auto-decide", dest="auto_decide", action="store_false")
     ap.add_argument("--native-only", action="store_true", help="Do not write corrected-HKL endpoints.")
     ap.add_argument("--python", default="", help="Python for the calculation subprocesses (default: the one running grond).")
     add_tool_config_args(ap)
@@ -150,20 +130,4 @@ def add_observations_and_outputs(ap: argparse.ArgumentParser) -> None:
     )
     ap.add_argument(
         "--no-hand-control", dest="hand_control", action="store_false", help="Skip the alternate-hand diagnostic."
-    )
-    ap.add_argument(
-        "--hand-n-basis",
-        dest="hand_n_basis",
-        metavar="N",
-        type=int,
-        default=24,
-        help="Deprecated auto compatibility option; final hand selection now reuses the exact final N value.",
-    )
-    ap.add_argument(
-        "--hand-n-points",
-        dest="hand_n_points",
-        metavar="Q",
-        type=int,
-        default=10,
-        help="Deprecated auto compatibility option; final hand selection now reuses the exact final Q value.",
     )

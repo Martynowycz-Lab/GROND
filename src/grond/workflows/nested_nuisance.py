@@ -168,8 +168,6 @@ def validate_nested_nuisance_policy(args: argparse.Namespace, prep: PrepConfig |
         return record
     if bool(getattr(args, "fast", False)):
         return {**record, "status": "not_applicable_fast", "reason": "--fast skips every nuisance stage"}
-    if prep is not None and len(prep.datasets) == 1 and not bool(getattr(args, "auto_decide", True)):
-        return {**record, "status": "not_applicable_fixed_workflow", "reason": "--no-auto-decide runs no nuisance stages"}
     if int(getattr(args, "nested_n_basis", 0) or 0) < 2:
         raise ValueError("--nested-n-basis must be an integer of at least 2 beams")
     requested_points = str(getattr(args, "nested_n_points", "screen") or "screen").strip().lower()

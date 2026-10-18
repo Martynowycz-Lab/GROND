@@ -12,51 +12,6 @@ def add_decision_controls(ap: argparse.ArgumentParser) -> None:
 
     ap.add_argument("--max-rows", type=int, default=0)
     ap.add_argument(
-        "--scout-max-rows", type=int, default=1000, help="Representative row limit for automatic transform/hand scouts."
-    )
-    ap.add_argument("--scout-n-basis", type=int, default=8, help="Basis size for cheap decision scouts.")
-    ap.add_argument("--scout-n-points", type=int, default=3, help="Quadrature points for cheap decision scouts.")
-    ap.add_argument(
-        "--transform-rerank-top",
-        type=int,
-        default=3,
-        help="Number of coarse transform-scout winners to rerun at better N/Q; 0 disables the second stage.",
-    )
-    ap.add_argument(
-        "--transform-rerank-n-basis", type=int, default=24, help="Basis size for second-stage transform reranking."
-    )
-    ap.add_argument(
-        "--transform-rerank-n-points",
-        type=int,
-        default=10,
-        help="Quadrature points for second-stage transform reranking.",
-    )
-    ap.add_argument(
-        "--transform-rerank-max-rows",
-        type=int,
-        default=0,
-        help="Row limit for second-stage transform reranking; 0 reuses the preflight scout row budget.",
-    )
-    ap.add_argument(
-        "--transform-candidates",
-        default="auto",
-        help=(
-            "Semicolon-separated signed-axis transforms, or auto/common/off. "
-            "Calibration-grade auto/common enumerates all 24 determinant-positive "
-            "signed-axis permutations before the cell-metric filter."
-        ),
-    )
-    ap.add_argument(
-        "--transform-metric-tolerance",
-        type=float,
-        default=0.02,
-        help=(
-            "Maximum relative Frobenius mismatch between source and model "
-            "reciprocal-cell metrics before a signed-axis transform is rejected. "
-            "This filter uses cells only, never intensities, coordinates, chemistry, or hand."
-        ),
-    )
-    ap.add_argument(
         "--transform-parity-policy",
         choices=["proper-only", "all-diagnostic"],
         default="proper-only",
@@ -65,78 +20,6 @@ def add_decision_controls(ap: argparse.ArgumentParser) -> None:
             "all-diagnostic also scouts mixed-parity transforms for diagnostics, but cannot by itself "
             "support a named absolute-configuration claim."
         ),
-    )
-    ap.add_argument(
-        "--transform-canonicalization",
-        choices=["point-group", "off"],
-        default="point-group",
-        help=(
-            "point-group (default): metric-compatible transforms that differ by a proper rotation of the model "
-            "point group are one indexing (identical dynamical intensities); scout one representative per class "
-            "(identity when present) and record the classes. off: scout every retained candidate."
-        ),
-    )
-    ap.add_argument(
-        "--transform-scout-jobs",
-        type=int,
-        default=0,
-        help="Concurrent transform-scout subprocesses across candidates and datasets; 0 derives a core-safe value from --workers and --max-core-fraction.",
-    )
-    ap.add_argument(
-        "--transform-scout-workers-per-job",
-        type=int,
-        default=1,
-        help="Worker processes inside each transform-scout subprocess. Keep low when many scout jobs run concurrently.",
-    )
-    ap.add_argument(
-        "--transform-scout-window",
-        choices=["fixed-0.004", "inherit"],
-        default="fixed-0.004",
-        help=(
-            "Rocking window of the HKL transform scouts. fixed-0.004 (default) ranks transforms with the fixed "
-            "0.004 1/A window they were validated with; inherit uses --sg-window and the resolved "
-            "--sg-window-mode."
-        ),
-    )
-    ap.add_argument(
-        "--transform-metadata-prefilter",
-        choices=["auto", "on", "off"],
-        default="auto",
-        help=(
-            "Use solved/XSCALE baseline-HKL overlap as a diagnostic ordering aid. "
-            "Default auto never eliminates candidates; explicit on may eliminate candidates "
-            "but is not eligible for parity calibration."
-        ),
-    )
-    ap.add_argument(
-        "--transform-metadata-max-candidates",
-        type=int,
-        default=3,
-        help="Number of metadata-ranked candidates retained only by the explicit diagnostic --transform-metadata-prefilter on mode. Calibration-grade auto does not eliminate metric-compatible candidates.",
-    )
-    ap.add_argument(
-        "--transform-metadata-min-pairs",
-        type=int,
-        default=100,
-        help="Minimum paired positive-intensity rows required before trusting metadata transform ranking.",
-    )
-    ap.add_argument(
-        "--transform-metadata-min-correlation",
-        type=float,
-        default=0.70,
-        help="Minimum log-intensity correlation required before metadata can prefilter transform scouts.",
-    )
-    ap.add_argument(
-        "--transform-metadata-min-correlation-gap",
-        type=float,
-        default=0.05,
-        help="Correlation gap used only by the explicit diagnostic metadata-elimination mode; calibration-grade auto still Bloch-scouts every metric-compatible candidate.",
-    )
-    ap.add_argument(
-        "--transform-metadata-max-rows",
-        type=int,
-        default=0,
-        help="Maximum INTEGRATE/XDS rows used by metadata transform ranking; 0 uses all rows.",
     )
     ap.add_argument(
         "--trust-hkl-transform",
@@ -270,27 +153,6 @@ def add_decision_controls(ap: argparse.ArgumentParser) -> None:
         "--split-salt",
         default=DEFAULT_FREE_SALT,
         help=f"Salt of the orbit-hash free set (default {DEFAULT_FREE_SALT}).",
-    )
-    ap.add_argument(
-        "--metric-incompatible-datasets",
-        choices=["exclude", "fail"],
-        default="exclude",
-        help=(
-            "A crystal of a multi-crystal run whose unit cell is incompatible with the model under every transform "
-            "candidate (cell-metric filter). exclude (default): drop it before any scout, with the reason recorded in "
-            "decisions/metric_excluded_datasets.json; the run fails only if no crystal is left. fail: stop the run."
-        ),
-    )
-    ap.add_argument(
-        "--split-candidate-set",
-        choices=["shared-closure", "per-crystal"],
-        default="shared-closure",
-        help=(
-            "Transform candidates behind every crystal's split contract. shared-closure (default): one set for all "
-            "crystals, the union of their retained candidates closed under composition modulo the model Laue "
-            "group, so free and excluded status depends on the orbit alone (pseudo-symmetric cells and one-sided "
-            "XDS P1 fallbacks proceed). per-crystal: each crystal's own retained candidates."
-        ),
     )
     ap.add_argument(
         "--exclude-orbits-json",

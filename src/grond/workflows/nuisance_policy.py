@@ -145,8 +145,6 @@ def resolve_final_n_basis(
         return 20
     if int(args.n_basis) > 0:
         return int(args.n_basis)
-    if getattr(args, "full_fast", False):
-        return int(args.full_fast_n_basis)
     if args.dry_run:
         return int(args.final_basis_fallback)
     scan = root / "decisions" / ds.name / f"{safe_label(stage)}_support_basis.json"
@@ -342,43 +340,6 @@ def transform_scout_nuisance(args: argparse.Namespace) -> dict:
         "mosaicity_sigma_deg": "0.0",
         "row_resolution_b": "0.0",
     }
-
-
-def apply_speed_profile(args: argparse.Namespace) -> dict[str, object]:
-    """Apply named run profiles after parsing and return a provenance record."""
-
-    if getattr(args, "fast", False) and getattr(args, "full_fast", False):
-        raise SystemExit(
-            "Choose either --fast or --full-fast. --fast is a quick look; --full-fast runs the automatic gates with cheap N/Q."
-        )
-    if not getattr(args, "full_fast", False):
-        return {"profile": "standard"}
-
-    changes: dict[str, object] = {
-        "profile": "full_fast",
-        "reason": "automatic gates with cheap Bloch settings and minimal endpoint polish",
-    }
-
-    def assign(name: str, value: object) -> None:
-        """Set one option on ``args`` and record the old and new value when it changes."""
-        old = getattr(args, name)
-        setattr(args, name, value)
-        if old != value:
-            changes[name] = {"old": old, "new": value}
-
-    n_basis = int(args.full_fast_n_basis)
-    n_points = int(args.full_fast_n_points)
-    assign("screen_n_basis", n_basis)
-    assign("screen_n_points", n_points)
-    assign("transform_rerank_n_basis", min(int(args.transform_rerank_n_basis), n_basis))
-    assign("transform_rerank_n_points", min(int(args.transform_rerank_n_points), n_points))
-    assign("hand_n_basis", min(int(args.hand_n_basis), n_basis))
-    assign("hand_n_points", min(int(args.hand_n_points), n_points))
-    assign("n_points", n_points)
-    assign("shelxl_iterations", min(int(args.shelxl_iterations), 1))
-    if args.endpoint_feedback == "auto":
-        assign("endpoint_feedback", "off")
-    return changes
 
 
 def nuisance_with_updates(nui: dict, **updates) -> dict:

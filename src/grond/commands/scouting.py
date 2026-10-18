@@ -16,7 +16,7 @@ from grond.io.config import DatasetSpec, PrepConfig, write_prep
 from grond.io.structure_contract import check_sfac_contract, prepare_structure_for_legacy
 from grond.runtime import auto_chunksize, auto_worker_count
 from grond.workflows.decision import ALL_PROPER_SIGNED_PERMUTATIONS, apply_preflight, preflight_dataset, write_json
-from grond.workflows.transform_selection import choose_transform_by_scout, plan_split_candidates
+from grond.workflows.transform_selection import SCOUT_MAX_ROWS, choose_transform_by_scout, plan_split_candidates
 
 
 def _fill_common_run_defaults(args: argparse.Namespace) -> argparse.Namespace:
@@ -79,13 +79,13 @@ def cmd_scout(args: argparse.Namespace) -> int:
             source,
             requested_min_peak=source.min_peak,
             requested_geometry_percentile=source.geometry_percentile,
-            requested_scout_rows=args.scout_max_rows,
+            requested_scout_rows=SCOUT_MAX_ROWS,
         )
         write_json(root / "decisions" / source.name / "preflight.json", preflight)
         if preflight.status == "fatal":
             raise RuntimeError(f"fatal preflight failure for {source.name}: {preflight.warnings}")
         prepared = apply_preflight(source, preflight)
-        scout_rows = preflight.scout_max_rows if preflight.scout_max_rows > 0 else int(args.scout_max_rows)
+        scout_rows = preflight.scout_max_rows if preflight.scout_max_rows > 0 else SCOUT_MAX_ROWS
         decided, decision = choose_transform_by_scout(
             prep,
             prepared,

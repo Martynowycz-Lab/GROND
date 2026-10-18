@@ -20,14 +20,9 @@ from grond.validation import heldout
 SPLIT_SCHEMES = ("orbit-hash", "legacy")
 LEGACY_SPLIT_ALGORITHM = "candidate_union_model_symmetry_friedel_orbits_v1"
 ORBIT_HASH_SPLIT_ALGORITHM = "candidate_union_model_symmetry_friedel_orbit_hash_v1"
-# --split-candidate-set: shared-closure (default) builds every crystal's contract from one shared candidate set;
-# per-crystal builds each contract from that crystal's own retained candidates.
-SPLIT_CANDIDATE_SETS = ("shared-closure", "per-crystal")
+# Every crystal's split contract is built from one shared candidate set (the closure of all crystals' candidates).
 SHARED_CANDIDATE_POLICY = "shared_relative_candidates_closed_modulo_model_laue_group_v1"
-PER_CRYSTAL_CANDIDATE_POLICY = "per_crystal_retained_candidates_v1"
-# --transform-canonicalization: point-group (default) scouts one representative per equivalence class; off scouts
-# every retained candidate.
-TRANSFORM_CANONICALIZATIONS = ("point-group", "off")
+# The transform scout scouts one representative per point-group equivalence class of the retained candidates.
 TRANSFORM_EQUIVALENCE_POLICY = "model_point_group_proper_rotations_v1"
 # Finite subgroups of GL(3, Z) have at most 48 elements (m-3m); a larger closure is not a lattice symmetry.
 MAX_FINITE_INTEGER_GROUP_ORDER = 48
@@ -691,22 +686,6 @@ def transform_equivalence_classes(transforms, symmetry_ops) -> dict:
     }
 
 
-def transform_equivalence_disabled(transforms) -> dict:
-    """The --transform-canonicalization off record: every candidate is its own class and is scouted."""
-
-    candidates = [name for name, _matrix in _unique_transform_matrices(transforms)]
-    return {
-        "policy": "off",
-        "rule": "every retained candidate is scouted",
-        "input_candidates": candidates,
-        "classes": [{"representative": name, "members": [name]} for name in candidates],
-        "representatives": candidates,
-        "input_candidate_count": len(candidates),
-        "class_count": len(candidates),
-        "collapsed_candidate_count": 0,
-    }
-
-
 def shared_candidate_group_sha256(shared_group, laue_rotations) -> str:
     """Return the canonical-JSON SHA-256 of a shared candidate group and its model Laue rotation labels."""
 
@@ -790,23 +769,6 @@ def shared_candidate_closure(retained_by_dataset, symmetry_ops) -> dict:
         "laue_coset_representatives": [hkl_matrix_label(matrix) for matrix in coset_representatives],
         "pseudo_symmetric": len(group) > len(laue),
         "shared_group_sha256": shared_candidate_group_sha256(shared, laue_labels),
-        "datasets": datasets,
-    }
-
-
-def per_crystal_candidate_sets(retained_by_dataset) -> dict:
-    """The --split-candidate-set per-crystal record: each contract uses that crystal's own retained candidates."""
-
-    datasets = {}
-    for name, transforms in retained_by_dataset.items():
-        candidates = [candidate for candidate, _matrix in _unique_transform_matrices(transforms)]
-        if not candidates:
-            raise ValueError(f"dataset {name!r} has no retained transform candidates for the split contract")
-        datasets[str(name)] = {"retained_candidates": candidates, "split_candidates": list(candidates)}
-    return {
-        "schema": "grond.split_candidate_union.v1",
-        "policy": PER_CRYSTAL_CANDIDATE_POLICY,
-        "rule": "each crystal's contract uses its own retained candidates",
         "datasets": datasets,
     }
 

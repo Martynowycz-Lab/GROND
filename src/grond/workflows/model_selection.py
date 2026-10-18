@@ -139,7 +139,7 @@ def resolve_structure_update_strategy(args: argparse.Namespace, *, multi_dataset
     requested = getattr(args, "structure_update", "auto")
     if requested in {"off", "shelxl_feedback"}:
         return requested
-    if getattr(args, "fast", False) or getattr(args, "full_fast", False) or getattr(args, "native_only", False):
+    if getattr(args, "fast", False) or getattr(args, "native_only", False):
         return "off"
     if shelxl_is_available(getattr(args, "shelxl", "shelxl")):
         return "shelxl_feedback"

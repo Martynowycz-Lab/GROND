@@ -288,61 +288,24 @@ def apply_preflight(ds: DatasetSpec, decision: PreflightDecision) -> DatasetSpec
     )
 
 
-def expand_transform_candidates(
-    current: str,
-    spec: str,
-    *,
-    parity_policy: str = "proper-only",
-) -> list[str]:
-    """Build the HKL transform list used by the transform scout.
+def expand_transform_candidates(current: str, *, parity_policy: str = "proper-only") -> list[str]:
+    """Build the HKL transform list used by the transform scout: the declared transform and the common ones.
 
-    Automatic/common scouting is proper-only by default.  The historical
-    mixed-parity search remains available as the explicit
-    ``all-diagnostic`` policy, but downstream reports then remain conditional
-    and cannot silently claim named absolute configuration.
+    Scouting is proper-only by default.  The historical mixed-parity search remains available as the explicit
+    ``all-diagnostic`` policy, but downstream reports then remain conditional and cannot silently claim named
+    absolute configuration.
     """
 
-    spec = (spec or "auto").strip()
     if parity_policy not in {"proper-only", "all-diagnostic"}:
         raise ValueError(
             "transform parity policy must be 'proper-only' or 'all-diagnostic'"
         )
-    if spec.lower() in {"off", "none"}:
-        info = parse_hkl_transform_info(current)
-        if parity_policy == "proper-only" and not info.proper:
-            raise ValueError(
-                f"improper fixed transform {info.canonical!r} (determinant -1) is not allowed "
-                "by --transform-parity-policy=proper-only; canonicalize the model/HKLF4 pair "
-                f"to {info.proper_canonical_transform!r}, or use all-diagnostic mode without "
-                "an absolute-configuration claim"
-            )
-        return [info.canonical]
     out: list[str] = []
-    raw: list[tuple[str, bool]] = []
     common = ALL_COMMON_TRANSFORMS if parity_policy == "all-diagnostic" else COMMON_PROPER_TRANSFORMS
-    for item in spec.split(";"):
-        item = item.strip()
-        if not item:
-            continue
-        if item == "auto":
-            raw.extend([(current, True), *((candidate, True) for candidate in common)])
-        elif item == "common":
-            raw.extend((candidate, True) for candidate in common)
-        else:
-            raw.append((item, False))
-    if not raw:
-        raw = [(current, True), *((candidate, True) for candidate in common)]
-    for item, automatic in raw:
+    for item in (current, *common):
         item = "identity" if item in {"", "auto"} else item
         info = parse_hkl_transform_info(item)
         if parity_policy == "proper-only" and not info.proper:
-            if not automatic:
-                raise ValueError(
-                    f"improper transform {info.canonical!r} (determinant -1) is not allowed by "
-                    "--transform-parity-policy=proper-only; use a proper sign-paired operator "
-                    f"{info.proper_canonical_transform!r}, or opt into all-diagnostic mode without "
-                    "an absolute-configuration claim"
-                )
             continue
         if info.canonical not in out:
             out.append(info.canonical)

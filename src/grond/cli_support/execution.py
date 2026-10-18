@@ -145,18 +145,16 @@ def estimate_run_steps(prep: PrepConfig, args: argparse.Namespace) -> int:
 
     total = 1 if _publication_baseline_hkl(prep) else 0
     for ds in prep.datasets:
-        if getattr(args, "auto_decide", True) and not getattr(args, "trust_hkl_transform", False):
+        if not getattr(args, "trust_hkl_transform", False):
             transform_candidates = expand_transform_candidates(
                 ds.hkl_transform,
-                args.transform_candidates,
                 parity_policy=getattr(args, "transform_parity_policy", "proper-only"),
             )
             total += len(transform_candidates)
-            rerank_top = max(0, int(getattr(args, "transform_rerank_top", 0)))
-            if len(transform_candidates) > 1 and rerank_top > 0:
-                total += min(rerank_top, len(transform_candidates))
+            if len(transform_candidates) > 1:
+                total += min(TRANSFORM_RERANK_TOP, len(transform_candidates))
         total += 1
-        if getattr(args, "auto_decide", True) and getattr(args, "hand_control", True):
+        if getattr(args, "hand_control", True):
             # Two label-symmetric nuisance-grid evaluations followed by two
             # singleton evidence replays at the selected common nuisance.
             total += 4
@@ -285,23 +283,17 @@ def run_logged(cmd: list[str], log_dir: Path, label: str, *, dry_run: bool = Fal
         raise subprocess.CalledProcessError(proc.returncode, cmd)
 
 
-def transform_scout_worker_count(args: argparse.Namespace) -> int:
-    """Worker processes assigned inside each transform-scout subprocess."""
-
-    return max(1, int(getattr(args, "transform_scout_workers_per_job", 1) or 1))
+# Second-stage transform scouts: the best TRANSFORM_RERANK_TOP coarse candidates are rerun at higher N/Q.
+TRANSFORM_RERANK_TOP = 3
+# One worker process inside each transform-scout subprocess; the scouts run as parallel subprocesses.
+TRANSFORM_SCOUT_WORKERS_PER_JOB = 1
 
 
 def transform_scout_job_count(args: argparse.Namespace, task_count: int | None = None) -> int:
-    """Maximum number of transform-scout subprocesses GROND should launch at once."""
+    """Maximum number of transform-scout subprocesses GROND should launch at once (the core budget of --workers)."""
 
-    requested = int(getattr(args, "transform_scout_jobs", 0) or 0)
-    if requested > 0:
-        jobs = requested
-    else:
-        budget = auto_worker_count(
-            int(getattr(args, "workers", 0) or 0), float(getattr(args, "max_core_fraction", 0.85))
-        )
-        jobs = max(1, budget // transform_scout_worker_count(args))
+    budget = auto_worker_count(int(getattr(args, "workers", 0) or 0), float(getattr(args, "max_core_fraction", 0.85)))
+    jobs = max(1, budget // TRANSFORM_SCOUT_WORKERS_PER_JOB)
     if task_count is not None:
         jobs = min(max(1, int(task_count)), jobs)
     return max(1, int(jobs))
