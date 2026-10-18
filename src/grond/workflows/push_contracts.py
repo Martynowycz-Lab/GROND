@@ -138,10 +138,10 @@ def resolve_push_continuation_contract(
 ) -> dict[str, dict[str, object]]:
     """Resolve the split, scale and handoff contract of a continuation, with the provenance of every value.
 
-    An explicit push-endpoint option wins.  Otherwise every source summary must record the same value (the
-    datasets of one run share one free split, scale grids and handoff); a summary that does not record a key
-    gives that key's legacy value, so an older checkpoint continues as it ran.  The P-spline grids have no legacy
-    value: a run that recorded none (per-frame scales) needs them passed explicitly.
+    Every source summary must record the same value (the datasets of one run share one free split, scale grids
+    and handoff); a summary that does not record a key gives that key's legacy value, so an older checkpoint
+    continues as it ran.  The P-spline grids have no legacy value: a run that recorded none (per-frame scales)
+    cannot be continued.
     """
 
     contract: dict[str, dict[str, object]] = {}
@@ -150,21 +150,17 @@ def resolve_push_continuation_contract(
         recorded = {
             name: _continuation_value(key, legacy if value is None else value) for name, value in recorded_raw.items()
         }
-        override = getattr(args, key, None)
-        if override is not None:
-            value, source = _continuation_value(key, override), "override"
+        distinct = {json.dumps(item, sort_keys=True) for item in recorded.values()}
+        if len(distinct) > 1:
+            raise SystemExit(
+                f"the continuation datasets record different {key} values {recorded}; one push-endpoint "
+                "continues one run contract."
+            )
+        value = next(iter(recorded.values())) if recorded else _continuation_value(key, legacy)
+        if any(item is not None for item in recorded_raw.values()):
+            source = "source_summary"
         else:
-            distinct = {json.dumps(item, sort_keys=True) for item in recorded.values()}
-            if len(distinct) > 1:
-                raise SystemExit(
-                    f"the continuation datasets record different {key} values {recorded}; one push-endpoint "
-                    f"continues one run contract. Pass --{key.replace('_', '-')} explicitly only if that is intended."
-                )
-            value = next(iter(recorded.values())) if recorded else _continuation_value(key, legacy)
-            if any(item is not None for item in recorded_raw.values()):
-                source = "source_summary"
-            else:
-                source = "historical_default_not_recorded"
+            source = "historical_default_not_recorded"
         choices = CONTINUATION_CHOICES.get(key)
         if choices and value not in choices:
             raise SystemExit(f"continuation {key} {value!r} is not one of {', '.join(choices)}")
@@ -172,8 +168,7 @@ def resolve_push_continuation_contract(
     for key in ("scale_spline_n_basis_grid", "scale_spline_lambda_grid"):
         if contract[key]["source"] == "historical_default_not_recorded":
             raise SystemExit(
-                f"no source summary records the P-spline frame-scale grid {key}; "
-                f"pass --{key.replace('_', '-')} explicitly"
+                f"no source summary records the P-spline frame-scale grid {key}; this run cannot be continued"
             )
     return contract
 
@@ -220,24 +215,6 @@ def continuation_contract_record(contract: Mapping[str, Mapping]) -> dict[str, d
     return {key: {"value": item["value"], "source": item["source"]} for key, item in contract.items()}
 
 
-def refuse_single_push_split_scale_overrides(contract: Mapping[str, Mapping]) -> None:
-    """A single-dataset push replays the split and scale recorded in its source summary; it cannot change them.
-
-    shelxl_feedback_loop.py takes the free split and the frame-scale family from --source-summary, so an
-    override that differs from the recorded value would be ignored; refuse it instead.
-    """
-
-    for key, _legacy in CONTINUATION_SPLIT_SCALE_KEYS:
-        item = contract[key]
-        recorded = next(iter(item["recorded"].values()), None)
-        if item["source"] == "override" and item["value"] != recorded:
-            raise SystemExit(
-                f"single-dataset push-endpoint replays {key}={recorded!r} from --source-summary; "
-                f"--{key.replace('_', '-')} {item['value']!r} cannot change it. Continue from a source summary "
-                "made with that setting instead."
-            )
-
-
 def single_push_handoff_args(contract: Mapping[str, Mapping]) -> list[str]:
     """shelxl_feedback_loop.py handoff options of a single-dataset push (the loop defaults are never relied on)."""
 
@@ -277,7 +254,7 @@ def hydrate_push_args_for_multi(
     """Fill missing multi-dataset continuation attributes; the continuation contract comes from the checkpoint.
 
     The split, scale and handoff contract is resolved from ``source_summaries`` (the checkpoint datasets'
-    source native summaries) and explicit push-endpoint overrides, never from the current AUTO defaults;
+    source native summaries), never from the current AUTO defaults;
     every other missing attribute takes the normal run default.
     """
 
@@ -451,27 +428,3 @@ def prep_from_multi_checkpoint(
         metadata={"continued_from": checkpoint.get("run_dir", "")},
     )
     return prep, nuisance
-
-
-def override_push_native_weights(
-    nuisance: dict[str, dict],
-    args: argparse.Namespace,
-) -> dict[str, dict]:
-    """Apply an explicit native row-weight contract to a continuation replay.
-
-    This is a diagnostic/recovery control for checkpoints written before the
-    native feedback loop pinned its starting WGHT contract.  The override is
-    deliberately global so every dataset in the shared endpoint loop is
-    evaluated under the same declared row objective.
-    """
-
-    native_wght_a = getattr(args, "native_wght_a", None)
-    native_wght_b = getattr(args, "native_wght_b", None)
-    if native_wght_a is None and native_wght_b is None:
-        return nuisance
-    for block in nuisance.values():
-        if native_wght_a is not None:
-            block["native_wght_a"] = float(native_wght_a)
-        if native_wght_b is not None:
-            block["native_wght_b"] = float(native_wght_b)
-    return nuisance

@@ -22,9 +22,7 @@ from grond.workflows.push_contracts import (
     continuation_source_summaries,
     dataset_policy_from_row_contracts,
     hydrate_push_args_for_multi,
-    override_push_native_weights,
     prep_from_multi_checkpoint,
-    refuse_single_push_split_scale_overrides,
     resolve_dataset_row_contracts,
     resolve_push_continuation_contract,
     single_push_handoff_args,
@@ -32,6 +30,9 @@ from grond.workflows.push_contracts import (
 )
 from grond.workflows.push_models import prepare_push_endpoint_model
 from grond.workflows.shared_refinement import run_multi_shelxl_feedback_loop
+
+# Safety report: cycles within this of the best row wR(I)all are listed as equivalent.
+BEST_CYCLE_TOLERANCE = 0.001
 
 
 def cmd_push_endpoint_multi(
@@ -62,7 +63,6 @@ def cmd_push_endpoint_multi(
     args = hydrate_push_args_for_multi(
         args, continuation_source_summaries(checkpoint, Path(str(checkpoint_info["checkpoint"])).parent)
     )
-    nuisance = override_push_native_weights(nuisance, args)
     args.dataset_row_contracts = resolve_dataset_row_contracts(
         getattr(args, "dataset_row_contract", None), prep.datasets
     )
@@ -129,7 +129,7 @@ def cmd_push_endpoint_multi(
         "continuation_contract": args.continuation_contract,
     }
     (out_dir / "push_endpoint_summary.json").write_text(json.dumps(result, indent=2, allow_nan=True) + "\n")
-    report = write_multi_push_endpoint_report(out_dir, best_cycle_tolerance=float(args.best_cycle_tolerance))
+    report = write_multi_push_endpoint_report(out_dir, best_cycle_tolerance=BEST_CYCLE_TOLERANCE)
     if report:
         print(f"Multi-dataset endpoint push report: {report}")
     return 0
@@ -156,7 +156,6 @@ def cmd_push_endpoint(args: argparse.Namespace) -> int:
     # The loop replays the split and scale model from the source summary; the SHELXL handoff is forwarded
     # explicitly from the same summary (historical values when it predates a key) or from an override.
     contract = resolve_push_continuation_contract(args, {"source_summary": read_json(source_summary)})
-    refuse_single_push_split_scale_overrides(contract)
     warn_historical_continuation_defaults(contract)
     args.rescale = str(contract["rescale"]["value"])
     cmd = [
@@ -235,8 +234,6 @@ def cmd_push_endpoint(args: argparse.Namespace) -> int:
         cmd.append("--ignore-source-baseline-hkl")
     if args.hkl_transform:
         cmd += [f"--hkl-transform={args.hkl_transform}"]
-    if args.make_maps_on_final:
-        cmd.append("--make-maps-on-final")
     if args.dry_run:
         plan = {
             "command": cmd,
@@ -256,7 +253,7 @@ def cmd_push_endpoint(args: argparse.Namespace) -> int:
         + "\n"
     )
     subprocess.run(cmd, check=True)
-    report = write_push_endpoint_report(out_dir, best_cycle_tolerance=float(args.best_cycle_tolerance))
+    report = write_push_endpoint_report(out_dir, best_cycle_tolerance=BEST_CYCLE_TOLERANCE)
     if report:
         print(f"Endpoint push report: {report}")
     return 0

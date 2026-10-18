@@ -49,12 +49,6 @@ def register_push(sub: argparse._SubParsersAction) -> None:
     p_push.add_argument(
         "--hkl-transform", default="", help="Override signed HKL transform. Defaults to the source summary."
     )
-    p_push.add_argument(
-        "--multi-endpoint-merge-key",
-        choices=["model_symmetry", "model_symmetry_friedel", "exact_signed_hkl"],
-        default="",
-        help="For multi-dataset checkpoints, corrected-HKL merge key before each shared SHELXL LS step. Defaults to the checkpoint value or model_symmetry.",
-    )
     p_push.add_argument("--cycles", type=int, default=3, help="Rounds of Bloch calculation and SHELXL refinement (default %(default)s).")
     p_push.add_argument(
         "--recompute-final-rows",
@@ -91,18 +85,6 @@ def register_push(sub: argparse._SubParsersAction) -> None:
         type=int,
         default=1,
         help="Diagnostic internal L.S./CGLS cycle count for each generated endpoint. Production keeps this at 1.",
-    )
-    p_push.add_argument(
-        "--native-wght-a",
-        type=float,
-        default=None,
-        help="Override the checkpoint native row-weight a term for every continuation dataset.",
-    )
-    p_push.add_argument(
-        "--native-wght-b",
-        type=float,
-        default=None,
-        help="Override the checkpoint native row-weight b term for every continuation dataset.",
     )
     p_push.add_argument("--workers", type=int, default=auto_worker_count(0, 0.85), help="Worker processes (default: 85%% of the cores).")
     p_push.add_argument("--chunksize", type=int, default=4, help="Observations per worker task (default %(default)s).")
@@ -145,75 +127,9 @@ def register_push(sub: argparse._SubParsersAction) -> None:
         default=FULL_Q_LAMBDA,
         help="Diagnostic q-exponent grid. Production auto uses the full Bloch/Born correction with lambda_q=1.0.",
     )
-    # Continuation contract: by default every value below is replayed from the checkpoint/source summary (the
-    # historical value when a summary predates the key), never taken from the current AUTO defaults.
-    p_push.add_argument(
-        "--rescale",
-        choices=["median-iobs", "none", "absolute"],
-        default=None,
-        help="Corrected-intensity scale of the endpoint HKL. Default: the source summary's value (median-iobs if unrecorded).",
-    )
-    p_push.add_argument(
-        "--endpoint-include-free-rows",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-        help="Write split=free rows into the corrected HKL. Default: the source summary's value (included if unrecorded).",
-    )
-    p_push.add_argument(
-        "--endpoint-q-policy",
-        choices=["clip", "exclude"],
-        default=None,
-        help="Pathological correction ratios: clip or exclude. Default: the source summary's value (clip if unrecorded).",
-    )
-    p_push.add_argument(
-        "--shelxl-npd-recovery",
-        choices=["damp", "isor"],
-        default=None,
-        help="NPD recovery of the SHELXL handoff. Default: the source summary's value (damp if unrecorded).",
-    )
-    p_push.add_argument(
-        "--shelxl-convergence-shift-esd",
-        type=float,
-        default=None,
-        help="Stop the SHELXL calls once |max shift/esd| is below this value. Default: the source summary's value (0 if unrecorded).",
-    )
-    p_push.add_argument(
-        "--endpoint-wght-mode",
-        choices=["freeze-zero", "inherit", "promote", "promote-gold", "converge"],
-        default=None,
-        help="SHELXL WGHT policy of the endpoints. Default: the source summary's value (freeze-zero if unrecorded).",
-    )
-    p_push.add_argument(
-        "--keep-damp",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-        help="Carry an active DAMP into later SHELXL calls. Default: the source summary's value (carried if unrecorded).",
-    )
-    p_push.add_argument(
-        "--split-scheme",
-        choices=["orbit-hash", "legacy"],
-        default=None,
-        help="Free-split scheme. Default: the source summaries' value (legacy if unrecorded). Single-dataset pushes only replay it.",
-    )
-    p_push.add_argument(
-        "--split-salt", default=None, help="Orbit-hash free-set salt. Default: the source summaries' value."
-    )
-    p_push.add_argument(
-        "--exclude-orbits-json",
-        default=None,
-        help="Lockbox file of orbits held back from every stage. Default: the source summaries' value (none if unrecorded).",
-    )
-    p_push.add_argument(
-        "--scale-spline-n-basis-grid", default=None, help="P-spline basis grid. Default: the source summaries' value."
-    )
-    p_push.add_argument(
-        "--scale-spline-lambda-grid", default=None, help="P-spline penalty grid. Default: the source summaries' value."
-    )
+    # Continuation contract: the free split, the P-spline grids and the SHELXL handoff are replayed from the
+    # checkpoint/source summary (the historical value when a summary predates the key).
     p_push.add_argument("--prediction-cache-compression", choices=["compressed", "none"], default="none")
-    p_push.add_argument("--make-maps-on-final", action="store_true")
-    p_push.add_argument(
-        "--best-cycle-tolerance", type=float, default=0.001, help="Safety report tolerance above the best row wR(I)all."
-    )
     p_push.add_argument(
         "--model-prep",
         choices=[
