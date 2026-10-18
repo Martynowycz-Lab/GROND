@@ -125,7 +125,7 @@ def _print_stage_metrics(cmd: list[str]) -> None:
 def _estimated_resolution_steps(args: argparse.Namespace) -> int:
     """Estimate resolution-promotion commands for progress reporting."""
 
-    return 1 if getattr(args, "resolution_limit_gate", True) else 0
+    return 1
 
 
 def _estimated_sg_window_scout_steps(args: argparse.Namespace) -> int:

@@ -62,16 +62,13 @@ def parse_named_path(text: str) -> tuple[str, Path]:
     return path.parent.name or path.stem, path
 
 
-def read_input_rows(run_items: list[str], row_table_items: list[str]) -> list[dict]:
-    """Read rows from run directories and explicit row-table paths."""
+def read_input_rows(run_items: list[str]) -> list[dict]:
+    """Read the row tables (native_dyn_calc.csv) of the run directories."""
 
     rows: list[dict] = []
     for item in run_items:
         name, run_dir = parse_named_path(item)
         rows.extend(read_csv_rows((run_dir / "native_dyn_calc.csv").resolve(), name))
-    for item in row_table_items:
-        name, row_table = parse_named_path(item)
-        rows.extend(read_csv_rows(row_table.resolve(), name))
     return rows
 
 
@@ -352,6 +349,23 @@ def write_report(path: Path, title: str, payload: dict) -> None:
     path.write_text("\n".join(lines))
 
 
+# Shells and promotion thresholds of the held-out resolution-limit gate.
+RESOLUTION_SHELLS = 10
+THRESHOLDS = {
+    "strict_split_cc": 0.30,
+    "strict_mean_i_over_sigma": 0.50,
+    "exploratory_split_cc": 0.20,
+    "exploratory_mean_i_over_sigma": 0.25,
+    "min_common_pairs": 8,
+    "min_shell_rows": 20,
+    "min_strong_fraction": 0.005,
+    "max_shell_mwrall": 0.60,
+    "max_free_work_mwr_gap": 0.12,
+    "min_free_rows": 5,
+    "max_cumulative_mwr_penalty": 0.03,
+}
+
+
 def main() -> None:
     """Build resolution shells from the row tables and promote strict and exploratory cutoffs.
 
@@ -360,46 +374,23 @@ def main() -> None:
 
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--run", action="append", default=[], help="Dataset run as name=/path/to/native_nuisance_run.")
-    ap.add_argument("--row-table", action="append", default=[], help="Row table as name=/path/to/native_dyn_calc.csv.")
     ap.add_argument("--res", required=True)
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--title", default="GROND resolution-limit promotion")
     ap.add_argument("--scope", default="dataset", choices=["dataset", "merged"])
-    ap.add_argument("--shells", type=int, default=10)
-    ap.add_argument("--strict-split-cc", type=float, default=0.30)
-    ap.add_argument("--strict-mean-i-over-sigma", type=float, default=0.50)
-    ap.add_argument("--exploratory-split-cc", type=float, default=0.20)
-    ap.add_argument("--exploratory-mean-i-over-sigma", type=float, default=0.25)
-    ap.add_argument("--min-common-pairs", type=int, default=8)
-    ap.add_argument("--min-shell-rows", type=int, default=20)
-    ap.add_argument("--min-strong-fraction", type=float, default=0.005)
-    ap.add_argument("--max-shell-mwrall", type=float, default=0.60)
-    ap.add_argument("--max-free-work-mwr-gap", type=float, default=0.12)
-    ap.add_argument("--min-free-rows", type=int, default=5)
-    ap.add_argument("--max-cumulative-mwr-penalty", type=float, default=0.03)
     args = ap.parse_args()
 
     out = Path(args.out_dir).expanduser()
     out.mkdir(parents=True, exist_ok=True)
     model = parse_model(Path(args.res).expanduser())
-    rows = read_input_rows(args.run, args.row_table)
+    rows = read_input_rows(args.run)
     if not rows:
         raise SystemExit("No row tables were supplied.")
 
-    shells = shell_records(rows, model, n_shells=args.shells, min_common_pairs=args.min_common_pairs)
+    shells = shell_records(rows, model, n_shells=RESOLUTION_SHELLS, min_common_pairs=THRESHOLDS["min_common_pairs"])
     decision = promote_resolution_limit(
         shells,
-        strict_split_cc=args.strict_split_cc,
-        strict_mean_i_over_sigma=args.strict_mean_i_over_sigma,
-        exploratory_split_cc=args.exploratory_split_cc,
-        exploratory_mean_i_over_sigma=args.exploratory_mean_i_over_sigma,
-        min_common_pairs=args.min_common_pairs,
-        min_rows=args.min_shell_rows,
-        min_strong_fraction=args.min_strong_fraction,
-        max_shell_mwrall=args.max_shell_mwrall,
-        max_free_work_mwr_gap=args.max_free_work_mwr_gap,
-        min_free_rows=args.min_free_rows,
-        max_cumulative_mwr_penalty=args.max_cumulative_mwr_penalty,
+        **{("min_rows" if key == "min_shell_rows" else key): value for key, value in THRESHOLDS.items()},
     )
     decision_dict = decision.to_dict()
     shells = add_decision_flags(shells, decision.promoted_last_shell, decision.exploratory_last_shell)
@@ -418,19 +409,7 @@ def main() -> None:
             "kinematic": overall_kinematic,
         },
         "shells": shells,
-        "thresholds": {
-            "strict_split_cc": args.strict_split_cc,
-            "strict_mean_i_over_sigma": args.strict_mean_i_over_sigma,
-            "exploratory_split_cc": args.exploratory_split_cc,
-            "exploratory_mean_i_over_sigma": args.exploratory_mean_i_over_sigma,
-            "min_common_pairs": args.min_common_pairs,
-            "min_shell_rows": args.min_shell_rows,
-            "min_strong_fraction": args.min_strong_fraction,
-            "max_shell_mwrall": args.max_shell_mwrall,
-            "max_free_work_mwr_gap": args.max_free_work_mwr_gap,
-            "min_free_rows": args.min_free_rows,
-            "max_cumulative_mwr_penalty": args.max_cumulative_mwr_penalty,
-        },
+        "thresholds": dict(THRESHOLDS),
         "artifacts": {
             "summary": str((out / "summary.json").resolve()),
             "report": str((out / "REPORT.md").resolve()),

@@ -152,35 +152,6 @@ def add_decision_controls(ap: argparse.ArgumentParser) -> None:
         help="Adaptive score margin required before switching to the alternate hand.",
     )
     ap.add_argument(
-        "--hand-max-wR2-all",
-        type=float,
-        default=0.45,
-        help="Maximum alternate-hand all-row wR2 allowed before automatic hand switching. Poor row contracts still report the hand diagnostic but keep the input hand.",
-    )
-    ap.add_argument(
-        "--hand-max-free-wR2-all",
-        type=float,
-        default=0.50,
-        help="Maximum alternate-hand free-row wR2 allowed before automatic hand switching.",
-    )
-    ap.add_argument(
-        "--hand-min-free-wR2-gain",
-        type=float,
-        default=0.0,
-        help="Minimum free-row wR2 improvement required before automatic scout-stage hand switching.",
-    )
-    ap.add_argument(
-        "--hand-min-adjusted-z",
-        type=float,
-        default=2.0,
-        help=(
-            "Minimum absolute common-source-sigma Klar-Palatinus adjusted hand Z "
-            "required before a matched hand decision may train or consume an "
-            "external setup-parity calibration. Weaker decisions remain "
-            "residual-preference diagnostics."
-        ),
-    )
-    ap.add_argument(
         "--hand-flip-zkp-all",
         type=float,
         default=3.5,
@@ -340,9 +311,6 @@ def add_decision_controls(ap: argparse.ArgumentParser) -> None:
             "inflated by a start refined on the free rows. off: legacy, start from the supplied model."
         ),
     )
-    ap.add_argument("--hand-min-z-all", type=float, default=2.0, help=argparse.SUPPRESS)
-    ap.add_argument("--hand-min-z-free", type=float, default=0.5, help=argparse.SUPPRESS)
-    ap.add_argument("--hand-min-free-rows", type=int, default=10, help=argparse.SUPPRESS)
     ap.add_argument("--stop-on-bad-preflight", action="store_true", default=False)
     ap.add_argument("--stop-on-bad-fit", action="store_true", default=False)
     ap.add_argument(

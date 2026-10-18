@@ -24,8 +24,6 @@ def run_resolution_limit_gate(
 ) -> dict:
     """Run held-out resolution-limit promotion on final row tables."""
 
-    if not getattr(args, "resolution_limit_gate", True):
-        return {"status": "disabled"}
     if args.dry_run:
         return {"status": "dry_run", "out_dir": str(out_dir), "runs": {k: str(v) for k, v in runs.items()}}
     missing = [
@@ -35,7 +33,7 @@ def run_resolution_limit_gate(
     ]
     if missing:
         return {"status": "missing_row_table", "missing": missing}
-    cmd = resolution_limit_cmd(python, runs, res, out_dir, args, title=title, scope=scope)
+    cmd = resolution_limit_cmd(python, runs, res, out_dir, title=title, scope=scope)
     run_logged(cmd, logs, f"{label}_resolution_limit", dry_run=False)
     summary = try_read_json(out_dir / "summary.json")
     if summary:

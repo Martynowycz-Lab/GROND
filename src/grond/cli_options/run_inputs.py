@@ -43,65 +43,9 @@ def add_inputs(ap: argparse.ArgumentParser) -> None:
         default="raw",
         help="DIALS sigma bridge policy. raw keeps the detector-model variance; auto empirical calibration and detector_gain scaling are explicit diagnostics.",
     )
-    ap.add_argument(
-        "--dials-sigma-scale",
-        type=float,
-        default=None,
-        help="Explicit DIALS sigma multiplier. Overrides --dials-sigma-mode when positive.",
-    )
-    ap.add_argument(
-        "--dials-min-partiality-write",
-        type=float,
-        default=1e-6,
-        help="Minimum DIALS partiality written into the converted row file. GROND's --min-peak still controls production row selection.",
-    )
-    ap.add_argument(
-        "--dials-drop-dont-integrate",
-        action="store_true",
-        help="Deprecated alias for the default production behavior. Rows flagged dont_integrate are dropped unless --dials-keep-dont-integrate is used.",
-    )
-    ap.add_argument(
-        "--dials-keep-dont-integrate",
-        action="store_true",
-        help="Diagnostic only: keep DIALS rows flagged dont_integrate.",
-    )
-    ap.add_argument(
-        "--dials-keep-bad-flags",
-        action="store_true",
-        help="Diagnostic only: keep DIALS rows with severe bad-pixel, overloaded, powder-ring, failed-background, or failed-summation flags.",
-    )
     ap.add_argument("--structure", default="")
     ap.add_argument("--baseline-hkl", default="")
     ap.add_argument("--dataset-name", default="dataset")
-    ap.add_argument(
-        "--parity-setup-id",
-        default="",
-        help=(
-            "Stable acquisition/import setup identity frozen into transform and "
-            "hand decisions before selection. Required for calibration-grade claims."
-        ),
-    )
-    ap.add_argument(
-        "--parity-setup-manifest-sha256",
-        default="",
-        help=("SHA-256 of the immutable acquisition/import setup manifest, frozen before transform or hand selection."),
-    )
-    ap.add_argument(
-        "--physical-crystal-id",
-        default="",
-        help=(
-            "Stable physical specimen/crystal identity for a direct single-dataset "
-            "run. For multi-dataset prep files, record physical_crystal_id per dataset."
-        ),
-    )
-    ap.add_argument(
-        "--acquisition-fingerprint",
-        default="",
-        help=(
-            "SHA-256 of the raw-acquisition/image manifest for a direct "
-            "single-dataset run. For multi-dataset prep files, record it per dataset."
-        ),
-    )
     ap.add_argument("--out-dir", required=True, help="Output directory. Run the same command again to resume.")
 
 

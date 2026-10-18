@@ -54,26 +54,6 @@ def add_resolution(ap: argparse.ArgumentParser) -> None:
             "Resolution limit of the corrected HKL file and its statistics in Å (default 0: as --min-d-spacing)."
         ),
     )
-    ap.add_argument(
-        "--resolution-limit-gate",
-        dest="resolution_limit_gate",
-        action="store_true",
-        default=True,
-        help="Promote per-dataset and merged resolution limits from held-out shell stability and GROND row/MR residuals.",
-    )
-    ap.add_argument("--no-resolution-limit-gate", dest="resolution_limit_gate", action="store_false")
-    ap.add_argument("--resolution-shells", type=int, default=10)
-    ap.add_argument("--resolution-strict-split-cc", type=float, default=0.30)
-    ap.add_argument("--resolution-strict-mean-i-over-sigma", type=float, default=0.50)
-    ap.add_argument("--resolution-exploratory-split-cc", type=float, default=0.20)
-    ap.add_argument("--resolution-exploratory-mean-i-over-sigma", type=float, default=0.25)
-    ap.add_argument("--resolution-min-common-pairs", type=int, default=8)
-    ap.add_argument("--resolution-min-shell-rows", type=int, default=20)
-    ap.add_argument("--resolution-min-strong-fraction", type=float, default=0.005)
-    ap.add_argument("--resolution-max-shell-mwrall", type=float, default=0.60)
-    ap.add_argument("--resolution-max-free-work-mwr-gap", type=float, default=0.12)
-    ap.add_argument("--resolution-min-free-rows", type=int, default=5)
-    ap.add_argument("--resolution-max-cumulative-mwr-penalty", type=float, default=0.03)
 
 
 def add_dataset_policy(ap: argparse.ArgumentParser) -> None:
@@ -85,17 +65,6 @@ def add_dataset_policy(ap: argparse.ArgumentParser) -> None:
         default="auto",
         help="For multi-dataset jobs, automatically keep good crystals at full weight, downweight marginal crystals, and keep weak nonredundant crystals endpoint-only.",
     )
-    ap.add_argument("--dataset-policy-min-rows", type=int, default=100)
-    ap.add_argument("--dataset-policy-min-weight", type=float, default=0.25)
-    ap.add_argument("--dataset-policy-primary-min-quality", type=float, default=0.75)
-    ap.add_argument("--dataset-policy-min-raw-quality", type=float, default=0.20)
-    ap.add_argument("--dataset-policy-min-cc", type=float, default=0.70)
-    ap.add_argument("--dataset-policy-max-wr2", type=float, default=0.75)
-    ap.add_argument("--dataset-policy-max-r1", type=float, default=0.60)
-    ap.add_argument("--dataset-policy-unique-gain-fraction", type=float, default=0.01)
-    ap.add_argument("--dataset-policy-wr2-scale", type=float, default=0.08)
-    ap.add_argument("--dataset-policy-r1-scale", type=float, default=0.08)
-    ap.add_argument("--dataset-policy-cc-scale", type=float, default=0.04)
     ap.add_argument(
         "--multi-endpoint-merge-key",
         choices=["model_symmetry", "model_symmetry_friedel", "exact_signed_hkl"],

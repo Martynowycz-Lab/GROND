@@ -10,29 +10,6 @@ from grond.workflows.dataset_policy import build_dataset_policy, policy_by_name,
 from grond.workflows.decision import nuisance_score_rows, safe_float
 
 
-def dataset_policy_kwargs(args: argparse.Namespace) -> dict:
-    """Collect CLI thresholds for multi-dataset inclusion policy decisions.
-
-    Under --nuisance-score-rows work the quality metrics read work rows only (free rows stay held out);
-    legacy reads all rows.
-    """
-
-    return {
-        "selection_rows": "work" if nuisance_score_rows(args) == "work" else "all",
-        "min_rows": args.dataset_policy_min_rows,
-        "min_weight": args.dataset_policy_min_weight,
-        "primary_min_quality": args.dataset_policy_primary_min_quality,
-        "min_raw_quality": args.dataset_policy_min_raw_quality,
-        "min_cc": args.dataset_policy_min_cc,
-        "max_wr2": args.dataset_policy_max_wr2,
-        "max_r1": args.dataset_policy_max_r1,
-        "unique_gain_fraction": args.dataset_policy_unique_gain_fraction,
-        "wr2_scale": args.dataset_policy_wr2_scale,
-        "r1_scale": args.dataset_policy_r1_scale,
-        "cc_scale": args.dataset_policy_cc_scale,
-    }
-
-
 def all_primary_policy(runs: dict[str, Path], *, status: str) -> dict:
     """Return a no-op full-weight policy for disabled or dry-run contexts."""
 
@@ -70,7 +47,9 @@ def run_dataset_policy_gate(runs: dict[str, Path], out_dir: Path, args: argparse
     ]
     if missing:
         return {"status": "missing_row_table", "missing": missing}
-    policy = build_dataset_policy(runs, **dataset_policy_kwargs(args))
+    # Under --nuisance-score-rows work the quality metrics read work rows only (free rows stay held out);
+    # legacy reads all rows. The thresholds are decide_dataset_policy's defaults.
+    policy = build_dataset_policy(runs, selection_rows="work" if nuisance_score_rows(args) == "work" else "all")
     policy["label"] = label
     policy["artifacts"] = write_policy_artifacts(policy, out_dir)
     return policy
