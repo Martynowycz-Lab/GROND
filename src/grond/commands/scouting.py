@@ -138,11 +138,6 @@ def cmd_scout(args: argparse.Namespace) -> int:
                 f"grond thickness --prep {shlex.quote(str(scouted_path.resolve()))} "
                 f"--out-dir {shlex.quote(str((root / '02_thickness').resolve()))}"
             ),
-            "fixed_model": (
-                f"grond run --prep {shlex.quote(str(scouted_path.resolve()))} "
-                f"--out-dir {shlex.quote(str((root / '03_fixed_model').resolve()))} "
-                "--mode bloch --no-auto-decide --no-hand-control --no-maps --native-only"
-            ),
         },
     }
     handoff_path = root / "scout_handoff.json"

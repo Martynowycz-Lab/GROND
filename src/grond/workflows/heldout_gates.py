@@ -2,8 +2,7 @@
 
 The other feature gates (row resolution, absorption, Sg jitter, sigma model) compare one grid run
 with the active run by ``score_native_summary``: all-row wR2 + 0.25 * free wR2 + 0.10 * all-row R1 plus
-Born sanity penalties, with scales fitted on every row under ``--production-scales``.  That score is
-in-sample, and its free term sees free rows that were inside the scale fit.
+Born sanity penalties (work rows only in AUTO).  That score is in-sample.
 
 The mosaic-cone and dose gates instead compare every candidate of one grid run on identical work rows
 by orbit-grouped cross-validation (grond.validation.heldout): 3 salted crystal-independent orbit folds,

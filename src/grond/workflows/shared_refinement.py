@@ -256,7 +256,7 @@ def run_multi_shelxl_feedback_loop(
             "endpoint_q_policy": str(getattr(args, "endpoint_q_policy", "clip")),
             "endpoint_intensity_scale": str(getattr(args, "endpoint_intensity_scale", "median-iobs")),
             "endpoint_wght_mode": str(getattr(args, "endpoint_wght_mode", "freeze-zero")),
-            # The weighting rule the macro-cycles actually used (--shelxl-feedback-wght-mode).
+            # The weighting rule the macro-cycles actually used (the endpoint rule).
             "feedback_wght_mode": resolved_feedback_wght_mode(args),
             "dataset_sigma_policy": str(getattr(args, "dataset_sigma_policy", "auto")),
         },

@@ -158,7 +158,7 @@ def dataset_transform_candidates(
 ) -> dict[str, object]:
     """The cell-metric-filtered transform candidates of one dataset (cells only: no intensities, atoms or hand).
 
-    ``scouted`` is False when AUTO keeps the declared transform (--trust-hkl-transform, --no-auto-decide): no split
+    ``scouted`` is False when AUTO keeps the declared transform (--trust-hkl-transform): no split
     contract is written and the native stages key the declared transform's model setting.
     """
 
@@ -616,9 +616,7 @@ def transform_scout_records(
 
     args = crystal_arguments(args, ds.name)
     window_overrides = transform_scout_window_overrides()
-    n_basis = getattr(args, "fixed_n_basis", None) or n_basis
-    n_points = getattr(args, "fixed_n_points", None) or n_points
-    frozen_nuisance = {**transform_scout_nuisance(args), **getattr(args, "fixed_thickness", {})}
+    frozen_nuisance = transform_scout_nuisance(args)
     frozen_nuisance_sha256 = hashlib.sha256(
         json.dumps(
             frozen_nuisance,

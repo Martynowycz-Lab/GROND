@@ -13,7 +13,7 @@ Parameters fixed by the model's lattice symmetry (for example the 90 degree angl
 get exactly 0, as SHELXL expects; parameters tied by symmetry (a = b in a tetragonal cell) share their
 mean e.s.d.  Without a measured source (one crystal with neither), or when a crystal's cell cannot be read, the
 starting model's own ZERR e.s.d.s are used when they are non-zero, and otherwise the model's ZERR is kept unchanged;
-both print a warning and are recorded.  ``--cell-esd-policy source`` always keeps the model's ZERR.
+both print a warning and are recorded.
 """
 
 from __future__ import annotations

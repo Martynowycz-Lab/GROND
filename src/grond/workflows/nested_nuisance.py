@@ -11,7 +11,7 @@ Nested nuisance stage (per crystal, after the screen and the early hand decision
        spectral Config it used;
     2. ``grond.engine.nested_nuisance_stage`` computes the spectra of every physics variant (cone sigma grid
        x dose total-B grid; window, points and support of the resolved AUTO physics at ``--nested-n-basis``) on work
-       rows only and picks (variant, family in ``--nested-families``, its parameters, P-spline lambda) by inner
+       rows only and picks (variant, family (uniform_gradient or gamma), its parameters, P-spline lambda) by inner
        3-fold orbit CV R_all (grond.regularize.nested_selection);
     3. the pick (thickness distribution with its resolved evaluator and support, cone, dose, no absorption) is
        replayed once at screen fidelity (``*_nested_selected``) and pinned for every later stage: the in-sample
@@ -180,14 +180,6 @@ def validate_nested_nuisance_policy(args: argparse.Namespace, prep: PrepConfig |
         )
     nested_grids(args)
     auto_mosaicity_grid(args)
-    if prep is not None:
-        fixed = [ds.name for ds in prep.datasets if _fixed_thickness(args, ds.name)]
-        if fixed:
-            raise ValueError(
-                f"--dataset-thickness-nm/--crystal-parameters-from fix the thickness of {', '.join(fixed)}; the nested "
-                "nuisance selection selects the thickness distribution jointly with the cone and dose; use "
-                "--nuisance-selection sequential"
-            )
     evaluator, evaluator_reason = nested_evaluator(args)
     record.update(nested_n_basis=int(args.nested_n_basis), families=list(nested_families(args)), evaluator=evaluator,
                   evaluator_reason=evaluator_reason)
@@ -206,13 +198,6 @@ def nested_spectra_points(args: argparse.Namespace, ds) -> int:
     if requested == "final":
         return int(stage_n_points(args, ds, screen=False))
     return int(requested)
-
-
-def _fixed_thickness(args: argparse.Namespace, name: str) -> dict:
-    """Return the thickness fields a fresh AUTO crystal-parameter record pins for ``name``, else {}."""
-
-    record = (getattr(args, "crystal_parameters", {}) or {}).get(name, {}) or {}
-    return dict(record.get("fixed_thickness") or {}) if record.get("fresh_auto") else {}
 
 
 # ----------------------------------------------------------------------------- variants and request

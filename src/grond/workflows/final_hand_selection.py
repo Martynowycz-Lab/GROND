@@ -337,14 +337,14 @@ def _elastic_pair_records(
             "scale_fit_split": scale_fit_split,
             "source_scale_fit_split": source_split,
             "fidelity": {
-                "n_basis": getattr(effective, "fixed_n_basis", None) or n_basis,
-                "n_points": getattr(effective, "fixed_n_points", None) or n_points,
+                "n_basis": n_basis,
+                "n_points": n_points,
                 "thickness_points": int(getattr(effective, "final_thickness_points", 0) or 0),
                 "source": "final_fidelity_escalation" if override else "source_run",
             },
         }
         try:
-            elastic, source_absorption = elastic_hand_nuisance(nuisance, absorption_policy="uniform")
+            elastic, source_absorption = elastic_hand_nuisance(nuisance)
         except ValueError as exc:
             # Non-uniform absorption: fail closed for this dataset, never approximate.
             record.update(
@@ -594,7 +594,6 @@ ESCALATION_REASONS = {
     "not_escalated_incomplete_evidence": (
         "the screen-fidelity evidence is incomplete or failed; it never switches the hand and the final check decides"
     ),
-    "skipped_fast": "--fast: the screen and final fidelity coincide",
     "skipped_same_fidelity": "the final N/Q and thickness points equal the screen ones for every crystal",
 }
 
@@ -642,11 +641,8 @@ def _run_early_escalation(
         for ds in prep.datasets:
             crystal = crystal_arguments(args, ds.name)
             fidelity[ds.name] = {
-                "n_basis": int(
-                    getattr(crystal, "fixed_n_basis", None)
-                    or resolve_final_n_basis(prep, ds, args, python, logs, root, model, "early_hand_escalation")
-                ),
-                "n_points": int(getattr(crystal, "fixed_n_points", None) or stage_n_points(args, ds, screen=False)),
+                "n_basis": int(resolve_final_n_basis(prep, ds, args, python, logs, root, model, "early_hand_escalation")),
+                "n_points": int(stage_n_points(args, ds, screen=False)),
                 "thickness_points": int(crystal.final_thickness_points),
             }
     except Exception as exc:  # recorded; the screen evidence did not support a switch, so the input hand is kept
@@ -716,10 +712,8 @@ def run_elastic_hand_selection(
 
     Every dataset retains its source run's N/Q, row support, thickness,
     jitter, and other nuisance values.  The paired calculation shares each
-    eigendecomposition.  A uniform absorptive potential is kept exactly
-    (``--hand-pair-absorption uniform``) or every absorption term is zeroed
-    (legacy ``strip``).  With ``--hand-decision-evidence heldout-orbit-sign``
-    the hand switches only on the pooled held-out orbit sign test plus the
+    eigendecomposition.  A uniform absorptive potential is kept exactly.
+    The hand switches only on the pooled held-out orbit sign test plus the
     paired orbit-bootstrap R_obs interval; the all-row ZKP is reported only.
     The evidence is pooled over every dataset of ``prep``: a crystal whose own
     evidence disagrees is warned about and never vetoes.  At the early stage

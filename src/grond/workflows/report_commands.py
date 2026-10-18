@@ -33,11 +33,10 @@ def combine_cmd(
 ) -> list[str]:
     """Build the multi-dataset corrected-HKL combination command.
 
-    ``feedback_cycle`` marks a structure-feedback macro-cycle: it uses the macro-cycle weighting rule
-    (--shelxl-feedback-wght-mode).  ``final_outputs`` (default: not a feedback cycle) adds the unmerged
-    endpoint, which belongs to the final combined endpoint only.  ``free_validation`` (combine_final only)
-    forwards --endpoint-free-validation on when the AUTO option is on and the free rows stay out of the HKL; the
-    option is never emitted otherwise, so every other command is unchanged.
+    ``feedback_cycle`` marks a structure-feedback macro-cycle: it uses the macro-cycle weighting rule.
+    ``final_outputs`` (default: not a feedback cycle) adds the unmerged endpoint, which belongs to the final
+    combined endpoint only.  ``free_validation`` (combine_final only) forwards --endpoint-free-validation on when
+    the free rows stay out of the HKL; the option is never emitted otherwise.
     """
 
     iterations = int(shelxl_iterations if shelxl_iterations is not None else getattr(args, "shelxl_iterations", 5))

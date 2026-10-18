@@ -31,9 +31,8 @@ def add_decision_controls(ap: argparse.ArgumentParser) -> None:
         type=float,
         default=3.5,
         help=(
-            "Legacy --hand-decision-evidence all-row-zkp only: invert the acentric model once when the "
-            "all-row Klar-Palatinus adjusted Z favors the inverse by at least this magnitude (default 3.5). "
-            "The ZKP is always reported as a diagnostic."
+            "Threshold of the all-row Klar-Palatinus adjusted Z reported with the hand evidence (default 3.5); "
+            "the held-out orbit-sign rule decides the hand and the ZKP is a diagnostic."
         ),
     )
     ap.add_argument(

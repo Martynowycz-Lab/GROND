@@ -13,17 +13,11 @@ from grond.workflows.decision import safe_float, score_native_summary
 UNIFORM_HAND_PAIR_ABSORPTION_MODES = {"mean", "midgley_like", "midgley"}
 
 
-def elastic_hand_nuisance(
-    nuisance: Mapping[str, object],
-    *,
-    absorption_policy: str = "strip",
-) -> tuple[dict[str, object], dict[str, object]]:
+def elastic_hand_nuisance(nuisance: Mapping[str, object]) -> tuple[dict[str, object], dict[str, object]]:
     """Freeze the nuisance for an exact negative-thickness hand pair.
 
-    ``absorption_policy="uniform"`` keeps a uniform absorptive potential
-    (H0 + i*mu*I keeps the pair exact) and refuses any non-uniform term instead
-    of silently dropping it.  ``"strip"`` is the legacy elastic pair with every
-    absorption term zeroed.
+    A uniform absorptive potential is kept (H0 + i*mu*I keeps the pair exact); any non-uniform term is refused
+    instead of silently dropped.
     """
 
     elastic = dict(nuisance)
@@ -36,39 +30,24 @@ def elastic_hand_nuisance(
         "absorption_tds_b",
     )
     source = {key: elastic.get(key) for key in absorption_keys}
-    if absorption_policy == "uniform":
-        mode = str(elastic.get("absorption_mode") or "none").strip().lower()
-        nonuniform = {
-            key: safe_float(elastic.get(key, 0.0), float("nan"))
-            for key in ("absorption_frac", "absorption_mu_g2", "absorption_mu_theta2", "absorption_tds_b")
-        }
-        mu = safe_float(elastic.get("absorption_mu", 0.0), float("nan"))
-        active_nonuniform = {key: value for key, value in nonuniform.items() if value != 0.0}
-        if mode == "none" or (mode in UNIFORM_HAND_PAIR_ABSORPTION_MODES and not active_nonuniform):
-            if not math.isfinite(mu) or mu < 0.0:
-                raise ValueError(f"hand pair absorption_mu must be finite and nonnegative, got {mu!r}")
-            if mode == "none" and (mu != 0.0 or active_nonuniform):
-                raise ValueError("absorption_mode none carries nonzero absorptive coefficients; refusing the hand pair")
-            return elastic, source
-        raise ValueError(
-            "the exact hand pair keeps only uniform absorption (mean/midgley_like/midgley with zero "
-            f"absorption_frac, absorption_mu_g2, absorption_mu_theta2, absorption_tds_b); this nuisance has "
-            f"absorption_mode={mode!r} with {active_nonuniform or 'a non-uniform mode'}. "
-            "Use --hand-pair-absorption strip for the legacy elastic pair"
-        )
-    if absorption_policy != "strip":
-        raise ValueError(f"unknown hand-pair absorption policy {absorption_policy!r}")
-    elastic.update(
-        {
-            "absorption_mode": "none",
-            "absorption_mu": 0.0,
-            "absorption_frac": 0.0,
-            "absorption_mu_g2": 0.0,
-            "absorption_mu_theta2": 0.0,
-            "absorption_tds_b": 0.0,
-        }
+    mode = str(elastic.get("absorption_mode") or "none").strip().lower()
+    nonuniform = {
+        key: safe_float(elastic.get(key, 0.0), float("nan"))
+        for key in ("absorption_frac", "absorption_mu_g2", "absorption_mu_theta2", "absorption_tds_b")
+    }
+    mu = safe_float(elastic.get("absorption_mu", 0.0), float("nan"))
+    active_nonuniform = {key: value for key, value in nonuniform.items() if value != 0.0}
+    if mode == "none" or (mode in UNIFORM_HAND_PAIR_ABSORPTION_MODES and not active_nonuniform):
+        if not math.isfinite(mu) or mu < 0.0:
+            raise ValueError(f"hand pair absorption_mu must be finite and nonnegative, got {mu!r}")
+        if mode == "none" and (mu != 0.0 or active_nonuniform):
+            raise ValueError("absorption_mode none carries nonzero absorptive coefficients; refusing the hand pair")
+        return elastic, source
+    raise ValueError(
+        "the exact hand pair keeps only uniform absorption (mean/midgley_like/midgley with zero "
+        f"absorption_frac, absorption_mu_g2, absorption_mu_theta2, absorption_tds_b); this nuisance has "
+        f"absorption_mode={mode!r} with {active_nonuniform or 'a non-uniform mode'}"
     )
-    return elastic, source
 
 
 def score_native_metrics(summary: Mapping[str, object], metrics: Mapping[str, object]) -> dict[str, object]:

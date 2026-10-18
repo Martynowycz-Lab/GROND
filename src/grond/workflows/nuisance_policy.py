@@ -640,7 +640,7 @@ def dataset_frame_span(path: str) -> float:
 def dose_b_per_frame_grid(args: argparse.Namespace, ds: DatasetSpec | None) -> tuple[str, dict]:
     """Return the engine per-frame dose grid and how it was obtained.
 
-    An explicit --dose-b-per-frame-grid is used verbatim (legacy units).  Otherwise
+    A per-frame grid a stage set on its namespace (grond thickness-scout) is used verbatim.  Otherwise
     --dose-b-total-grid (A^2 over the scan) is divided by this dataset's ZCAL span.
     """
 
@@ -649,7 +649,7 @@ def dose_b_per_frame_grid(args: argparse.Namespace, ds: DatasetSpec | None) -> t
         return explicit, {"source": "dose_b_per_frame_grid", "per_frame_grid": explicit}
     totals = parse_strict_grid(getattr(args, "dose_b_total_grid", ""), "dose total B")
     if not totals:
-        raise ValueError("neither --dose-b-per-frame-grid nor --dose-b-total-grid gives a dose grid")
+        raise ValueError("--dose-b-total-grid gives no dose grid")
     if any(value < 0.0 for value in totals):
         raise ValueError("--dose-b-total-grid values must be nonnegative (A^2 accumulated over the scan)")
     if ds is None:

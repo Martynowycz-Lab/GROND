@@ -207,7 +207,7 @@ def add_nuisance(ap: argparse.ArgumentParser) -> None:
         default="0,0.5,1,2,3",
         help=(
             "Dose-B grid in A^2 accumulated over the whole scan; each crystal converts it to B per frame with "
-            "its own ZCAL span. Ignored when --dose-b-per-frame-grid is given."
+            "its own ZCAL span."
         ),
     )
     ap.add_argument(
@@ -238,7 +238,7 @@ def add_nuisance(ap: argparse.ArgumentParser) -> None:
         default="nested",
         help=(
             "nested: per crystal, after the screen and the early hand decision, select mosaic cone x dose B x thickness "
-            "distribution (--nested-families) x P-spline lambda jointly by inner orbit CV on work rows from Bloch "
+            "distribution (uniform_gradient or gamma) x P-spline lambda jointly by inner orbit CV on work rows from Bloch "
             "spectra, and pin the pick for every later stage (the cone and dose gates do not run). sequential: the "
             "discrete/continuous thickness polish followed by the cone and dose gates. Legacy: sequential."
         ),

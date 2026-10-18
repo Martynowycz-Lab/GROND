@@ -65,10 +65,7 @@ def native_stage_cmd(
     from grond.io.structure_contract import is_shelx_model
 
     args = crystal_arguments(args, ds.name)
-    fixed_thickness = getattr(args, "fixed_thickness", {})
-    pinned = {**pinned, **fixed_thickness} if pinned else {}
-    n_basis = getattr(args, "fixed_n_basis", None) or n_basis
-    n_points = getattr(args, "fixed_n_points", None) or n_points
+    pinned = dict(pinned) if pinned else {}
     if n_points is None or isinstance(n_points, bool) or int(n_points) < 1:
         raise ValueError(f"native stage {stage!r} for {ds.name} needs a resolved positive n_points, got {n_points!r}")
     endpoint_ok = bool(endpoint and is_shelx_model(structure) and not getattr(args, "native_only", False))
@@ -312,16 +309,6 @@ def native_stage_cmd(
         # converge calls are L.S. 10 (the combined endpoints' --shelxl-feedback-endpoint-ls-cycles), not the
         # engine's one-cycle default, so each call's shift/esd test and weight suggestion see a converged model.
         cmd += ["--endpoint-ls-cycles", str(int(getattr(args, "shelxl_feedback_endpoint_ls_cycles", 10) or 10))]
-    # Apply these last: a thickness neighbourhood or feature scout must not
-    # reopen a parameter the caller explicitly fixed.
-    for field, option in (
-        ("thickness_A", "--thickness-grid"),
-        ("thickness_model", "--thickness-model-grid"),
-        ("thickness_grad_frac", "--thickness-grad-grid"),
-        ("thickness_sigma_frac", "--thickness-sigma-frac-grid"),
-    ):
-        if field in fixed_thickness:
-            cmd[cmd.index(option) + 1] = grid_from_nuisance(fixed_thickness, field, "")
     if pinned:
         # A pinned support thickness distribution (gamma, table/cf/auto) travels with its shape, evaluator and
         # support; the legacy quadrature adds nothing, so legacy commands are unchanged.

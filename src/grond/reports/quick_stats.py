@@ -691,7 +691,7 @@ def _start_quick_stats_markdown(
         "",
         "This is the short run summary. Use the detailed reports for diagnostics and audit trails.",
         "",
-        # --report-layout heldout-first: the held-out validation opens the report.
+        # heldout-first layout: the held-out validation opens the report.
         *heldout_lines,
         "## Canonical Final Statistics",
         "",
@@ -1709,7 +1709,7 @@ def _write_quick_stats_final_summary(
         "",
         "This is the compact user-facing summary. `QUICK_STATS.md` and the JSON reports keep the full audit trail.",
         "",
-        # --report-layout heldout-first: the held-out validation opens the summary.
+        # heldout-first layout: the held-out validation opens the summary.
         *(heldout_markdown_lines(heldout_report) if heldout_first else []),
         "## Decision",
         "",

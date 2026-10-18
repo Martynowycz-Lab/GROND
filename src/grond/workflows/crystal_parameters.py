@@ -190,8 +190,4 @@ def crystal_arguments(args: argparse.Namespace, name: str) -> argparse.Namespace
             setattr(resolved, key, value)
     for key, value in settings.items():
         setattr(resolved, key, value)
-    if record.get("fresh_auto"):
-        resolved.fixed_thickness = record.get("fixed_thickness", {})
-        resolved.fixed_n_basis = settings.get("n_basis")
-        resolved.fixed_n_points = settings.get("n_points")
     return resolved

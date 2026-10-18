@@ -45,7 +45,7 @@ def add_endpoints(ap: argparse.ArgumentParser, *, expose_lambda_controls: bool) 
         "--endpoint-wght-mode",
         choices=["freeze-zero", "inherit", "promote", "promote-gold", "converge"],
         default="converge",
-        help="SHELXL weight policy for corrected-HKL endpoint files. converge (default) starts each handoff at WGHT 0 0 and promotes SHELXL's suggested WGHT until the applied and suggested WGHT agree (|da| < 0.002, |db| < 0.02) and max shift/esd < --shelxl-convergence-shift-esd, at most --wght-converge-max-calls calls, so the written .res carries the converged WGHT; promote-gold starts at WGHT 0.1 0 and promotes on later calls until shift/esd converges; promote keeps the source-model WGHT on the first call and then promotes; freeze-zero is the legacy WGHT 0 0 after GROND sigma calibration; inherit keeps the source-model WGHT.",
+        help="SHELXL weight policy for corrected-HKL endpoint files. converge (default) starts each handoff at WGHT 0 0 and promotes SHELXL's suggested WGHT until the applied and suggested WGHT agree (|da| < 0.002, |db| < 0.02) and max shift/esd < --shelxl-convergence-shift-esd, at most 20 calls, so the written .res carries the converged WGHT; promote-gold starts at WGHT 0.1 0 and promotes on later calls until shift/esd converges; promote keeps the source-model WGHT on the first call and then promotes; freeze-zero is the legacy WGHT 0 0 after GROND sigma calibration; inherit keeps the source-model WGHT.",
     )
     ap.add_argument(
         "--endpoint-intensity-scale",
@@ -203,7 +203,7 @@ def add_endpoints(ap: argparse.ArgumentParser, *, expose_lambda_controls: bool) 
         "--endpoint-feedback",
         choices=["auto", "on", "off"],
         default="auto",
-        help="Optionally feed the polished B=0 no-EXTI endpoint model into one more Bloch endpoint cycle. Full auto uses auto; --fast skips it.",
+        help="Optionally feed the polished B=0 no-EXTI endpoint model into one more Bloch endpoint cycle. Full auto uses auto.",
     )
     ap.add_argument(
         "--publication-endpoint-chooser",

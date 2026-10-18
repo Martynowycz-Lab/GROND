@@ -20,7 +20,7 @@ A call that leaves atoms non-positive definite gets the NPD recovery of the SHEL
 fails does the stage fall back to the supplied model.  A refinement without NPD atoms never reaches the recovery, so
 its files and record are unchanged.
 
-Under --endpoint-free-validation on (AUTO default) the finished model is then scored, reporting only, on the free
+The finished model is then scored, reporting only, on the free
 reflections of the same baseline HKL (same masks) with SHELXL L.S. 0 next to its own work reflections
 (grond.validation.endpoint_free): the honest conventional R_free on the orbits GROND holds out.
 """

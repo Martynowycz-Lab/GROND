@@ -652,9 +652,7 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
             hand_pair = root / "runs" / ds.name / "adaptive_final_elastic_hand_pair"
             final_summary = read_json(final / "summary.json")
             final_config = final_summary.get("config") if isinstance(final_summary.get("config"), Mapping) else {}
-            hand_nuisance, source_absorption = elastic_hand_nuisance(
-                best_nuisance(final) or regularized_nui, absorption_policy="uniform"
-            )
+            hand_nuisance, source_absorption = elastic_hand_nuisance(best_nuisance(final) or regularized_nui)
             hand_args = _args_with_recorded_native_contract(args, final_config)
             hand_n_basis = _positive_summary_int(final_config, "n_basis") or final_n_basis
             hand_n_points = _positive_summary_int(final_config, "n_points") or args.n_points
