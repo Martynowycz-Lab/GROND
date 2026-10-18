@@ -213,8 +213,6 @@ def estimate_run_steps(prep: PrepConfig, args: argparse.Namespace) -> int:
             total += 1 + 2 * len(prep.datasets)
         total += 2
         total += _estimated_resolution_steps(args)
-    if str(getattr(args, "final_polish", "off") or "off") != "off":
-        total += 1
     return max(total, 1)
 
 

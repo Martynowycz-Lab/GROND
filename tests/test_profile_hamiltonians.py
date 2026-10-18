@@ -52,46 +52,6 @@ def test_empty_slice_retains_its_matrix_shape():
 
 
 @pytest.mark.parametrize('dtype', [np.complex64, np.complex128])
-def test_pets_compact_plan_preserves_absorption_without_dense_stack(monkeypatch, dtype):
-    from types import SimpleNamespace
-
-    from scipy.linalg import expm
-
-    from grond.polish.crystals import compact_row_plan
-
-    static = np.array([[0.004j, 0.002+0.001j], [0.002-0.001j, 0.004j]], dtype=dtype)
-    excitation = np.array([[0.0, 0.003], [0.0, -0.008], [0.0, 0.01]])
-    profile = H.ProfileHamiltonians(static, excitation)
-    weights = np.array([0.2, 0.5, 0.3])
-    dense = np.asarray(profile).astype(np.complex128)
-
-    def propagate(matrix):
-        return abs(expm(2j * np.pi * 7.0 * matrix)[1, 0]) ** 2
-
-    expected = weights @ np.array([propagate(matrix) for matrix in dense])
-
-    def forbid_stack(*args, **kwargs):
-        raise AssertionError('PETS plan must not allocate a full profile stack')
-
-    monkeypatch.setattr(H.ProfileHamiltonians, '__array__', forbid_stack)
-    port = SimpleNamespace(
-        data=SimpleNamespace(pets_exact_a_center=np.eye(3)),
-        row_prediction_plan=lambda index: {
-            'support_hkls': [[0, 0, 0], [1, 2, 3]],
-            '_dyn_matrices': profile, '_profile_weights': weights,
-        },
-        propagate_direct_to_target_thickness_average=propagate,
-        absorption_enabled=lambda: True,
-        row_delta_b=lambda index: 0.5,
-    )
-    result = compact_row_plan(port, 0, predict=True)
-    np.testing.assert_array_equal(result['sg'], np.diagonal(dense, axis1=1, axis2=2).real)
-    np.testing.assert_allclose(result['native_intensity'], expected, rtol=1e-14)
-    assert result['mu'] == float(static[0, 0].imag)
-    assert result['dose_delta_b_A2'] == 0.5
-
-
-@pytest.mark.parametrize('dtype', [np.complex64, np.complex128])
 def test_hermitian_eigh_uses_the_real_solver_only_for_real_matrices(dtype):
     from scipy.linalg import eigh
 

@@ -10,7 +10,6 @@ from grond.runtime import auto_worker_count
 def register_push(sub: argparse._SubParsersAction) -> None:
     """Register push commands."""
 
-    from grond.cli_options.run_endpoints import add_final_polish
     from grond.cli_options.run_physics import add_crystal_overrides, add_profile_coordinates
     from grond.cli_support.tools import add_tool_config_args, default_shelxl_executable
     from grond.cli_support.values import FULL_Q_LAMBDA
@@ -280,13 +279,6 @@ def register_push(sub: argparse._SubParsersAction) -> None:
         default=1,
         help="Rewrite L.S. to this value in the prepared start model. Use 0 to preserve it.",
     )
-    p_push.add_argument(
-        "--run-dir",
-        default="",
-        help="Finished GROND auto/run directory to polish with --final-polish diffbloch (its grond_summary.json, final row "
-        "tables and SHELXL publication model; --start-res overrides the model).",
-    )
-    add_final_polish(p_push)
     p_push.set_defaults(func=cmd_push_endpoint)
 
 

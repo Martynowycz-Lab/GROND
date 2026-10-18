@@ -259,12 +259,6 @@ def cmd_run(args: argparse.Namespace) -> int:
         nuisance_selection_policy = validate_nested_nuisance_policy(args, prep)
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
-    from grond.commands.final_polish import refuse_unused_polish_options, validate_final_polish
-
-    refuse_unused_polish_options(args)
-    if str(getattr(args, "final_polish", "off") or "off") != "off":
-        # Refuse bad options and models the polish cannot represent before the run, not after it.
-        validate_final_polish(args, structure=prep.structure)
     configure_progress(
         logs,
         resume=bool(args.resume),
@@ -416,12 +410,6 @@ def cmd_run(args: argparse.Namespace) -> int:
             "cc_scale": args.dataset_policy_cc_scale,
         },
         "free_set": str(getattr(args, "free_set", "on")),
-        "final_polish": {
-            "mode": str(getattr(args, "final_polish", "off")),
-            "max_iterations": getattr(args, "final_polish_max_iterations", None),
-            "thickness": getattr(args, "final_polish_thickness", None),
-            "shelxl": getattr(args, "final_polish_shelxl", None),
-        },
         "publication_endpoint_chooser": {
             "enabled": args.publication_endpoint_chooser,
             "min_hkl_safe_factor": args.publication_endpoint_min_hkl_safe_factor,
@@ -468,12 +456,6 @@ def cmd_run(args: argparse.Namespace) -> int:
     if bool(getattr(args, "dry_run", False)):
         result["status"] = "dry_run"
     quick = _write_run_completion_artifacts(prep, result, args)
-    if str(getattr(args, "final_polish", "off") or "off") != "off":
-        # Optional last stage on the finished run; its outputs are additional and fail closed.
-        from grond.commands.final_polish import run_final_polish_stage
-
-        result["final_polish"] = run_final_polish_stage(args, python, logs, result)
-        (Path(args.out_dir) / "grond_summary.json").write_text(json.dumps(result, indent=2) + "\n")
     finished = (
         execution._PROGRESS.mark_finished(str(result.get("status", "ok")))
         if execution._PROGRESS

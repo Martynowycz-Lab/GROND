@@ -6,11 +6,11 @@ from dataclasses import asdict, replace
 import numpy as np
 import pytest
 
+from grond.bloch.config import Config
 from grond.cli_options.parser import build_parser
 from grond.io.config import DatasetSpec
 from grond.legacy.engine import nested_nuisance_stage as nested_stage
 from grond.legacy.engine.shelxl_feedback_loop import native_command
-from grond.polish.crystals import stage_config
 from grond.refine.arguments_feedback import build_parser as feedback_parser
 from grond.regularize.arguments_native import build_parser as native_parser
 from grond.regularize.contracts import TARGET_MODES, Nuisance
@@ -48,12 +48,13 @@ def source_and_args(tmp_path):
 
 
 def test_auto_to_native_to_saved_spectral_config_keeps_measure(tmp_path):
-    args, ds, _nui, summary, parsed = source_and_args(tmp_path)
+    args, ds, _nui, _summary, parsed = source_and_args(tmp_path)
     assert parsed.profile_coordinate == "direct_angle"
     assert parsed.profile_normalization == "target_sg_equivalent_v1"
     assert parsed.profile_angle_max_half_width_deg == 3.5
-    cfg = stage_config(summary)
-    assert cfg.profile_normalization == parsed.profile_normalization
+    cfg = Config(profile_coordinate=parsed.profile_coordinate, profile_normalization=parsed.profile_normalization,
+                 profile_angle_max_half_width_deg=parsed.profile_angle_max_half_width_deg,
+                 mosaicity_support_sigma_deg=parsed.mosaicity_support_sigma_deg)
     assert cfg.mosaicity_support_sigma_deg == 0.3
     variants = nested_variants(args, ds)
     widths = [v["config"]["mosaicity_sigma_deg"] for v in variants]

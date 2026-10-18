@@ -150,13 +150,6 @@ def cmd_push_endpoint_multi(
 def cmd_push_endpoint(args: argparse.Namespace) -> int:
     """Continue an existing GROND endpoint with pinned nuisance settings."""
 
-    if str(getattr(args, "final_polish", "off") or "off") != "off":
-        from grond.commands.final_polish import cmd_final_polish
-
-        return cmd_final_polish(args)
-    from grond.commands.final_polish import refuse_unused_polish_options
-
-    refuse_unused_polish_options(args)
     python = choose_python(args.python)
     out_dir = Path(args.out_dir).expanduser().resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
