@@ -68,7 +68,6 @@ def populate_nuisance_trials(
     sg_jitter_candidate_rejection,
     rejected_prediction_candidates,
     geom_trials,
-    detector_scale_bins_values,
     wght_a_values,
     wght_b_values,
     evaluate_trial,
@@ -262,7 +261,6 @@ def populate_nuisance_trials(
                                                         row_b_values = parse_float_grid(args.row_resolution_b_grid)
                                                         for grid_values in itertools.product(
                                                             group_width_values,
-                                                            detector_scale_bins_values,
                                                             sigma_a_values,
                                                             sigma_b_values,
                                                             sigma_c_values,
@@ -270,13 +268,13 @@ def populate_nuisance_trials(
                                                             wght_a_values,
                                                             wght_b_values,
                                                         ):
-                                                            group_width, detector_scale_bins, sig_a, sig_b, sig_c, row_resolution_b, native_wght_a, native_wght_b = grid_values
+                                                            group_width, sig_a, sig_b, sig_c, row_resolution_b, native_wght_a, native_wght_b = grid_values
                                                             nui = Nuisance(
                                                                 thickness,
                                                                 grad,
                                                                 frame_offset,
                                                                 group_width,
-                                                                detector_scale_bins,
+                                                                0,  # detector_scale_bins: no detector scale field
                                                                 sig_a,
                                                                 sig_b,
                                                                 sig_c,
@@ -303,10 +301,6 @@ def populate_nuisance_trials(
                                                                 row_resolution_b=row_resolution_b,
                                                                 native_wght_a=native_wght_a,
                                                                 native_wght_b=native_wght_b,
-                                                                scale_smoothness=args.scale_smoothness,
-                                                                detector_scale_ridge=args.detector_scale_ridge,
-                                                                detector_scale_smoothness=args.detector_scale_smoothness,
-                                                                detector_scale_min_rows=args.detector_scale_min_rows,
                                                                 thickness_gamma_shape=thickness_gamma_shape,
                                                                 **support_fields,
                                                                 **abs_par,

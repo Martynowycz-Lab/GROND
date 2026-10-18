@@ -104,11 +104,6 @@ def native_stage_cmd(
         if pinned
         else ("0.0" if fast else args.row_resolution_b_grid)
     )
-    detector_scale_bins = (
-        grid_from_nuisance(pinned, "detector_scale_bins", "0")
-        if pinned
-        else ("0" if fast else args.detector_scale_bins)
-    )
     scale_fit_split = scale_fit_split_override or ("all" if args.production_scales else "work")
     if scale_fit_split not in {"work", "all"}:
         raise ValueError(f"invalid scale-fit split override {scale_fit_split!r}")
@@ -192,14 +187,6 @@ def native_stage_cmd(
         f"--frame-offset-grid={frame_grid}",
         "--group-width-grid",
         group_grid,
-        "--detector-scale-bins",
-        detector_scale_bins,
-        "--detector-scale-ridge",
-        str(getattr(args, "detector_scale_ridge", 0.05)),
-        "--detector-scale-smoothness",
-        str(getattr(args, "detector_scale_smoothness", 0.10)),
-        "--detector-scale-min-rows",
-        str(getattr(args, "detector_scale_min_rows", 20)),
         "--sigma-a-grid",
         sigma_a,
         "--sigma-b-corr-grid",
@@ -281,8 +268,6 @@ def native_stage_cmd(
         selection_metric_override or args.selection_metric,
         "--lambda-grid",
         lambda_grid,
-        "--scale-smoothness",
-        str(args.scale_smoothness),
         "--endpoint-b-grid",
         endpoint_b_grid,
         "--endpoint-exti-grid",

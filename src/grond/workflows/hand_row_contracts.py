@@ -125,7 +125,6 @@ def _args_with_recorded_native_contract(
         "split_salt",
         "exclude_orbits_json",
         "selection_metric",
-        "scale_smoothness",
         "prediction_cache_compression",
         "row_plan_cache",
         "matrix_convention",

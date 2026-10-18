@@ -143,8 +143,6 @@ def native_command(
         grid_value(nui.get("frame_offset")),
         "--group-width-grid",
         grid_value(nui.get("group_width_deg")),
-        "--detector-scale-bins",
-        str(int(float(nui.get("detector_scale_bins", 0)))),
         "--sigma-a-grid",
         grid_value(nui.get("sigma_a")),
         "--sigma-b-corr-grid",
@@ -210,8 +208,6 @@ def native_command(
         str(summary_value(source_summary, "selection_metric", "all_wR2")),
         "--lambda-grid",
         str(args.lambda_grid),
-        "--scale-smoothness",
-        grid_value(nui.get("scale_smoothness", 0.0)),
         "--endpoint-b-grid",
         "0.0",
         "--endpoint-exti-grid",
@@ -276,7 +272,6 @@ def native_command(
         "profile_basis_mode", "profile_coordinate", "profile_normalization", "profile_angle_max_half_width_deg",
         "mosaicity_mode", "mosaicity_sigma_deg", "mosaicity_max_sigma_deg", "mosaicity_points",
         "mosaicity_support_sigma_deg", "mosaicity_support_points", "mosaicity_support_width_sigma",
-        "detector_scale_ridge", "detector_scale_smoothness", "detector_scale_min_rows",
         "dose_b_ref_frame",
         "row_contract", "split_contract",
     )
@@ -293,15 +288,15 @@ def native_command(
         value = cfg.get(key)
         if value is not None and str(value) != "":
             cmd.extend(["--" + key.replace("_", "-"), str(value)])
-    # The frame-scale family is part of the source stage contract; per-frame summaries add nothing.
+    # The P-spline scale grids are part of the source stage contract; a summary that records none keeps the
+    # engine's default grids.
     scale_model = (source_summary.get("best_native") or {}).get("scale_model") or {}
-    if str(cfg.get("scale_model") or scale_model.get("kind") or "per-frame") == "pspline":
-        n_basis_grid = cfg.get("scale_spline_n_basis_grid") or ",".join(str(v) for v in scale_model.get("n_basis_grid") or [])
-        lambda_grid = cfg.get("scale_spline_lambda_grid") or ",".join(f"{float(v):g}" for v in scale_model.get("lambda_grid") or [])
-        if not n_basis_grid or not lambda_grid:
-            raise SystemExit("source summary uses --scale-model pspline but records no P-spline n_basis/lambda grid")
-        cmd.extend(["--scale-model", "pspline", "--scale-spline-n-basis-grid", str(n_basis_grid),
-                    "--scale-spline-lambda-grid", str(lambda_grid)])
+    n_basis_grid = cfg.get("scale_spline_n_basis_grid") or ",".join(str(v) for v in scale_model.get("n_basis_grid") or [])
+    lambda_grid = cfg.get("scale_spline_lambda_grid") or ",".join(f"{float(v):g}" for v in scale_model.get("lambda_grid") or [])
+    if n_basis_grid:
+        cmd.extend(["--scale-spline-n-basis-grid", str(n_basis_grid)])
+    if lambda_grid:
+        cmd.extend(["--scale-spline-lambda-grid", str(lambda_grid)])
     geometry_path = nui.get("geometry_path_file") or cfg.get("geometry_path") or cfg.get("geometry_path_file")
     if geometry_path:
         cmd.extend(["--geometry-path", str(geometry_path)])

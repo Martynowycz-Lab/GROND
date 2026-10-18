@@ -50,8 +50,6 @@ def run_publication_report(python: str, prep: PrepConfig, result: dict, args: ar
             artifacts["publication_runs"] = result.get("publication_runs")
         if result.get("publication_full_runs"):
             artifacts["publication_full_runs"] = result.get("publication_full_runs")
-        if result.get("scale_contract_selection"):
-            artifacts["scale_contract_selection"] = result.get("scale_contract_selection")
         with execution._RUN_LOG_LOCK:
             write_json(artifacts_path, artifacts)
             if execution._PROGRESS is not None and not execution._PROGRESS.refresh_output_fingerprints(

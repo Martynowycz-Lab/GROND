@@ -37,51 +37,19 @@ def file_provenance(path: Path) -> dict[str, object]:
     }
 
 
-def scale_contract_provenance(summary: dict, rows: list[dict]) -> dict[str, object]:
-    """Describe the scale table actually materialized in one source run."""
+def scale_contract_provenance(summary: dict) -> dict[str, object]:
+    """Describe the frame scales of one source run: its P-spline setting, or the frame groups of a legacy run."""
 
     best_native = summary.get("best_native") or {}
     nuisance = best_native.get("nuisance") or {}
-    row_model_fields = ("scale_replay_model", "scale_compression_model")
+    scale_model = best_native.get("scale_model") if isinstance(best_native.get("scale_model"), dict) else {}
     model_names: list[str] = []
     source = ""
-    for field in row_model_fields:
-        values = sorted(
-            {
-                str(row.get(field, "")).strip()
-                for row in rows
-                if str(row.get(field, "")).strip()
-            }
-        )
-        if values:
-            model_names = values
-            source = f"row_table.{field}"
-            break
-
-    if not model_names:
-        compression_candidate = (summary.get("scale_compression") or {}).get("selected_output") or {}
-        compression_name = str(compression_candidate.get("name", "")).strip()
-        candidates = (
-            (str(nuisance.get("scale_replay_model", "")).strip(), "summary.best_native.nuisance.scale_replay_model"),
-            (compression_name, "summary.scale_compression.selected_output.name"),
-            (str(nuisance.get("scale_compression_model", "")).strip(), "summary.best_native.nuisance.scale_compression_model"),
-        )
-        for candidate, candidate_source in candidates:
-            if candidate:
-                model_names = [candidate]
-                source = candidate_source
-                break
-
-    scale_model = best_native.get("scale_model") if isinstance(best_native.get("scale_model"), dict) else {}
-    if not model_names and scale_model.get("kind") == "fixed_design":
-        model_names = [str(scale_model.get("name", "fixed_design"))]
-        source = "summary.best_native.scale_model"
-    if not model_names and scale_model.get("kind") == "pspline":
+    if scale_model.get("kind") == "pspline":
         # Smooth frame scales have no group-width contract; parameter_count stays ceil(EDF), edf is exact.
         model_names = [f"pspline_n{scale_model.get('n_basis')}_lambda{safe_float(scale_model.get('lambda')):g}"]
         source = "summary.best_native.scale_model"
-
-    if not model_names:
+    else:
         group_width = safe_float(nuisance.get("group_width_deg"))
         detector_bins = safe_float(nuisance.get("detector_scale_bins"))
         if math.isfinite(group_width) or math.isfinite(detector_bins):
@@ -99,7 +67,7 @@ def scale_contract_provenance(summary: dict, rows: list[dict]) -> dict[str, obje
         "parameter_count": count,
         "fit_split": str(best_native.get("scale_fit_split", "")) or "unknown",
     }
-    if scale_model.get("kind") in {"pspline", "fixed_design"}:
+    if scale_model.get("kind") == "pspline":
         out["edf"] = safe_float(scale_model.get("edf"))
     return out
 

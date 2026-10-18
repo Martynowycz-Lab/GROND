@@ -68,16 +68,16 @@ def apply_push_checkpoint(args: argparse.Namespace) -> dict:
     }
 
 
-# The continuation contract a push must replay from the run it continues: the free split, the frame-scale
-# family and the dynamical SHELXL handoff.  Each entry is (push attribute = source-summary config key, value of
-# the historical behaviour for summaries that predate the key).  The current AUTO defaults are never used.
+# The continuation contract a push must replay from the run it continues: the free split, the P-spline
+# frame-scale grids and the dynamical SHELXL handoff.  Each entry is (push attribute = source-summary config
+# key, value of the historical behaviour for summaries that predate the key).  The current AUTO defaults are
+# never used.
 CONTINUATION_SPLIT_SCALE_KEYS = (
     ("split_scheme", "legacy"),
     ("split_salt", DEFAULT_FREE_SALT),
     ("exclude_orbits_json", ""),
     ("free_fraction", 0.10),
     ("split_seed", 42),
-    ("scale_model", "per-frame"),
     ("scale_spline_n_basis_grid", "32"),
     ("scale_spline_lambda_grid", "0.3,1,3,10,30,100"),
 )
@@ -93,7 +93,6 @@ CONTINUATION_HANDOFF_KEYS = (
 )
 CONTINUATION_CHOICES = {
     "split_scheme": ("orbit-hash", "legacy"),
-    "scale_model": ("per-frame", "pspline"),
     "endpoint_q_policy": ("clip", "exclude"),
     "rescale": ("median-iobs", "none", "absolute"),
     "shelxl_npd_recovery": ("damp", "isor"),
@@ -126,8 +125,6 @@ def _recorded_continuation_value(summary: Mapping[str, object], key: str) -> obj
         return config[key]
     best = summary.get("best_native") if isinstance(summary.get("best_native"), Mapping) else {}
     scale_model = best.get("scale_model") if isinstance(best.get("scale_model"), Mapping) else {}
-    if key == "scale_model" and scale_model.get("kind"):
-        return scale_model["kind"]
     if key == "scale_spline_n_basis_grid" and scale_model.get("n_basis_grid"):
         return ",".join(str(int(value)) for value in scale_model["n_basis_grid"])
     if key == "scale_spline_lambda_grid" and scale_model.get("lambda_grid"):
@@ -142,8 +139,9 @@ def resolve_push_continuation_contract(
     """Resolve the split, scale and handoff contract of a continuation, with the provenance of every value.
 
     An explicit push-endpoint option wins.  Otherwise every source summary must record the same value (the
-    datasets of one run share one free split, scale family and handoff); a summary that does not record a key
-    gives that key's legacy value, so an older checkpoint continues as it ran.
+    datasets of one run share one free split, scale grids and handoff); a summary that does not record a key
+    gives that key's legacy value, so an older checkpoint continues as it ran.  The P-spline grids have no legacy
+    value: a run that recorded none (per-frame scales) needs them passed explicitly.
     """
 
     contract: dict[str, dict[str, object]] = {}
@@ -171,13 +169,12 @@ def resolve_push_continuation_contract(
         if choices and value not in choices:
             raise SystemExit(f"continuation {key} {value!r} is not one of {', '.join(choices)}")
         contract[key] = {"value": value, "source": source, "recorded": recorded}
-    if contract["scale_model"]["value"] == "pspline":
-        for key in ("scale_spline_n_basis_grid", "scale_spline_lambda_grid"):
-            if contract[key]["source"] == "historical_default_not_recorded":
-                raise SystemExit(
-                    f"the continuation uses --scale-model pspline but no source summary records {key}; "
-                    f"pass --{key.replace('_', '-')} explicitly"
-                )
+    for key in ("scale_spline_n_basis_grid", "scale_spline_lambda_grid"):
+        if contract[key]["source"] == "historical_default_not_recorded":
+            raise SystemExit(
+                f"no source summary records the P-spline frame-scale grid {key}; "
+                f"pass --{key.replace('_', '-')} explicitly"
+            )
     return contract
 
 

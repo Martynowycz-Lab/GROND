@@ -161,7 +161,8 @@ def _declared_nuisance_contract(config: Mapping[str, object]) -> dict[str, str]:
         "thickness_sigma_frac": "thickness_sigma_frac_grid",
         "frame_offset": "frame_offset_grid",
         "group_width_deg": "group_width_grid",
-        "detector_scale_bins": "detector_scale_bins",
+        # No detector scale field: every run declares 0 bins.
+        "detector_scale_bins": None,
         "sigma_a": "sigma_a_grid",
         "sigma_b_corr": "sigma_b_corr_grid",
         "sigma_c_peak": "sigma_c_peak_grid",
@@ -180,7 +181,7 @@ def _declared_nuisance_contract(config: Mapping[str, object]) -> dict[str, str]:
         "row_resolution_b": "row_resolution_b_grid",
     }
     return {
-        output: str(config.get(source) or "").strip()
+        output: "0" if source is None else str(config.get(source) or "").strip()
         for output, source in mapping.items()
     }
 

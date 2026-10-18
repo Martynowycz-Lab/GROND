@@ -1235,7 +1235,7 @@ def main():
                     "row_table": file_provenance(row_table_path),
                     "summary": file_provenance(summary_path),
                 },
-                "scale_contract": scale_contract_provenance(summary, unfiltered_rows),
+                "scale_contract": scale_contract_provenance(summary),
                 "resolution_filter": resolution_filter,
                 "rows": len(rows),
                 "native_rows": len(native_rows),

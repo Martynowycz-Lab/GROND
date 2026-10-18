@@ -76,9 +76,6 @@ def hand_decision_settings(args: argparse.Namespace) -> dict[str, object]:
     absorption = str(getattr(args, "hand_pair_absorption", "strip"))
     if absorption not in {"uniform", "strip"}:
         raise ValueError(f"unknown hand-pair absorption policy {absorption!r}")
-    scale_model = str(getattr(args, "scale_model", "per-frame") or "per-frame")
-    if scale_model not in {"pspline", "per-frame"}:
-        raise ValueError(f"unknown scale model {scale_model!r} for the held-out hand refit")
     escalation = str(getattr(args, "hand_early_escalation", "off"))
     if escalation not in HAND_EARLY_ESCALATION:
         raise ValueError(f"unknown early hand escalation {escalation!r}; expected one of {list(HAND_EARLY_ESCALATION)}")
@@ -89,18 +86,14 @@ def hand_decision_settings(args: argparse.Namespace) -> dict[str, object]:
         "pair_scale_fit_split": pair_split,
         "pair_absorption": absorption,
         "early_escalation": escalation,
-        "scale_model": scale_model,
-        "scale_refit_config": (
-            {
-                # The run's own P-spline grids; (n_basis, lambda) is re-chosen by inner orbit CV on each
-                # training set, exactly as the engine chooses it per crystal in the nested selection.
-                "n_basis_grid": [int(v) for v in _grid_values(getattr(args, "scale_spline_n_basis_grid", None), "32")],
-                "lambda_grid": [float(v) for v in _grid_values(getattr(args, "scale_spline_lambda_grid", None), "1")],
-                "objective": str(getattr(args, "scale_spline_objective", None) or "row_mr"),
-            }
-            if scale_model == "pspline"
-            else {}
-        ),
+        "scale_model": "pspline",
+        "scale_refit_config": {
+            # The run's own P-spline grids; (n_basis, lambda) is re-chosen by inner orbit CV on each
+            # training set, exactly as the engine chooses it per crystal in the nested selection.
+            "n_basis_grid": [int(v) for v in _grid_values(getattr(args, "scale_spline_n_basis_grid", None), "32")],
+            "lambda_grid": [float(v) for v in _grid_values(getattr(args, "scale_spline_lambda_grid", None), "1")],
+            "objective": str(getattr(args, "scale_spline_objective", None) or "row_mr"),
+        },
     }
 
 
@@ -201,14 +194,13 @@ def heldout_hand_decision(
                 {
                     "dataset": name,
                     "tables": tables,
-                    "ang": _row_rotation_angles(pair_summary, tables) if settings["scale_model"] == "pspline" else None,
+                    "ang": _row_rotation_angles(pair_summary, tables),
                 }
             )
         if crystals:
             evidence = heldout_hand_evidence(
                 crystals,
                 symmetry_ops=parse_model(Path(model)).get("symmetry_ops"),
-                scale_model=str(settings["scale_model"]),
                 scale_cfg=settings["scale_refit_config"],
                 shell_dmin=exclusion["shell_dmin"] if exclusion is not None else None,
                 excluded_orbits=exclusion["orbits"] if exclusion is not None else None,

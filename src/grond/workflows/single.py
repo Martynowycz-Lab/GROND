@@ -521,8 +521,6 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
         thickness_run = root / "runs" / ds.name / "adaptive_thickness_polish"
         thickness_baseline = discrete_thickness_baseline_nuisance(args, active_nui)
         thickness_candidates = thickness_polish_nuisance(thickness_baseline, screen_frame_offsets)
-        if bool(getattr(args, "pets_static_auto", False)):
-            thickness_candidates["frame_offset"] = "0"
         run_logged(
             native_stage_cmd(
                 python,

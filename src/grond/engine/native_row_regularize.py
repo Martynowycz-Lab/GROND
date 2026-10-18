@@ -6,7 +6,7 @@ regularization terms we can defend from the current XDS row contract:
 
 * crystal thickness and thickness gradient;
 * one global frame offset;
-* per-frame/wedge group scales fitted on work reflections;
+* P-spline frame scales in scan angle fitted on work reflections;
 * simple sigma inflation terms used for weighting;
 * corrected-HKL export from q = Idyn/Iborn, followed by SHELXL scoring.
 
@@ -129,11 +129,8 @@ from grond.regularize.row_output import (
     write_row_table as write_row_table,
 )
 from grond.regularize.scales import (
-    fit_frame_detector_scales as fit_frame_detector_scales,
-    fit_group_scales as fit_group_scales,
     native_metrics as native_metrics,
     shelx_weights as shelx_weights,
-    solve_regularized_scales as solve_regularized_scales,
 )
 from grond.regularize.selection import (
     _trial_full_row_score as _trial_full_row_score,
@@ -844,17 +841,8 @@ def export_corrected_endpoint(
     arrays = best_eval["arrays"]
     q = arrays["dyn_raw"] / np.maximum(arrays["born_raw"], 1e-30)
     q_clip = np.clip(q, 0.05, 20.0)
-    groups = arrays["groups"]
-    scales = np.full(len(target), np.nan, dtype=float)
-    for g, scale in best_eval["dyn_scales"].items():
-        scales[groups == int(g)] = float(scale)
-    if "dyn_row_scale" in arrays:  # P-spline scales are per row, not per frame group
-        scales = np.asarray(arrays["dyn_row_scale"], dtype=float)
-    if best_eval.get("dyn_detector_scales"):
-        det_bins = arrays.get("detector_bins")
-        if det_bins is not None:
-            for d, scale in best_eval["dyn_detector_scales"].items():
-                scales[det_bins == int(d)] *= float(scale)
+    # P-spline scales are per row, not per frame group.
+    scales = np.asarray(arrays["dyn_row_scale"], dtype=float)
     endpoint_target, endpoint_sig, endpoint_restore_factor = endpoint_observation_arrays(
         data,
         target,
@@ -1290,10 +1278,6 @@ def main():
                 "HKLF4 contract; add --skip-endpoint-refinement or re-import the ordinary "
                 "cif_pets with PETS' matching static HKLF4 as --baseline-hkl"
             )
-        if any(value > 1 for value in parse_int_grid(args.detector_scale_bins)):
-            raise ValueError(
-                "PETS cif_pets input has no detector coordinates; detector scale bins must be 0"
-            )
         if any(
             abs(value) > 1e-12 for value in parse_float_grid(args.frame_offset_grid)
         ):
@@ -1422,7 +1406,6 @@ def main():
     dose_modes = [m.strip() for m in str(args.dose_b_mode_grid).replace(",", " ").split() if m.strip()]
     sg_jitter_modes = [m.strip() for m in str(args.sg_jitter_mode_grid).replace(",", " ").split() if m.strip()]
     group_width_values = parse_group_width_grid(args.group_width_grid, data)
-    detector_scale_bins_values = parse_int_grid(args.detector_scale_bins)
     frame_offset_values, frame_datum = resolve_frame_offset_grid(args.frame_offset_grid, data, datum_indices)
     row_plan_cache_decision = resolve_fixed_model_row_plan_cache(
         args.row_plan_cache,
@@ -1449,11 +1432,9 @@ def main():
             flush=True,
         )
     scale_model = scale_model_from_args(args)
-    scale_orbit_keys = None
-    if scale_model.kind == "pspline":
-        # Inner-CV folds of the P-spline scale fit use model-Laue orbits with Friedel pairs.
-        scale_orbit_keys = np.full(len(target), "", dtype=object)
-        scale_orbit_keys[indices] = heldout.orbit_keys(data.hkl[indices], model.get("symmetry_ops"), include_friedel=True)
+    # Inner-CV folds of the P-spline scale fit use model-Laue orbits with Friedel pairs.
+    scale_orbit_keys = np.full(len(target), "", dtype=object)
+    scale_orbit_keys[indices] = heldout.orbit_keys(data.hkl[indices], model.get("symmetry_ops"), include_friedel=True)
     trial_evaluator = functools.partial(evaluate_trial, scale_model=scale_model, orbit_keys=scale_orbit_keys)
     populate_nuisance_trials(
         args=args,
@@ -1474,7 +1455,6 @@ def main():
         sg_jitter_candidate_rejection=sg_jitter_candidate_rejection,
         rejected_prediction_candidates=rejected_prediction_candidates,
         geom_trials=geom_trials,
-        detector_scale_bins_values=detector_scale_bins_values,
         wght_a_values=wght_a_values,
         wght_b_values=wght_b_values,
         evaluate_trial=trial_evaluator,

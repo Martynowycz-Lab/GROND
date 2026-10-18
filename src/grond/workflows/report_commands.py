@@ -145,11 +145,8 @@ def publication_report_cmd(
             cmd += ["--run", f"{name}={run}"]
         for name, run in (result.get("publication_full_runs") or {}).items():
             cmd += ["--full-run", f"{name}={run}"]
-        scale_contract = result.get("scale_contract_selection")
-        if isinstance(scale_contract, Mapping):
-            selected_contract = str(scale_contract.get("selected_contract", "")).strip()
-            if selected_contract:
-                cmd += ["--selected-scale-contract", selected_contract]
+        # The combined endpoint keeps every crystal's full scales (the report's selected full-scale rows).
+        cmd += ["--selected-scale-contract", "full"]
         combined_summary = try_read_json(Path(str(result["combined"])) / "combined_summary.json")
         combined_endpoint = combined_summary.get("combined_endpoint")
         combined_endpoint = combined_endpoint if isinstance(combined_endpoint, Mapping) else {}

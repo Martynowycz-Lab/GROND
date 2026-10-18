@@ -108,19 +108,6 @@ def test_pspline_refit_matches_the_reference_fit_scales_cv():
     assert np.allclose(got, ref, rtol=1e-10, equal_nan=True)
 
 
-def test_group_scales_recover_truth_and_clamp_missing_groups():
-    rng = np.random.default_rng(1)
-    raw = rng.uniform(10, 100, size=200)
-    group = np.repeat(np.arange(10), 20)
-    s = np.linspace(0.5, 1.5, 10)
-    y = s[group] * raw
-    train = group != 9
-    out = H.group_fit_predict(y, np.ones_like(y), raw, group, train)
-    assert np.allclose(out["prediction"][train], y[train])
-    assert out["n_groups_clamped"] == 1 and out["n_scales"] == 9
-    assert np.allclose(out["prediction"][~train], np.median(s[:9]) * raw[~train])
-
-
 def test_inner_cv_selection_returns_a_grid_member():
     y, sig, raw, ang, group, keys, _d = synthetic(n=600)
     train = H.hash_fold(keys, G.DEV_SALT, 3) != 0

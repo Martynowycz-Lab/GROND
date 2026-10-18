@@ -360,7 +360,6 @@ def heldout_hand_evidence(
     crystals: list[Mapping[str, object]],
     *,
     symmetry_ops,
-    scale_model: str,
     scale_cfg: Mapping[str, object] | None = None,
     n_folds: int = HAND_CV_FOLDS,
     cv_salt: str = HAND_CV_SALT,
@@ -372,14 +371,12 @@ def heldout_hand_evidence(
     """Held-out predictions of both hands from one exact pair, pooled over crystals.
 
     Every work row is predicted out of fold: ``n_folds`` salted orbit folds
-    (crystal-independent keys), with frame scales refitted on the training
+    (crystal-independent keys), with P-spline frame scales refitted on the training
     orbits of each fold only.  Free rows are predicted from one fit on all
     work rows.  ``crystals`` holds ``{"dataset", "tables", "ang"}`` entries
-    (``ang`` is required for the P-spline scale model).
+    (``ang``: the per-row rotation angles of the P-spline scale fit).
     """
 
-    if scale_model not in {"pspline", "per-frame"}:
-        raise ValueError(f"unsupported held-out hand scale model {scale_model!r}")
     cfg = dict(scale_cfg or {})
     excluded = set(excluded_orbits or ())
     per: dict[str, dict[str, object]] = {}
@@ -400,26 +397,23 @@ def heldout_hand_evidence(
             raise ValueError(f"{name}: hand tables have no work rows to fit scales on")
         folds = heldout.hash_fold(list(keys), cv_salt, int(n_folds))
         ang = crystal.get("ang")
-        if scale_model == "pspline" and ang is None:
+        if ang is None:
             raise ValueError(f"{name}: the P-spline held-out hand refit needs per-row rotation angles")
 
         def fit_predict(raw, train, _y=y, _sig=sig, _group=group, _ang=ang, _keys=keys):
-            """Fit this crystal's frame scales on the ``train`` rows and return the scaled prediction for every row.
+            """Fit this crystal's P-spline frame scales on the ``train`` rows and return the scaled prediction for every row.
 
-            Under the P-spline model, a grid of several (n_basis, lambda) settings is resolved by inner CV on the
-            training rows only.
+            A grid of several (n_basis, lambda) settings is resolved by inner CV on the training rows only.
             """
-            if scale_model == "pspline":
-                fit_cfg = cfg
-                if "n_basis_grid" in cfg or "lambda_grid" in cfg:
-                    grid = {"n_basis": tuple(cfg.get("n_basis_grid") or (32,)), "lambda": tuple(cfg.get("lambda_grid") or (1.0,))}
-                    objective = str(cfg.get("objective", "row_mr"))
-                    fit_cfg = heldout.select_pspline_by_inner_cv(
-                        _y, _sig, raw, _ang, _group, train, _keys, grid=grid, objective=objective
-                    )["scale"] if len(grid["n_basis"]) * len(grid["lambda"]) > 1 else {
-                        "n_basis": int(grid["n_basis"][0]), "lambda": float(grid["lambda"][0]), "objective": objective}
-                return heldout.pspline_fit_predict(_y, _sig, raw, _ang, _group, train, fit_cfg)["prediction"]
-            return heldout.group_fit_predict(_y, _sig, raw, _group, train)["prediction"]
+            fit_cfg = cfg
+            if "n_basis_grid" in cfg or "lambda_grid" in cfg:
+                grid = {"n_basis": tuple(cfg.get("n_basis_grid") or (32,)), "lambda": tuple(cfg.get("lambda_grid") or (1.0,))}
+                objective = str(cfg.get("objective", "row_mr"))
+                fit_cfg = heldout.select_pspline_by_inner_cv(
+                    _y, _sig, raw, _ang, _group, train, _keys, grid=grid, objective=objective
+                )["scale"] if len(grid["n_basis"]) * len(grid["lambda"]) > 1 else {
+                    "n_basis": int(grid["n_basis"][0]), "lambda": float(grid["lambda"][0]), "objective": objective}
+            return heldout.pspline_fit_predict(_y, _sig, raw, _ang, _group, train, fit_cfg)["prediction"]
 
         predictions = {}
         for hand, raw in (("selected", tables["raw_selected"]), ("inverse", tables["raw_inverse"])):
@@ -472,12 +466,8 @@ def heldout_hand_evidence(
             "orbit_key": "grond.validation.heldout.orbit_key (model Laue group + Friedel), pooled over crystals",
             "shells": "exclusion-list shells" if shell_dmin else "5 equal-count resolution shells over pooled rows",
         },
-        "scale_model": scale_model,
-        "scale_refit": (
-            {"kind": "pspline_train_rows_only", **{key: cfg[key] for key in sorted(cfg)}}
-            if scale_model == "pspline"
-            else {"kind": "free_per_group_scales_train_rows_only", "group_column": "group"}
-        ),
+        "scale_model": "pspline",
+        "scale_refit": {"kind": "pspline_train_rows_only", **{key: cfg[key] for key in sorted(cfg)}},
     }
 
 

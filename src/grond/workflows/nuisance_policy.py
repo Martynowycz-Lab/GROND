@@ -29,8 +29,6 @@ AUTO_DIALS_BBOX_WINDOW_MAX = 0.03
 AUTO_DIALS_BBOX_N_POINTS = 60
 # Window cap for every other mode.
 LEGACY_SG_WINDOW_MAX = 0.012
-# PETS exact rows sample the PETS-owned rocking wedge, not an Sg window, with a fixed point count.
-AUTO_PETS_N_POINTS = 20
 # Engine bound on the mosaic width (Config.mosaicity_max_sigma_deg default).
 MOSAICITY_MAX_SIGMA_DEG = 0.5
 # Sequential per-crystal feature gates.  The mosaic cone precedes the Sg-jitter proxy because the
@@ -265,15 +263,14 @@ def compact_base_nuisance(args: argparse.Namespace) -> dict:
             "mosaicity_sigma_deg": "0.0",
             "row_resolution_b": "0.0",
         }
-    pets_static = bool(getattr(args, "pets_static_auto", False))
     return {
         "thickness_A": args.thickness_grid,
-        "thickness_model": (args.thickness_model_grid if pets_static else "uniform_gradient"),
+        "thickness_model": "uniform_gradient",
         "thickness_grad_frac": args.thickness_grad_grid,
         "thickness_sigma_frac": "0.0",
         "frame_offset": args.frame_offset_grid,
         "group_width_deg": args.group_width_grid,
-        "detector_scale_bins": args.detector_scale_bins,
+        "detector_scale_bins": "0",  # recorded nuisance field; no detector scale field
         "sigma_a": "0.0",
         "sigma_b_corr": "0.0",
         "sigma_c_peak": "0.0",
@@ -556,15 +553,12 @@ def resolved_final_n_points(args: argparse.Namespace, ds: DatasetSpec) -> int:
     """Return the explicit --n-points, or the final profile point count derived from the window.
 
     Fixed (and other width-bounded) windows keep AUTO_FIXED_PROFILE_SPACING (0.010 -> 50, 0.004 -> 20);
-    the DIALS-bbox window uses AUTO_DIALS_BBOX_N_POINTS.  PETS exact rows spread the points over the
-    PETS integration wedge, which the Sg window does not describe, so they keep AUTO_PETS_N_POINTS.
+    the DIALS-bbox window uses AUTO_DIALS_BBOX_N_POINTS.
     """
 
     explicit = getattr(args, "n_points", None)
     if explicit is not None:
         return int(explicit)
-    if bool(getattr(args, "pets_static_auto", False)):
-        return int(AUTO_PETS_N_POINTS)
     if resolved_sg_window_mode(args, ds) == "dials_bbox":
         return int(AUTO_DIALS_BBOX_N_POINTS)
     width = float(args.sg_window) * float(getattr(args, "sg_window_scale", 1.0))
@@ -738,7 +732,7 @@ def configure_auto_physics(prep: PrepConfig, args: argparse.Namespace) -> dict:
                 f"sg_window_mode dials_bbox for {ds.name}: {ds.hkl} does not declare "
                 "DIALS_BBOX_Z_RANGE_AS_ALF0_BET0=TRUE (GROND DIALS bridge), so ALF0/BET0 are not a bbox z-range"
             )
-        derived_source = "pets_wedge" if bool(getattr(crystal, "pets_static_auto", False)) else "window"
+        derived_source = "window"
         dose: dict = {}
         if dose_by_total and Path(ds.hkl).expanduser().is_file():
             try:

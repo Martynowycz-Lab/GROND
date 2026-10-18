@@ -282,11 +282,8 @@ def _thickness_scout_variant_args(
     variant.row_resolution_b_grid = "0.0"
     variant.dose_b_mode_grid = "none"
     variant.dose_b_per_frame_grid = "0.0"
-    if scale_mode == "production":
-        variant.detector_scale_bins = str(args.detector_scale_bins)
-    elif scale_mode in {"no_detector", "nodetector", "no-detector"}:
-        variant.detector_scale_bins = "0"
-    else:
+    # Both scale modes fit the same P-spline frame scales; there is no detector scale field.
+    if scale_mode not in {"production", "no_detector", "nodetector", "no-detector"}:
         raise SystemExit(f"Unknown thickness-scout scale mode {scale_mode!r}. Use production or no-detector.")
     if feature_mode == "bare":
         variant.sg_jitter_mode_grid = "none"

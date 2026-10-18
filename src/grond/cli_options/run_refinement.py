@@ -21,19 +21,9 @@ def add_scales_and_screening(ap: argparse.ArgumentParser) -> None:
         help="Fit nuisance scales on work rows only (the default).",
     )
     ap.add_argument(
-        "--scale-model",
-        choices=["pspline", "per-frame"],
-        default="pspline",
-        help=(
-            "Frame-scale family fitted in every native stage. pspline (default): smooth P-spline in scan angle "
-            "on the scale-fit rows, n_basis and lambda chosen per crystal by inner orbit CV. "
-            "per-frame: free per-frame scales."
-        ),
-    )
-    ap.add_argument(
         "--scale-spline-n-basis-grid",
         default="32",
-        help="P-spline basis sizes tried by the inner orbit CV; one value pins it.",
+        help="Frame scales are a smooth P-spline in scan angle: basis sizes tried by the inner orbit CV; one value pins it.",
     )
     ap.add_argument(
         "--scale-spline-lambda-grid",
@@ -50,79 +40,6 @@ def add_structure_updates(ap: argparse.ArgumentParser) -> None:
         choices=["auto", "shelxl_feedback", "off"],
         default="auto",
         help="Structure-update engine. Auto uses the high-N/Q SHELXL feedback loop for full runs when SHELXL is available, otherwise off.",
-    )
-
-
-def add_scale_contract_selection(ap: argparse.ArgumentParser) -> None:
-    """Add the multi-dataset scale-contract options (recorded in the decision; the full contract is kept)."""
-
-    ap.add_argument(
-        "--multi-scale-contract-selection",
-        choices=["auto", "off"],
-        default="auto",
-        help="Multi-dataset scale-contract decision record; the full per-crystal scale contract is always kept.",
-    )
-    ap.add_argument(
-        "--multi-scale-min-reduction",
-        type=float,
-        default=0.10,
-        help="Minimum total scale-parameter reduction required for compact promotion.",
-    )
-    ap.add_argument(
-        "--multi-scale-require-bic-improvement",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Deprecated diagnostic toggle; BIC is reported but does not select scale topology.",
-    )
-    ap.add_argument(
-        "--multi-scale-max-row-rall-cost",
-        "--multi-scale-max-row-wr2-cost",
-        dest="multi_scale_max_row_rall_cost",
-        type=float,
-        default=0.01,
-        help="Maximum absolute compact JANA-style row Rall cost on each of all, work, and free rows.",
-    )
-    ap.add_argument(
-        "--multi-scale-max-endpoint-r1-cost",
-        type=float,
-        default=0.005,
-        help="Maximum absolute compact R1all and R1gt endpoint cost.",
-    )
-    ap.add_argument(
-        "--multi-scale-max-endpoint-wr2-cost",
-        type=float,
-        default=0.01,
-        help="Maximum absolute compact endpoint wR2all cost.",
-    )
-    ap.add_argument("--multi-scale-goof-min", type=float, default=0.85)
-    ap.add_argument("--multi-scale-goof-max", type=float, default=1.15)
-    ap.add_argument(
-        "--multi-scale-max-input-row-loss-fraction",
-        type=float,
-        default=0.001,
-        help="Maximum corrected-row loss allowed when materializing compact scales.",
-    )
-    ap.add_argument(
-        "--multi-scale-min-bloch-rall-gain",
-        "--multi-scale-min-bloch-wr2-gain",
-        dest="multi_scale_min_bloch_rall_gain",
-        type=float,
-        default=0.002,
-        help="Minimum pooled Born-minus-Bloch row Rall gain and retained per-dataset gain.",
-    )
-    ap.add_argument(
-        "--multi-scale-max-dataset-row-rall-cost",
-        "--multi-scale-max-dataset-row-wr2-cost",
-        dest="multi_scale_max_dataset_row_rall_cost",
-        type=float,
-        default=0.015,
-        help="Maximum compact-versus-full row Rall cost on any individual dataset/split.",
-    )
-    ap.add_argument(
-        "--multi-scale-max-preexisting-bloch-gain-loss",
-        type=float,
-        default=0.01,
-        help="Maximum additional Born-minus-Bloch loss allowed where the full-scale control already lacks a split-level Bloch win.",
     )
 
 

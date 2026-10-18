@@ -14,23 +14,19 @@ def metric_row(trial):
     """Flatten one evaluated trial into a nuisance-table row.
 
     The row holds its nuisance fields, q-control summary, counts and the Bloch and Born wR2 and R1 (fractions).
-    P-spline trials add their scale columns; scale_inner_cv_Rall stays in percent as recorded.
+    The P-spline scale columns follow; scale_inner_cv_Rall stays in percent as recorded.
     """
 
     m = trial["metrics"]
     n = trial["nuisance"]
     q_control = trial.get("q_control") or {}
-    spline = trial.get("scale_model") or {}
-    spline_columns = (
-        {
-            "scale_edf": spline.get("edf"),
-            "scale_spline_n_basis": spline.get("n_basis"),
-            "scale_spline_lambda": spline.get("lambda"),
-            "scale_inner_cv_Rall": spline.get("inner_cv_r_all"),
-        }
-        if spline.get("kind") == "pspline"
-        else {}
-    )
+    spline = trial["scale_model"]
+    spline_columns = {
+        "scale_edf": spline.get("edf"),
+        "scale_spline_n_basis": spline.get("n_basis"),
+        "scale_spline_lambda": spline.get("lambda"),
+        "scale_inner_cv_Rall": spline.get("inner_cv_r_all"),
+    }
     return {
         **n,
         "q_control": q_control.get("mode", "real"),
@@ -61,10 +57,7 @@ def trial_metric(trial, metric_name: str) -> float:
         return float(trial["metrics"]["work"]["born"]["wR2_all"])
     if metric_name == "cv_Rall":
         # Inner 3-fold orbit-CV amplitude R_all over the scale-fit rows.
-        spline = trial.get("scale_model") or {}
-        if spline.get("kind") != "pspline":
-            raise ValueError("selection metric cv_Rall needs --scale-model pspline")
-        return float(spline["inner_cv_r_all"]) / 100.0
+        return float(trial["scale_model"]["inner_cv_r_all"]) / 100.0
     split, value = metric_name.split("_", 1)
     if split not in trial["metrics"]:
         raise ValueError(f"unknown selection split {split!r} in {metric_name!r}")

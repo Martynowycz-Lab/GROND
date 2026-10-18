@@ -36,10 +36,8 @@ def write_row_table(path: Path, data: XDSData, target, best_eval, masks, target_
             "max_sg_solve_residual",
             "split", "row_resolution_factor", "dyn_raw_unmodulated", "dyn_raw", "born_raw", "q_dyn_over_born", "dyn_scaled", "born_scaled",
             "dyn_residual_over_sigma", "born_residual_over_sigma",
+            "scale_angle_deg",  # P-spline scale coordinate omega(ZCAL)
         ]
-        if "scale_angle_deg" in arrays:
-            # P-spline scale coordinate omega(ZCAL); per-frame tables keep the historical columns.
-            fields.append("scale_angle_deg")
         w = csv.DictWriter(f, fieldnames=fields)
         w.writeheader()
         default_float = np.full(len(target), np.nan, dtype=float)
@@ -106,9 +104,8 @@ def write_row_table(path: Path, data: XDSData, target, best_eval, masks, target_
                 "born_scaled": float(arrays["born_scaled"][i]),
                 "dyn_residual_over_sigma": float((arrays["dyn_scaled"][i] - target[i]) / max(arrays["sigma_eff"][i], 1e-12)),
                 "born_residual_over_sigma": float((arrays["born_scaled"][i] - target[i]) / max(arrays["sigma_eff"][i], 1e-12)),
+                "scale_angle_deg": float(arrays["scale_angle_deg"][i]),
             }
-            if "scale_angle_deg" in arrays:
-                row["scale_angle_deg"] = float(arrays["scale_angle_deg"][i])
             w.writerow(row)
 
 

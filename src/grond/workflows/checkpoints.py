@@ -138,7 +138,6 @@ def write_continue_checkpoint(prep: PrepConfig, result: Mapping[str, object], ar
         "datasets": datasets,
         "structure_dataset_policy": ((result.get("dataset_policy") or {}).get("structure_update") or {}),
         "final_dataset_policy": ((result.get("dataset_policy") or {}).get("final") or {}),
-        "scale_contract_selection": result.get("scale_contract_selection") or {},
         "multi_endpoint_merge_key": getattr(args, "multi_endpoint_merge_key", "model_symmetry"),
         "recommended_command": [
             "GROND",

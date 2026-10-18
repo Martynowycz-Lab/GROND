@@ -204,12 +204,6 @@ def register_push(sub: argparse._SubParsersAction) -> None:
         help="Lockbox file of orbits held back from every stage. Default: the source summaries' value (none if unrecorded).",
     )
     p_push.add_argument(
-        "--scale-model",
-        choices=["pspline", "per-frame"],
-        default=None,
-        help="Frame-scale family. Default: the source summaries' value (per-frame if unrecorded).",
-    )
-    p_push.add_argument(
         "--scale-spline-n-basis-grid", default=None, help="P-spline basis grid. Default: the source summaries' value."
     )
     p_push.add_argument(

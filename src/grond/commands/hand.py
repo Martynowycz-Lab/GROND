@@ -99,8 +99,7 @@ def _apply_source_physics_to_hand_args(
     args.native_only = True
     args.make_maps = False
     args.production_scales = str(source_config.get("scale_fit_split") or "work") == "all"
-    # Replay the source frame-scale family; summaries that predate the option used per-frame scales.
-    args.scale_model = str(source_config.get("scale_model") or "per-frame")
+    # Replay the source P-spline scale grids; summaries that do not record them get the default grids.
     for key in ("scale_spline_n_basis_grid", "scale_spline_lambda_grid"):
         if key in source_config:
             setattr(args, key, source_config[key])

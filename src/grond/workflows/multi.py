@@ -51,7 +51,6 @@ from grond.workflows.nuisance_policy import (
     stage_n_points,
 )
 from grond.workflows.report_commands import combine_cmd
-from grond.workflows.scale_selection import run_multi_scale_contract_selection
 from grond.workflows.sg_window_selection import run_sg_window_scout
 from grond.workflows.shared_refinement import run_multi_shelxl_feedback_loop
 from grond.workflows.single import run_feature_gate
@@ -625,13 +624,9 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
             "final_elastic_selection": post_feedback_multi_hand_diagnostic,
         }
         write_json(root / "decisions" / "shared_absolute_structure_decision.json", shared_hand_decision)
-    combined_input_runs, publication_runs, scale_contract_selection = run_multi_scale_contract_selection(
-        full_runs=final_runs,
-        full_input_runs=full_input_runs,
-        full_publication_runs=full_publication_runs,
-        root=root,
-        args=args,
-    )
+    # The combined endpoint uses every crystal's own full P-spline scales.
+    combined_input_runs = {str(name): Path(path) for name, path in full_input_runs.items()}
+    publication_runs = {str(name): Path(path) for name, path in full_publication_runs.items()}
     combined = root / "runs" / "combined"
     run_logged(
         combine_cmd(python, combined_input_runs, final_model, combined, args, free_validation=True),
@@ -680,7 +675,6 @@ def run_multi(prep: PrepConfig, args: argparse.Namespace, python: str, logs: Pat
         },
         "structure_update_strategy": structure_strategy,
         "structure_feedback": structure_feedback,
-        "scale_contract_selection": scale_contract_selection,
         "resolution_limits": resolution_limits,
         "merged_resolution_limit": merged_resolution_limit,
         "sg_window_scout": sg_window_scout_runs,

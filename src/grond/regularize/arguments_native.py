@@ -146,12 +146,8 @@ def build_parser(description: str, *, default_hkl, default_res, default_baseline
     ap.add_argument(
         "--group-width-grid",
         default="auto",
-        help="Comma grid of physical frame-scale group widths. Values are degrees; also accepts frame, 2frame, 3frames, and auto.",
+        help="Comma grid of frame-group widths (the row table's group column). Values are degrees; also accepts frame, 2frame, 3frames, and auto.",
     )
-    ap.add_argument("--detector-scale-bins", default="0", help="Comma grid for optional NxN detector-position scale correction fitted with frame scales. Use 0 to disable.")
-    ap.add_argument("--detector-scale-ridge", type=float, default=0.05, help="Dimensionless shrinkage of detector factors toward unity.")
-    ap.add_argument("--detector-scale-smoothness", type=float, default=0.10, help="Dimensionless nearest-neighbor detector-field smoothness penalty.")
-    ap.add_argument("--detector-scale-min-rows", type=int, default=20, help="Minimum work rows required before a detector tile receives an independent data term.")
     ap.add_argument("--sigma-a-grid", default="0.0,0.03,0.06")
     ap.add_argument("--sigma-b-corr-grid", default="0.0")
     ap.add_argument("--sigma-c-peak-grid", default="0.0")
@@ -168,7 +164,7 @@ def build_parser(description: str, *, default_hkl, default_res, default_baseline
     ap.add_argument("--free-fraction", type=float, default=0.10)
     ap.add_argument("--split-seed", type=int, default=42)
     add_split_scheme_args(ap)
-    ap.add_argument("--scale-fit-split", choices=["work", "all"], default="work", help="Rows used to fit nuisance group scales. Use 'all' to reproduce final all-data model-update statistics; use 'work' for validation.")
+    ap.add_argument("--scale-fit-split", choices=["work", "all"], default="work", help="Rows used to fit the P-spline frame scales. Use 'all' to reproduce final all-data model-update statistics; use 'work' for validation.")
     ap.add_argument(
         "--selection-metric",
         choices=["work_born_wR2", "work_wR2", "free_wR2", "all_wR2", "all_R1", "cv_Rall"],
@@ -176,7 +172,7 @@ def build_parser(description: str, *, default_hkl, default_res, default_baseline
         help=(
             "Metric used to choose the reported best nuisance trial. "
             "work_born_wR2 is reserved for hand-invariant transform scouting; "
-            "cv_Rall is the inner orbit-CV R_all of the P-spline scale fit and needs --scale-model pspline."
+            "cv_Rall is the inner orbit-CV R_all of the P-spline scale fit."
         ),
     )
     ap.add_argument(
@@ -203,13 +199,7 @@ def build_parser(description: str, *, default_hkl, default_res, default_baseline
         default="1.0",
         help="Diagnostic q-exponent grid. Production workflows use the full Bloch/Born correction with lambda_q=1.0.",
     )
-    ap.add_argument(
-        "--scale-smoothness",
-        type=float,
-        default=0.0,
-        help="Experimental L2 frame-scale smoothness coefficient. Default 0 keeps per-group scales independent; use post-hoc scale compression for publication parameter reduction.",
-    )
-    add_scale_model_arguments(ap, default="per-frame")
+    add_scale_spline_arguments(ap)
     ap.add_argument("--endpoint-b-grid", default="0.0", help="Diagnostic endpoint resolution-scale grid in intensity B units: Icorr *= exp(B*(1/4d^2 - median(1/4d^2))). Nonzero values are not promoted over a neutral B=0 endpoint.")
     ap.add_argument("--endpoint-exti-grid", default="off", help="Comma grid of endpoint EXTI modes: off,on. Off removes EXTI from the corrected endpoint; on keeps/regularizes the source EXTI term.")
     ap.add_argument("--shelxl", default=shelxl, help="Explicit SHELXL executable used for corrected-HKL endpoints.")
@@ -294,19 +284,13 @@ def build_parser(description: str, *, default_hkl, default_res, default_baseline
     return ap
 
 
-def add_scale_model_arguments(ap: argparse.ArgumentParser, *, default: str) -> None:
-    """Frame-scale family options of the native row engine."""
+def add_scale_spline_arguments(ap: argparse.ArgumentParser) -> None:
+    """P-spline frame-scale options of the native row engine.
 
-    ap.add_argument(
-        "--scale-model",
-        choices=["per-frame", "pspline"],
-        default=default,
-        help=(
-            "Frame-scale family fitted in every trial. per-frame: one free scale per frame group. "
-            "pspline: smooth cubic P-spline in scan angle, fitted on the scale-fit rows, with n_basis and lambda "
-            "chosen by inner 3-fold orbit CV over the grids below."
-        ),
-    )
+    Every trial fits a smooth cubic P-spline in scan angle on the scale-fit rows, with n_basis and lambda chosen by
+    inner 3-fold orbit CV over these grids.
+    """
+
     ap.add_argument(
         "--scale-spline-n-basis-grid",
         default="32",

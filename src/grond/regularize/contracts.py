@@ -13,7 +13,9 @@ class Nuisance:
     """Nuisance values of one native trial; each trial record stores them as its nuisance dict.
 
     Thicknesses are in A and angles in degrees. sigma_a, sigma_b_corr and sigma_c_peak are the error-model terms of
-    sigma_eff. A NaN native_wght_a or native_wght_b means the stage's SHELXL weights are used.
+    sigma_eff. A NaN native_wght_a or native_wght_b means the stage's SHELXL weights are used. group_width_deg sets
+    the frame groups of the row table. detector_scale_bins, scale_smoothness and the detector_scale_* fields belong
+    to the removed per-frame and detector scale models; they stay in the record at 0 and their defaults.
     """
 
     thickness_A: float
@@ -137,43 +139,36 @@ def parse_int_grid(text: str) -> list[int]:
     return [int(round(float(x))) for x in str(text).replace(",", " ").split() if x.strip()]
 
 
-SCALE_MODELS = ("per-frame", "pspline")
-
-
 @dataclass(frozen=True)
 class ScaleModel:
-    """Frame-scale family fitted inside every native trial.
+    """P-spline frame scales fitted inside every native trial.
 
     Like ``scale_fit_split`` this is a stage evaluation contract, not a Nuisance
-    field. ``per-frame`` is the free per-group fit. ``pspline`` is the smooth
-    P-spline in scan angle (tests/reference/reference_lib.py fit_scales_cv) whose
-    (n_basis, lambda) are chosen by inner 3-fold orbit CV over the scale-fit rows.
+    field: a smooth cubic P-spline in scan angle (tests/reference/reference_lib.py
+    fit_scales_cv) whose (n_basis, lambda) are chosen by inner 3-fold orbit CV over
+    the scale-fit rows.
     """
 
-    kind: str = "per-frame"
     n_basis_grid: tuple[int, ...] = (32,)
     lambda_grid: tuple[float, ...] = (0.3, 1.0, 3.0, 10.0, 30.0, 100.0)
     objective: str = "row_mr"
     clamp: bool = True
 
     def __post_init__(self) -> None:
-        """Refuse an unknown kind; for pspline also empty grids, n_basis below 4 and non-positive lambda."""
+        """Refuse empty grids, n_basis below 4 and non-positive lambda."""
 
-        if self.kind not in SCALE_MODELS:
-            raise ValueError(f"unknown scale model {self.kind!r}; choices are {', '.join(SCALE_MODELS)}")
-        if self.kind == "pspline":
-            if not self.n_basis_grid or not self.lambda_grid:
-                raise ValueError("pspline scale model needs non-empty n_basis and lambda grids")
-            if any(int(n) < 4 for n in self.n_basis_grid):
-                raise ValueError("pspline n_basis values must be at least 4 (cubic B-splines)")
-            if any(not math.isfinite(float(v)) or float(v) <= 0.0 for v in self.lambda_grid):
-                raise ValueError("pspline lambda values must be finite and positive")
+        if not self.n_basis_grid or not self.lambda_grid:
+            raise ValueError("pspline scale model needs non-empty n_basis and lambda grids")
+        if any(int(n) < 4 for n in self.n_basis_grid):
+            raise ValueError("pspline n_basis values must be at least 4 (cubic B-splines)")
+        if any(not math.isfinite(float(v)) or float(v) <= 0.0 for v in self.lambda_grid):
+            raise ValueError("pspline lambda values must be finite and positive")
 
     def to_dict(self) -> dict[str, object]:
         """Return the scale-model contract as a JSON-safe dict."""
 
         return {
-            "kind": self.kind,
+            "kind": "pspline",
             "n_basis_grid": [int(n) for n in self.n_basis_grid],
             "lambda_grid": [float(v) for v in self.lambda_grid],
             "objective": self.objective,
@@ -182,13 +177,9 @@ class ScaleModel:
 
 
 def scale_model_from_args(args) -> ScaleModel:
-    """Scale-model contract from parsed options; absent options mean the legacy per-frame fit."""
+    """P-spline scale contract from the --scale-spline-* options; absent options give their defaults."""
 
-    kind = str(getattr(args, "scale_model", "per-frame") or "per-frame")
-    if kind == "per-frame":
-        return ScaleModel()
     return ScaleModel(
-        kind=kind,
         n_basis_grid=tuple(parse_int_grid(getattr(args, "scale_spline_n_basis_grid", "32"))),
         lambda_grid=tuple(parse_float_grid(getattr(args, "scale_spline_lambda_grid", "0.3,1,3,10,30,100"))),
     )

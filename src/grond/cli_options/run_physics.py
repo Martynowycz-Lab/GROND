@@ -278,40 +278,7 @@ def add_nuisance(ap: argparse.ArgumentParser) -> None:
     ap.add_argument(
         "--group-width-grid",
         default="auto",
-        help="Scale-group width grid. Numeric values are degrees; frame, 2frame, 3frames, and auto resolve from XDS OSCILLATION_RANGE. Auto never goes below one physical frame; explicit numeric sub-frame values are diagnostic opt-ins.",
-    )
-    ap.add_argument(
-        "--detector-scale-bins",
-        default="0",
-        help="Detector-position field used during physical nuisance selection. The default is detector-free so a flexible field cannot choose thickness or other physics; 0x0, 2x2, 4x4, and diagnostic 8x8 fields are evaluated later on the same frozen predictions.",
-    )
-    ap.add_argument(
-        "--detector-scale-ridge",
-        type=float,
-        default=0.05,
-        help="Dimensionless shrinkage of detector factors toward unity.",
-    )
-    ap.add_argument(
-        "--detector-scale-smoothness",
-        type=float,
-        default=0.10,
-        help="Dimensionless nearest-neighbor detector-field smoothness penalty.",
-    )
-    ap.add_argument(
-        "--detector-scale-min-rows",
-        type=int,
-        default=20,
-        help="Minimum work rows required for every independently supported detector tile.",
-    )
-    ap.add_argument("--detector-scale-min-holdout-improvement", type=float, default=0.002)
-    ap.add_argument("--detector-scale-required-improved-splits", type=int, default=2)
-    ap.add_argument("--detector-scale-max-bloch-gain-loss", type=float, default=0.002)
-    ap.add_argument("--detector-scale-min-field-correlation", type=float, default=0.50)
-    ap.add_argument("--detector-scale-max-field-log-rms", type=float, default=0.10)
-    ap.add_argument(
-        "--detector-scale-independent-calibration",
-        action="store_true",
-        help="Permit 8x8 detector-scale promotion only when an independent detector calibration supports that field.",
+        help="Frame-group width grid (the group column of the row tables). Numeric values are degrees; frame, 2frame, 3frames, and auto resolve from XDS OSCILLATION_RANGE. Auto never goes below one physical frame; explicit numeric sub-frame values are diagnostic opt-ins.",
     )
     ap.add_argument("--sigma-a-grid", default="0.0")
     ap.add_argument("--sigma-b-corr-grid", default="0.0")

@@ -13,8 +13,6 @@ from grond.cli_support import execution
 from grond.cli_support.execution import configure_progress, estimate_run_steps
 from grond.cli_support.tools import choose_python, external_tool_statuses, raise_for_missing_external_tools
 from grond.commands.preparation import prep_from_args
-from grond.hashing import sha256_file
-from grond.hkl_transform import parse_hkl_transform_info
 from grond.io.config import PrepConfig, write_prep
 from grond.io.structure_contract import check_sfac_contract, prepare_structure_for_legacy
 from grond.reports.progress import _quick_progress_finish_info
@@ -90,97 +88,14 @@ def _validated_h_omit_mode(value: object, dataset_count: int) -> str:
     return "on" if mode in {"on", "only", "both"} else "off"
 
 
-def _configure_static_pets_auto(
-    prep: PrepConfig,
-    args: argparse.Namespace,
-) -> dict[str, object] | None:
-    """Apply source-safe AUTO defaults for a row-matched ordinary PETS import."""
+def _refuse_static_pets_auto(prep: PrepConfig) -> None:
+    """Refuse a PETS2 import: its exact rows have no continuous scan angle for the P-spline frame scales."""
 
-    bridge = (prep.metadata or {}).get("pets2_bridge")
-    if not isinstance(bridge, Mapping):
-        return None
-    if len(prep.datasets) != 1:
-        raise SystemExit("PETS2 AUTO currently supports exactly one ordinary integration")
-    if bool(bridge.get("virtual_frames")):
+    if isinstance((prep.metadata or {}).get("pets2_bridge"), Mapping):
         raise SystemExit(
-            "PETS *_dyn.cif_pets virtual-frame occurrences are correlated row-space data, "
-            "not a static SHELXL endpoint. Import the ordinary cif_pets plus its companion "
-            ".hkl and PETS-exported SHELX HKLF4 instead."
+            "PETS2 input is not supported: GROND fits P-spline frame scales in the continuous rotation-scan "
+            "angle, which PETS exact rows do not have"
         )
-    static_contract = bridge.get("static_endpoint_contract")
-    if not isinstance(static_contract, Mapping) or static_contract.get("status") != "validated":
-        raise SystemExit(
-            "PETS2 AUTO requires a row-for-row validated PETS static HKLF4. Re-import "
-            "the ordinary cif_pets with its 13-column .hkl, starting model, and the "
-            "matching PETS-exported SHELX HKL as --baseline-hkl."
-        )
-    baseline = Path(prep.baseline_hkl).expanduser().resolve()
-    if not baseline.is_file():
-        raise SystemExit(f"validated PETS static HKLF4 is not readable: {baseline}")
-    expected_hash = str(static_contract.get("sha256") or "")
-    actual_hash = sha256_file(baseline)
-    if not expected_hash or actual_hash != expected_hash:
-        raise SystemExit(
-            "PETS static HKLF4 hash changed after import; refusing the AUTO run "
-            f"(expected {expected_hash or 'missing'}, observed {actual_hash})"
-        )
-    dataset = prep.datasets[0]
-    transform = parse_hkl_transform_info(dataset.hkl_transform or "identity")
-    if transform.canonical != "identity" or not transform.proper:
-        raise SystemExit("PETS2 AUTO currently requires the importer-validated proper identity setting")
-
-    changes: dict[str, dict[str, object]] = {}
-
-    def force(name: str, value: object) -> None:
-        """Set one option on ``args`` and record the old and new value when it changes."""
-        old = getattr(args, name)
-        setattr(args, name, value)
-        if old != value:
-            changes[name] = {"old": old, "new": value}
-
-    force("trust_hkl_transform", True)
-    force("frame_offset_grid", "0")
-    force("group_width_grid", "999,10,5,3,2,1")
-    force("detector_scale_bins", "0")
-    # PETS exact rows have no continuous scan angle for P-spline scales; keep compact angular groups.
-    force("scale_model", "per-frame")
-    force("row_resolution_b_grid", "0.0")
-    force("sigma_c_peak_grid", "0.0")
-    force("sg_jitter_mode_grid", "none")
-    force("sg_jitter_sigma0_grid", "0.0")
-    force("sg_jitter_sigma_d_inv_grid", "0.0")
-    force("sg_jitter_sigma_frame_grid", "0.0")
-    # PETS exact rows have no mosaic-cone implementation; the engine refuses it.
-    force("mosaicity_mode", "none")
-    # The nested nuisance stage scores with P-spline scales in scan angle, which PETS exact rows do not have.
-    force("nuisance_selection", "sequential")
-    force("feedback_thickness_update", "off")
-    force("thickness_model_grid", "single,uniform_gradient")
-    force("thickness_grad_grid", "0.0,0.4,1.0")
-    force("profile_quadrature", "uniform")
-    force("profile_accumulation", "sum")
-    force("sg_window_scout", "off")
-    args.pets_static_auto = True
-    payload = {
-        "schema": "grond.pets2-static-auto-contract.v1",
-        "status": "validated",
-        "source": bridge.get("source"),
-        "rows": bridge.get("rows"),
-        "virtual_frames": False,
-        "static_hkl": str(baseline),
-        "static_hkl_sha256": actual_hash,
-        "transform": transform.to_dict(),
-        "automatic_overrides": changes,
-        "selection": (
-            "AUTO chooses screen/final beam bases, quadrature count, thickness, compact "
-            "angular frame scales, hand, and the SHELXL rounds; detector scales remain disabled "
-            "because cif_pets has no detector coordinates"
-        ),
-    }
-    contract_path = Path(args.out_dir) / "PETS_STATIC_AUTO_CONTRACT.json"
-    contract_path.parent.mkdir(parents=True, exist_ok=True)
-    contract_path.write_text(json.dumps(payload, indent=2) + "\n")
-    return payload
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -203,7 +118,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     if args.bloch_evaluator_settings["mode"] != "off" or args.bloch_evaluator_settings["basis_centring_coset"]:
         print(f"Bloch evaluator settings: {json.dumps(args.bloch_evaluator_settings, sort_keys=True)}", flush=True)
     prep = prep_from_args(args)
-    _configure_static_pets_auto(prep, args)
+    _refuse_static_pets_auto(prep)
     try:
         requested_h_omit = str(getattr(args, "h_omit", "off") or "off")
         args.h_omit = _validated_h_omit_mode(requested_h_omit, len(prep.datasets))
@@ -317,19 +232,6 @@ def cmd_run(args: argparse.Namespace) -> int:
         },
         "scale_model": scale_model_policy,
         "nuisance_selection": nuisance_selection_policy,
-        "multi_scale_contract_selection": {
-            "mode": args.multi_scale_contract_selection,
-            "minimum_scale_reduction": args.multi_scale_min_reduction,
-            "require_bic_improvement_diagnostic_only": args.multi_scale_require_bic_improvement,
-            "maximum_row_rall_cost": args.multi_scale_max_row_rall_cost,
-            "maximum_endpoint_r1_cost": args.multi_scale_max_endpoint_r1_cost,
-            "maximum_endpoint_wr2_cost": args.multi_scale_max_endpoint_wr2_cost,
-            "goof_range": [args.multi_scale_goof_min, args.multi_scale_goof_max],
-            "maximum_input_row_loss_fraction": args.multi_scale_max_input_row_loss_fraction,
-            "minimum_bloch_rall_gain": args.multi_scale_min_bloch_rall_gain,
-            "maximum_dataset_row_rall_cost": args.multi_scale_max_dataset_row_rall_cost,
-            "maximum_preexisting_bloch_gain_loss": args.multi_scale_max_preexisting_bloch_gain_loss,
-        },
         "resolution_limit": {
             "enabled": args.resolution_limit_gate,
             "shells": args.resolution_shells,

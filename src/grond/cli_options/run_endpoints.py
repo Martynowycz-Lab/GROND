@@ -20,12 +20,6 @@ def add_endpoints(ap: argparse.ArgumentParser, *, expose_lambda_controls: bool) 
     else:
         ap.set_defaults(lambda_grid=FULL_Q_LAMBDA)
     ap.add_argument(
-        "--scale-smoothness",
-        type=float,
-        default=0.0,
-        help="Experimental L2 frame-scale smoothness coefficient. Default 0 keeps per-group scales independent.",
-    )
-    ap.add_argument(
         "--endpoint-b-grid",
         default="0.0",
         help="Corrected-HKL endpoint resolution-scale diagnostic grid. Nonzero values are opt-in only; GROND keeps B=0 as the final promotable endpoint whenever it is present.",

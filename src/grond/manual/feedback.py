@@ -83,7 +83,6 @@ def _manual_checkpoint(workflow: Mapping[str, object], output: Path) -> dict[str
         "datasets": datasets,
         "structure_dataset_policy": {},
         "final_dataset_policy": {},
-        "scale_contract_selection": {},
         "multi_endpoint_merge_key": "model_symmetry",
         "manual_workflow": str(workflow.get("root", "")),
     }

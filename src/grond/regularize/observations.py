@@ -1,4 +1,4 @@
-"""Observation units, row selection and scale-group geometry."""
+"""Observation units, row selection and frame-group geometry."""
 
 from __future__ import annotations
 
@@ -54,7 +54,7 @@ def automatic_frame_offset_grid(datum_offset_frames: float) -> list[float]:
 
 
 def parse_group_width_grid(text: str, data: XDSData) -> list[float]:
-    """Parse physical scale-group widths.
+    """Parse physical frame-group widths.
 
     In addition to numeric degree values, GROND accepts `frame`, `2frame`,
     `3frames`, and `auto`.  `auto` expands to one-, two-, and three-frame
@@ -155,7 +155,7 @@ def sigma_eff(data: XDSData, target, base_sigma, nui: Nuisance):
 
 
 def group_indices(data: XDSData, group_width_deg: float, frame_offset: float):
-    """Return the scale group of every row: omega at ZCAL + frame_offset in group_width_deg bins.
+    """Return the frame group of every row: omega at ZCAL + frame_offset in group_width_deg bins.
 
     Bins start at the smallest omega. PETS exact-row input keeps its own virtual-frame partition, except a validated
     static HKLF4 endpoint, which bins the cumulative rotation between its orientation matrices.
@@ -193,31 +193,6 @@ def group_indices(data: XDSData, group_width_deg: float, frame_offset: float):
         return np.rint(np.asarray(data.zcal, dtype=float)).astype(int) - 1
     omegas = np.asarray([data.omega_from_z(float(z) + float(frame_offset)) for z in data.zcal], dtype=float)
     return ((omegas - float(np.min(omegas))) // float(group_width_deg)).astype(int)
-
-
-def detector_bin_indices(data: XDSData, n_bins: int):
-    """Return every row's tile y * n_bins + x on an n_bins x n_bins grid over XCAL and YCAL (all 0 when n_bins <= 1).
-
-    The detector size comes from the header NX and NY, else from the largest calculated position plus 1.
-    """
-
-    if int(n_bins) <= 1:
-        return np.zeros(len(data.hkl), dtype=int)
-    nx_text = str(data.header.get("NX", ""))
-    ny_text = str(data.header.get("NY", ""))
-    nx_match = re.search(r"^\s*([0-9.]+)", nx_text)
-    ny_match = re.search(r"(?:^|\s)NY\s*=\s*([0-9.]+)", nx_text) or re.search(r"^\s*([0-9.]+)", ny_text)
-    x = np.asarray(data.xcal, dtype=float)
-    y = np.asarray(data.ycal, dtype=float)
-    nx = float(nx_match.group(1)) if nx_match else float("nan")
-    ny = float(ny_match.group(1)) if ny_match else float("nan")
-    if not np.isfinite(nx) or nx <= 0:
-        nx = float(np.nanmax(x)) + 1.0
-    if not np.isfinite(ny) or ny <= 0:
-        ny = float(np.nanmax(y)) + 1.0
-    xb = np.floor(np.clip(x, 0.0, nx - 1e-6) / nx * int(n_bins)).astype(int)
-    yb = np.floor(np.clip(y, 0.0, ny - 1e-6) / ny * int(n_bins)).astype(int)
-    return yb * int(n_bins) + xb
 
 
 def geometry_tail_mask(data: XDSData, base_mask, percentile: float = 100.0):

@@ -290,8 +290,6 @@ def manual_thickness(args) -> int:
             scale_modes,
             "--feature-modes",
             feature_modes,
-            "--detector-scale-bins",
-            "0",
             *_tool_args(args),
         ]
         if len(parse_numeric_grid(args.thickness_grid_nm)) == 1:

@@ -9,12 +9,11 @@ The mosaic-cone and dose gates instead compare every candidate of one grid run o
 by orbit-grouped cross-validation (grond.validation.heldout): 3 salted crystal-independent orbit folds,
 scales refitted on the training orbits of each fold, amplitude R on the held-out orbits.  Free rows (the
 engine split, plus the crystal-independent orbit-hash free set when that scheme is requested) and
-excluded (lockbox) orbits are never used.  Under the P-spline scale model every candidate is scored at
+excluded (lockbox) orbits are never used.  Every candidate is scored with P-spline frame scales at
 every (n_basis, lambda) of the run's own scale contract (--scale-spline-n-basis-grid x
 --scale-spline-lambda-grid) and keeps its lowest cross-validated R_all over all development rows, which
 chooses the physics variant jointly with the scale setting; that setting's out-of-fold predictions enter
-the bootstrap and it is recorded per candidate.  Per-frame runs refit free per-group scales.  The lowest
-cross-validated R_all is selected and replaces the active physics only when the paired merged-orbit
+the bootstrap and it is recorded per candidate.  The lowest cross-validated R_all is selected and replaces the active physics only when the paired merged-orbit
 bootstrap of candidate minus active puts the R_obs change below 0 and the R_all change at most +0.05 pp.
 """
 
@@ -38,7 +37,6 @@ from grond.validation.heldout import (
     N_BOOT,
     cv_predictions,
     free_mask,
-    group_fit_predict,
     hash_fold,
     load_orbit_exclusion,
     paired_orbit_bootstrap,
@@ -115,10 +113,8 @@ def _family_view(family: str, nuisance: dict) -> dict:
 
 
 def _gate_scale_settings(contract: ScaleModel) -> list[dict]:
-    """Every (n_basis, lambda) setting the gate scores a candidate at; one free per-group fit for per-frame."""
+    """Every (n_basis, lambda) setting the gate scores a candidate at."""
 
-    if contract.kind != "pspline":
-        return [{"kind": "free_per_group"}]
     return [
         {"n_basis": int(n_basis), "lambda": float(lam), "objective": str(contract.objective)}
         for n_basis in contract.n_basis_grid
@@ -131,7 +127,6 @@ def score_trial_candidates(
     *,
     family: str,
     active_nuisance: dict,
-    scale_model: str,
     scale_contract: ScaleModel | None = None,
     n_folds: int = GATE_CV_FOLDS,
     salt: str = GATE_CV_SALT,
@@ -143,16 +138,12 @@ def score_trial_candidates(
     """Cross-validate every candidate of one gate run on identical work rows and apply the adoption rule.
 
     extra_free marks further held-out rows (the orbit-hash free set); excluded_orbits are dropped entirely.
-    scale_contract is the run's scale model (scale_model_from_args); without it the default contract of
-    scale_model is used.  Under pspline each candidate keeps the (n_basis, lambda) of its lowest
-    cross-validated R_all over all development rows, recorded as its ``scale``.
+    scale_contract is the run's P-spline contract (scale_model_from_args); without it the default contract is
+    used.  Each candidate keeps the (n_basis, lambda) of its lowest cross-validated R_all over all development
+    rows, recorded as its ``scale``.
     """
 
-    if scale_model not in {"pspline", "per-frame"}:
-        raise ValueError(f"unsupported scale model {scale_model!r} for held-out gate scoring")
-    contract = ScaleModel(kind=scale_model) if scale_contract is None else scale_contract
-    if contract.kind != scale_model:
-        raise ValueError(f"held-out gate scale contract is {contract.kind!r} but the scale model is {scale_model!r}")
+    contract = ScaleModel() if scale_contract is None else scale_contract
     settings = _gate_scale_settings(contract)
     clamp = bool(contract.clamp)
     candidates = list(rows["nuisance"])
@@ -189,14 +180,9 @@ def score_trial_candidates(
         raw = np.asarray(rows["dyn_raw"][index], dtype=float)[sel]
         trials = []
         for setting in settings:
-            if scale_model == "pspline":
-                def fit(train, raw=raw, setting=setting):
-                    """Fit P-spline scales on the ``train`` rows at this (n_basis, lambda); return the prediction."""
-                    return pspline_fit_predict(y, sig, raw, angle, group, train, setting, clamp=clamp)["prediction"]
-            else:
-                def fit(train, raw=raw):
-                    """Fit free per-group scales on the ``train`` rows; return the prediction."""
-                    return group_fit_predict(y, sig, raw, group, train)["prediction"]
+            def fit(train, raw=raw, setting=setting):
+                """Fit P-spline scales on the ``train`` rows at this (n_basis, lambda); return the prediction."""
+                return pspline_fit_predict(y, sig, raw, angle, group, train, setting, clamp=clamp)["prediction"]
             oof = cv_predictions(fit, len(y), folds)
             trials.append((setting, oof, r_metrics(y, sig, oof)))
         # Lowest cross-validated R_all over the scale grid; the first setting wins ties (grid order).
@@ -206,9 +192,8 @@ def score_trial_candidates(
         entry = {"index": index, **_family_view(family, nuisance), "cv_r_all": metrics["r_all"],
                  "cv_r_obs": metrics["r_obs"], "n_rows": metrics["n_all"], "n_obs": metrics["n_obs"],
                  "scale": dict(setting)}
-        if scale_model == "pspline":
-            entry["scale_grid"] = [{"n_basis": s["n_basis"], "lambda": s["lambda"], "cv_r_all": m["r_all"]}
-                                   for s, _oof, m in trials]
+        entry["scale_grid"] = [{"n_basis": s["n_basis"], "lambda": s["lambda"], "cv_r_all": m["r_all"]}
+                               for s, _oof, m in trials]
         scored.append(entry)
     order = sorted(range(len(scored)), key=lambda i: (scored[i]["cv_r_all"], i != base, i))
     best = order[0]
@@ -243,13 +228,9 @@ def score_trial_candidates(
                            "free_rows_used": False, "n_rows": int(len(y)), "n_orbits": int(len(np.unique(keys))),
                            "n_free_rows_skipped": int(np.count_nonzero(held_out)),
                            "n_excluded_rows": int(np.count_nonzero(excluded))},
-        "scale_model": scale_model,
-        "scale_config": (
-            {**contract.to_dict(), "selection": "per_candidate_min_cv_r_all_over_grid",
-             "selected": dict(scored[best]["scale"]), "baseline": dict(scored[base]["scale"])}
-            if scale_model == "pspline"
-            else {"kind": "free_per_group"}
-        ),
+        "scale_model": "pspline",
+        "scale_config": {**contract.to_dict(), "selection": "per_candidate_min_cv_r_all_over_grid",
+                         "selected": dict(scored[best]["scale"]), "baseline": dict(scored[base]["scale"])},
     }
 
 
@@ -328,8 +309,8 @@ def run_heldout_feature_gate(
         # The run's own scale contract: the grids the engine stages and the held-out hand refit use.
         scale_contract = scale_model_from_args(args)
         scored = score_trial_candidates(
-            rows, family=family, active_nuisance=dict(active_nui), scale_model=scale_contract.kind,
-            scale_contract=scale_contract, **gate_row_policy(args, rows)
+            rows, family=family, active_nuisance=dict(active_nui), scale_contract=scale_contract,
+            **gate_row_policy(args, rows)
         )
     except Exception as exc:
         return active_nui, active_run, {**record, "status": "failed", "error": str(exc)}

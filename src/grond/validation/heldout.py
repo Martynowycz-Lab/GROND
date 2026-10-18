@@ -6,7 +6,7 @@ Definitions (checked against the independent reference in tests/reference/refere
 * salted SHA-256 fold assignment (48-bit prefix mod K);
 * amplitude R1 metrics (R_all on every row, R_obs on Io > 3 sigma);
 * the paired, shell-stratified, merged-orbit bootstrap and the orbit sign test used for the hand;
-* scale refits on training rows only (P-spline or free per-group scales) that predict held-out rows.
+* P-spline scale refits on training rows only that predict held-out rows.
 """
 
 from __future__ import annotations
@@ -244,27 +244,6 @@ def pspline_fit_predict(y, sig, raw, ang, group, train, scale_cfg: dict | None =
     sol = fitter.fit(y, sig, raw, _clamped(ang, train, clamp), group=group, fit_mask=train,
                      lambda_smooth=float(cfg.get("lambda", 1.0)))
     return {"prediction": np.asarray(sol["prediction"], dtype=float), "edf": float(sol["edf"]), "lambda": float(sol["lambda"])}
-
-
-def group_fit_predict(y, sig, raw, group, train) -> dict[str, Any]:
-    """Free per-group (per-frame) scales: weighted LS s_g = sum(w y r) / sum(w r^2) on train rows, w = 1/sigma^2.
-
-    Groups without training rows get the median fitted scale (reported as n_groups_clamped).
-    """
-    y = np.asarray(y, dtype=float)
-    raw = np.asarray(raw, dtype=float)
-    w = 1.0 / np.maximum(np.asarray(sig, dtype=float), 1e-12) ** 2
-    group = np.asarray(group)
-    train = np.asarray(train, dtype=bool)
-    uniq, inv = np.unique(group, return_inverse=True)
-    num = np.bincount(inv, weights=np.where(train, w * y * raw, 0.0), minlength=len(uniq))
-    den = np.bincount(inv, weights=np.where(train, w * raw * raw, 0.0), minlength=len(uniq))
-    ok = den > 0
-    scale = np.full(len(uniq), np.nan)
-    scale[ok] = num[ok] / den[ok]
-    fill = float(np.median(scale[ok])) if ok.any() else 1.0
-    scale[~ok] = fill
-    return {"prediction": scale[inv] * raw, "n_scales": int(ok.sum()), "n_groups_clamped": int((~ok).sum())}
 
 
 def select_pspline_by_inner_cv(y, sig, raw, ang, group, train, keys, grid: dict | None = None, salt: str = INNER_CV_SALT,
