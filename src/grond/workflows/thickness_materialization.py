@@ -7,15 +7,6 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from grond.cli_support.values import try_read_json
-from grond.workflows.decision import nuisance_score_rows
-
-
-def free_wr2_loss_limit(args: argparse.Namespace) -> float:
-    """Free-row no-harm veto of the discrete thickness promotion; off (inf) when free rows are held out."""
-
-    if nuisance_score_rows(args) == "work":
-        return float("inf")
-    return float(args.continuous_thickness_max_free_wr2_loss)
 
 
 def discrete_thickness_promotion_record(run: Path, *, dry_run: bool) -> dict:

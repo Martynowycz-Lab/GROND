@@ -62,7 +62,7 @@ MIN_GATE_ROWS = 50
 def uses_heldout_gate(args: argparse.Namespace, family: str) -> bool:
     """Return true when this family is scored by orbit cross-validation instead of the in-sample score."""
 
-    return family in HELDOUT_GATE_FAMILIES and str(getattr(args, "physics_gate_selection", "in-sample")) == "orbit-cv"
+    return family in HELDOUT_GATE_FAMILIES
 
 
 def _family_matches(family: str, reference: dict, nuisance: dict) -> bool:
@@ -321,7 +321,6 @@ def run_heldout_feature_gate(
     # nuisance are one candidate, with the active run's scale-fit split.
     selected_dir = root / "runs" / ds.name / f"adaptive_{family}_selected"
     active_split = str((read_json(active_run / "summary.json").get("config") or {}).get("scale_fit_split") or "")
-    matched = str(getattr(args, "thickness_gate_split", "legacy")) == "matched"
     try:
         run_logged(
             native_stage_cmd(
@@ -337,7 +336,7 @@ def run_heldout_feature_gate(
                 pinned=scored["selected_nuisance"],
                 make_maps=False,
                 endpoint=False,
-                scale_fit_split_override=(active_split or None) if matched else None,
+                scale_fit_split_override=active_split or None,
                 allow_pinned_jitter_fallback=False,
             ),
             logs,

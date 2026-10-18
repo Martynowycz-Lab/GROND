@@ -10,7 +10,7 @@ from pathlib import Path
 from grond.cli_support.execution import run_logged
 from grond.cli_support.values import parse_numeric_grid, read_json
 from grond.io.config import DatasetSpec, PrepConfig
-from grond.workflows.decision import nuisance_score_rows, safe_float, safe_label, score_native_summary, write_json
+from grond.workflows.decision import safe_float, safe_label, score_native_summary, write_json
 from grond.workflows.model_selection import best_nuisance, dataset_baseline_hkl
 from grond.workflows.native_commands import native_stage_cmd
 
@@ -130,7 +130,7 @@ def run_sg_window_scout(
                     "all": metrics["all"],
                     "work": metrics["work"],
                     "free": metrics["free"],
-                    "score": score_native_summary(summary, nuisance_score_rows(args)),
+                    "score": score_native_summary(summary, "work"),
                 }
             )
         except subprocess.CalledProcessError as exc:
@@ -146,7 +146,7 @@ def run_sg_window_scout(
                 }
             )
 
-    score_rows = nuisance_score_rows(args)
+    score_rows = "work"
     ok = [row for row in candidates if row.get("status") == "ok"]
     current = min(ok, key=lambda r: abs(float(r["sg_window"]) - baseline_width), default=None)
     best = min(ok, key=lambda r: sg_window_score(r, score_rows), default=None)

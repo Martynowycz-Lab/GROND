@@ -28,7 +28,7 @@ def validate_scale_model_policy(args: argparse.Namespace) -> dict[str, object]:
     contract = scale_model_from_args(args)
     return {
         "scale_model": "pspline",
-        "scale_fit_split": "all" if bool(getattr(args, "production_scales", False)) else "work",
+        "scale_fit_split": "work",
         "contract": contract.to_dict(),
         "hyperparameters": "chosen per crystal and stage by inner 3-fold orbit CV over the scale-fit rows",
     }

@@ -29,11 +29,9 @@ from grond.reports.console import (
 from grond.workflows.crystal_parameters import crystal_arguments
 from grond.workflows.decision import (
     apply_preflight,
-    nuisance_score_rows,
     preflight_dataset,
     safe_float,
     score_native_summary,
-    should_stop_for_bad_data,
     thickness_polish_nuisance,
     write_json,
 )
@@ -102,6 +100,8 @@ from grond.workflows.transform_selection import (
     choose_transform_by_scout,
 )
 
+# Minimum improvement of the in-sample work-row score before a staged feature family is kept.
+FEATURE_ACCEPT_DELTA = 0.002
 # Score margin recorded with the single-crystal post-feedback hand check (the held-out orbit rule decides the hand).
 HAND_ACCEPT_DELTA = 0.015
 # Loop stops that reject a cycle's model but leave the model entering it valid (shelxl_feedback_loop). A failed
@@ -180,14 +180,10 @@ def run_feature_gate(
             active_nui=active_nui,
         )
     baseline_summary = read_json(active_run / "summary.json")
-    baseline_score = score_native_summary(baseline_summary, nuisance_score_rows(args))
+    baseline_score = score_native_summary(baseline_summary, "work")
     gate_dir = root / "runs" / ds.name / f"adaptive_{family}_gate"
     # Score the gate on the scale-fit split of its baseline so the free/all terms compare like with like.
-    matched_split = (
-        str((baseline_summary.get("config") or {}).get("scale_fit_split") or "") or None
-        if str(getattr(args, "thickness_gate_split", "legacy")) == "matched"
-        else None
-    )
+    matched_split = str((baseline_summary.get("config") or {}).get("scale_fit_split") or "") or None
     try:
         run_logged(
             native_stage_cmd(
@@ -213,12 +209,12 @@ def run_feature_gate(
         gate_split = str((gate_summary.get("config") or {}).get("scale_fit_split") or "")
         if matched_split and gate_split != matched_split:
             raise RuntimeError(f"gate scale-fit split {gate_split!r} differs from its baseline {matched_split!r}")
-        gate_score = score_native_summary(gate_summary, nuisance_score_rows(args))
+        gate_score = score_native_summary(gate_summary, "work")
     except Exception as exc:
         return active_nui, active_run, {"family": family, "status": "failed", "error": str(exc), "run": str(gate_dir)}
     improvement = safe_float(baseline_score.get("score")) - safe_float(gate_score.get("score"))
-    accepted = improvement > float(args.feature_accept_delta)
-    scale_fit_split = matched_split or ("all" if getattr(args, "production_scales", False) else "work")
+    accepted = improvement > FEATURE_ACCEPT_DELTA
+    scale_fit_split = matched_split or "work"
     record = {
         "family": family,
         "status": "accepted" if accepted else "rejected",
@@ -226,16 +222,12 @@ def run_feature_gate(
         "baseline_score": baseline_score,
         "gate_score": gate_score,
         "score_improvement": improvement,
-        "accept_delta": float(args.feature_accept_delta),
+        "accept_delta": FEATURE_ACCEPT_DELTA,
         "selection": "in_sample_score_native_summary",
         "scale_fit_split": scale_fit_split,
         # The gate stage ranks its grid on --selection-metric, then this score compares it with the baseline.
         "selection_metric": str(args.selection_metric),
-        "free_rows_in_selection": not (
-            nuisance_score_rows(args) == "work"
-            and str(args.selection_metric) == "work_wR2"
-            and scale_fit_split == "work"
-        ),
+        "free_rows_in_selection": not (str(args.selection_metric) == "work_wR2" and scale_fit_split == "work"),
     }
     if accepted:
         return best_nuisance(gate_dir) or active_nui, gate_dir, record
@@ -351,8 +343,6 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
         raise RuntimeError(f"fatal preflight failure for {ds0.name}: {preflight.warnings}")
     ds = apply_preflight(ds0, preflight)
     scout_rows = preflight.scout_max_rows if preflight.scout_max_rows > 0 else SCOUT_MAX_ROWS
-    if preflight.status == "bad" and args.stop_on_bad_preflight:
-        return {"status": "stopped_bad_preflight", "preflight": str(root / "decisions" / ds0.name / "preflight.json")}
 
     ds, transform_decision = choose_transform_by_scout(prep, ds, args, python, logs, root, scout_max_rows=scout_rows)
     configure_cell_esd(prep.structure, [ds], args)
@@ -376,17 +366,7 @@ def run_single_adaptive(prep: PrepConfig, args: argparse.Namespace, python: str,
         f"{ds.name}_adaptive_screen",
         dry_run=args.dry_run,
     )
-    screen_summary = read_json(screen / "summary.json")
     screen_frame_offsets = resolved_frame_offset_candidates(screen)
-    stop, reasons = should_stop_for_bad_data(
-        screen_summary, max_wR2=args.stop_if_wR2_above, min_improvement=args.min_bloch_wR2_gain
-    )
-    if stop and args.stop_on_bad_fit:
-        write_json(
-            root / "decisions" / ds.name / "stop_decision.json",
-            {"stop": True, "reasons": reasons, "screen": str(screen)},
-        )
-        return {"status": "stopped_bad_fit", "primary_run": str(screen), "reasons": reasons}
     # Validation console: the split and the screen's held-out R, printed from their recorded JSON.
     single_prep = PrepConfig(structure=prep.structure, datasets=[ds], baseline_hkl=prep.baseline_hkl)
     report_split(single_prep, args, {ds.name: screen}, root)

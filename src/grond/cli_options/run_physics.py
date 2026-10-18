@@ -250,24 +250,6 @@ def add_nuisance(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--thickness-model-grid", default="uniform_gradient")
     ap.add_argument("--thickness-grad-grid", default="0.4,1.0")
     ap.add_argument(
-        "--continuous-thickness-min-gain",
-        type=float,
-        default=5e-5,
-        help="Minimum objective gain required to promote a non-grid continuous thickness.",
-    )
-    ap.add_argument(
-        "--continuous-thickness-max-free-wr2-loss",
-        type=float,
-        default=0.002,
-        help="Maximum tolerated held-out/free wR2 loss for promoted continuous thickness.",
-    )
-    ap.add_argument(
-        "--continuous-thickness-max-all-r1-loss",
-        type=float,
-        default=0.001,
-        help="Maximum tolerated all-row R1 loss for promoted continuous thickness.",
-    )
-    ap.add_argument(
         "--frame-offset-grid",
         default="auto",
         help=(
@@ -347,25 +329,6 @@ def add_nuisance(ap: argparse.ArgumentParser) -> None:
                     help="Points per axis in the common beam-support envelope.")
     ap.add_argument("--mosaicity-support-width-sigma", type=float, default=4.0,
                     help="Half-width of the common beam-support envelope in support-sigma units.")
-    ap.add_argument(
-        "--physics-gate-selection",
-        choices=["orbit-cv", "in-sample"],
-        default="orbit-cv",
-        help=(
-            "Score of the mosaicity and dose feature gates. orbit-cv compares every candidate on 3-fold "
-            "orbit-grouped cross-validation over work rows (free rows unused) and accepts only a paired "
-            "orbit-bootstrap improvement; in-sample is the legacy score of the other feature gates."
-        ),
-    )
-    ap.add_argument(
-        "--thickness-gate-split",
-        choices=["matched", "legacy"],
-        default="matched",
-        help=(
-            "Scale-fit split of the in-sample feature gates. matched fits every gate on its baseline's split, so "
-            "each comparison uses one split; legacy follows --production-scales."
-        ),
-    )
     ap.add_argument(
         "--nuisance-selection",
         choices=["nested", "sequential"],

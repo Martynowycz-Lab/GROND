@@ -337,15 +337,6 @@ def safe_float(value, fallback: float = float("inf")) -> float:
     return out if math.isfinite(out) else fallback
 
 
-def nuisance_score_rows(args) -> str:
-    """Rows behind in-sample nuisance scores; namespaces without the option keep the legacy score."""
-
-    rows = str(getattr(args, "nuisance_score_rows", "legacy") or "legacy")
-    if rows not in {"work", "legacy"}:
-        raise ValueError(f"unknown --nuisance-score-rows {rows!r}")
-    return rows
-
-
 def score_native_summary(summary: dict, rows: str = "legacy") -> dict:
     """Extract the ranking metrics used to compare native Bloch stages.
 
@@ -452,25 +443,6 @@ def thickness_polish_nuisance(nui: dict, frame_offset_candidates: Sequence[float
             fvals.add(value)
     out["frame_offset"] = ",".join(f"{v:.15g}" for v in sorted(fvals))
     return out
-
-
-def should_stop_for_bad_data(summary: dict, *, max_wR2: float, min_improvement: float) -> tuple[bool, list[str]]:
-    """Decide whether a branch is too poor to spend more compute on."""
-
-    score = score_native_summary(summary)
-    reasons: list[str] = []
-    if not math.isfinite(score["dyn_wR2_all"]):
-        reasons.append("dynamic all-row wR2 is not finite")
-    if score["dyn_wR2_all"] > max_wR2:
-        reasons.append(f"dynamic all-row wR2 {score['dyn_wR2_all']:.3f} exceeds stop threshold {max_wR2:.3f}")
-    born_w = (((summary.get("best_native") or {}).get("metrics") or {}).get("all") or {}).get("born", {}).get("wR2_all")
-    try:
-        improvement = float(born_w) - score["dyn_wR2_all"]
-    except Exception:
-        improvement = float("nan")
-    if math.isfinite(improvement) and improvement < min_improvement:
-        reasons.append(f"Bloch improvement over Born wR2 is only {improvement:.4f}")
-    return bool(reasons), reasons
 
 
 def write_json(path: Path, payload) -> None:

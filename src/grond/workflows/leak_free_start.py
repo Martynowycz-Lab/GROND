@@ -81,15 +81,6 @@ def structurally_converged(stats: dict) -> bool:
     )
 
 
-def leak_free_start_mode(args: argparse.Namespace) -> str:
-    """Return the ``--leak-free-start`` setting (on/off; off when absent); raise on any other value."""
-
-    mode = str(getattr(args, "leak_free_start", "off") or "off")
-    if mode not in {"on", "off"}:
-        raise ValueError(f"unknown --leak-free-start {mode!r}")
-    return mode
-
-
 def endpoint_free_validation_mode(args: argparse.Namespace) -> str:
     """Return the ``--endpoint-free-validation`` setting (on/off; off when absent); raise on any other value."""
 
@@ -292,8 +283,6 @@ def run_leak_free_start(
     too.  Without a plan the membership is the Laue-orbit one (identical whenever no candidate is pseudo-symmetric).
     """
 
-    if leak_free_start_mode(args) == "off":
-        return {"status": "disabled", "leak": "start model as supplied (refined on every reflection)"}
     if str(getattr(args, "split_scheme", "legacy")) != "orbit-hash":
         return {"status": "not_applicable_legacy_split",
                 "leak": "start model as supplied; the legacy per-dataset split has no crystal-independent free orbits"}

@@ -9,18 +9,6 @@ def add_scales_and_screening(ap: argparse.ArgumentParser) -> None:
     """Add scales and screening options in the established order."""
 
     ap.add_argument(
-        "--production-scales",
-        action="store_true",
-        default=False,
-        help="Fit nuisance scales on all rows for a final diagnostic; validation and automatic selection use work-only scales by default.",
-    )
-    ap.add_argument(
-        "--validation-scales",
-        dest="production_scales",
-        action="store_false",
-        help="Fit nuisance scales on work rows only (the default).",
-    )
-    ap.add_argument(
         "--scale-spline-n-basis-grid",
         default="32",
         help="Frame scales are a smooth P-spline in scan angle: basis sizes tried by the inner orbit CV; one value pins it.",

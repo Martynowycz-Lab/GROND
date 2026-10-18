@@ -746,8 +746,8 @@ def configure_auto_physics(prep: PrepConfig, args: argparse.Namespace) -> dict:
             "mu_grid": str(args.absorption_mu_grid),
             "frac_grid": str(args.absorption_frac_grid),
         },
-        "physics_gate_selection": str(getattr(args, "physics_gate_selection", "in-sample")),
-        "thickness_gate_split": str(getattr(args, "thickness_gate_split", "legacy")),
+        "physics_gate_selection": "orbit-cv",
+        "thickness_gate_split": "matched",
     }
     out = Path(args.out_dir) / "decisions" / "auto_physics_contract.json"
     out.parent.mkdir(parents=True, exist_ok=True)

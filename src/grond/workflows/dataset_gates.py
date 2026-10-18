@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from grond.workflows.dataset_policy import build_dataset_policy, policy_by_name, write_policy_artifacts
-from grond.workflows.decision import nuisance_score_rows, safe_float
+from grond.workflows.decision import safe_float
 
 
 def all_primary_policy(runs: dict[str, Path], *, status: str) -> dict:
@@ -47,9 +47,9 @@ def run_dataset_policy_gate(runs: dict[str, Path], out_dir: Path, args: argparse
     ]
     if missing:
         return {"status": "missing_row_table", "missing": missing}
-    # Under --nuisance-score-rows work the quality metrics read work rows only (free rows stay held out);
-    # legacy reads all rows. The thresholds are decide_dataset_policy's defaults.
-    policy = build_dataset_policy(runs, selection_rows="work" if nuisance_score_rows(args) == "work" else "all")
+    # The quality metrics read work rows only (free rows stay held out); the thresholds are
+    # decide_dataset_policy's defaults.
+    policy = build_dataset_policy(runs, selection_rows="work")
     policy["label"] = label
     policy["artifacts"] = write_policy_artifacts(policy, out_dir)
     return policy

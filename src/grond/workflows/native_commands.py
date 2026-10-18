@@ -26,6 +26,10 @@ from grond.workflows.nuisance_policy import (
 )
 from grond.workflows.scale_model_policy import scale_model_cli_arguments
 
+# Discrete thickness promotion: minimum work-row score gain and the work-row R1 no-harm limit.
+THICKNESS_PROMOTION_MIN_GAIN = 5e-05
+THICKNESS_PROMOTION_MAX_ALL_R1_LOSS = 0.001
+
 
 def native_stage_cmd(
     python: str,
@@ -104,7 +108,8 @@ def native_stage_cmd(
         if pinned
         else ("0.0" if fast else args.row_resolution_b_grid)
     )
-    scale_fit_split = scale_fit_split_override or ("all" if args.production_scales else "work")
+    # hand-check replays the recorded split of its source stage (production_scales); AUTO fits on work rows.
+    scale_fit_split = scale_fit_split_override or ("all" if getattr(args, "production_scales", False) else "work")
     if scale_fit_split not in {"work", "all"}:
         raise ValueError(f"invalid scale-fit split override {scale_fit_split!r}")
     pinned_jitter_mode = grid_from_nuisance(pinned, "sg_jitter_mode", "none") if pinned else ""
@@ -340,25 +345,22 @@ def native_stage_cmd(
             ]
         )
     if promotion_baseline:
-        from grond.workflows.decision import nuisance_score_rows
-        from grond.workflows.thickness_materialization import free_wr2_loss_limit
-
+        # Held-out free rows: the composite score and the R1 veto read work rows only, and the free-row no-harm
+        # veto is off (inf).
         cmd.extend(
             [
                 "--promotion-baseline-json",
                 json.dumps(dict(promotion_baseline), sort_keys=True, allow_nan=True),
                 "--promotion-min-gain",
-                str(float(args.continuous_thickness_min_gain)),
+                str(THICKNESS_PROMOTION_MIN_GAIN),
                 "--promotion-max-free-wr2-loss",
-                f"{free_wr2_loss_limit(args):g}",
+                "inf",
                 "--promotion-max-all-r1-loss",
-                str(float(args.continuous_thickness_max_all_r1_loss)),
+                str(THICKNESS_PROMOTION_MAX_ALL_R1_LOSS),
+                "--promotion-score-rows",
+                "work",
             ]
         )
-        if nuisance_score_rows(args) == "work":
-            # Held-out free rows: the composite score and the R1 veto read work rows only (the engine
-            # default is 'all', so legacy commands carry no extra option).
-            cmd += ["--promotion-score-rows", "work"]
     cmd += scale_model_cli_arguments(args)
     if ds.include_nonpositive:
         cmd.append("--include-nonpositive")
