@@ -282,9 +282,8 @@ def config_template() -> dict[str, Any]:
     data: dict[str, Any] = {
         "tools": {"shelxl": "", "shelx2map": ""},
         "notes": (
-            "SHELXL is needed for the default small-molecule SHELXL endpoint. "
-            "shelx2map is optional and is used only for quick corrected-HKL endpoint maps; "
-            "GROND finish makes native dynamical maps without it. Empty values use environment variables and PATH."
+            "SHELXL refines the model. shelx2map writes the SHELXL Fo-Fc maps of grond finish; without it finish "
+            "writes only the dynamical maps. Empty values use PATH."
         ),
     }
     return data
@@ -313,7 +312,7 @@ def write_config_template(
         ]
         lines.extend(
             [
-                'notes: "SHELXL is needed for the default small-molecule SHELXL endpoint. shelx2map is optional and only makes quick corrected-HKL endpoint maps; GROND finish makes native dynamical maps without it."',
+                'notes: "SHELXL refines the model. shelx2map writes the SHELXL Fo-Fc maps of grond finish; without it finish writes only the dynamical maps. Empty values use PATH."',
                 "",
             ]
         )

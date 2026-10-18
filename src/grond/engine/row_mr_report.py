@@ -22,8 +22,6 @@ import argparse
 import csv
 import json
 import math
-import shutil
-import subprocess
 from collections import defaultdict
 from pathlib import Path
 
@@ -1265,32 +1263,6 @@ def write_latex(
     path.write_text("\n".join(body))
 
 
-def build_pdf(tex_path: Path) -> dict:
-    """Compile a .tex file with the first LaTeX engine found and return the build status."""
-
-    pdflatex = shutil.which("pdflatex") or shutil.which("xelatex") or shutil.which("lualatex")
-    if not pdflatex:
-        return {"built": False, "reason": "no LaTeX engine found"}
-    try:
-        proc = subprocess.run(
-            [pdflatex, "-interaction=nonstopmode", tex_path.name],
-            cwd=tex_path.parent,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            timeout=60,
-            check=False,
-        )
-    except Exception as exc:
-        return {"built": False, "reason": str(exc)}
-    pdf = tex_path.with_suffix(".pdf")
-    return {
-        "built": bool(proc.returncode == 0 and pdf.exists()),
-        "returncode": int(proc.returncode),
-        "pdf": str(pdf.resolve()) if pdf.exists() else "",
-        "log": str(tex_path.with_suffix(".log").resolve()),
-    }
-
 
 def main() -> None:
     """Compute row and MR factors for each --run and write the Markdown, LaTeX, CSV and JSON tables to --out-dir."""
@@ -1516,8 +1488,6 @@ def main() -> None:
         writer = csv.DictWriter(stream, fieldnames=list(per_dataset_rows[0].keys()))
         writer.writeheader()
         writer.writerows(per_dataset_rows)
-    pdf_status = build_pdf(tex_path)
-    canonical_pdf_status = build_pdf(canonical_tex_path)
     result = {
         "summary": str(json_path.resolve()),
         "markdown": str(md_path.resolve()),
@@ -1526,11 +1496,9 @@ def main() -> None:
         "canonical_jana_markdown": str(canonical_md_path.resolve()),
         "canonical_jana_latex": str(canonical_tex_path.resolve()),
         "canonical_jana_csv": str(canonical_csv_path.resolve()),
-        "canonical_jana_pdf": canonical_pdf_status,
         "per_dataset_jana_json": str(per_dataset_json_path.resolve()),
         "per_dataset_jana_markdown": str(per_dataset_md_path.resolve()),
         "per_dataset_jana_csv": str(per_dataset_csv_path.resolve()),
-        "pdf": pdf_status,
         "dynamic": row_mr_summary["dynamic"],
         "born": row_mr_summary["born"],
         "kinematic": row_mr_summary["kinematic"],
