@@ -5,6 +5,11 @@ The audit works on row-preserving ``native_dyn_calc.csv`` files. It builds
 resolution shells, calculates GROND row/MR unmerged and merged residual factors
 for each shell and cumulative cutoff, checks held-out shell stability, and
 writes a promoted strict cutoff plus a looser exploratory cutoff.
+
+The weighted-residual gates (shell ``MwRall``, cumulative penalty, work/free gap)
+read the intensity-residual form ``MwRall_I``, against which the thresholds were
+set; Jana2020's amplitude form ``MwRall`` is reported alongside and does not
+enter any decision.
 """
 
 from __future__ import annotations
@@ -162,7 +167,16 @@ def metrics_or_empty(rows: list[dict], model: dict, calc_column: str) -> dict:
     """Calculate GROND row/MR metrics without failing on an empty row list."""
 
     if not rows:
-        return {"Nall": 0, "Nobs": 0, "Rall": float("nan"), "wRall": float("nan"), "MRall": float("nan"), "MwRall": float("nan")}
+        return {
+            "Nall": 0,
+            "Nobs": 0,
+            "Rall": float("nan"),
+            "wRall": float("nan"),
+            "wRall_I": float("nan"),
+            "MRall": float("nan"),
+            "MwRall": float("nan"),
+            "MwRall_I": float("nan"),
+        }
     return compute_model_metrics(rows, model, calc_column)
 
 
@@ -178,8 +192,10 @@ def matched_metrics_or_empty(rows: list[dict], model: dict) -> tuple[dict, dict,
             "Nobs": 0,
             "Rall": float("nan"),
             "wRall": float("nan"),
+            "wRall_I": float("nan"),
             "MRall": float("nan"),
             "MwRall": float("nan"),
+            "MwRall_I": float("nan"),
             "Nmerge_input": 0,
             "Nmerge_used": 0,
             "Nmerge_excluded": 0,
@@ -205,11 +221,21 @@ def shell_record(shell_no: int, rows: list[dict], cumulative_rows: list[dict], m
     free = [r for r in rows if str(r.get("split", "")).lower() == "free"]
     work_dyn = metrics_or_empty(work, model, "dyn_scaled")
     free_dyn = metrics_or_empty(free, model, "dyn_scaled")
-    gap = abs(safe_float(free_dyn.get("MwRall")) - safe_float(work_dyn.get("MwRall")))
-    if not (math.isfinite(gap) and work_dyn.get("Nall", 0) and free_dyn.get("Nall", 0)):
-        gap = float("nan")
 
-    stability_mode = "split_cc" if split_common >= int(min_common_pairs) else "work_free_MwRall"
+    def mwr_gap(key: str) -> float:
+        """Return |free - work| of the merged weighted factor ``key``, NaN unless both sets have rows."""
+
+        value = abs(safe_float(free_dyn.get(key)) - safe_float(work_dyn.get(key)))
+        if not (math.isfinite(value) and work_dyn.get("Nall", 0) and free_dyn.get("Nall", 0)):
+            return float("nan")
+        return value
+
+    # The gates read the intensity-residual form (*_I), against which the thresholds were set; the amplitude
+    # form (Jana2020 wR(all) for refinement on F) is reported alongside.
+    gap = mwr_gap("MwRall_I")
+    gap_amplitude = mwr_gap("MwRall")
+
+    stability_mode = "split_cc" if split_common >= int(min_common_pairs) else "work_free_MwRall_I"
     return {
         "shell": int(shell_no),
         "d_low": float(np.nanmin(dvals)) if len(dvals) else float("nan"),
@@ -229,25 +255,35 @@ def shell_record(shell_no: int, rows: list[dict], cumulative_rows: list[dict], m
         "kinematic_Nmerge_excluded": int(born.get("Nmerge_excluded", 0)),
         "dynamic_Rall": dyn.get("Rall", float("nan")),
         "dynamic_wRall": dyn.get("wRall", float("nan")),
+        "dynamic_wRall_I": dyn.get("wRall_I", float("nan")),
         "dynamic_MRall": dyn.get("MRall", float("nan")),
         "dynamic_MwRall": dyn.get("MwRall", float("nan")),
+        "dynamic_MwRall_I": dyn.get("MwRall_I", float("nan")),
         "kinematic_Rall": born.get("Rall", float("nan")),
         "kinematic_wRall": born.get("wRall", float("nan")),
+        "kinematic_wRall_I": born.get("wRall_I", float("nan")),
         "kinematic_MRall": born.get("MRall", float("nan")),
         "kinematic_MwRall": born.get("MwRall", float("nan")),
+        "kinematic_MwRall_I": born.get("MwRall_I", float("nan")),
         "cumulative_rows": int(cum_dyn.get("Nall", 0)),
         "cumulative_matched_Ninput": int(cumulative_support.get("Ninput", 0)),
         "cumulative_matched_Nexcluded": int(cumulative_support.get("Nexcluded", 0)),
         "cumulative_dynamic_Rall": cum_dyn.get("Rall", float("nan")),
         "cumulative_dynamic_wRall": cum_dyn.get("wRall", float("nan")),
+        "cumulative_dynamic_wRall_I": cum_dyn.get("wRall_I", float("nan")),
         "cumulative_dynamic_MRall": cum_dyn.get("MRall", float("nan")),
         "cumulative_dynamic_MwRall": cum_dyn.get("MwRall", float("nan")),
+        "cumulative_dynamic_MwRall_I": cum_dyn.get("MwRall_I", float("nan")),
         "cumulative_kinematic_MwRall": cum_born.get("MwRall", float("nan")),
+        "cumulative_kinematic_MwRall_I": cum_born.get("MwRall_I", float("nan")),
         "work_Nall": int(work_dyn.get("Nall", 0)),
         "free_Nall": int(free_dyn.get("Nall", 0)),
         "work_dynamic_MwRall": work_dyn.get("MwRall", float("nan")),
+        "work_dynamic_MwRall_I": work_dyn.get("MwRall_I", float("nan")),
         "free_dynamic_MwRall": free_dyn.get("MwRall", float("nan")),
-        "free_work_MwRall_gap": gap,
+        "free_dynamic_MwRall_I": free_dyn.get("MwRall_I", float("nan")),
+        "free_work_MwRall_gap": gap_amplitude,
+        "free_work_MwRall_I_gap": gap,
     }
 
 
@@ -283,7 +319,7 @@ def write_report(path: Path, title: str, payload: dict) -> None:
     lines = [
         f"# {title}",
         "",
-        "This audit promotes a resolution limit from final GROND row tables. The strict limit requires usable signal, held-out shell stability, and acceptable GROND row/MR merged weighted residuals. The exploratory limit is looser and is meant for diagnostic maps or sensitivity checks.",
+        "This audit promotes a resolution limit from final GROND row tables. The strict limit requires usable signal, held-out shell stability, and acceptable GROND row/MR merged weighted residuals. The weighted-residual gates read the intensity-residual form `MwRall_I`, against which the thresholds were set; `MwRall` is Jana2020's amplitude form (wR(all) for refinement on F) and is reported only. The exploratory limit is looser and is meant for diagnostic maps or sensitivity checks.",
         "",
         "## Decision",
         "",
@@ -295,8 +331,8 @@ def write_report(path: Path, title: str, payload: dict) -> None:
         "",
         "Born and Bloch shell factors use one common finite row support. `matched/excluded` reports supported rows versus supplied rows removed before both calculations; `merge excluded` reports matched rows whose HKL indices cannot enter symmetry merging.",
         "",
-        "| shell | d range A | matched/excluded | merge excluded | I/sigma mean | split CC | dyn MRall | dyn MwRall | cumulative MwRall | kept |",
-        "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+        "| shell | d range A | matched/excluded | merge excluded | I/sigma mean | split CC | dyn MRall | dyn MwRall | dyn MwRall_I (gate) | cumulative MwRall_I (gate) | kept |",
+        "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
     for row in shells:
         kept = "promoted" if row.get("inside_promoted_limit") else ("exploratory" if row.get("inside_exploratory_limit") else "rejected")
@@ -304,7 +340,7 @@ def write_report(path: Path, title: str, payload: dict) -> None:
             f"| {row['shell']} | {fmt(row['d_high'])}-{fmt(row['d_low'])} | "
             f"{row['matched_Nall']}/{row['matched_Nexcluded']} | {row['dynamic_Nmerge_excluded']} | "
             f"{fmt(row['mean_I_over_sigma'])} | {fmt(row['split_cc'])} | {pct(row['dynamic_MRall'])} | "
-            f"{pct(row['dynamic_MwRall'])} | {pct(row['cumulative_dynamic_MwRall'])} | {kept} |"
+            f"{pct(row['dynamic_MwRall'])} | {pct(row['dynamic_MwRall_I'])} | {pct(row['cumulative_dynamic_MwRall_I'])} | {kept} |"
         )
     lines.extend(
         [

@@ -2,12 +2,18 @@
 """Write publication tables with JANA/PETS-style row and MR factors.
 
 The input is one or more GROND ``native_dyn_calc.csv`` row tables.  The
-unmerged ``Robs``, ``Rall``, and ``wRall`` factors are calculated on individual
-row observations.  ``MRobs``, ``MRall``, and ``MwRall`` are calculated after
-arithmetic merging of symmetry-related rows from the supplied model symmetry,
-with merged sigmas propagated as sqrt(sum(sigma^2)) / n.  These are
-GROND-computed values using the JANA/PETS dynamical-refinement reporting family;
-they are not output parsed from JANA or PETS.
+unmerged ``Robs``, ``Rall``, ``wRobs`` and ``wRall`` factors are calculated on
+individual row observations.  ``MRobs``, ``MRall``, ``MwRobs`` and ``MwRall``
+are calculated after arithmetic merging of symmetry-related rows from the
+supplied model symmetry, with merged sigmas propagated as sqrt(sum(sigma^2)) / n.
+All factors are on amplitudes F = sqrt(I): R = sum|Fo - Fc| / sum Fo, and the
+weighted factors are Jana2020's wR(all) for refinement on F,
+wR = sqrt(sum w (Fo - Fc)^2 / sum w Fo^2) with w = 1/(sigma_F^2 + (u Fo)^2).
+The merged MR and MwR factors follow Klar et al. (2023).  The intensity-residual
+form printed by earlier versions, sqrt(sum w (Io - Ic)^2 / sum w Io^2) with the
+same w, is kept as ``wRobs_I``, ``wRall_I``, ``MwRobs_I`` and ``MwRall_I``.
+These are GROND-computed values using the JANA/PETS dynamical-refinement
+reporting family; they are not output parsed from JANA or PETS.
 """
 
 from __future__ import annotations
@@ -197,10 +203,13 @@ def row_sqrt_weights(obs: np.ndarray, sigma: np.ndarray, instability_u: float = 
 
 
 def row_mr_r_factors(obs, sigma, calc, instability_u: float = 0.01, observed_sigma_cut: float = 3.0) -> dict:
-    """Return Nall, Nobs, Robs, Rall, wRobs and wRall of calc against obs in the JANA/PETS convention.
+    """Return Nall, Nobs, Robs, Rall, wRobs, wRall and the *_I forms of calc against obs in the JANA/PETS convention.
 
-    Weak observations are set to zero first. R is on amplitudes sqrt(I); wR weights intensity residuals
-    with row_sqrt_weights. Observed rows have I > observed_sigma_cut * sigma before that adjustment.
+    Weak observations (I < 0.01 sigma) are set to zero first. R is sum|Fo - Fc| / sum Fo on amplitudes
+    F = sqrt(max(I, 0)). wR is the amplitude form, Jana2020's wR(all) for refinement on F:
+    sqrt(sum w (Fo - Fc)^2 / sum w Fo^2) with w = 1/(sigma_F^2 + (u Fo)^2), the square of row_sqrt_weights.
+    wRobs_I and wRall_I keep the intensity-residual form of earlier versions, sqrt(sum w (Io - Ic)^2 / sum w Io^2)
+    with the same w. Observed rows have I > observed_sigma_cut * sigma before the weak-row adjustment.
     """
 
     obs = np.asarray(obs, dtype=float)
@@ -218,6 +227,8 @@ def row_mr_r_factors(obs, sigma, calc, instability_u: float = 0.01, observed_sig
             "Rall": float("nan"),
             "wRobs": float("nan"),
             "wRall": float("nan"),
+            "wRobs_I": float("nan"),
+            "wRall_I": float("nan"),
         }
 
     obs_original = obs.copy()
@@ -235,27 +246,32 @@ def row_mr_r_factors(obs, sigma, calc, instability_u: float = 0.01, observed_sig
             return float("nan")
         return float(np.sum(np.abs(fobs[use] - fcalc[use])) / max(np.sum(fobs[use]), 1e-30))
 
+    # row_sqrt_weights is w^(1/2) = (sigma_F^2 + (u Fo)^2)^(-1/2); squaring the weighted terms gives w.
     weights = row_sqrt_weights(obs_original, sigma, instability_u=instability_u)
-    residual = obs - calc
+    amplitude_residual = fobs - fcalc
+    intensity_residual = obs - calc
 
-    def wr_factor(use):
-        """Return the weighted R factor over the rows in use, NaN if none."""
+    def wr_factor(residual, reference, use):
+        """Return sqrt(sum (w^(1/2) residual)^2 / sum (w^(1/2) reference)^2) over the rows in use, NaN if none."""
 
         if not np.any(use):
             return float("nan")
         return float(
             np.sqrt(
-                np.sum((weights[use] * np.abs(residual[use])) ** 2) / max(np.sum((weights[use] * obs[use]) ** 2), 1e-30)
+                np.sum((weights[use] * residual[use]) ** 2) / max(np.sum((weights[use] * reference[use]) ** 2), 1e-30)
             )
         )
 
+    every = np.ones_like(observed, dtype=bool)
     return {
         "Nall": int(len(obs)),
         "Nobs": int(np.count_nonzero(observed)),
         "Robs": r_factor(observed),
-        "Rall": r_factor(np.ones_like(observed, dtype=bool)),
-        "wRobs": wr_factor(observed),
-        "wRall": wr_factor(np.ones_like(observed, dtype=bool)),
+        "Rall": r_factor(every),
+        "wRobs": wr_factor(amplitude_residual, fobs, observed),
+        "wRall": wr_factor(amplitude_residual, fobs, every),
+        "wRobs_I": wr_factor(intensity_residual, obs, observed),
+        "wRall_I": wr_factor(intensity_residual, obs, every),
     }
 
 
@@ -334,6 +350,8 @@ def compute_model_metrics(rows: list[dict], model: dict, calc_column: str, insta
         "MRall": mr["Rall"],
         "MwRobs": mr["wRobs"],
         "MwRall": mr["wRall"],
+        "MwRobs_I": mr["wRobs_I"],
+        "MwRall_I": mr["wRall_I"],
         "MNobs": mr["Nobs"],
         "MNall": mr["Nall"],
         "merge_groups": int(len(mult)),
@@ -369,7 +387,7 @@ def compute_row_mr_summary(rows: list[dict], model: dict, instability_u: float =
         metrics["Nmatched"] = n_matched
     return {
         "definition": {
-            "style": "JANA/PETS-style dynamical-refinement row and merged-row residual factors (GROND implementation)",
+            "style": "JANA/PETS-style dynamical-refinement row and merged-row residual factors (GROND implementation); R and wR as Jana2020 for refinement on F, MR and MwR after Klar et al. (2023)",
             "provenance": "computed by GROND from its final signed row table; not emitted by JANA or PETS",
             "matched_support": "Born and Bloch factors use the identical intersection of rows with finite Iobs, positive finite immutable source sigma(Iobs), finite born_scaled, and finite dyn_scaled",
             "matched_support_counts": "Ninput is the supplied row count; Nmatched/Nall is the common finite Born/Bloch support; Nexcluded is Ninput-Nmatched",
@@ -379,9 +397,10 @@ def compute_row_mr_summary(rows: list[dict], model: dict, instability_u: float =
             "all_reflection_metrics": "Rall, wRall, MRall, and MwRall use all finite observations after row or merged-row grouping.",
             "observed_weighted_metrics": "wRobs and MwRobs are optional extensions that apply the same weighted residual formula to the Iobs > 3 sigma(Iobs) subsets; the conventional core reporting family is Robs, Rall, wRall, MRobs, MRall, and MwRall.",
             "R_formula": "sum(abs(sqrt(Iobs,JANA) - sqrt(max(Icalc,0)))) / sum(sqrt(Iobs,JANA))",
-            "wR_formula": "sqrt(sum((w * abs(Iobs-Icalc))^2) / sum((w * Iobs)^2))",
+            "wR_formula": "sqrt(sum((w * (sqrt(Iobs,JANA) - sqrt(max(Icalc,0))))^2) / sum((w * sqrt(Iobs,JANA))^2)); amplitude form, Jana2020 wR(all) for refinement on F; used for wRobs, wRall, MwRobs, and MwRall",
+            "wR_I_formula": "sqrt(sum((w * (Iobs,JANA - Icalc))^2) / sum((w * Iobs,JANA)^2)); intensity-residual form printed by earlier GROND versions, kept as wRobs_I, wRall_I, MwRobs_I, and MwRall_I",
             "nonpositive_intensity_policy": "following Klar et al. SI, rows with Iobs < 0.01 sigma(Iobs) use Iobs=0 and sigma(sqrt(Iobs))=5 sqrt(sigma(Iobs))",
-            "weight_formula": "w = (sigma(sqrt(Iobs,JANA))^2 + (u*sqrt(Iobs,JANA))^2)^(-1/2), with u=0.01 by default",
+            "weight_formula": "w = (sigma(sqrt(Iobs,JANA))^2 + (u*sqrt(Iobs,JANA))^2)^(-1/2), with u=0.01 by default; w^2 is the least-squares weight 1/(sigma_F^2 + (u F)^2)",
             "sigma_contract": "source_sigma is the immutable imported experimental sigma(Iobs); xds_sigma is accepted as its historical column name and sigma_eff only as a legacy fallback during CSV normalization",
             "sigma_sqrt_formula": "sigma(sqrt(Iobs)) = source_sigma/(2 sqrt(Iobs)) for ordinary positive rows; weak rows use 5 sqrt(source_sigma)",
             "instability_u": float(instability_u),
@@ -1087,7 +1106,7 @@ def write_markdown(
         "",
         *markdown_table(row_rows),
         "",
-        f"Definitions: `Robs`, optional `wRobs`, `MRobs`, and optional `MwRobs` use only observed reflections satisfying `Iobs > 3 sigma(Iobs)`. `Rall`, `wRall`, `MRall`, and `MwRall` use all finite rows or merged rows. Born and Bloch use one common finite row support. `Nmerge excluded` counts supported rows whose HKL indices cannot enter symmetry merging. The conventional core family is `Robs/Rall/wRall/MRobs/MRall/MwRall`. The instability factor is `u = {instability_u_text}`. Weights use `w = [sigma(sqrt(Iobs))^2 + (u sqrt(Iobs))^2]^(-1/2)` and `wR = sqrt(sum((w |Iobs - Icalc|)^2) / sum((w Iobs)^2))`.",
+        f"Definitions: `Robs`, optional `wRobs`, `MRobs`, and optional `MwRobs` use only observed reflections satisfying `Iobs > 3 sigma(Iobs)`. `Rall`, `wRall`, `MRall`, and `MwRall` use all finite rows or merged rows. Born and Bloch use one common finite row support. `Nmerge excluded` counts supported rows whose HKL indices cannot enter symmetry merging. The conventional core family is `Robs/Rall/wRall/MRobs/MRall/MwRall`. The instability factor is `u = {instability_u_text}`. Weights use `w = [sigma(sqrt(Iobs))^2 + (u sqrt(Iobs))^2]^(-1/2)` and `wR = sqrt(sum((w (sqrt(Iobs) - sqrt(Icalc)))^2) / sum((w sqrt(Iobs))^2))`, the amplitude form of Jana2020's `wR(all)` for refinement on F; `MR`/`MwR` follow Klar et al. (2023). The intensity-residual form of earlier versions is kept in the JSON output as `wRobs_I`, `wRall_I`, `MwRobs_I`, and `MwRall_I`.",
         "",
     ]
     if endpoint_rows:
@@ -1204,7 +1223,7 @@ def write_latex(
             r"\bottomrule\end{tabular}",
             "",
             r"\bigskip",
-            rf"\noindent $R_{{obs}}$, optional $wR_{{obs}}$, $MR_{{obs}}$, and optional $MwR_{{obs}}$ use reflections satisfying $I_{{obs}} > 3\sigma(I_{{obs}})$. $R_{{all}}$, $wR_{{all}}$, $MR_{{all}}$, and $MwR_{{all}}$ use all finite rows or merged rows. Born and Bloch use one common finite row support; Nmerge excluded counts supported rows whose HKL indices cannot enter symmetry merging. The conventional core family is $R_{{obs}}/R_{{all}}/wR_{{all}}/MR_{{obs}}/MR_{{all}}/MwR_{{all}}$. The instability factor is $u={tex_escape(instability_u_text)}$.",
+            rf"\noindent $R_{{obs}}$, optional $wR_{{obs}}$, $MR_{{obs}}$, and optional $MwR_{{obs}}$ use reflections satisfying $I_{{obs}} > 3\sigma(I_{{obs}})$. $R_{{all}}$, $wR_{{all}}$, $MR_{{all}}$, and $MwR_{{all}}$ use all finite rows or merged rows. Born and Bloch use one common finite row support; Nmerge excluded counts supported rows whose HKL indices cannot enter symmetry merging. The conventional core family is $R_{{obs}}/R_{{all}}/wR_{{all}}/MR_{{obs}}/MR_{{all}}/MwR_{{all}}$. The instability factor is $u={tex_escape(instability_u_text)}$. Weights are $w=[\sigma(\sqrt{{I_{{obs}}}})^2+(u\sqrt{{I_{{obs}}}})^2]^{{-1/2}}$ and $wR=\sqrt{{\sum (w(\sqrt{{I_{{obs}}}}-\sqrt{{I_{{calc}}}}))^2/\sum (w\sqrt{{I_{{obs}}}})^2}}$, the amplitude form of Jana2020's $wR(\mathrm{{all}})$ for refinement on $F$; $MR$ and $MwR$ follow Klar et al. (2023).",
         ]
     )
     if endpoint_rows:

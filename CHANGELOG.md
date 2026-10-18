@@ -32,6 +32,7 @@ Interface:
 - `grond auto --preset fast` gives a quick result with every check kept.
 - `grond manual` runs the calculation stage by stage.
 - `grond refine` recalculates the corrections for a model refined outside GROND.
+- JANA-style `wR` and `MwR` are the amplitude form, Jana2020's wR(all) for refinement on F (`MR`/`MwR` after Klar et al. 2023); the intensity-residual form of earlier versions is kept in the JSON as `wRobs_I`, `wRall_I`, `MwRobs_I`, `MwRall_I`, and the resolution-limit gates still read it.
 
 ## 0.2.1
 
