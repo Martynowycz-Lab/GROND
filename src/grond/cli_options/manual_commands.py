@@ -250,7 +250,7 @@ def register_manual(sub: argparse._SubParsersAction) -> None:
     )
     p_manual_finish.add_argument("--map-mode", choices=["native", "off"], default="native")
     p_manual_finish.add_argument(
-        "--native-map-spacing", type=float, default=0.25, help="Native map grid spacing in Angstrom."
+        "--native-map-spacing", type=float, default=0.1, help="Native map grid spacing in Angstrom (default 0.1)."
     )
     from .endpoint_commands import add_model_box_args
 

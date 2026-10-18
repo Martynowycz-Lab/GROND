@@ -627,7 +627,7 @@ def run_finish_native_dynamic_maps(
         return {"status": "missing_model", "model": ""}
     d_min = getattr(args, "native_map_d_min", 0.0)
     options = NativeDynamicMapOptions(
-        grid_spacing_A=float(getattr(args, "native_map_spacing", 0.25)),
+        grid_spacing_A=float(getattr(args, "native_map_spacing", 0.1)),
         d_min_A=float(d_min) if float(d_min) > 0.0 else None,
         min_i_over_sigma=float(getattr(args, "native_map_min_i_over_sigma", 0.0)),
         max_grid_points=int(getattr(args, "native_map_max_grid_points", 8_000_000)),
@@ -648,7 +648,7 @@ def run_finish_maps(run_dir: Path, result: Mapping[str, object], args: argparse.
 
     if not getattr(args, "make_maps", True):
         return {"status": "disabled"}
-    mode = str(getattr(args, "map_mode", "native") or "native").lower()
+    mode = str(getattr(args, "map_mode", "both") or "both").lower()
     if mode == "off":
         return {"status": "disabled"}
     if mode not in {"native", "shelx2map", "both"}:

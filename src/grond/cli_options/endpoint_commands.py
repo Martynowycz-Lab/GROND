@@ -309,19 +309,20 @@ def register_finish(sub: argparse._SubParsersAction) -> None:
         "--make-maps",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Generate finish maps. Native row-level dynamical maps are the default; use --no-make-maps to skip.",
+        help="Generate finish maps (see --map-mode); use --no-make-maps to skip.",
     )
     p_finish.add_argument(
         "--map-mode",
         choices=["native", "shelx2map", "both", "off"],
-        default="native",
-        help="native writes row-level dynamical maps; shelx2map writes quick corrected-HKL endpoint maps; both writes both.",
+        default="both",
+        help="native writes row-level dynamical maps; shelx2map writes quick corrected-HKL endpoint maps; both "
+        "(default, as in every paper run) writes both.",
     )
     p_finish.add_argument(
         "--native-map-spacing",
         type=float,
-        default=0.25,
-        help="Approximate CCP4 grid spacing in Angstroms for native dynamical maps.",
+        default=0.1,
+        help="Approximate CCP4 grid spacing in Angstroms for native dynamical maps (default 0.1, as in every paper run).",
     )
     p_finish.add_argument(
         "--native-map-d-min",
