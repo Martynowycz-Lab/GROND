@@ -169,7 +169,8 @@ def add_geometry(ap: argparse.ArgumentParser) -> None:
         "--topup-d-min",
         type=float,
         default=0.8,
-        help="Nominal Bloch support top-up dmin. Auto never uses a shallower support limit than the selected data dmin.",
+        help="Beam candidates are the reflections with d at least the finer of this value and the data's d_min, in Å "
+        "(default %(default)s).",
     )
     ap.add_argument(
         "--max-support-sg",
