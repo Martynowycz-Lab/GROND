@@ -117,6 +117,7 @@ def manual_feedback(args) -> int:
     command_line = [
         *_child_base(args),
         "refine",
+        "--reuse-settings",  # the manual workflow keeps the settings of its own thickness stage
         "--checkpoint",
         str(checkpoint_path),
         "--start-res",
@@ -201,6 +202,7 @@ def manual_feedback(args) -> int:
     recompute_command = [
         *_child_base(args),
         "refine",
+        "--reuse-settings",  # the manual workflow keeps the settings of its own thickness stage
         "--checkpoint",
         str(checkpoint_path),
         "--start-res",

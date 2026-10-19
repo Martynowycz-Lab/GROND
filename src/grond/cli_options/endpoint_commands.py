@@ -17,7 +17,12 @@ def register_push(sub: argparse._SubParsersAction) -> None:
 
     p_push = sub.add_parser(
         "refine",
-        help="Recalculate the corrections for a model you refined yourself, with the settings of a run.",
+        help="Run the full calculation again on a model you refined yourself, keeping the run's indexing, hand and "
+        "held-out set.",
+        description="Runs `grond auto` on the new model with the run's data, indexing, hand, held-out set and "
+        "command-line options. Beams, rocking points, thickness, mosaic spread and damage are chosen again from the "
+        "new model and the data. Options of `grond auto` given here override the run's. With --reuse-settings the "
+        "run's chosen settings are kept and only the frame scales, error model and weights are refitted.",
     )
     p_push.add_argument("--checkpoint", default="", help="grond_continue_checkpoint.json of a finished `grond auto` run.")
     p_push.add_argument(
@@ -29,6 +34,12 @@ def register_push(sub: argparse._SubParsersAction) -> None:
         "--start-res",
         default="",
         help="Model to continue from, for example one you refined in SHELXL or Olex2.",
+    )
+    p_push.add_argument(
+        "--reuse-settings",
+        action="store_true",
+        help="Keep the run's thickness, mosaic spread, damage, beam count and rocking points instead of choosing them "
+        "again for the new model.",
     )
     p_push.add_argument("--out-dir", required=True, help="Output directory.")
     p_push.add_argument("--python", default="", help="Python for the calculation subprocesses (default: the one running grond).")
@@ -49,7 +60,8 @@ def register_push(sub: argparse._SubParsersAction) -> None:
     p_push.add_argument(
         "--hkl-transform", default="", help="Override signed HKL transform. Defaults to the source summary."
     )
-    p_push.add_argument("--cycles", type=int, default=3, help="Rounds of Bloch calculation and SHELXL refinement (default %(default)s).")
+    p_push.add_argument("--cycles", type=int, default=None, help="Rounds of Bloch calculation and SHELXL refinement "
+                        "(default: as grond auto; 3 with --reuse-settings).")
     p_push.add_argument(
         "--recompute-final-rows",
         action="store_true",
@@ -58,8 +70,8 @@ def register_push(sub: argparse._SubParsersAction) -> None:
             "without a SHELXL step. Use this to make maps/statistics for an already accepted endpoint model."
         ),
     )
-    p_push.add_argument("--n-basis", type=int, default=None, help="Override the beam count for all continuation crystals; otherwise retain each saved count (single-dataset default: 108).")
-    p_push.add_argument("--n-points", type=int, default=None, help="Rocking points per observation (default: the count saved by the run).")
+    p_push.add_argument("--n-basis", type=int, default=None, help="Beam count (default: chosen as in grond auto; with --reuse-settings, the run's).")
+    p_push.add_argument("--n-points", type=int, default=None, help="Rocking points per observation (default: chosen as in grond auto; with --reuse-settings, the run's).")
     p_push.add_argument("--final-n-basis", type=int, default=0, help="Single-dataset final beam override; for multiple crystals use --dataset-n-basis or --n-basis.")
     p_push.add_argument("--final-n-points", type=int, default=20)
     add_crystal_overrides(p_push)

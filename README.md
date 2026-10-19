@@ -49,7 +49,7 @@ grond finish --run-dir run
 |---|---|
 | `auto` | Full run: indexing check, held-out set, settings by cross-validation, hand test, SHELXL rounds. |
 | `manual` | The same calculation one stage at a time, for inspection. |
-| `refine` | Recalculates the corrections for a model you refined yourself, with the settings saved by `auto`. |
+| `refine` | Runs the calculation again on a model you refined yourself, with the run's data, indexing, hand and held-out set. |
 | `finish` | Writes the maps and summary tables of a finished run. |
 | `prep` | Writes the input file for one model and one or more crystals. |
 | `import-dials` | Converts a DIALS `integrated.refl`/`.expt` pair. |
@@ -73,6 +73,12 @@ grond finish --run-dir run
 The run ends by listing the files to open first: `TABLE1_FINAL_STATISTICS.md`, `FINAL_SUMMARY.md`,
 `HELDOUT_VALIDATION.md`, the refined model with its corrected HKL file, and `grond_continue_checkpoint.json` for
 `grond refine`.
+
+`grond refine --checkpoint run/grond_continue_checkpoint.json --start-res model.res --out-dir run2` takes a model you
+refined in SHELXL or Olex2 from GROND's HKL file and runs `grond auto` on it with the run's data, options, indexing,
+hand and held-out set. Beams, rocking points, thickness, mosaic spread and damage are chosen again from the new model,
+for any number of crystals. Options of `grond auto` given to `refine` override the run's. `--reuse-settings` keeps the
+run's settings instead and refits only the frame scales, error model and weights.
 
 By default (`--free-set off`) the chosen model is refined once more against all reflections at the end. With
 `--free-set on` the held-out reflections stay out of the final model. All runs in the paper used `--free-set on`.

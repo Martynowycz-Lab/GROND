@@ -140,22 +140,21 @@ def write_continue_checkpoint(prep: PrepConfig, result: Mapping[str, object], ar
         "final_dataset_policy": ((result.get("dataset_policy") or {}).get("final") or {}),
         "multi_endpoint_merge_key": getattr(args, "multi_endpoint_merge_key", "model_symmetry"),
         "recommended_command": [
-            "GROND",
-            "push-endpoint",
+            "grond",
+            "refine",
             "--checkpoint",
             str(checkpoint_path),
             "--start-res",
             "edited_model.res",
             "--out-dir",
-            str(out_dir / "endpoint_push_from_edited_model"),
-            "--cycles",
-            "3",
+            str(out_dir / "refine_edited_model"),
         ],
         "notes": [
-            "Use this for deliberate continuation from a changed model while reusing the pinned GROND row/nuisance contract.",
-            "For multi-dataset checkpoints, GROND recomputes each dataset from the edited shared model, merges corrected endpoint observations, then runs one shared SHELXL LS step per macrocycle.",
-            "Checkpoint dataset source runs keep the full native calculations. Multi-dataset push refits the pinned full frame grouping.",
-            "For an interrupted GROND auto run, rerun the original command with the same --out-dir instead.",
+            "grond refine runs the full calculation again on the edited model with this run's data, indexing, hand, "
+            "held-out set and command-line options; beams, rocking points, thickness, mosaic spread and damage are "
+            "chosen again.",
+            "With --reuse-settings it keeps this run's settings and refits only the frame scales, error model and weights.",
+            "For an interrupted grond auto run, rerun the original command with the same --out-dir instead.",
         ],
     }
     if dataset_count == 1 and not source_summary:

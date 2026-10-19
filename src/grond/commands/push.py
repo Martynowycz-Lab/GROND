@@ -10,8 +10,8 @@ from dataclasses import asdict
 from pathlib import Path
 
 from grond.cli_support.tools import choose_python, external_tool_statuses
-from grond.cli_support.values import read_json
-from grond.io.config import write_datasets_csv, write_prep
+from grond.cli_support.values import read_json, try_read_json
+from grond.io.config import DatasetSpec, PrepConfig, write_datasets_csv, write_prep
 from grond.paths import engine_script
 from grond.reports.push import write_multi_push_endpoint_report, write_push_endpoint_report
 from grond.workflows.crystal_parameters import resolve_crystal_parameters
@@ -33,6 +33,105 @@ from grond.workflows.shared_refinement import run_multi_shelxl_feedback_loop
 
 # Safety report: cycles within this of the best row wR(I)all are listed as equivalent.
 BEST_CYCLE_TOLERANCE = 0.001
+
+
+# Options that describe where a run's inputs and outputs are; `grond refine` sets its own.
+RUN_LOCATION_OPTIONS = {
+    "--prep", "--out-dir", "--prediction-cache-dir", "--resume", "--no-resume", "--hkl", "--xds-dir", "--structure",
+    "--baseline-hkl", "--dials-refl", "--dials-expt", "--hkl-transform", "--trust-hkl-transform", "--hand-control",
+    "--no-hand-control",
+}
+# Options of `grond refine` itself; every other option on its command line goes to `grond auto`.
+REFINE_OPTIONS = {"--checkpoint", "--start-res", "--out-dir", "--cycles", "--reuse-settings"}
+
+
+def _auto_option_actions() -> dict[str, argparse.Action]:
+    """The options of `grond auto`, by flag."""
+
+    from grond.cli_options.parser import build_parser
+
+    sub = next(a for a in build_parser()._actions if isinstance(a, argparse._SubParsersAction))
+    return {flag: action for action in sub.choices["auto"]._actions for flag in action.option_strings}
+
+
+def _option_groups(argv: list[str], actions: Mapping[str, argparse.Action]) -> list[tuple[str, list[str]]]:
+    """Split a command line into (flag, tokens) with the arity of each `grond auto` or `grond refine` option."""
+
+    groups, i = [], 0
+    while i < len(argv):
+        token = argv[i]
+        flag = token.split("=", 1)[0]
+        action = actions.get(flag)
+        takes_value = "=" not in token and (
+            (action is not None and action.nargs != 0) or (action is None and flag in REFINE_OPTIONS - {"--reuse-settings"})
+        )
+        n = 2 if takes_value and i + 1 < len(argv) else 1
+        groups.append((flag, argv[i:i + n]))
+        i += n
+    return groups
+
+
+def cmd_refine_new_settings(args: argparse.Namespace) -> int:
+    """Run `grond auto` on the new model with the run's data, indexing, hand, held-out set and options.
+
+    The new model is not re-refined against the kinematic data (no baseline HKL) and its hand is kept
+    (--no-hand-control). The split contracts of the run keep the held-out set unchanged. Beams, rocking points,
+    thickness, mosaic spread and damage are chosen again, as `grond auto` chooses them.
+    """
+
+    from grond.cli_support.entrypoint import main as grond_main
+
+    if not str(getattr(args, "checkpoint", "") or ""):
+        raise SystemExit("grond refine needs --checkpoint of a grond auto run (--source-summary works with --reuse-settings).")
+    checkpoint_info = apply_push_checkpoint(args)
+    checkpoint = checkpoint_info["checkpoint_data"]
+    run_dir = Path(str(checkpoint.get("run_dir") or Path(str(checkpoint_info["checkpoint"])).parent))
+    out_dir = Path(args.out_dir).expanduser().resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    datasets = []
+    for row in checkpoint.get("datasets") or []:
+        values = {key: row[key] for key in DatasetSpec.__dataclass_fields__ if row.get(key) is not None}
+        values["baseline_hkl"] = ""
+        datasets.append(DatasetSpec(**values))
+    if not datasets:
+        raise SystemExit(f"{checkpoint_info['checkpoint']} records no datasets.")
+    prep = PrepConfig(
+        structure=str(Path(args.start_res).expanduser().resolve()),
+        datasets=datasets,
+        default_hkl_transform=str(checkpoint.get("hkl_transform") or "identity"),
+        metadata={"refined_from": str(run_dir)},
+    )
+    prep_path = out_dir / "refine_prep.json"
+    write_prep(prep_path, prep)
+
+    actions = _auto_option_actions()
+    recorded = try_read_json(run_dir / "run_config.json").get("argv")
+    carried: list[str] = []
+    if isinstance(recorded, list) and recorded and recorded[0] == "auto":
+        for flag, tokens in _option_groups([str(v) for v in recorded[1:]], actions):
+            if flag not in RUN_LOCATION_OPTIONS:
+                carried += tokens
+    else:
+        print("NOTE the run did not record its command line; refine uses the grond auto defaults and the options "
+              "given here.", flush=True)
+    given: list[str] = []
+    argv = list(getattr(args, "argv", []) or [])
+    for flag, tokens in _option_groups(argv[argv.index("refine") + 1:] if "refine" in argv else [], actions):
+        if flag == "--cycles":
+            given += ["--shelxl-feedback-cycles", tokens[-1]]
+        elif flag in REFINE_OPTIONS:
+            continue
+        elif flag not in actions and flag not in ("-v", "--verbose"):
+            raise SystemExit(f"grond refine: {flag} works only with --reuse-settings.")
+        elif flag not in ("-v", "--verbose"):
+            given += tokens
+    auto_argv = ["auto", *carried, *given, "--prep", str(prep_path), "--out-dir", str(out_dir),
+                 "--trust-hkl-transform", "--no-hand-control"]
+    record = {"checkpoint": str(checkpoint_info["checkpoint"]), "start_res": str(prep.structure),
+              "options_of_the_run": carried, "options_given": given, "grond": auto_argv}
+    (out_dir / "refine_command.json").write_text(json.dumps(record, indent=2) + "\n")
+    print("grond refine: grond " + " ".join(auto_argv), flush=True)
+    return grond_main(auto_argv)
 
 
 def cmd_push_endpoint_multi(
@@ -136,8 +235,11 @@ def cmd_push_endpoint_multi(
 
 
 def cmd_push_endpoint(args: argparse.Namespace) -> int:
-    """Continue an existing GROND endpoint with pinned nuisance settings."""
+    """`grond refine`: new settings by default, or the run's settings with --reuse-settings."""
 
+    if not args.reuse_settings:
+        return cmd_refine_new_settings(args)
+    args.cycles = 3 if args.cycles is None else args.cycles
     python = choose_python(args.python)
     out_dir = Path(args.out_dir).expanduser().resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -147,13 +249,18 @@ def cmd_push_endpoint(args: argparse.Namespace) -> int:
         return cmd_push_endpoint_multi(args, checkpoint_info, start_model, prep_audit, python, out_dir)
     if args.dataset_n_basis or args.dataset_thickness_nm:
         raise SystemExit("--dataset-n-basis and --dataset-thickness-nm require a multi-dataset --checkpoint.")
-    args.n_basis = 108 if args.n_basis is None else args.n_basis
-    args.n_points = 20 if args.n_points is None else args.n_points
-    # 0 replays the beam-pool depth recorded by the run, min(0.8 Å, d_min), as the multi-crystal path does.
-    args.topup_d_min = 0.0 if args.topup_d_min is None else args.topup_d_min
     source_summary = Path(str(args.source_summary)).expanduser()
     if not source_summary.is_file():
         raise SystemExit(f"--source-summary {source_summary} does not exist")
+    # The run's own beam count and rocking points, as the multi-crystal path replays them.
+    saved = read_json(source_summary).get("config") or {}
+    for key in ("n_basis", "n_points"):
+        if getattr(args, key) is None:
+            if saved.get(key) in (None, ""):
+                raise SystemExit(f"{source_summary} records no {key}; give --{key.replace('_', '-')}.")
+            setattr(args, key, int(saved[key]))
+    # 0 replays the beam-pool depth recorded by the run, min(0.8 Å, d_min), as the multi-crystal path does.
+    args.topup_d_min = 0.0 if args.topup_d_min is None else args.topup_d_min
     # The loop replays the split and scale model from the source summary; the SHELXL handoff is forwarded
     # explicitly from the same summary (historical values when it predates a key) or from an override.
     contract = resolve_push_continuation_contract(args, {"source_summary": read_json(source_summary)})

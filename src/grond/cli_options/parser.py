@@ -30,7 +30,7 @@ HELP_LEVELS = {
             "--prediction-cache-dir", "--row-plan-cache", "--shared-grid", "--shared-grid-gpus", "--basis-centring-coset"],
     },
     "refine": {
-        0: ["--checkpoint", "--start-res", "--out-dir", "--cycles", "--workers", "--config", "--shelxl"],
+        0: ["--checkpoint", "--start-res", "--out-dir", "--reuse-settings", "--cycles", "--workers", "--config", "--shelxl"],
         1: ["--python", "--resume"],
     },
     "finish": {

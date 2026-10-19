@@ -279,8 +279,9 @@ def hydrate_push_args_for_multi(
     args.shelxl_feedback_shelxl_iterations = int(getattr(args, "shelxl_iterations", 1) or 1)
     args.shelxl_feedback_endpoint_ls_cycles = int(getattr(args, "endpoint_ls_cycles", 1) or 1)
     args.shelxl_iterations = int(getattr(args, "shelxl_iterations", 1) or 1)
-    args.n_points = int(getattr(args, "n_points", 20) or 20)
-    args.n_basis = int(getattr(args, "n_basis", 108) or 108)
+    # Each crystal's saved beam count and rocking points apply (crystal_parameters); these are only the fallbacks.
+    args.n_points = int(getattr(args, "n_points", 0) or 0)
+    args.n_basis = int(getattr(args, "n_basis", 0) or 0)
     args.final_n_basis = int(getattr(args, "final_n_basis", 0) or 0)
     args.final_n_points = int(getattr(args, "final_n_points", args.n_points) or args.n_points)
     args.prediction_cache_compression = getattr(args, "prediction_cache_compression", "none")

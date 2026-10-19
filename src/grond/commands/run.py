@@ -233,6 +233,8 @@ def cmd_run(args: argparse.Namespace) -> int:
             "allow_npd": args.publication_allow_npd,
             "feedback_cycles": str(getattr(args, "publication_feedback_cycles", "all") or "all"),
         },
+        # the command line, so that `grond refine` can repeat this run's own options
+        "argv": list(getattr(args, "argv", []) or []),
     }
     (Path(args.out_dir) / "run_config.json").write_text(json.dumps(config, indent=2) + "\n")
     # a crystal whose cell no transform reconciles with the model is left out, recorded, before any split is planned

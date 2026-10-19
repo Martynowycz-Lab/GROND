@@ -136,7 +136,9 @@ def resolve_crystal_parameters(
                 f"Supply --dataset-n-basis {ds.name}=N or --n-basis N."
             )
         settings["n_basis"] = _saved_integer(basis, ds.name, "n_basis", 2)
-        points = args.n_points if args.n_points is not None else settings.get("n_points", 20)
+        points = args.n_points if args.n_points is not None else settings.get("n_points")
+        if points is None:
+            raise SystemExit(f"Checkpoint dataset {ds.name!r} has no saved n_points. Supply --n-points N.")
         settings["n_points"] = _saved_integer(points, ds.name, "n_points", 1)
         if args.topup_d_min is not None:
             if not math.isfinite(args.topup_d_min) or args.topup_d_min <= 0:
