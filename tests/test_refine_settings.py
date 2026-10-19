@@ -36,7 +36,7 @@ def test_refine_runs_auto_with_the_runs_options_and_keeps_indexing_and_split(tmp
     auto_argv, prep = _run(tmp_path, monkeypatch, "--cycles", "2", "--nested-n-basis", "48")
     assert auto_argv[0] == "auto"
     # the run's own options, not its input and output locations or its hand control
-    assert ["--free-set", "on", "--min-d-spacing", "0.80", "--preset", "fast"] == auto_argv[1:7]
+    assert auto_argv[1:7] == ["--free-set", "on", "--min-d-spacing", "0.80", "--preset", "fast"]
     assert "--hand-control" not in auto_argv and "c" not in auto_argv
     # options given to refine go to auto and come after the run's
     assert auto_argv[7:11] == ["--shelxl-feedback-cycles", "2", "--nested-n-basis", "48"]
