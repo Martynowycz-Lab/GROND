@@ -149,7 +149,8 @@ def cmd_push_endpoint(args: argparse.Namespace) -> int:
         raise SystemExit("--dataset-n-basis and --dataset-thickness-nm require a multi-dataset --checkpoint.")
     args.n_basis = 108 if args.n_basis is None else args.n_basis
     args.n_points = 20 if args.n_points is None else args.n_points
-    args.topup_d_min = 0.7 if args.topup_d_min is None else args.topup_d_min
+    # 0 replays the beam-pool depth recorded by the run, min(0.8 Å, d_min), as the multi-crystal path does.
+    args.topup_d_min = 0.0 if args.topup_d_min is None else args.topup_d_min
     source_summary = Path(str(args.source_summary)).expanduser()
     if not source_summary.is_file():
         raise SystemExit(f"--source-summary {source_summary} does not exist")

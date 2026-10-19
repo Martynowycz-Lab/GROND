@@ -96,7 +96,7 @@ def register_push(sub: argparse._SubParsersAction) -> None:
         default=0.0,
         help="Resolution limit of the corrected HKL file and its statistics in Å (default 0: as --min-d-spacing).",
     )
-    p_push.add_argument("--topup-d-min", type=float, default=None, help="Override the beam-pool resolution; otherwise use each checkpoint value (single-dataset default: 0.7 Angstrom).")
+    p_push.add_argument("--topup-d-min", type=float, default=None, help="Beam-pool resolution in Å (default: the value recorded by the run, min(0.8 Å, d_min)).")
     p_push.add_argument("--min-peak", type=float, default=-1.0)
     p_push.add_argument("--geometry-percentile", type=float, default=0.0)
     p_push.add_argument("--max-rows", type=int, default=0)
