@@ -307,7 +307,7 @@ def _write_final_statistics_table1(
 
     row_records = [
         _table1_jana_record(
-            "Conventional kinematic refinement",
+            str(input_shelxl.get("label") or "Conventional kinematic refinement"),
             "merged conventional refinement",
             None,
             "not available: no audited matched unmerged prediction/scale contract; use the SHELXL endpoint panel",
@@ -330,7 +330,7 @@ def _write_final_statistics_table1(
     publication_res = Path(publication_res_text) if publication_res_text else None
     publication_controls = _quick_source_shelx_controls(publication_res)
     conventional_endpoint = _table1_shelxl_record(
-        "Conventional kinematic reference refinement",
+        str(input_shelxl.get("label") or "Conventional kinematic reference refinement"),
         "starting merged HKLF4 refinement",
         input_shelxl,
         input_controls,

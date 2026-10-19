@@ -193,6 +193,9 @@ def write_quick_stats(
     )
     file_block["bloch_diagnostics"] = str(bloch_diagnostics_path)
     input_shelxl = _quick_baseline_shelxl(prep, final_summary, result)
+    if (prep.metadata or {}).get("refined_from"):
+        # grond refine: the supplied model is the user's refinement of an earlier GROND run, not a kinematic one
+        input_shelxl = {**input_shelxl, "label": "Input model (grond refine)"}
     file_block["baseline_res"] = str(input_shelxl.get("res") or "")
     file_block["baseline_hkl"] = str(input_shelxl.get("hkl") or "")
     file_block["baseline_lst"] = str(input_shelxl.get("lst") or "")

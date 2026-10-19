@@ -138,6 +138,9 @@ def start_model_leak(result: Mapping[str, object]) -> dict[str, object]:
     if status == "ok":
         return {"start_model": False, "start_model_evidence": f"refined on {record.get('n_work')} work reflections; "
                 f"{record.get('n_free_removed')} free and {record.get('n_excluded_removed')} excluded removed"}
+    if status == "refine_start" and record.get("held_out_kept_out"):
+        return {"start_model": False, "start_model_evidence": "grond refine of a --free-set on run: GROND's reflection "
+                "files, and so the model given, never held the held-out reflections"}
     return {"start_model": True, "start_model_evidence": f"leak-free start {status}: {record.get('leak', 'supplied model used')}"}
 
 def shelxl_hkl_free_rows(out_dir: Path, result: Mapping[str, object]) -> tuple[bool, str]:

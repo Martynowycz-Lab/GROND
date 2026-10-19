@@ -237,7 +237,8 @@ def _format_terminal_finish_summary(payload: Mapping[str, object]) -> str:
         endpoint_lines.extend(
             [
                 "  No corrected endpoint passed the hard artifact, support, endpoint-health, and no-harm checks.",
-                f"  Retain conventional baseline: R1(F)all {_quick_percent(input_shelxl.get('R1all'))}; RES {files.get('baseline_res', '')}; HKL {files.get('baseline_hkl', '')}",
+                f"  Retain {'the input model' if input_shelxl.get('label') else 'conventional baseline'}: R1(F)all "
+                f"{_quick_percent(input_shelxl.get('R1all'))}; RES {files.get('baseline_res', '')}; HKL {files.get('baseline_hkl', '')}",
             ]
         )
     elif publication_is_direct_ls1:
