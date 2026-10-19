@@ -66,6 +66,12 @@ def add_backend(ap: argparse.ArgumentParser) -> None:
         ),
     )
     ap.add_argument(
+        "--shared-grid-gpus",
+        default=None,
+        help="CUDA devices for the shared grid's prediction passes, e.g. 0,1,2 (needs JAX with CUDA). Used only when the "
+        "grid matrices have at least 2,000 beams; smaller ones solve faster on CPU cores.",
+    )
+    ap.add_argument(
         "--basis-centring-coset",
         choices=["off", "on"],
         default=None,

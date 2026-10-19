@@ -26,7 +26,7 @@ HELP_LEVELS = {
         1: ["--python", "--resume", "--endpoint-min-d-spacing", "--min-peak", "--h-omit", "--max-support-sg",
             "--n-points", "--nested-n-points", "--nested-n-basis", "--final-basis-max", "--final-basis-scan-limit",
             "--mosaicity-mode", "--nested-response-tables", "--shelxl-feedback-cycles", "--chunksize",
-            "--prediction-cache-dir", "--row-plan-cache", "--shared-grid", "--basis-centring-coset"],
+            "--prediction-cache-dir", "--row-plan-cache", "--shared-grid", "--shared-grid-gpus", "--basis-centring-coset"],
     },
     "refine": {
         0: ["--checkpoint", "--start-res", "--out-dir", "--cycles", "--workers", "--config", "--shelxl"],

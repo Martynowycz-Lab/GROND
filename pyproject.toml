@@ -36,6 +36,7 @@ Issues = "https://github.com/Martynowycz-Lab/GROND/issues"
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.8"]
 config = ["PyYAML>=6"]
+gpu = ["jax[cuda12]>=0.4"]
 
 [project.scripts]
 grond = "grond.cli:main"

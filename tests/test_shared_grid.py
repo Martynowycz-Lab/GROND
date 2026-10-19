@@ -17,19 +17,6 @@ def _port(tmp_path, **overrides):
     return S.build_port(str(hkl), "identity", str(res), Config(**cfg))
 
 
-def _grid_basis(port, omega, targets, cut):
-    """solve_grid_point's beams at one untilted orientation: direct beam, targets, then pool beams with |Sg| <= cut."""
-    pool = np.asarray(port.pool_hkl, dtype=int)
-    candidates = np.flatnonzero(np.abs(port.sg_for_hkls_at_orientation(pool, omega, 0.0, 0.0)) <= cut)
-    assert len(candidates) <= port.cfg.n_basis - 2  # below the cap, so no top-up ranking
-    order = {(0, 0, 0): 0}
-    for hkl in [*targets, *pool[candidates]]:
-        order.setdefault(tuple(int(v) for v in hkl), len(order))
-    basis = np.asarray(list(order), dtype=np.int64)
-    pos = np.asarray([order[tuple(int(v) for v in hkl)] for hkl in targets], dtype=int)
-    return basis, pos, np.asarray(port.sg_for_hkls_at_orientation(basis, omega, 0.0, 0.0), dtype=float)
-
-
 def _adjacent_rows(port, count=2):
     omegas = np.asarray([port.omega_from_z(z) for z in port.data.zcal])
     order = np.argsort(omegas)
@@ -44,7 +31,7 @@ def test_grid_solve_matches_a_dense_eigendecomposition(tmp_path):
     rows = _adjacent_rows(port, 3)
     targets = np.asarray([port.data.hkl[r] for r in rows], dtype=int)
     omega = float(np.mean([port.omega_from_z(port.data.zcal[r]) for r in rows]))
-    basis, pos, sg = _grid_basis(port, omega, targets, 0.05)
+    basis, pos, sg = SG.grid_basis(port, omega, 0.0, targets, 0.05)
     H = SG._static_matrix(port, basis, 0.0, np.complex128)
     H[np.diag_indices(len(H))] += sg
     assert np.max(np.abs(H.imag)) > 0.0  # non-centrosymmetric: the complex Hermitian path
@@ -102,15 +89,16 @@ def test_path_chooser_defaults_off_and_refuses_unsupported_physics(tmp_path, mon
 def test_run_options_set_the_environment_for_every_stage(monkeypatch):
     from grond.cli_options.parser import build_parser
 
-    for name in ("GROND_SHARED_GRID", "GROND_BASIS_CENTRING_COSET"):
-        monkeypatch.delenv(name, raising=False)
+    for name in ("GROND_SHARED_GRID", "GROND_SHARED_GRID_GPUS", "GROND_BASIS_CENTRING_COSET"):
+        monkeypatch.setenv(name, "")  # registers the original value, so the writes below are undone after the test
+        monkeypatch.delenv(name)
     args = build_parser().parse_args(["auto", "--prep", "p.json", "--out-dir", "o"])
-    assert (args.shared_grid, args.basis_centring_coset) == (None, None)
+    assert (args.shared_grid, args.shared_grid_gpus, args.basis_centring_coset) == (None, None, None)
     assert SG.apply_cli_options(args) == {"mode": "off", "basis_centring_coset": False}
     args = build_parser().parse_args(["auto", "--prep", "p.json", "--out-dir", "o", "--shared-grid", "auto",
-                                      "--basis-centring-coset", "on"])
+                                      "--shared-grid-gpus", "0,1", "--basis-centring-coset", "on"])
     record = SG.apply_cli_options(args)
-    assert record["mode"] == "auto" and record["basis_centring_coset"]
+    assert record["mode"] == "auto" and record["gpus"] == ["0", "1"] and record["basis_centring_coset"]
     assert SG.os.environ["GROND_SHARED_GRID"] == "auto" and SG.os.environ["GROND_BASIS_CENTRING_COSET"] == "1"
 
 
@@ -118,5 +106,6 @@ def test_prediction_cache_identity_binds_the_evaluator(monkeypatch):
     monkeypatch.setenv("GROND_SHARED_GRID", "off")
     assert SG.cache_identity() is None  # per-row cache keys are unchanged
     monkeypatch.setenv("GROND_SHARED_GRID", "auto")
+    monkeypatch.setenv("GROND_SHARED_GRID_GPUS", "0,1,2")
     identity = SG.cache_identity()
-    assert identity["mode"] == "auto" and identity["per_degree"] == 100.0
+    assert identity["mode"] == "auto" and identity["gpus"] is True and identity["per_degree"] == 100.0

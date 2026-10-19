@@ -78,7 +78,18 @@ By default (`--free-set off`) the chosen model is refined once more against all 
 `--free-set on` the held-out reflections stay out of the final model. All runs in the paper used `--free-set on`.
 
 Large cells (SU-102 has about 800 beams per matrix) need `--shared-grid auto`, which diagonalizes each matrix once
-per scan orientation and interpolates onto the rocking points of every reflection.
+per scan orientation and interpolates onto the rocking points of every reflection. The SU-102 runs of the paper used
+
+```bash
+GROND_SHARED_GRID_TABLE_PER_DEGREE=50 GROND_SHARED_GRID_TABLE_PRECISION=single \
+grond auto --prep su102.json --out-dir run --workers 40 --free-set on --nested-response-tables \
+    --shared-grid auto --basis-centring-coset on --n-points 240 --nested-n-points 60 --chunksize 1 \
+    --max-support-sg 0.01 --final-basis-scan-limit 4000 --final-basis-max 4000 --nested-n-basis 1000 \
+    --row-plan-cache off
+```
+
+With matrices of 2,000 beams or more (for example SU-102 at |S_g| ≤ 0.04 Å⁻¹), `--shared-grid-gpus 0,1,2` solves
+them on NVIDIA GPUs with JAX (`python -m pip install ".[gpu]"`); smaller matrices stay on the CPU cores.
 
 Read [LIMITATIONS.md](LIMITATIONS.md) before relying on a result.
 
