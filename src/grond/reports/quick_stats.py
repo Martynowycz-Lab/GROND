@@ -1451,6 +1451,7 @@ def _prepare_quick_stats_console(
             "configuration_status_reason", "transform parity contract is missing"
         ),
         "input_shelxl": {
+            "label": input_shelxl.get("label", ""),
             "R1gt": _quick_fraction(input_shelxl.get("R1_gt")),
             "R1all": _quick_fraction(input_shelxl.get("R1_all")),
             "wR2all": _quick_fraction(input_shelxl.get("wR2_all")),
