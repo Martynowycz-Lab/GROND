@@ -131,9 +131,3 @@ def test_nonlinear_common_support_uses_exact_interval_independent_of_candidate_w
     for omega, cone in envelopes[1:]:
         np.testing.assert_array_equal(omega, envelopes[0][0])
         np.testing.assert_array_equal(cone, envelopes[0][1])
-
-
-def test_pets_owned_wedge_refuses_the_dials_equivalence_convention():
-    p = port()
-    with pytest.raises(ValueError, match="PETS-owned"):
-        p.pets_exact_row_prediction_plan(0)

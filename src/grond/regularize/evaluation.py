@@ -26,8 +26,6 @@ def pspline_trial_scales(data, target, base_sig, dyn, born, groups, valid, scale
     on hand-sensitive Bloch predictions.
     """
 
-    if getattr(data, "pets_exact_a_center", None) is not None:
-        raise ValueError("P-spline frame scales need a continuous rotation-scan angle; PETS exact-row input has none.")
     if orbit_keys is None or len(orbit_keys) != len(target):
         raise ValueError("P-spline frame scales need one reflection-orbit key per row for their inner CV")
     rows = np.where(np.asarray(valid, dtype=bool))[0]

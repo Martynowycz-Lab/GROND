@@ -101,7 +101,7 @@ from grond.regularize.evaluation import (
     evaluate_trial as evaluate_trial,
     paired_inverse_prediction as paired_inverse_prediction,
 )
-from grond.regularize.grid import mosaicity_candidate_grid, populate_nuisance_trials
+from grond.regularize.grid import populate_nuisance_trials
 from grond.regularize.multidataset import endpoint_correction_denominators
 from grond.regularize.observations import (
     automatic_frame_offset_grid as automatic_frame_offset_grid,
@@ -1259,45 +1259,6 @@ def main():
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
     data = XDSData(Path(args.hkl), hkl_transform=args.hkl_transform)
-    if getattr(data, "pets_exact_a_center", None) is not None:
-        static_endpoint_validated = (
-            str(data.header.get("PETS_STATIC_HKLF4_VALIDATED", ""))
-            .strip()
-            .upper()
-            == "TRUE"
-        )
-        if not bool(args.skip_endpoint_refinement) and not static_endpoint_validated:
-            raise ValueError(
-                "native PETS rows do not have a validated row-preserving static SHELXL "
-                "HKLF4 contract; add --skip-endpoint-refinement or re-import the ordinary "
-                "cif_pets with PETS' matching static HKLF4 as --baseline-hkl"
-            )
-        if any(
-            abs(value) > 1e-12 for value in parse_float_grid(args.frame_offset_grid)
-        ):
-            raise ValueError(
-                "PETS exact geometry owns the zone orientations; frame-offset grids are not applicable"
-            )
-        if str(args.profile_quadrature) != "uniform":
-            raise ValueError(
-                "PETS exact rocking wedges currently implement uniform direct-angle sampling only"
-            )
-        if any(mode != "none" or abs(sigma) > 0.0 for mode, sigma in mosaicity_candidate_grid(args)):
-            raise ValueError(
-                "PETS exact-row mosaicity controls are not implemented and cannot be silently ignored"
-            )
-        if any(
-            str(value).strip().lower() != "none"
-            for value in str(args.sg_jitter_mode_grid).split(",")
-            if str(value).strip()
-        ):
-            raise ValueError(
-                "PETS exact-row Sg-jitter controls are not implemented and cannot be silently ignored"
-            )
-        if str(args.geometry_path).strip():
-            raise ValueError(
-                "PETS exact geometry cannot be combined with an XDS/DIALS geometry-path correction"
-            )
     target, base_sig = target_arrays(data, args.target_mode)
     row_contract_summary = {}
     if str(args.row_contract).strip():

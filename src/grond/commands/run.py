@@ -86,16 +86,6 @@ def _validated_h_omit_mode(value: object, dataset_count: int) -> str:
     return "on" if mode in {"on", "only", "both"} else "off"
 
 
-def _refuse_static_pets_auto(prep: PrepConfig) -> None:
-    """Refuse a PETS2 import: its exact rows have no continuous scan angle for the P-spline frame scales."""
-
-    if isinstance((prep.metadata or {}).get("pets2_bridge"), Mapping):
-        raise SystemExit(
-            "PETS2 input is not supported: GROND fits P-spline frame scales in the continuous rotation-scan "
-            "angle, which PETS exact rows do not have"
-        )
-
-
 def cmd_run(args: argparse.Namespace) -> int:
     """CLI entrypoint for the configurable `GROND run` workflow."""
 
@@ -116,7 +106,6 @@ def cmd_run(args: argparse.Namespace) -> int:
     if args.bloch_evaluator_settings["mode"] != "off" or args.bloch_evaluator_settings["basis_centring_coset"]:
         print(f"Bloch evaluator settings: {json.dumps(args.bloch_evaluator_settings, sort_keys=True)}", flush=True)
     prep = prep_from_args(args)
-    _refuse_static_pets_auto(prep)
     try:
         requested_h_omit = str(getattr(args, "h_omit", "off") or "off")
         args.h_omit = _validated_h_omit_mode(requested_h_omit, len(prep.datasets))

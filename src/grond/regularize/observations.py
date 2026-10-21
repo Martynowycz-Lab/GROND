@@ -157,40 +157,9 @@ def sigma_eff(data: XDSData, target, base_sigma, nui: Nuisance):
 def group_indices(data: XDSData, group_width_deg: float, frame_offset: float):
     """Return the frame group of every row: omega at ZCAL + frame_offset in group_width_deg bins.
 
-    Bins start at the smallest omega. PETS exact-row input keeps its own virtual-frame partition, except a validated
-    static HKLF4 endpoint, which bins the cumulative rotation between its orientation matrices.
+    Bins start at the smallest omega.
     """
 
-    if getattr(data, "pets_exact_a_center", None) is not None:
-        static_endpoint = (
-            str(data.header.get("PETS_STATIC_HKLF4_VALIDATED", ""))
-            .strip()
-            .upper()
-            == "TRUE"
-        )
-        if static_endpoint:
-            matrices = np.asarray(data.pets_exact_a_center, dtype=float)
-            cumulative = np.zeros(len(matrices), dtype=float)
-            for index in range(1, len(matrices)):
-                relative = matrices[index] @ np.linalg.inv(matrices[index - 1])
-                cosine = float(
-                    np.clip((np.trace(relative) - 1.0) / 2.0, -1.0, 1.0)
-                )
-                cumulative[index] = cumulative[index - 1] + math.degrees(
-                    math.acos(cosine)
-                )
-            ordinals = np.rint(np.asarray(data.zcal, dtype=float)).astype(int) - 1
-            if np.any(ordinals < 0) or np.any(ordinals >= len(cumulative)):
-                raise ValueError("PETS static endpoint row uses an invalid acquisition-frame ordinal")
-            width = float(group_width_deg)
-            if not math.isfinite(width) or width <= 0.0:
-                raise ValueError("PETS static endpoint scale-group width must be positive")
-            row_angles = cumulative[ordinals]
-            return np.floor((row_angles - float(np.min(row_angles))) / width).astype(int)
-        # PETS owns this virtual-frame/zone partition. Its orientations are not
-        # a uniform XDS scan and can have varying angular steps, so re-binning
-        # by an arbitrary omega width can silently combine unrelated zones.
-        return np.rint(np.asarray(data.zcal, dtype=float)).astype(int) - 1
     omegas = np.asarray([data.omega_from_z(float(z) + float(frame_offset)) for z in data.zcal], dtype=float)
     return ((omegas - float(np.min(omegas))) // float(group_width_deg)).astype(int)
 

@@ -53,7 +53,6 @@ grond finish --run-dir run
 | `finish` | Writes the maps and summary tables of a finished run. |
 | `prep` | Writes the input file for one model and one or more crystals. |
 | `import-dials` | Converts a DIALS `integrated.refl`/`.expt` pair. |
-| `export-pets` | Writes DIALS or XDS observations as PETS2 `cif_pets` files, for Jana2020 or diffBloch. |
 | `sfac-check`, `init-config`, `doctor` | Check the model, write the tool config, check the installation. |
 
 ## What `auto` does

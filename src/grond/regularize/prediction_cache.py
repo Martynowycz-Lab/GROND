@@ -24,7 +24,6 @@ def external_geometry_fingerprints(data: XDSData, cfg: Config) -> dict:
     result = {}
     for label, value in (
         ("geometry_path", cfg.geometry_path_file),
-        ("pets_exact_geometry", getattr(data, "pets_exact_geometry_path", None)),
     ):
         if value:
             path = Path(value).expanduser().resolve()
@@ -35,7 +34,7 @@ def external_geometry_fingerprints(data: XDSData, cfg: Config) -> dict:
     # replaced. Bind the arrays actually loaded into that object as well as
     # current file bytes, so it cannot seed a hit for a subsequently reloaded
     # object with different effective geometry.
-    for name in ("A_at_scan_points", "pets_exact_a_center", "pets_integration_semiangle_deg"):
+    for name in ("A_at_scan_points",):
         value = getattr(data, name, None)
         if value is not None:
             array = np.ascontiguousarray(value, dtype=">f8")

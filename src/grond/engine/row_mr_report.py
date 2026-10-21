@@ -81,7 +81,7 @@ def read_csv_rows(path: Path, dataset: str) -> list[dict]:
         # The standalone Bloch engine writes its immutable observation columns
         # as iobs/sigma.  Auto's post-nuisance row contract renames the same
         # quantities target_I/sigma_eff.  Accept the direct-engine spelling
-        # explicitly so PETS and other forward-only audits can use the canonical
+        # explicitly so forward-only audits can use the canonical
         # JANA/PETS report without manufacturing a second CSV dialect.
         if not str(row.get("target_I") or "").strip() and str(
             row.get("iobs") or ""

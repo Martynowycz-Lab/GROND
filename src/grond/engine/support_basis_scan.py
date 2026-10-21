@@ -62,8 +62,7 @@ def _init_worker(port):
 def _basis_size_worker(idx):
     """Return (row index, basis size) for one row, with the basis the predictions would use.
 
-    PETS exact rows use their common orientation basis, centre mode the row-centre basis, and other modes
-    the basis over the rocking window and mosaic orientations.
+    Centre mode uses the row-centre basis, and other modes the basis over the rocking window and mosaic orientations.
     """
 
     if _WORKER_PORT is None:
@@ -71,14 +70,7 @@ def _basis_size_worker(idx):
     port = _WORKER_PORT
     row_idx = int(idx)
     hkl = port.data.hkl[row_idx]
-    if getattr(port.data, "pets_exact_a_center", None) is not None:
-        orientations, _offsets, _weights, _semiangle, _ordinal = (
-            port.pets_exact_orientation_samples(row_idx)
-        )
-        basis, _metadata = port.pets_exact_select_common_basis(
-            hkl, orientations, row_idx
-        )
-    elif _uses_center_basis(getattr(port, "cfg", None)):
+    if _uses_center_basis(getattr(port, "cfg", None)):
         omega_center = port.omega_from_z(port.data.zcal[row_idx])
         basis = port.select_basis(hkl, omega_center, row_idx=row_idx)
     else:

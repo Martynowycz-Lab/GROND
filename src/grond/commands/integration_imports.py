@@ -1,4 +1,4 @@
-"""`grond import-dials` and `grond export-pets`."""
+"""`grond import-dials`."""
 
 from __future__ import annotations
 
@@ -41,54 +41,4 @@ def cmd_import_dials(args: argparse.Namespace) -> int:
     if bridge.prep:
         payload["prep"] = str(bridge.prep)
     print(json.dumps(payload, indent=2))
-    return 0
-
-
-def cmd_export_pets(args: argparse.Namespace) -> int:
-    """Export DIALS or XDS observations to PETS/Jana/diffBloch ``cif_pets``."""
-
-    from grond.io.pets_export import export_pets
-
-    try:
-        result = export_pets(
-            out_dir=args.out_dir,
-            dataset_name=args.dataset_name,
-            dials_python=args.dials_python,
-            dials_refl=args.dials_refl or None,
-            dials_expt=args.dials_expt or None,
-            xds_dir=args.xds_dir or None,
-            experiment_ids=args.experiment_id,
-            intensity=args.intensity,
-            row_selection=args.row_selection,
-            xds_row_selection=args.xds_row_selection,
-            xds_sigma_mode=args.xds_sigma_mode,
-            min_partiality=args.min_partiality,
-            excitation_error_cutoff=args.excitation_error_cutoff,
-            frame_ownership=args.frame_ownership,
-            n_merged=args.virtual_frame_n_merged,
-            step=args.virtual_frame_step,
-            scan_varying_cell=args.scan_varying_cell,
-            max_cell_length_fraction=args.max_cell_length_deviation,
-            max_cell_angle_degrees=args.max_cell_angle_deviation,
-            keep_bad_flags=bool(args.keep_bad_flags),
-            allow_profile_fitted_xds=bool(args.allow_profile_fitted_xds),
-            row_contract=args.row_contract or None,
-            split_selection=args.split_selection,
-            overwrite=bool(args.overwrite),
-        )
-    except (FileNotFoundError, OSError, RuntimeError, ValueError) as exc:
-        print(json.dumps({"status": "error", "error": str(exc)}, indent=2))
-        return 2
-    print(
-        json.dumps(
-            {
-                "status": "complete",
-                "out_dir": str(result.out_dir),
-                "cif_pets": [str(path) for path in result.files],
-                "manifest": str(result.manifest),
-                "readme": str(result.readme),
-            },
-            indent=2,
-        )
-    )
     return 0

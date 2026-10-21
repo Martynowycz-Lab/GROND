@@ -2,7 +2,7 @@
 # h, k, l retain standard crystallographic Miller-index notation.
 """Signed XDS-like observations and their oriented scan geometry.
 
-PETS and DIALS compatibility metadata remain explicit; ordinary integrated
+DIALS compatibility metadata remain explicit; ordinary integrated
 observations are never silently mapped to an asymmetric unit here."""
 
 from __future__ import annotations
@@ -50,9 +50,8 @@ def resolve_zcal_frame_convention(header: dict[str, str], provenance: list[str])
     ``xds``: image n spans z in [n - 1, n]; phi(z) = STARTING_ANGLE + (z - STARTING_FRAME + 1) * OSCILLATION_RANGE.
     ``scan_start``: phi(z) = STARTING_ANGLE + (z - STARTING_FRAME) * OSCILLATION_RANGE, i.e. z = STARTING_FRAME is
     the start of the scan.  GROND's own writers use it: the DIALS bridge writes the dxtbx array z with
-    STARTING_FRAME = array_range[0], PETS2 import writes zone ordinals from 1, the portable row contract writes its
-    own starting frame.  A file without a recognised writer keeps this legacy mapping; ``!GROND_ZCAL_CONVENTION=``
-    states it explicitly.
+    STARTING_FRAME = array_range[0], and the portable row contract writes its own starting frame.  A file without a
+    recognised writer keeps this legacy mapping; ``!GROND_ZCAL_CONVENTION=`` states it explicitly.
     """
 
     explicit = str(header.get("GROND_ZCAL_CONVENTION", "") or "").strip().lower()
@@ -87,9 +86,9 @@ class XDSData:
     def __init__(self, hkl_path: Path, hkl_transform: str | None = None):
         """Read the rows and header of ``hkl_path``, then reindex with ``hkl_transform`` (identity by default).
 
-        Header extensions written by GROND's DIALS and PETS bridges (scan-point A matrices,
-        exact PETS geometry, goniometer fixed and setting rotations) are loaded when
-        present. An all-zero observed centroid is stored as NaN.
+        Header extensions written by GROND's DIALS bridge (scan-point A matrices,
+        goniometer fixed and setting rotations) are loaded when present. An
+        all-zero observed centroid is stored as NaN.
         """
 
         self.path = Path(hkl_path)
@@ -301,34 +300,6 @@ class XDSData:
             if not mats:
                 raise ValueError(f"declared DIALS A scan-point file {p} contains no matrices")
             self.A_at_scan_points = np.asarray(mats, dtype=float)
-        self.pets_exact_geometry_path = None
-        self.pets_exact_a_center = None
-        self.pets_integration_semiangle_deg = None
-        pets_geometry_file = self.header.get("PETS_EXACT_GEOMETRY_FILE", "").split()
-        if pets_geometry_file:
-            p = Path(pets_geometry_file[0])
-            if not p.is_absolute():
-                p = self.path.parent / p
-            self.pets_exact_geometry_path = p.resolve()
-            geometry_bytes = self._read_source_file("pets_exact_geometry", self.pets_exact_geometry_path)
-            with np.load(io.BytesIO(geometry_bytes), allow_pickle=False) as loaded:
-                required = {"a_center", "integration_semiangle_deg", "source_zone_id"}
-                missing = sorted(required.difference(loaded.files))
-                if missing:
-                    raise ValueError(f"PETS exact geometry is missing arrays: {', '.join(missing)}")
-                centers = np.asarray(loaded["a_center"], dtype=float)
-                semiangles = np.asarray(loaded["integration_semiangle_deg"], dtype=float)
-                zone_ids = np.asarray(loaded["source_zone_id"], dtype=np.int64)
-            if centers.ndim != 3 or centers.shape[1:] != (3, 3):
-                raise ValueError("PETS exact A centers must have shape (N,3,3)")
-            if semiangles.shape != (len(centers),) or zone_ids.shape != (len(centers),):
-                raise ValueError("PETS exact geometry arrays must have one row per zone")
-            if not np.all(np.isfinite(centers)) or not np.all(np.isfinite(semiangles)) or np.any(semiangles <= 0.0):
-                raise ValueError("PETS exact geometry must be finite with positive semiangles")
-            if not np.array_equal(zone_ids, np.arange(1, len(zone_ids) + 1)):
-                raise ValueError("PETS exact geometry source zone IDs must be consecutive from one")
-            self.pets_exact_a_center = centers
-            self.pets_integration_semiangle_deg = semiangles
         self.variance_model = tuple(float(v) for v in self.header.get("VARIANCE_MODEL", "1.0 0.0").split()[:2])
         self.apply_hkl_transform(hkl_transform)
         self._source_files = tuple(self._source_files)
@@ -398,12 +369,6 @@ class XDSData:
             self.A_at_scan_points = np.einsum(
                 "nij,jk->nik",
                 np.asarray(self.A_at_scan_points, dtype=float),
-                inv_t,
-            )
-        if self.pets_exact_a_center is not None:
-            self.pets_exact_a_center = np.einsum(
-                "nij,jk->nik",
-                np.asarray(self.pets_exact_a_center, dtype=float),
                 inv_t,
             )
         self.header["HKL_TRANSFORM_TO_MODEL_BASIS"] = canonical

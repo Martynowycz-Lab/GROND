@@ -23,7 +23,7 @@ model says it is clearly cheaper; see choose_path), force (always when supported
 (default 100) sets the grid density.
 
 Supported: target-Sg profiles, mosaicity none or transverse_target, no Sg jitter, no absorption, the table thickness
-evaluator (predictions) or response tables, XDS/DIALS rotation geometry (not PETS zone files).
+evaluator (predictions) or response tables, XDS/DIALS rotation geometry.
 Anything else falls back to the per-row engine.
 """
 
@@ -162,8 +162,6 @@ def apply_cli_options(args) -> dict:
 def unsupported_reason(port, purpose: str = "predict") -> str | None:
     """Why the shared grid cannot reproduce this port's physics (None when it can)."""
     cfg = port.cfg
-    if getattr(port.data, "pets_exact_a_center", None) is not None:
-        return "PETS zone orientations"
     if str(getattr(cfg, "profile_coordinate", "target_sg") or "target_sg").lower() != "target_sg":
         return "profile_coordinate is not target_sg"
     if str(getattr(cfg, "mosaicity_mode", "none") or "none").lower() not in {"none", "transverse_target"}:

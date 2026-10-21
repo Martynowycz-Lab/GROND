@@ -357,11 +357,9 @@ class PotentialMixin:
         return float(np.sum(self.thick_w * born_t))
 
     def make_groups(self):
-        """Return a scale-group index per row: rounded frame - 1 for PETS exact orientations, else omega bins.
+        """Return a scale-group index per row: its omega bin.
 
         Omega bins are group_width_deg degrees wide, counted from the lowest omega.
         """
-        if getattr(self.data, "pets_exact_a_center", None) is not None:
-            return np.rint(np.asarray(self.data.zcal, dtype=float)).astype(int) - 1
         omegas = np.array([self.omega_from_z(z) for z in self.data.zcal])
         return ((omegas - np.min(omegas)) // float(self.cfg.group_width_deg)).astype(int)

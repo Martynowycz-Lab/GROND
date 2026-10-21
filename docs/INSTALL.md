@@ -7,7 +7,7 @@
 - Optional: `shelx2map` (CCP4) for the SHELXL Fo−Fc maps written by `grond finish`. The dynamical maps need no
   external program.
 - Optional: JAX with CUDA (`python -m pip install ".[gpu]"`), only for `--shared-grid-gpus` on large cells.
-- Optional: DIALS, only for `grond import-dials` and `grond export-pets`. GROND runs the DIALS Python in a
+- Optional: DIALS, only for `grond import-dials`. GROND runs the DIALS Python in a
   subprocess (`--dials-python`), so DIALS can keep its own environment.
 
 GROND does not integrate images or solve structures. It reads integrated observations and a solved model.

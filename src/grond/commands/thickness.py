@@ -7,7 +7,6 @@ import json
 import math
 import shlex
 import time
-from collections.abc import Mapping
 from dataclasses import asdict
 from pathlib import Path
 
@@ -63,12 +62,6 @@ def cmd_thickness_scout(args: argparse.Namespace) -> int:
     logs = out_dir / "logs"
     python = choose_python(args.python)
     prep = prep_from_args(args)
-    if isinstance((prep.metadata or {}).get("pets2_bridge"), Mapping):
-        raise SystemExit(
-            "Generic thickness scouting is not convergence-safe for native PETS2. "
-            "Use grond pets-evaluate with explicit converged N, Q, reciprocal support, "
-            "and thickness grid."
-        )
     args.workers = auto_worker_count(args.workers, args.max_core_fraction)
     args.chunksize = auto_chunksize(args.chunksize, args.workers)
     original_structure = prep.structure

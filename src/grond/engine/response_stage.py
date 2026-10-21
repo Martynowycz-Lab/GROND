@@ -283,7 +283,7 @@ def compute_response_table(hkl, res, cfg: Config, rows, support: ThicknessSuppor
 def main(argv=None) -> None:
     """Compute the response table of the listed rows into --out-dir (refuses an existing directory)."""
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--hkl", required=True, help="XDS INTEGRATE.HKL or a GROND DIALS/PETS row bridge")
+    ap.add_argument("--hkl", required=True, help="XDS INTEGRATE.HKL or a GROND DIALS row bridge")
     ap.add_argument("--hkl-transform", default="identity")
     ap.add_argument("--res", required=True)
     ap.add_argument("--alternate-hand", action="store_true", help="Invert the model coordinates first")

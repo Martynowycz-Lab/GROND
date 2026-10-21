@@ -17,7 +17,7 @@ from grond.bloch.cache import row_plan_cache_validation_errors
 from grond.bloch.constants import ROW_PLAN_CACHE_SCHEMA
 from grond.bloch.hamiltonian import validate_passive_absorption
 from grond.bloch.model import model_content_hash
-from grond.bloch.numerics import _rotation_matrix_axis_angle, sha256, validate_row_indices
+from grond.bloch.numerics import sha256, validate_row_indices
 
 
 class RowCacheMixin:
@@ -96,7 +96,8 @@ class RowCacheMixin:
             "cell": [float(v) for v in self.model["cell"]],
             "wavelength": float(self.data.wavelength),
             "scan_matrix_sha256": source_hashes.get("scan_matrix", ""),
-            "pets_exact_geometry_sha256": source_hashes.get("pets_exact_geometry", ""),
+            # Always empty since the PETS exact-geometry input was removed; kept so row-plan cache keys are unchanged.
+            "pets_exact_geometry_sha256": "",
         }
         if getattr(self.data, "zcal_frame_convention", "scan_start") != "scan_start":
             # Keys of files read in the legacy scan-start mapping are unchanged; XDS-convention rows get their own.
@@ -176,84 +177,33 @@ class RowCacheMixin:
         for pos, row_idx in enumerate(indices):
             row_idx = int(row_idx)
             hkl = self.data.hkl[row_idx]
-            if getattr(self.data, "pets_exact_a_center", None) is not None:
-                orientations, profile_angles, profile_weights, semiangle, ordinal = self.pets_exact_orientation_samples(
-                    row_idx
-                )
-                profile_omegas = np.asarray(profile_angles, dtype=float)
-                profile_tilts = np.zeros((len(profile_omegas), 2), dtype=float)
-                center = np.asarray(self.data.pets_exact_a_center[ordinal], dtype=float)
-                c_sg = float(self.pets_exact_sg_for_hkls(np.asarray([hkl], dtype=int), center)[0])
-                derivative_step = 1e-4
-                plus = _rotation_matrix_axis_angle(np.asarray([1.0, 0.0, 0.0]), derivative_step) @ center
-                minus = _rotation_matrix_axis_angle(np.asarray([1.0, 0.0, 0.0]), -derivative_step) @ center
-                derivative = float(
-                    (
-                        self.pets_exact_sg_for_hkls(np.asarray([hkl], dtype=int), plus)[0]
-                        - self.pets_exact_sg_for_hkls(np.asarray([hkl], dtype=int), minus)[0]
-                    )
-                    / (2.0 * derivative_step)
-                )
-                sg_window_i = 2.0 * abs(derivative) * semiangle
-                basis, _pets_basis_meta = self.pets_exact_select_common_basis(hkl, orientations, row_idx)
-                sg_basis_rows = [
-                    np.asarray(
-                        self.pets_exact_sg_for_hkls(basis, orientation),
-                        dtype=float,
-                    )
-                    for orientation in orientations
-                ]
-                # These legacy fields are not used for exact PETS propagation,
-                # but the cache validator requires finite fixed-width arrays.
-                omega_c = 0.0
-                omega_b = 0.0
-                omega_b_available = False
-                sg_resid_values = np.asarray([], dtype=float)
-                sg_width_meta = {
-                    "sg_dSg_domega_inv_A_per_deg": derivative,
-                    "sg_dSg_dframe_inv_A": derivative * float(self.data.oscillation_range),
-                    "sg_window_raw_inv_A": sg_window_i,
-                    "sg_window_half_frames": semiangle / max(abs(float(self.data.oscillation_range)), 1e-30),
-                    "sg_window_clipped": False,
-                }
-                jitter_meta = {
-                    "sg_jitter_sigma_inv_A": 0.0,
-                    "sg_jitter_d_inv_A": float("nan"),
-                    "sg_jitter_frame_fraction": float("nan"),
-                    "sg_jitter_kernel_points": 1,
-                    "sg_profile_points_total": int(len(orientations)),
-                    "sg_profile_weight_sum": float(np.sum(profile_weights)),
-                    "sg_profile_same_branch_continuation_used": False,
-                    "sg_profile_same_branch_continuation_segments": 1,
-                }
-            else:
-                zcal = self.data.zcal[row_idx]
-                omega_c = self.omega_from_z(zcal)
-                c_sg = float(self.sg_for_hkls(np.asarray([hkl], dtype=int), omega_c)[0])
-                omega_b, omega_b_available = self.row_diagnostic_omega_bragg(hkl, omega_c)
-                sg_window_i, sg_width_meta = self.row_sg_window(row_idx, hkl, omega_c)
-                (
-                    solved_omegas,
-                    mosaic_tilts,
-                    profile_weights,
-                    sg_resid_values,
-                    jitter_meta,
-                    _mosaicity_meta,
-                ) = self.row_profile_orientation_points(row_idx, hkl, omega_c, c_sg, sg_window_i)
-                profile_omegas = np.asarray(solved_omegas, dtype=float)
-                profile_tilts = np.asarray(mosaic_tilts, dtype=float).reshape(-1, 2)
-                basis, _cone_basis_meta = self.select_basis_for_profile(
-                    hkl,
-                    omega_c,
-                    sg_window_i,
-                    solved_omegas,
-                    mosaic_tilts,
-                    row_idx=row_idx,
-                )
-                sg_basis_rows = []
-                for omega, (along_deg, transverse_deg) in zip(solved_omegas, mosaic_tilts, strict=True):
-                    sg_basis = self.sg_for_hkls_at_orientation(basis, omega, along_deg, transverse_deg)
-                    sg_basis_rows.append(np.asarray(sg_basis, dtype=float))
+            zcal = self.data.zcal[row_idx]
+            omega_c = self.omega_from_z(zcal)
+            c_sg = float(self.sg_for_hkls(np.asarray([hkl], dtype=int), omega_c)[0])
+            omega_b, omega_b_available = self.row_diagnostic_omega_bragg(hkl, omega_c)
+            sg_window_i, sg_width_meta = self.row_sg_window(row_idx, hkl, omega_c)
+            (
+                solved_omegas,
+                mosaic_tilts,
+                profile_weights,
+                sg_resid_values,
+                jitter_meta,
+                _mosaicity_meta,
+            ) = self.row_profile_orientation_points(row_idx, hkl, omega_c, c_sg, sg_window_i)
+            profile_omegas = np.asarray(solved_omegas, dtype=float)
+            profile_tilts = np.asarray(mosaic_tilts, dtype=float).reshape(-1, 2)
+            basis, _cone_basis_meta = self.select_basis_for_profile(
+                hkl,
+                omega_c,
+                sg_window_i,
+                solved_omegas,
+                mosaic_tilts,
+                row_idx=row_idx,
+            )
+            sg_basis_rows = []
+            for omega, (along_deg, transverse_deg) in zip(solved_omegas, mosaic_tilts, strict=True):
+                sg_basis = self.sg_for_hkls_at_orientation(basis, omega, along_deg, transverse_deg)
+                sg_basis_rows.append(np.asarray(sg_basis, dtype=float))
             if not np.array_equal(basis[0], np.asarray([0, 0, 0], dtype=int)) or not np.array_equal(
                 basis[1], np.asarray(hkl, dtype=int)
             ):
