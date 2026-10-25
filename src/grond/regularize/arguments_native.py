@@ -59,7 +59,7 @@ def build_parser(description: str, *, default_hkl, default_res, default_baseline
     ap.add_argument("--n-basis", type=int, default=20)
     ap.add_argument("--n-points", type=int, default=10)
     ap.add_argument("--sg-window", type=float, default=0.004)
-    ap.add_argument("--sg-window-mode", choices=["fixed", "zobs_residual", "zobs_plus_floor", "rlp_peak", "dials_bbox"], default="fixed")
+    ap.add_argument("--sg-window-mode", choices=["fixed", "dials_bbox"], default="fixed")
     ap.add_argument("--sg-window-min", type=float, default=0.003)
     ap.add_argument("--sg-window-max", type=float, default=0.012)
     ap.add_argument("--sg-window-scale", type=float, default=1.0)

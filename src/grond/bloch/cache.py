@@ -324,7 +324,7 @@ def row_plan_cache_validation_errors(cache: dict, indices, expected_key: str, ex
         # in which the quantity is applicable.
         "sg_window_half_frames": (
             "sg_window_mode",
-            {"fixed", "rlp_peak"},
+            {"fixed"},
         ),
         "sg_jitter_d_inv": (
             "sg_jitter_mode",

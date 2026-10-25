@@ -110,7 +110,7 @@ def _row_contract_nullable_numeric_fields(
 
     nullable: set[str] = set()
     sg_window_mode = str(config.get("sg_window_mode", "") or "").strip().lower()
-    if sg_window_mode in {"fixed", "rlp_peak"}:
+    if sg_window_mode == "fixed":
         nullable.add("sg_window_half_frames")
     sg_jitter_mode = str(nuisance.get("sg_jitter_mode", config.get("sg_jitter_mode", "")) or "").strip().lower()
     if sg_jitter_mode == "none":

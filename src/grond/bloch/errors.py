@@ -23,7 +23,3 @@ class NonPassiveAbsorptionError(ValueError):
 
         super().__init__(message)
         self.details = dict(details or {})
-
-
-class MissingObservedCentroidError(ValueError):
-    """A requested centroid-based profile has no measured spot position."""

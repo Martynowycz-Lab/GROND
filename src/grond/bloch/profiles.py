@@ -11,8 +11,6 @@ import numpy as np
 from numpy.polynomial.hermite import hermgauss
 from numpy.polynomial.legendre import leggauss
 
-from grond.bloch.errors import MissingObservedCentroidError
-
 
 class ProfileMixin:
     """One cohesive part of XDSBlochPort; initialized by the public facade."""
@@ -20,43 +18,20 @@ class ProfileMixin:
     def row_sg_window(self, row_idx, hkl, omega_bragg):
         """Return an auditable per-row target-Sg window.
 
-        The default remains the audited fixed window.  Adaptive modes are
-        deliberately simple XDS metadata probes, not fitted scale parameters.
-        They alter which part of the synthetic rocking curve is averaged.
+        The default is the audited fixed window.  The DIALS-bbox mode takes the
+        width from the reflection's recorded z-range, not from fitted scale
+        parameters.  It alters which part of the synthetic rocking curve is averaged.
         """
         mode = str(self.cfg.sg_window_mode or "fixed").lower()
         base = float(self.cfg.sg_window)
         deriv_deg = abs(float(self.sg_derivative_per_deg(hkl, omega_bragg)))
         deriv_frame = deriv_deg * abs(float(self.data.oscillation_range))
-        dz = abs(float(self.data.zobs[row_idx] - self.data.zcal[row_idx]))
-        if mode in {"zobs_residual", "zobs_plus_floor"} and not math.isfinite(dz):
-            # A missing centroid is not a measured zero residual. The normal
-            # fixed window needs no centroid and remains available explicitly.
-            raise MissingObservedCentroidError(
-                f"sg_window_mode={mode} requires an observed centroid for row {row_idx}, "
-                f"HKL {tuple(int(v) for v in hkl)}; ZOBS/ZCAL is unavailable. "
-                "Use sg_window_mode=fixed for integrations without observed centroids."
-            )
-        peak_frac = max(float(self.data.peak[row_idx]) / 100.0, 1e-6)
-        rlp_ratio = max(float(self.data.rlp[row_idx]), 1e-12) / max(self.median_rlp, 1e-12)
         half_frames = float(self.cfg.sg_window_frame_floor)
 
         if mode == "fixed":
             raw = base
             half_frames_used = float("nan")
             source = "global"
-        elif mode == "zobs_residual":
-            half_frames_used = max(half_frames, dz)
-            raw = 2.0 * deriv_frame * half_frames_used
-            source = "2*abs(dSg/dframe)*max(frame_floor,abs(ZOBS-ZCAL))"
-        elif mode == "zobs_plus_floor":
-            half_frames_used = half_frames + dz
-            raw = 2.0 * deriv_frame * half_frames_used
-            source = "2*abs(dSg/dframe)*(frame_floor+abs(ZOBS-ZCAL))"
-        elif mode == "rlp_peak":
-            half_frames_used = float("nan")
-            raw = base * math.sqrt(max(rlp_ratio, 1e-12) / peak_frac)
-            source = "sg_window*sqrt((RLP/median_RLP)/(PEAK/100))"
         elif mode == "dials_bbox":
             # Only GROND's DIALS bridge stores the reflection-table bbox z-range in ALF0/BET0.  In an XDS
             # INTEGRATE.HKL those columns are incident-beam angles, so a width derived from them is meaningless.
@@ -87,9 +62,6 @@ class ProfileMixin:
             "sg_dSg_domega_inv_A_per_deg": float(deriv_deg),
             "sg_dSg_dframe_inv_A": float(deriv_frame),
             "sg_window_half_frames": float(half_frames_used),
-            "sg_window_zobs_minus_zcal_frame": float(self.data.zobs[row_idx] - self.data.zcal[row_idx]),
-            "sg_window_rlp_ratio": float(rlp_ratio),
-            "sg_window_peak_fraction": float(peak_frac),
             "sg_window_clipped": bool(clipped != scaled),
         }
 

@@ -135,7 +135,7 @@ def add_geometry(ap: argparse.ArgumentParser) -> None:
     )
     ap.add_argument(
         "--sg-window-mode",
-        choices=["auto", "fixed", "zobs_residual", "zobs_plus_floor", "rlp_peak", "dials_bbox"],
+        choices=["auto", "fixed", "dials_bbox"],
         default="auto",
         help=(
             "Rocking-width source. Auto uses the per-row DIALS bbox z-range for rows from GROND's DIALS bridge "

@@ -202,10 +202,7 @@ class Config:
             raise ValueError("mosaicity_sigma_deg exceeds the explicit mosaicity_max_sigma_deg bound")
 
         choices = {
-            "sg_window_mode": (
-                self.sg_window_mode,
-                {"fixed", "zobs_residual", "zobs_plus_floor", "rlp_peak", "dials_bbox"},
-            ),
+            "sg_window_mode": (self.sg_window_mode, {"fixed", "dials_bbox"}),
             "sg_jitter_mode": (self.sg_jitter_mode, {"none", "gaussian", "student_t"}),
             "mosaicity_mode": (self.mosaicity_mode, {"none", "gaussian_omega", "transverse_target"}),
             "profile_quadrature": (

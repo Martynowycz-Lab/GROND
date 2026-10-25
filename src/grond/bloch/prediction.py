@@ -15,7 +15,6 @@ import numpy as np
 from grond.bloch.errors import (
     InfeasibleSgJitterProfileError,
     LocalSgCrossingError,
-    MissingObservedCentroidError,
     NonPassiveAbsorptionError,
 )
 from grond.bloch.numerics import sha256, validate_row_indices
@@ -25,7 +24,6 @@ _NON_RETRYABLE_ERRORS = (
     LocalSgCrossingError,
     InfeasibleSgJitterProfileError,
     NonPassiveAbsorptionError,
-    MissingObservedCentroidError,
 )
 
 _WORKER_PORT = None

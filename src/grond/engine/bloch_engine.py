@@ -203,9 +203,6 @@ class XDSBlochPort(
         self.pool_inv_d2 = self.inv_d2_for_hkls(self.pool_hkl)
         self.thick, self.thick_w = self.thickness_grid()
         self.group_indices = self.make_groups()
-        valid_rlp = np.asarray(self.data.rlp, dtype=float)
-        valid_rlp = valid_rlp[np.isfinite(valid_rlp) & (valid_rlp > 0.0)]
-        self.median_rlp = float(np.median(valid_rlp)) if valid_rlp.size else 1.0
         z_valid = np.asarray(self.data.zcal, dtype=float)
         z_valid = z_valid[np.isfinite(z_valid)]
         self.zcal_min = float(np.min(z_valid)) if z_valid.size else 0.0
