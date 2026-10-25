@@ -43,8 +43,8 @@ grond prep --structure model.res --baseline-hkl model.hkl \
 grond auto --prep prep.json --out-dir run --preset fast --free-set on --nested-response-tables --min-d-spacing 0.80
 ```
 
-The fast run takes approximately 15 minutes on 10 cores. The held-out R_obs is approximately 9.7%. Without
-`--preset fast`, the run gives the paper value, 9.3%.
+These are the settings of the paper's tyrosine run. The fast run takes approximately 15 minutes on 10 cores. The
+held-out R_obs is approximately 9.7%. Without `--preset fast`, the run gives the paper value, 9.3%.
 
 ## Use your data
 
@@ -73,11 +73,11 @@ The fast run takes approximately 15 minutes on 10 cores. The held-out R_obs is a
 4. Run GROND:
 
    ```bash
-   grond auto --prep prep.json --out-dir run --free-set on --nested-response-tables
+   grond auto --prep prep.json --out-dir run
    ```
 
-   All runs in the paper used `--free-set on --nested-response-tables`. To continue a stopped run, give the same
-   command again.
+   Add `--free-set on` to keep the held-out reflections out of the final model, as in the paper. To continue a stopped
+   run, give the same command again.
 
 5. For a large cell (for example, a metal–organic framework), add `--shared-grid auto`. GROND then calculates each
    orientation one time for all reflections. For GPU calculation of very large matrices, install
