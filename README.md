@@ -1,22 +1,29 @@
+"Then Morgoth hurled aloft Grond, the Hammer of the Underworld, and swung it down like a bolt of thunder." <br>
+_The Silmarillion, Chapter 18, "Of the Ruin of Beleriand and the Fall of Fingolfin," by J.R.R. Tolkien_ 
+
+
+
+"Grond! Grond! Grond!" <br>
+_The Lord of the Rings: The Return of the King, Book V, Chapter 4, "The Siege of Gondor," by J.R.R. Tolkien_ 
+
 # GROND
 
-GROND (Global Regularization Of Non-kinematical Diffraction) corrects electron-diffraction intensities for multiple
-scattering. It calculates each observation with Bloch waves and writes corrected intensities. SHELXL or Olex2 then
-refines the structure as for X-ray data. GROND repeats the correction until the model stops moving.
+GROND stands for the **G**lobal **R**egularization **O**f **N**on-kinematical **D**iffraction. This is an open source python package that corrects summation integrated electron-diffraction intensities for multiple scattering so that they ca be passed to popular refinement programs without special treatment otherwise. It operates as a layer between integration and refinement, after you have solved the structure and refined kinematically, same as other dynamical refinement. It calculates Bloch wave math for every reflection and writes corrected intensities. You can then use SHELXL or Olex2 or whatever reads hkl files to refines the structure without changing anything else. GROND repeats this correction after each time it is refined in SHELXL/OLEX2 until the model stops moving, or after 5 rounds. 
 
-GROND does not integrate images or solve structures. It starts from DIALS or XDS integration and a solved SHELX model.
+GROND does not integrate data, solve structures, or refine structures itself. You start with your data integrated from DIALS or XDS and a solved model.
 
-The paper describes the method (preprint link to follow).
+Our paper describes how this actually works and its limitations, the SI is fairly well laid out (preprint link).
 
-## Install
+## Installation
 
-You need:
+Requirements:
 
-- Linux or macOS with Python 3.11 to 3.14.
-- SHELXL on your `PATH`.
-- Optional: `shelx2map` (CCP4) for SHELXL Fo−Fc maps.
+- Linux or macOS with Python 3.11 to 3.14
+- Windows with WSL and the same
+- SHELXL on your `PATH`
+- Optional: `shelx2map` (CCP4) for SHELXL Fo−Fc maps
 
-Do these steps:
+Do this in your terminal:
 
 ```bash
 git clone https://github.com/Martynowycz-Lab/GROND.git
@@ -27,10 +34,9 @@ python -m pip install .
 grond doctor
 ```
 
-`grond doctor` must show `Ready.` and the path of `shelxl`. You do not set environment variables. GROND sets its own
-thread limits. The PyPI package `grond` is a different program. Install from this repository.
+`grond doctor` should show `Ready.` and the path of your `shelxl` binary.GROND sets its own thread limits at 80% of available, but this can be overridden. Hilariously, the PyPI package `grond` is a different program (a geology program?), so install from this repository. We are constantly fixing stuff, so update often. 
 
-## Run the example
+## Run an example
 
 The example has two L-tyrosine crystals (DIALS, 300 kV) and their kinematic model. Download it from Zenodo (DOI to
 follow) and extract it. Then do these steps:
@@ -97,12 +103,10 @@ The fast run takes approximately 15 minutes on 10 cores. The held-out R_obs is a
 
 ## Limits
 
-- GROND keeps the correction fixed during each SHELXL refinement. SHELXL standard uncertainties do not include the
-  uncertainty of the correction.
-- The thickness distribution, mosaic spread and damage term are parameters of the calculation, not measurements.
-- GROND does not model absorption, twinning or solvent masks. It refuses HKLF 5, TWIN, BASF and SWAT.
-- The hand test compares the model with its inverse. Calibrate the rotation axis and detector on a crystal of known
-  hand.
+- SHELXL standard uncertainties do not include the uncertainty of this correction. This matters when the initial model is far from being converged. 
+- Our thickness distribution, mosaic spread, and damage terms are  parameters not measurements.
+- GROND does not currently model absorption, twinning or solvent masks. It refuses if your file has HKLF 5, TWIN, BASF and SWAT.
+- Our hand test compares the model with its mirror. Do not trust this unless your rotation axis and detector orientation are **KNOWN**
 - Do not accept a lower R factor if the maps, displacement parameters or held-out statistics get worse.
 
 ## License and citation
