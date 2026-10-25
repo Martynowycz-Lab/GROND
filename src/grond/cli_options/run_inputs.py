@@ -20,11 +20,6 @@ def add_inputs(ap: argparse.ArgumentParser) -> None:
     )
     ap.add_argument("--dials-expt", default="", help="DIALS integrated.expt/scaled.expt file matching --dials-refl.")
     ap.add_argument(
-        "--dials-python",
-        default="",
-        help="Python executable that can import dials and dxtbx. Leave blank when the active Python already can.",
-    )
-    ap.add_argument(
         "--dials-intensity-mode",
         choices=["sum_complete", "sum_raw", "scale"],
         default="sum_complete",

@@ -16,7 +16,6 @@ def register_integration(sub: argparse._SubParsersAction) -> None:
     p_dials.add_argument("--refl", required=True, help="DIALS integrated.refl or scaled.refl file.")
     p_dials.add_argument("--expt", required=True, help="DIALS integrated.expt or scaled.expt file.")
     p_dials.add_argument("--out-dir", required=True, help="Output directory.")
-    p_dials.add_argument("--dials-python", default="", help="A Python that can import dials and dxtbx, e.g. <DIALS>/bin/python (default: found from the DIALS commands on PATH).")
     p_dials.add_argument("--intensity-mode", choices=["sum_complete", "sum_raw", "scale"], default="sum_complete")
     p_dials.add_argument(
         "--row-selection",

@@ -38,7 +38,7 @@ HELP_LEVELS = {
         1: ["--geometry-percentile", "--config"],
     },
     "import-dials": {
-        0: ["--refl", "--expt", "--out-dir", "--dials-python", "--dataset-name"],
+        0: ["--refl", "--expt", "--out-dir", "--dataset-name"],
         1: ["--row-selection", "--intensity-mode", "--sigma-mode"],
     },
     "doctor": {0: ["--config", "--json"]},

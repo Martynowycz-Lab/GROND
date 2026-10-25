@@ -52,7 +52,6 @@ def prep_from_args(args: argparse.Namespace) -> PrepConfig:
                     intensity_mode=args.dials_intensity_mode,
                     row_selection=args.dials_row_selection,
                     sigma_mode=args.dials_sigma_mode,
-                    dials_python=args.dials_python,
                     dataset_name="dataset",
                 )
             except (FileNotFoundError, OSError, RuntimeError, ValueError) as exc:

@@ -15,19 +15,13 @@ scan-varying orientation matrices for excitation-error calculations.
 
 from __future__ import annotations
 
-import importlib.util
 import json
-import os
-import shutil
-import subprocess
-import sys
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 
+from grond.io.dials_files import read_dials
 from grond.io.dials_geometry import (
     _a_scan_points_for_current_scan as _a_scan_points_for_current_scan,
     _format_header_vector as _format_header_vector,
@@ -45,8 +39,6 @@ from grond.io.dials_sigma import (
     _dials_sigma_multiplier as _dials_sigma_multiplier,
 )
 
-DIALS_HELPER_CODE = Path(__file__).with_name("_dials_reader.py").read_text()
-
 
 @dataclass
 class DialsBridgeOutput:
@@ -59,101 +51,6 @@ class DialsBridgeOutput:
     prep: Path | None = None
 
 
-def _imports_dials(python: str) -> bool:
-    """True when ``python`` can import dials and dxtbx."""
-
-    try:
-        return subprocess.run([python, "-c", "import dials, dxtbx"], capture_output=True, timeout=120).returncode == 0
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-
-
-def find_dials_python() -> str:
-    """Find a Python that can import DIALS: this one, else the DIALS whose commands are on PATH.
-
-    DIALS 3.30 and later put forwarder scripts in ``<install>/dialsbin`` (on PATH) and no longer ship
-    ``dials.python``; their Python is ``<install>/bin/python``, and ``dialsbin/cctbx.python`` still exists.
-    Older DIALS and CCP4 have ``dials.python`` and ``libtbx.python`` beside the ``dials.*`` commands.
-    """
-
-    if importlib.util.find_spec("dials") is not None and importlib.util.find_spec("dxtbx") is not None:
-        return sys.executable
-    candidates = []
-    for command in ("dials.version", "dials.import", "dials.integrate"):
-        found = shutil.which(command)
-        if found:
-            here = Path(found).parent
-            candidates += [here / name for name in ("dials.python", "cctbx.python", "libtbx.python")]
-            candidates += [here.parent / "bin" / "python", here / "python"]
-            break
-    candidates += [Path(found) for name in ("dials.python", "cctbx.python", "libtbx.python", "ccp4-python")
-                   if (found := shutil.which(name))]
-    seen = set()
-    for candidate in candidates:
-        if candidate in seen or not candidate.is_file() or not os.access(candidate, os.X_OK):
-            continue
-        seen.add(candidate)
-        if _imports_dials(str(candidate)):
-            return str(candidate)
-    return ""
-
-
-def _run_dials_helper(refl: Path, expt: Path, dials_python: str = "") -> tuple[dict[str, np.ndarray], dict[str, Any]]:
-    """Extract DIALS reflection and experiment arrays using a DIALS-capable Python."""
-
-    for label, path in (("reflection table", refl), ("experiment list", expt)):
-        if not path.is_file():
-            raise FileNotFoundError(f"DIALS {label} does not exist: {path}")
-    dials_python = dials_python or find_dials_python()
-    if not dials_python:
-        raise FileNotFoundError(
-            "GROND reads .refl and .expt files with DIALS, and it found no DIALS on PATH. Install DIALS and put its "
-            "commands on PATH (source its setpaths.sh), or give --dials-python <DIALS>/bin/python."
-        )
-    requested_python = str(dials_python)
-    explicit_path = Path(os.path.abspath(Path(requested_python).expanduser())) if os.sep in requested_python else None
-    if explicit_path is not None:
-        if not explicit_path.is_file():
-            raise FileNotFoundError(f"DIALS Python executable does not exist: {explicit_path}")
-        if not os.access(explicit_path, os.X_OK):
-            raise PermissionError(f"DIALS Python is not executable: {explicit_path}")
-        # Preserve venv/DIALS launcher symlinks.  Resolving them can replace the
-        # requested environment interpreter with its base Python and thereby
-        # lose the environment's NumPy, DIALS, and dxtbx installations.
-        python = str(explicit_path)
-    else:
-        resolved_python = shutil.which(requested_python)
-        if not resolved_python:
-            raise FileNotFoundError(
-                f"DIALS Python executable was not found on PATH: {requested_python}. "
-                "Pass --dials-python <DIALS>/bin/python."
-            )
-        python = resolved_python
-    with tempfile.TemporaryDirectory(prefix="grond_dials_") as tmp:
-        tmp_path = Path(tmp)
-        out_npz = tmp_path / "dials_arrays.npz"
-        out_json = tmp_path / "dials_metadata.json"
-        cmd = [python, "-c", DIALS_HELPER_CODE, str(refl), str(expt), str(out_npz), str(out_json)]
-        try:
-            proc = subprocess.run(cmd, text=True, capture_output=True)
-        except OSError as exc:
-            raise RuntimeError(f"Could not start DIALS Python {python}: {exc}") from None
-        if proc.returncode != 0:
-            hint = (
-                "Could not read the DIALS files. Give --dials-python <DIALS>/bin/python, a Python that can "
-                "import dials and dxtbx."
-            )
-            stderr_tail = "\n".join(proc.stderr.strip().splitlines()[-30:])
-            display = [python, "-c", "<embedded DIALS bridge helper>", str(refl), str(expt)]
-            raise RuntimeError(
-                f"{hint}\nCommand: {' '.join(display)}\nSTDERR (last {len(stderr_tail.splitlines())} lines):\n{stderr_tail}"
-            ) from None
-        with np.load(out_npz, allow_pickle=False) as loaded:
-            arrays = {name: np.array(loaded[name]) for name in loaded.files}
-        metadata = json.loads(out_json.read_text())
-    return arrays, metadata
-
-
 def convert_dials_to_grond(
     refl: str | Path,
     expt: str | Path,
@@ -163,7 +60,6 @@ def convert_dials_to_grond(
     row_selection: str = "integrated",
     sigma_mode: str = "raw",
     sigma_scale: float | None = None,
-    dials_python: str = "",
     min_partiality_write: float = 1e-6,
     keep_dont_integrate: bool = False,
     drop_bad_flags: bool = True,
@@ -189,7 +85,10 @@ def convert_dials_to_grond(
     out = Path(out_dir).expanduser().resolve()
     out.mkdir(parents=True, exist_ok=True)
 
-    arrays, metadata = _run_dials_helper(refl_path, expt_path, dials_python=dials_python)
+    for label, path in (("reflection table", refl_path), ("experiment list", expt_path)):
+        if not path.is_file():
+            raise FileNotFoundError(f"DIALS {label} does not exist: {path}")
+    arrays, metadata = read_dials(refl_path, expt_path)
     mode = str(intensity_mode or "sum_complete").strip().lower()
     selection = str(row_selection or "integrated").strip().lower()
     iobs, sigma, rlp, peak, intensity_note = _choose_intensity(

@@ -15,7 +15,6 @@ You need:
 - Linux or macOS with Python 3.11 to 3.14.
 - SHELXL on your `PATH`.
 - Optional: `shelx2map` (CCP4) for SHELXL Fo−Fc maps.
-- Optional: DIALS, only to convert DIALS files.
 
 Do these steps:
 
@@ -49,7 +48,7 @@ The fast run takes approximately 15 minutes on 10 cores. The held-out R_obs is a
 ## Use your data
 
 1. Integrate with DIALS or XDS.
-   - DIALS: convert each crystal one time. GROND finds DIALS from the `dials.*` commands on your `PATH`.
+   - DIALS: convert each crystal one time. GROND reads the DIALS files itself. You do not need DIALS for this.
 
      ```bash
      grond import-dials --refl integrated.refl --expt integrated.expt --out-dir c1

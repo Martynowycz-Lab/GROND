@@ -20,7 +20,6 @@ def cmd_import_dials(args: argparse.Namespace) -> int:
             row_selection=args.row_selection,
             sigma_mode=args.sigma_mode,
             sigma_scale=args.sigma_scale,
-            dials_python=args.dials_python,
             min_partiality_write=args.min_partiality_write,
             keep_dont_integrate=bool(args.keep_dont_integrate) and not bool(args.drop_dont_integrate),
             drop_bad_flags=not bool(args.keep_bad_flags),
