@@ -632,7 +632,6 @@ def classify_publication_endpoint(
     *,
     min_hkl_safe_factor: float = 0.25,
     max_modulation_p95: float = 20.0,
-    allow_npd: bool = False,
 ) -> dict:
     """Classify one endpoint as publishable physical output or diagnostic only."""
 
@@ -702,7 +701,7 @@ def classify_publication_endpoint(
     )
     warnings.extend(str(value) for value in promotion_contract.get("warnings", []) if str(value))
     npd_count = _int(candidate.get("npd_count", 0))
-    if not allow_npd and (npd_count > 0 or bool(candidate.get("has_npd", False))):
+    if npd_count > 0 or bool(candidate.get("has_npd", False)):
         atoms = candidate.get("npd_atoms")
         atom_text = ""
         if isinstance(atoms, list) and atoms:
@@ -747,7 +746,6 @@ def choose_publication_endpoints(
     min_hkl_safe_factor: float = 0.25,
     max_modulation_p95: float = 20.0,
     prefer_combined: bool = False,
-    allow_npd: bool = False,
     combined_baseline_r1_all: float | None = None,
     combined_baseline_source: str = "",
     require_combined_baseline: bool = False,
@@ -762,7 +760,6 @@ def choose_publication_endpoints(
             candidate,
             min_hkl_safe_factor=min_hkl_safe_factor,
             max_modulation_p95=max_modulation_p95,
-            allow_npd=allow_npd,
         )
         if blockers:
             reasons = list(decision.get("rejection_reasons") or [])
@@ -885,7 +882,7 @@ def choose_publication_endpoints(
                 if prefer_combined
                 else "rank endpoint R1(F)all, R1(F)gt, and wR2(F^2)all"
             ),
-            "allow_npd_override": bool(allow_npd),
+            "allow_npd_override": False,
             "combined_baseline": baseline_policy,
         },
     }
@@ -1041,7 +1038,6 @@ def write_publication_endpoint_choice(
     extra_candidates: list[dict] | None = None,
     min_hkl_safe_factor: float = 0.25,
     max_modulation_p95: float = 20.0,
-    allow_npd: bool = False,
     combined_baseline_r1_all: float | None = None,
     combined_baseline_source: str = "",
     require_combined_baseline: bool = False,
@@ -1059,7 +1055,6 @@ def write_publication_endpoint_choice(
         min_hkl_safe_factor=min_hkl_safe_factor,
         max_modulation_p95=max_modulation_p95,
         prefer_combined=combined_run is not None,
-        allow_npd=allow_npd,
         combined_baseline_r1_all=combined_baseline_r1_all,
         combined_baseline_source=combined_baseline_source,
         require_combined_baseline=require_combined_baseline,

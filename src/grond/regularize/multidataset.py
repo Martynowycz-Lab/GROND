@@ -141,19 +141,6 @@ def filter_native_rows_by_resolution(rows: list[dict], model: dict, min_d_spacin
     }
 
 
-def filter_hkl_rows_by_resolution(rows: list[tuple], model: dict, min_d_spacing: float) -> list[tuple]:
-    """Filter a corrected-HKL source with the same crystallographic cutoff."""
-
-    cutoff = float(min_d_spacing)
-    if cutoff <= 0.0:
-        return rows
-    return [
-        row
-        for row in rows
-        if d_spacing_from_model(model, int(row[0]), int(row[1]), int(row[2])) + 1e-12 >= cutoff
-    ]
-
-
 def hkl_resolution_stats(rows: list[tuple], model: dict) -> dict[str, object]:
     """Report the discrete resolution range represented by HKL rows."""
 
@@ -342,8 +329,8 @@ def endpoint_correction_denominators(
     lambda_q: float,
     selected: np.ndarray,
     *,
-    q_policy: str = "clip",
-    rescale: str = "median-iobs",
+    q_policy: str,
+    rescale: str,
     fc2: np.ndarray | None = None,
     kappa: float = ABSOLUTE_HKL_KAPPA,
     restore: np.ndarray | None = None,
@@ -352,19 +339,17 @@ def endpoint_correction_denominators(
 ) -> tuple[np.ndarray, np.ndarray, dict]:
     """Return per-row divisors d (Icorr = y/d), the rows kept, and an audit; shared by both endpoint writers.
 
-    median-iobs (legacy): d = s * q^lambda with s = dyn_scaled/dyn_raw (or the caller's fitted ``scales``),
-    later rescaled to the median IOBS.
+    none: d = s * q^lambda with s = dyn_scaled/dyn_raw (or the caller's fitted ``scales``).
     absolute: d = pred * q^(lambda-1) / (kappa |F|^2), i.e. Icorr = kappa |F|^2 y / pred for lambda = 1, the
     absolute-scale handoff (a perfect model gives Icorr = kappa |F|^2 on one scale for every
     crystal).  pred = dyn_scaled / restore is the scaled prediction in the IOBS units of y.  Rows with
     |F|^2 = 0 carry no information and are dropped.
 
-    q_policy clip (legacy) clips q into [0.05, 20] (absolute: the divisor relative to its median) and keeps the
-    row. exclude drops rows whose divisor relative to the median of the selected rows lies outside (0.05, 20)
+    q_policy exclude drops rows whose divisor relative to the median of the selected rows lies outside (0.05, 20)
     (rel = pred/|U_g|^2 relative to its training median) and counts them.
 
     ``reference_median`` replaces the median of the selected rows by another row set's (the work rows' divisor
-    median), so held-out rows are clipped or excluded by exactly the rule the work rows met.
+    median), so held-out rows are excluded by exactly the rule the work rows met.
     """
 
     lo, hi = ENDPOINT_Q_RATIO_BOUNDS
@@ -377,8 +362,8 @@ def endpoint_correction_denominators(
         "n_excluded_q_rows": 0,
         "n_zero_fcalc_rows": 0,
     }
-    if q_policy not in {"clip", "exclude"}:
-        raise ValueError(f"unknown endpoint q policy {q_policy!r}; use clip or exclude")
+    if q_policy != "exclude":
+        raise ValueError(f"unknown endpoint q policy {q_policy!r}; use exclude")
     if rescale == "absolute":
         if fc2 is None:
             raise ValueError("absolute endpoint intensity scale needs |Fcalc|^2 of the current model for every row")
@@ -390,11 +375,10 @@ def endpoint_correction_denominators(
         pred = dyn_scaled if restore is None else dyn_scaled / np.asarray(restore, dtype=float)
         denom = pred * np.power(np.maximum(q, 1e-30), float(lambda_q) - 1.0) / (float(kappa) * safe_fc2)
         audit["kappa"] = float(kappa)
-    elif rescale in {"median-iobs", "none"}:
+    elif rescale == "none":
         if scales is None:
             scales = np.maximum(dyn_scaled / np.maximum(dyn_raw, 1e-30), 1e-30)
-        q_used = np.clip(q, lo, hi) if q_policy == "clip" else q
-        denom = scales * (q_used ** float(lambda_q))
+        denom = scales * (q ** float(lambda_q))
     else:
         raise ValueError(f"unknown endpoint rescale mode {rescale!r}")
     denom = np.where(np.isfinite(denom) & (denom > 0.0), denom, np.nan)
@@ -408,12 +392,8 @@ def endpoint_correction_denominators(
     if np.any(selected):
         ratio = denom / median
         outside = selected & ~((ratio > lo) & (ratio < hi))
-        if q_policy == "exclude":
-            audit["n_excluded_q_rows"] = int(np.count_nonzero(outside))
-            selected &= ~outside
-        elif rescale == "absolute":
-            audit["n_clipped_q_rows"] = int(np.count_nonzero(outside))
-            denom = np.where(selected, median * np.clip(ratio, lo, hi), denom)
+        audit["n_excluded_q_rows"] = int(np.count_nonzero(outside))
+        selected &= ~outside
     audit["n_rows_kept"] = int(np.count_nonzero(selected))
     return np.maximum(np.nan_to_num(denom, nan=1.0), 1e-30), selected, audit
 
@@ -422,8 +402,8 @@ def endpoint_rows_and_corrections_from_native(
     rows: list[dict],
     lambda_q: float,
     *,
-    q_policy: str = "clip",
-    rescale: str = "median-iobs",
+    q_policy: str,
+    rescale: str,
     model: dict | None = None,
     kappa: float = ABSOLUTE_HKL_KAPPA,
     audit: dict | None = None,
@@ -431,13 +411,12 @@ def endpoint_rows_and_corrections_from_native(
 ):
     """Return corrected endpoint rows and their applied intensity multipliers.
 
-    The defaults are the legacy contract (q clipped into [0.05, 20], median-IOBS rescale). ``rescale=
-    "absolute"`` needs the current ``model``; its |Fcalc|^2 per row puts the rows on kappa*|F|^2.  ``audit``
-    (a dict) receives the kept/excluded row counts.
+    ``rescale="absolute"`` needs the current ``model``; its |Fcalc|^2 per row puts the rows on kappa*|F|^2.
+    ``audit`` (a dict) receives the kept/excluded row counts.
 
-    ``reference`` is the audit of another correction of the same crystal (its work rows): its divisor median and
-    median-IOBS rescale factor are used instead of this row set's own, so every row is corrected exactly as it would
-    have been among the reference rows (the held-out endpoint validation corrects the free rows this way).
+    ``reference`` is the audit of another correction of the same crystal (its work rows): its divisor median is
+    used instead of this row set's own, so every row is corrected exactly as it would have been among the
+    reference rows (the held-out endpoint validation corrects the free rows this way).
     """
 
     hkl = [(int(r["h"]), int(r["k"]), int(r["l"])) for r in rows]
@@ -470,56 +449,37 @@ def endpoint_rows_and_corrections_from_native(
         & np.isfinite(q)
         & (q > 0.0)
     )
-    if q_policy == "clip" and rescale == "median-iobs":
-        # Legacy contract, kept byte-for-byte.
-        q_clip = np.clip(q, 0.05, 20.0)
-        scales = np.maximum(dyn_scaled / np.maximum(dyn_raw, 1e-30), 1e-30)
-        denom = np.maximum(scales * (q_clip ** float(lambda_q)), 1e-30)
-        if audit is not None:
-            audit.update({"q_policy": "clip", "rescale": "median-iobs", "n_rows_selected": int(np.count_nonzero(valid)),
-                          "n_rows_kept": int(np.count_nonzero(valid)), "n_excluded_q_rows": 0})
-    else:
-        fc2 = None
-        if rescale == "absolute":
-            if model is None:
-                raise ValueError("absolute endpoint intensity scale needs the current structure model")
-            from grond.bloch.model import fcalc_res_grid
+    fc2 = None
+    if rescale == "absolute":
+        if model is None:
+            raise ValueError("absolute endpoint intensity scale needs the current structure model")
+        from grond.bloch.model import fcalc_res_grid
 
-            hkl_array = np.asarray(hkl, dtype=float).reshape(-1, 3)
-            fc2 = np.abs(fcalc_res_grid(model, hkl_array[:, 0], hkl_array[:, 1], hkl_array[:, 2])) ** 2
-        denom, valid, denom_audit = endpoint_correction_denominators(
-            target,
-            dyn_raw,
-            dyn_scaled,
-            q,
-            lambda_q,
-            valid,
-            q_policy=q_policy,
-            rescale=rescale,
-            fc2=fc2,
-            kappa=kappa,
-            restore=restore,
-            reference_median=None if reference is None else float(reference["divisor_median"]),  # type: ignore[arg-type]
-        )
-        if audit is not None:
-            audit.update(denom_audit)
+        hkl_array = np.asarray(hkl, dtype=float).reshape(-1, 3)
+        fc2 = np.abs(fcalc_res_grid(model, hkl_array[:, 0], hkl_array[:, 1], hkl_array[:, 2])) ** 2
+    denom, valid, denom_audit = endpoint_correction_denominators(
+        target,
+        dyn_raw,
+        dyn_scaled,
+        q,
+        lambda_q,
+        valid,
+        q_policy=q_policy,
+        rescale=rescale,
+        fc2=fc2,
+        kappa=kappa,
+        restore=restore,
+        reference_median=None if reference is None else float(reference["divisor_median"]),  # type: ignore[arg-type]
+    )
+    if audit is not None:
+        audit.update(denom_audit)
     icorr = target / denom
     sigcorr = sig / denom
-    if rescale == "median-iobs" and reference is not None:
-        factor = float(reference["rescale_factor"])  # type: ignore[arg-type]
-    elif rescale == "median-iobs":
-        src = float(np.nanmedian(target[valid])) if np.any(valid) else 1.0
-        dst = float(np.nanmedian(icorr[valid])) if np.any(valid) else 1.0
-        factor = src / max(dst, 1e-30)
-    else:
-        factor = 1.0
-    icorr *= factor
-    sigcorr *= factor
     if audit is not None:
-        audit["rescale_factor"] = float(factor)
+        audit["rescale_factor"] = 1.0
     selected = np.where(valid)[0]
     endpoint_rows = [(*hkl[i], float(icorr[i]), float(sigcorr[i])) for i in selected]
-    corrections = np.asarray(float(factor) / denom[selected], dtype=float)
+    corrections = np.asarray(1.0 / denom[selected], dtype=float)
     return endpoint_rows, corrections
 
 
@@ -545,10 +505,8 @@ def scale_hkl_rows(rows, scale: float):
 
 
 def audit_combined_endpoint_modulation(
-    corrections_by_dataset: dict[str, np.ndarray | None],
+    corrections_by_dataset: dict[str, np.ndarray],
     interdataset_scales: dict[str, float],
-    *,
-    endpoint_source: str,
 ) -> tuple[dict[str, object], dict[str, dict[str, object]]]:
     """Audit row corrections after applying relative interdataset scales."""
 
@@ -556,26 +514,12 @@ def audit_combined_endpoint_modulation(
     per_dataset: dict[str, dict[str, object]] = {}
     for name, source_corrections in corrections_by_dataset.items():
         dataset_scale = safe_float(interdataset_scales.get(name, 1.0), float("nan"))
-        if source_corrections is None:
-            fields = modulation_manifest_fields([])
-            fields["modulation_audit"] = {
-                **dict(fields["modulation_audit"]),
-                "status": "unavailable_endpoint_source_hkl",
-                "reason": "row-level source intensity multipliers are not recoverable from a prewritten HKL",
-            }
-        else:
-            adjusted = np.asarray(source_corrections, dtype=float) * dataset_scale
-            fields = modulation_manifest_fields(adjusted)
-            combined_corrections.extend(float(value) for value in adjusted)
+        adjusted = np.asarray(source_corrections, dtype=float) * dataset_scale
+        fields = modulation_manifest_fields(adjusted)
+        combined_corrections.extend(float(value) for value in adjusted)
         per_dataset[name] = {**fields, "interdataset_scale": dataset_scale}
 
     combined = modulation_manifest_fields(combined_corrections)
-    if endpoint_source == "hkl":
-        combined["modulation_audit"] = {
-            **dict(combined["modulation_audit"]),
-            "status": "unavailable_endpoint_source_hkl",
-            "reason": "combined modulation requires row-level native correction factors including interdataset scales",
-        }
     return combined, per_dataset
 
 

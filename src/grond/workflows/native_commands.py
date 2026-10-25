@@ -254,7 +254,7 @@ def native_stage_cmd(
         "--shelxl-iterations",
         str(shelxl_iterations),
         "--endpoint-wght-mode",
-        str(getattr(args, "endpoint_wght_mode", "freeze-zero")),
+        str(getattr(args, "endpoint_wght_mode", "converge")),
         *endpoint_handoff_args(args),
         "--post-bloch-sigma-policy",
         post_bloch_sigma_policy,
@@ -281,7 +281,7 @@ def native_stage_cmd(
         "--hkl-float-format",
         "shelx_fixed",
     ]
-    if endpoint_ok and str(getattr(args, "endpoint_wght_mode", "freeze-zero")) == "converge":
+    if endpoint_ok and str(getattr(args, "endpoint_wght_mode", "converge")) == "converge":
         # converge calls are L.S. 10 (the combined endpoints' --shelxl-feedback-endpoint-ls-cycles), not the
         # engine's one-cycle default, so each call's shift/esd test and weight suggestion see a converged model.
         cmd += ["--endpoint-ls-cycles", str(int(getattr(args, "shelxl_feedback_endpoint_ls_cycles", 10) or 10))]

@@ -86,7 +86,7 @@ def combine_cmd(
         "--endpoint-ls-cycles",
         str(endpoint_ls_cycles),
         "--endpoint-wght-mode",
-        resolved_feedback_wght_mode(args) if feedback_cycle else str(getattr(args, "endpoint_wght_mode", "freeze-zero")),
+        resolved_feedback_wght_mode(args) if feedback_cycle else str(getattr(args, "endpoint_wght_mode", "converge")),
         *endpoint_handoff_args(args),
     ]
     final = (not feedback_cycle) if final_outputs is None else final_outputs
@@ -99,17 +99,11 @@ def combine_cmd(
         cmd += ["--min-d-spacing", f"{endpoint_min_d_spacing:g}"]
     if args.dataset_sigma_holdout_floor:
         cmd.append("--dataset-sigma-holdout-floor")
-    if free_validation and endpoint_free_validation_active(args):
+    if free_validation:
         cmd += ["--endpoint-free-validation", "on"]
     for name, run in runs.items():
         cmd += ["--run", f"{name}={run}"]
     return cmd
-
-
-def endpoint_free_validation_active(args: argparse.Namespace) -> bool:
-    """Endpoint free validation runs when the free rows are kept out of every refinement HKL."""
-
-    return not bool(getattr(args, "endpoint_include_free_rows", True))
 
 
 def publication_report_cmd(

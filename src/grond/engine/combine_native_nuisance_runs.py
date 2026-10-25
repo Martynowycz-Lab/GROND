@@ -53,7 +53,6 @@ from grond.regularize.multidataset import (
     endpoint_rows_and_corrections_from_native as endpoint_rows_and_corrections_from_native,
     estimate_overlap_scales as estimate_overlap_scales,
     file_provenance as file_provenance,
-    filter_hkl_rows_by_resolution as filter_hkl_rows_by_resolution,
     filter_native_rows_by_resolution as filter_native_rows_by_resolution,
     hkl_resolution_stats as hkl_resolution_stats,
     merge_hkl_rows as merge_hkl_rows,
@@ -79,7 +78,6 @@ try:  # Package import.
         shelx_res_health,
         shelxl_iteration_safe,
         snapshot_safe_shelxl_iteration,
-        write_active_wght,
         write_endpoint_ins,
     )
     from .post_bloch_sigma import (
@@ -108,7 +106,6 @@ except ImportError:  # Direct script execution from this directory.
         shelx_res_health,
         shelxl_iteration_safe,
         snapshot_safe_shelxl_iteration,
-        write_active_wght,
         write_endpoint_ins,
     )
     from post_bloch_sigma import (
@@ -427,7 +424,7 @@ def run_shelxl(
     shelxl: str,
     iterations: int = 5,
     *,
-    wght_mode: str = "freeze-zero",
+    wght_mode: str,
     endpoint_ls_cycles: int = 1,
     convergence_shift_esd: float = 0.0,
     npd_recovery: str = "damp",
@@ -453,11 +450,10 @@ def run_shelxl(
     history = []
     last_safe = None
     last_stdout = ""
-    mode = str(wght_mode or "freeze-zero")
+    mode = str(wght_mode)
     n_iter = wght_call_limit(mode, iterations, wght_converge_max_calls)
     n_ls = max(1, int(endpoint_ls_cycles))
     tolerance = float(convergence_shift_esd or 0.0)
-    freeze_zero = mode == "freeze-zero"
     if mode not in WGHT_MODES:
         return {"returncode": None, "status": "invalid_wght_mode", "wght_mode": mode}
     if mode == "converge" and not tolerance > 0.0:
@@ -467,8 +463,6 @@ def run_shelxl(
     # An endpoint written with ACTA keeps it on every call, so the CIF is SHELXL's CIF of the kept .res.
     acta = requests_acta(work / f"{stem}.ins")
     for i in range(n_iter):
-        if freeze_zero:
-            write_active_wght(work / f"{stem}.ins", 0.0, 0.0)
         ins = work / f"{stem}.ins"
         base_ins_text = ins.read_text(errors="replace") if ins.exists() else ""
         proc, stats = run_one_shelxl_attempt(
@@ -505,7 +499,7 @@ def run_shelxl(
             break
         res = work / f"{stem}.res"
         if i + 1 < n_iter and res.exists():
-            active = (0.0, 0.0) if freeze_zero else _active_wght_from_stats(stats)
+            active = _active_wght_from_stats(stats)
             write_endpoint_ins(
                 work / f"{stem}.res",
                 work / f"{stem}.ins",
@@ -522,8 +516,6 @@ def run_shelxl(
                     work / f"{stem}.ins",
                     recommended_wght_from_stats(stats),
                 )
-            elif freeze_zero:
-                stats["next_wght"] = {"promoted": False, "frozen": True, "active_wght_a": 0.0, "active_wght_b": 0.0}
             else:
                 stats["next_wght"] = {"promoted": False, "inherited": True}
     (work / "shelxl_stdout.log").write_text(last_stdout)
@@ -533,7 +525,7 @@ def run_shelxl(
         final["status"] = "shelxl_failed"
         final["invalid_res_reason"] = f"SHELXL returned {final['returncode']}"
     elif final["res_health"].get("ok"):
-        active = (0.0, 0.0) if freeze_zero else _active_wght_from_stats(final)
+        active = _active_wght_from_stats(final)
         write_endpoint_ins(
             work / f"{stem}.res",
             work / f"{stem}.res",
@@ -593,37 +585,11 @@ def require_combined_endpoint_shelxl(
     return resolved
 
 
-def endpoint_lam_dir(run: Path, lam: str) -> Path:
-    """Return a run's endpoint directory for one lambda, e.g. endpoint_lam_1p0."""
-
-    return run / f"endpoint_lam_{lam.replace('.', 'p')}"
-
-
-def endpoint_hkl_path(run: Path, lam: str) -> Path:
-    """Return a run's corrected endpoint HKL for lambda, preferring the unmerged file.
-
-    Searches the plain and the B/noexti endpoint directories; returns the default path if none exists.
-    """
-
-    lam_tag = str(lam).replace(".", "p")
-    candidate_dirs = [
-        endpoint_lam_dir(run, lam),
-        run / f"endpoint_lam_{lam_tag}_B_0p0_noexti",
-    ]
-    candidate_dirs.extend(sorted(run.glob(f"endpoint_lam_{lam_tag}_B_*_noexti")))
-    for ep_dir in candidate_dirs:
-        for name in ("dyn_nuisance_corrected_unmerged.hkl", "dyn_nuisance_corrected.hkl"):
-            path = ep_dir / name
-            if path.exists():
-                return path
-    return endpoint_lam_dir(run, lam) / "dyn_nuisance_corrected_unmerged.hkl"
-
-
 def run_unmerged_batch_endpoint(
     out: Path,
     args,
     rows_by_dataset: dict[str, list[tuple]],
-    corrections_by_dataset: dict[str, np.ndarray | None],
+    corrections_by_dataset: dict[str, np.ndarray],
     post_bloch_sigma: dict,
     shelxl_executable: str,
     endpoint_key_for,
@@ -666,14 +632,13 @@ def run_unmerged_batch_endpoint(
         basf_start.append(float(relative) if math.isfinite(relative) and relative > 0.0 else 1.0)
     write_fixed_width_batch_hkl(ep_dir / f"{stem}.hkl", rows, batches)
     kappa_effective = ABSOLUTE_HKL_KAPPA * hkl_safe_factor
-    osf = math.sqrt(kappa_effective) if args.rescale == "absolute" else None
+    osf = math.sqrt(kappa_effective)
     write_no_exti_ins(
         Path(args.res),
         ep_dir / f"{stem}.ins",
         f"{stem}.hkl",
         wght=endpoint_initial_wght(args.endpoint_wght_mode),
         ls_cycles=args.endpoint_ls_cycles,
-        keep_damp=bool(args.keep_damp),
         osf=osf,
         basf=basf_start,
         merg=0,
@@ -688,7 +653,6 @@ def run_unmerged_batch_endpoint(
         endpoint_ls_cycles=args.endpoint_ls_cycles,
         convergence_shift_esd=args.shelxl_convergence_shift_esd,
         npd_recovery=args.shelxl_npd_recovery,
-        keep_damp=bool(args.keep_damp),
         wght_converge_max_calls=args.wght_converge_max_calls,
         allow_basf=True,
     )
@@ -698,7 +662,6 @@ def run_unmerged_batch_endpoint(
     modulation, _per_dataset = audit_combined_endpoint_modulation(
         {name: corrections_by_dataset.get(name) for name in names},
         {name: 1.0 for name in names},
-        endpoint_source=args.endpoint_source,
     )
     return {
         "status": "ok" if str(shelxl.get("status", "")) == "ok" else str(shelxl.get("status", "")),
@@ -722,7 +685,7 @@ def run_unmerged_batch_endpoint(
         "endpoint_wght_mode": args.endpoint_wght_mode,
         "intensity_scale": {
             "mode": args.rescale,
-            "kappa_effective": kappa_effective if args.rescale == "absolute" else None,
+            "kappa_effective": kappa_effective,
             "osf_reset": osf,
         },
         "shelxl": shelxl,
@@ -766,7 +729,7 @@ def free_validation_rows_by_dataset(
             float(args.endpoint_lambda),
             q_policy=args.endpoint_q_policy,
             rescale=args.rescale,
-            model=model if args.rescale == "absolute" else None,
+            model=model,
             audit=correction,
             reference=item["work_correction"],
         )
@@ -1090,26 +1053,12 @@ def main():
     # Native endpoint directories use ``str(float(lambda))``.  Canonicalizing
     # here keeps values such as ``1`` and ``1.0`` on one artifact identity.
     args.endpoint_lambda = str(endpoint_lambda_value)
-    if args.dataset_sigma_policy == "error_model" and args.endpoint_include_free_rows:
-        ap.error(
-            "--dataset-sigma-policy error_model is fitted on work rows only and needs --no-endpoint-include-free-rows "
-            "(free rows in the HKL would enter the fit); use uniform_z_rms with the legacy free-row HKL"
-        )
-    if args.dataset_sigma_policy == "error_model" and args.endpoint_source != "native":
-        ap.error("--dataset-sigma-policy error_model needs --endpoint-source native (row splits and the current model)")
     if args.dataset_sigma_policy == "error_model" and args.post_bloch_sigma_policy != "none":
         ap.error(
             "--dataset-sigma-policy error_model already sets per-crystal sigmas; use --post-bloch-sigma-policy none "
             "(a second uniform rescale of the merged HKL would undo the relative weights)"
         )
     free_validation = str(getattr(args, "endpoint_free_validation", "off")) == "on"
-    if free_validation and args.endpoint_include_free_rows:
-        ap.error(
-            "--endpoint-free-validation on needs --no-endpoint-include-free-rows (with the free rows in the refinement "
-            "HKL nothing is held out)"
-        )
-    if free_validation and args.endpoint_source != "native":
-        ap.error("--endpoint-free-validation on needs --endpoint-source native (free rows are corrected from the row tables)")
     if args.endpoint_wght_mode == "converge" and not float(args.shelxl_convergence_shift_esd or 0.0) > 0.0:
         ap.error("--endpoint-wght-mode converge needs --shelxl-convergence-shift-esd > 0 (AUTO 0.01)")
     try:
@@ -1145,7 +1094,7 @@ def main():
     all_rows = []
     dataset_summaries = []
     endpoint_rows_by_dataset: dict[str, list[tuple]] = {}
-    endpoint_corrections_by_dataset: dict[str, np.ndarray | None] = {}
+    endpoint_corrections_by_dataset: dict[str, np.ndarray] = {}
     endpoint_weight_by_name: dict[str, float] = {}
     dataset_sigma_by_name: dict[str, dict] = {}
     free_endpoint_rows_by_dataset: dict[str, list[tuple]] = {}
@@ -1183,14 +1132,12 @@ def main():
             if str(r.get("dataset_role", "primary")) != "exclude"
             and endpoint_weight > 0.0
         ]
-        free_rows_excluded = 0
         free_input_rows = [r for r in endpoint_input_rows if str(r.get("split", "work")) == "free"]
-        if not args.endpoint_include_free_rows:
-            # Free rows stay in the row tables and joint metrics (predicted and scored every cycle) but are
-            # never refined against, so SHELXL-side and row-side R_free stay honest.
-            kept_rows = [r for r in endpoint_input_rows if str(r.get("split", "work")) == "work"]
-            free_rows_excluded = len(endpoint_input_rows) - len(kept_rows)
-            endpoint_input_rows = kept_rows
+        # Free rows stay in the row tables and joint metrics (predicted and scored every cycle) but are
+        # never refined against, so SHELXL-side and row-side R_free stay honest.
+        kept_rows = [r for r in endpoint_input_rows if str(r.get("split", "work")) == "work"]
+        free_rows_excluded = len(endpoint_input_rows) - len(kept_rows)
+        endpoint_input_rows = kept_rows
         source_best_native = summary.get("best_native", {})
         if not isinstance(source_best_native, dict):
             source_best_native = {}
@@ -1264,52 +1211,30 @@ def main():
                 "q_p95": float(np.nanpercentile(q, 95)) if len(q) else float("nan"),
             }
         )
-        if args.endpoint_source == "hkl":
-            source_hkl_path = endpoint_hkl_path(run, args.endpoint_lambda)
-            hkl_rows = read_hkl(source_hkl_path)
-            source_run_text = (summary.get("dataset_policy") or {}).get("run_dir", "")
-            source_run = Path(source_run_text) if source_run_text else None
-            if not hkl_rows and source_run and source_run.exists():
-                source_hkl_path = endpoint_hkl_path(source_run, args.endpoint_lambda)
-                hkl_rows = read_hkl(source_hkl_path)
-            hkl_input_count = len(hkl_rows)
-            hkl_rows = filter_hkl_rows_by_resolution(hkl_rows, model, float(args.min_d_spacing))
-            dataset_summaries[-1]["source_artifacts"]["endpoint_hkl"] = file_provenance(source_hkl_path)
-            dataset_summaries[-1]["endpoint_hkl_resolution_filter"] = {
-                "requested_min_d_spacing_A": float(args.min_d_spacing),
-                "input_rows": hkl_input_count,
-                "kept_rows": len(hkl_rows),
-                "retained_rows": len(hkl_rows),
-                "dropped_rows": hkl_input_count - len(hkl_rows),
-                **hkl_resolution_stats(hkl_rows, model),
-            }
-            endpoint_rows_by_dataset[name] = hkl_rows
-            endpoint_corrections_by_dataset[name] = None
-        else:
-            correction_audit: dict = {}
-            endpoint_rows, endpoint_corrections = endpoint_rows_and_corrections_from_native(
-                endpoint_input_rows,
+        correction_audit: dict = {}
+        endpoint_rows, endpoint_corrections = endpoint_rows_and_corrections_from_native(
+            endpoint_input_rows,
+            float(args.endpoint_lambda),
+            q_policy=args.endpoint_q_policy,
+            rescale=args.rescale,
+            model=model,
+            audit=correction_audit,
+        )
+        dataset_summaries[-1]["endpoint_correction"] = correction_audit
+        endpoint_rows_by_dataset[name] = endpoint_rows
+        endpoint_corrections_by_dataset[name] = endpoint_corrections
+        if free_validation:
+            free_validation_inputs[name] = {"rows": free_input_rows, "work_correction": dict(correction_audit)}
+        if args.dataset_sigma_policy == "error_model" and free_input_rows:
+            # Corrected free rows (their own q-ratio median) are scored by the fitted error model and
+            # reported; they are never fitted and never written to an HKL.
+            free_endpoint_rows_by_dataset[name], _free_corrections = endpoint_rows_and_corrections_from_native(
+                free_input_rows,
                 float(args.endpoint_lambda),
                 q_policy=args.endpoint_q_policy,
                 rescale=args.rescale,
-                model=model if args.rescale == "absolute" else None,
-                audit=correction_audit,
+                model=model,
             )
-            dataset_summaries[-1]["endpoint_correction"] = correction_audit
-            endpoint_rows_by_dataset[name] = endpoint_rows
-            endpoint_corrections_by_dataset[name] = endpoint_corrections
-            if free_validation:
-                free_validation_inputs[name] = {"rows": free_input_rows, "work_correction": dict(correction_audit)}
-            if args.dataset_sigma_policy == "error_model" and free_input_rows:
-                # Corrected free rows (their own q-ratio median) are scored by the fitted error model and
-                # reported; they are never fitted and never written to an HKL.
-                free_endpoint_rows_by_dataset[name], _free_corrections = endpoint_rows_and_corrections_from_native(
-                    free_input_rows,
-                    float(args.endpoint_lambda),
-                    q_policy=args.endpoint_q_policy,
-                    rescale=args.rescale,
-                    model=model if args.rescale == "absolute" else None,
-                )
         dataset_sigma_by_name[name] = {"policy": args.dataset_sigma_policy, "status": "not_requested"}
 
     uncalibrated_rows_by_dataset = dict(endpoint_rows_by_dataset)
@@ -1354,8 +1279,6 @@ def main():
     wght_a = 0.126534
     wght_b = 0.0
     endpoint_key_for = endpoint_key_function(args.endpoint_merge_key, symmetry_ops)
-    if args.rescale == "absolute" and args.endpoint_source == "hkl":
-        raise ValueError("--rescale absolute needs --endpoint-source native (row predictions and the current model)")
     interdataset_scale_diagnostic: dict = {}
     if args.interdataset_scale == "overlap":
         interdataset_scale = estimate_overlap_scales(endpoint_rows_by_dataset, canonicalizer=endpoint_key_for)
@@ -1365,7 +1288,7 @@ def main():
             "overlap_counts": {name: 0 for name in endpoint_rows_by_dataset},
             "scales": {name: 1.0 for name in endpoint_rows_by_dataset},
         }
-        if args.rescale == "absolute" and len(endpoint_rows_by_dataset) > 1:
+        if len(endpoint_rows_by_dataset) > 1:
             # Every crystal is already on kappa*|F|^2; the overlap estimate is reported, not applied (expected ~1).
             interdataset_scale_diagnostic = estimate_overlap_scales(endpoint_rows_by_dataset, canonicalizer=endpoint_key_for)
     endpoint_rows = []
@@ -1375,7 +1298,6 @@ def main():
     combined_modulation, per_dataset_modulation = audit_combined_endpoint_modulation(
         endpoint_corrections_by_dataset,
         interdataset_scale["scales"],
-        endpoint_source=args.endpoint_source,
     )
     for dataset_summary in dataset_summaries:
         name = str(dataset_summary.get("name", ""))
@@ -1452,14 +1374,13 @@ def main():
             safe_factor, merged_rows, unmerged_rows = write_pass_hkl(ep_dir, merged_rows, unmerged_rows)
             # Absolute scale: Fo^2 = kappa_eff*|F|^2 with kappa_eff = kappa*hkl_safe_factor, so the OSF restarts at
             # sqrt(kappa_eff) for every handoff instead of chasing a per-cycle median factor.
-            pass_osf = math.sqrt(ABSOLUTE_HKL_KAPPA * safe_factor) if args.rescale == "absolute" else None
+            pass_osf = math.sqrt(ABSOLUTE_HKL_KAPPA * safe_factor)
             write_no_exti_ins(
                 start_model,
                 ep_dir / "multi_dyn_corrected.ins",
                 hkl_name,
                 wght=endpoint_initial_wght(args.endpoint_wght_mode),
                 ls_cycles=args.endpoint_ls_cycles,
-                keep_damp=bool(args.keep_damp),
                 osf=pass_osf,
                 **endpoint_native_outputs(args),
             )
@@ -1472,7 +1393,6 @@ def main():
                 endpoint_ls_cycles=args.endpoint_ls_cycles,
                 convergence_shift_esd=args.shelxl_convergence_shift_esd,
                 npd_recovery=args.shelxl_npd_recovery,
-                keep_damp=bool(args.keep_damp),
                 wght_converge_max_calls=args.wght_converge_max_calls,
             )
             fail_if_shelxl_became_unavailable(
@@ -1761,12 +1681,12 @@ def main():
             "endpoint_ls_cycles": max(1, int(args.endpoint_ls_cycles)),
             "shelxl_convergence_shift_esd": float(args.shelxl_convergence_shift_esd),
             "shelxl_npd_recovery": args.shelxl_npd_recovery,
-            "keep_damp": bool(args.keep_damp),
+            "keep_damp": False,
             "free_rows": {
-                "policy": "include" if args.endpoint_include_free_rows else "exclude",
+                "policy": "exclude",
                 # read by reports/heldout.py (leak flag for the SHELXL HKL)
-                "free_rows_in_hkl": bool(args.endpoint_include_free_rows),
-                "hkl_split": "all" if args.endpoint_include_free_rows else "work",
+                "free_rows_in_hkl": False,
+                "hkl_split": "work",
                 "n_excluded": int(sum(int(ds.get("endpoint_free_rows_excluded", 0)) for ds in dataset_summaries)),
             },
             "q_policy": args.endpoint_q_policy,
@@ -1775,9 +1695,9 @@ def main():
             ),
             "intensity_scale": {
                 "mode": args.rescale,
-                "kappa": ABSOLUTE_HKL_KAPPA if args.rescale == "absolute" else None,
-                "kappa_effective": (ABSOLUTE_HKL_KAPPA * hkl_safe_factor) if (endpoint_rows and args.rescale == "absolute") else None,
-                "osf_reset": math.sqrt(ABSOLUTE_HKL_KAPPA * hkl_safe_factor) if (endpoint_rows and args.rescale == "absolute") else None,
+                "kappa": ABSOLUTE_HKL_KAPPA,
+                "kappa_effective": (ABSOLUTE_HKL_KAPPA * hkl_safe_factor) if endpoint_rows else None,
+                "osf_reset": math.sqrt(ABSOLUTE_HKL_KAPPA * hkl_safe_factor) if endpoint_rows else None,
                 "n_rows_over_f8_2_at_kappa": int(n_over_f8_2) if endpoint_rows else 0,
             },
             "interdataset_scale_diagnostic": interdataset_scale_diagnostic,

@@ -105,7 +105,7 @@ def resolved_dataset_sigma_policy(args: argparse.Namespace, *, multi_dataset: bo
 def resolved_feedback_wght_mode(args: argparse.Namespace) -> str:
     """SHELXL weighting policy of the structure-feedback macro-cycles (``endpoint`` follows the endpoints)."""
 
-    return str(getattr(args, "endpoint_wght_mode", "freeze-zero"))
+    return str(getattr(args, "endpoint_wght_mode", "converge"))
 
 
 def refuse_sigma_weight_startup_conflicts(args: argparse.Namespace) -> None:
@@ -118,18 +118,10 @@ def refuse_sigma_weight_startup_conflicts(args: argparse.Namespace) -> None:
     if str(getattr(args, "mode", "auto")) not in {"auto", "regularize"}:
         return
     conflicts = []
-    weight_modes = {str(getattr(args, "endpoint_wght_mode", "freeze-zero")), resolved_feedback_wght_mode(args)}
+    weight_modes = {str(getattr(args, "endpoint_wght_mode", "converge")), resolved_feedback_wght_mode(args)}
     if "converge" in weight_modes and not float(getattr(args, "shelxl_convergence_shift_esd", 0.0) or 0.0) > 0.0:
         conflicts.append(
-            "the converge SHELXL weighting mode needs --shelxl-convergence-shift-esd > 0 (AUTO 0.01); with a zero "
-            "tolerance use --endpoint-wght-mode freeze-zero or promote-gold"
-        )
-    error_model = error_model_sigma_active(args) or str(getattr(args, "post_bloch_sigma_policy", "auto")) == "error_model"
-    if error_model and bool(getattr(args, "endpoint_include_free_rows", False)):
-        conflicts.append(
-            "the per-crystal error model (--dataset-sigma-policy error_model) is fitted on work rows only and cannot "
-            "run with --endpoint-include-free-rows (free rows in every SHELXL HKL); add --dataset-sigma-policy auto "
-            "for the legacy free-row HKL"
+            "the converge SHELXL weighting mode needs --shelxl-convergence-shift-esd > 0 (AUTO 0.01)"
         )
     explicit = str(getattr(args, "cell_esd", "") or "").strip()
     if explicit:

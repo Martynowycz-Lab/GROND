@@ -87,9 +87,9 @@ def register_push(sub: argparse._SubParsersAction) -> None:
     )
     p_push.add_argument(
         "--shelxl-feedback-keep",
-        choices=["best-free", "last"],
+        choices=["last"],
         default="last",
-        help="Continuation model to keep: last (default) or the output with the lowest free-row R_obs.",
+        help="Continuation model to keep: the last adopted cycle.",
     )
     p_push.add_argument(
         "--endpoint-ls-cycles",
@@ -188,9 +188,9 @@ def register_finish(sub: argparse._SubParsersAction) -> None:
     )
     p_finish.add_argument(
         "--publication-feedback-cycles",
-        choices=["kept", "all"],
+        choices=["kept"],
         default=None,
-        help="Rounds the final model may come from: kept (default) or all.",
+        help="Rounds the final model may come from: kept (default), the round the loop kept.",
     )
     p_finish.add_argument(
         "--run-dir", default=".", help="Output directory of a finished run (default: the current directory)."

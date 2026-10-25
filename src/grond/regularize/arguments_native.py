@@ -187,9 +187,9 @@ def build_parser(description: str, *, default_hkl, default_res, default_baseline
     ap.add_argument("--endpoint-ls-cycles", type=int, default=1, help="Internal L.S./CGLS cycle count written into generated endpoint .ins/.res files. Production uses 1; larger values are diagnostic stress tests.")
     ap.add_argument(
         "--endpoint-wght-mode",
-        choices=["freeze-zero", "inherit", "promote", "promote-gold", "converge"],
-        default="freeze-zero",
-        help="SHELXL WGHT policy for corrected-HKL endpoints. freeze-zero is the production default after GROND sigma calibration; inherit keeps the source-model WGHT; promote keeps the source-model WGHT on the first call and uses SHELXL recommendations on later external passes; promote-gold starts at WGHT 0.1 0 and then promotes like promote; converge starts at WGHT 0 0 and promotes until the applied and suggested WGHT agree and max shift/esd < --shelxl-convergence-shift-esd (AUTO).",
+        choices=["converge"],
+        default="converge",
+        help="SHELXL WGHT policy for corrected-HKL endpoints: converge starts at WGHT 0 0 and promotes until the applied and suggested WGHT agree and max shift/esd < --shelxl-convergence-shift-esd (AUTO 0.01).",
     )
     ap.add_argument("--wght-converge-max-calls", type=int, default=20, help="Maximum SHELXL calls of one endpoint under --endpoint-wght-mode converge (replaces --shelxl-iterations there).")
     ap.add_argument("--zerr-esds", default="", help="Six cell e.s.d.s a,b,c,alpha,beta,gamma for the ZERR record of generated endpoint inputs (Z kept). Empty keeps the model's ZERR.")
@@ -197,9 +197,7 @@ def build_parser(description: str, *, default_hkl, default_res, default_baseline
     ap.add_argument("--endpoint-list-code", type=int, default=0, help="LIST code of generated endpoint inputs (AUTO 6: an .fcf with phases for SHELXLE/Olex2 maps). 0 keeps the model's LIST.")
     ap.add_argument("--shelxl-convergence-shift-esd", type=float, default=0.0, help="Stop the SHELXL calls of an endpoint once the last L.S. cycle has |max shift/esd| below this value (AUTO 0.01). 0 disables the test (legacy).")
     ap.add_argument("--shelxl-npd-recovery", choices=["damp", "isor"], default="damp", help="Recovery for a non-positive-definite ADP step: legacy DAMP ladder, or ISOR on the NPD atoms only (AUTO).")
-    ap.add_argument("--keep-damp", action="store_true", help="Legacy: carry an active DAMP instruction into later SHELXL calls and the written RES. Default strips it.")
-    ap.add_argument("--endpoint-include-free-rows", action=argparse.BooleanOptionalAction, default=True, help="Write split=free rows into the corrected HKL (legacy default). AUTO passes --no-endpoint-include-free-rows.")
-    ap.add_argument("--endpoint-q-policy", choices=["clip", "exclude"], default="clip", help="Rows whose correction ratio relative to the median lies outside (0.05, 20): clip q and keep them (legacy) or exclude and count them (AUTO).")
+    ap.add_argument("--endpoint-q-policy", choices=["exclude"], default="exclude", help="Rows whose correction ratio relative to the median lies outside (0.05, 20) are excluded and counted.")
     ap.add_argument("--skip-endpoint-refinement", action="store_true", help="Run the fixed-model Bloch row calculation and row reports only. No corrected-HKL SHELXL endpoint is written or refined.")
     ap.add_argument("--post-bloch-sigma-policy", choices=["none", "uniform_z_rms", "error_model"], default="none", help="Endpoint uncertainty policy applied after Bloch correction and before SHELXL. uniform_z_rms fits one residual RMS(z) scalar from the current model and scales endpoint sigmas only; error_model fits sigma'^2 = k^2 (sigma^2 + (u P)^2) on this crystal's work rows against the current model (AUTO final endpoints).")
     ap.add_argument("--error-model-refits", type=int, default=1, help="error_model only: after SHELXL has refined the endpoint, refit the error model against the refined model (work rows only) and refine again, this many times.")
@@ -207,7 +205,7 @@ def build_parser(description: str, *, default_hkl, default_res, default_baseline
     ap.add_argument("--post-bloch-sigma-holdout-fraction", type=float, default=0.20, help="Deterministic HKL holdout fraction reported for uniform_z_rms diagnostics.")
     ap.add_argument("--post-bloch-sigma-min-scale", type=float, default=0.25, help="Lower guardrail for the uniform_z_rms sigma multiplier.")
     ap.add_argument("--post-bloch-sigma-max-scale", type=float, default=4.0, help="Upper guardrail for the uniform_z_rms sigma multiplier.")
-    ap.add_argument("--rescale", choices=["median-iobs", "none", "absolute"], default="median-iobs", help="Corrected-intensity scale: median-iobs (legacy), none, or absolute kappa*|F|^2 * Iobs/Icalc with the OSF reset to sqrt(kappa) (AUTO).")
+    ap.add_argument("--rescale", choices=["none", "absolute"], default="absolute", help="Corrected-intensity scale: absolute kappa*|F|^2 * Iobs/Icalc with the OSF reset to sqrt(kappa) (AUTO), or none.")
     ap.add_argument("--hkl-float-format", choices=["shelx_fixed", "wide"], default="shelx_fixed")
     ap.add_argument("--workers", type=int, default=1)
     ap.add_argument("--chunksize", type=int, default=8)

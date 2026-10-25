@@ -142,7 +142,7 @@ def run_publication_endpoint_chooser(prep: PrepConfig, result: dict, args: argpa
         extra_candidates.append(model_candidate)
     extra_candidates.extend(
         _multi_feedback_endpoint_candidates(
-            result, Path(getattr(args, "out_dir", ".")), str(getattr(args, "publication_feedback_cycles", "all") or "all")
+            result, Path(getattr(args, "out_dir", ".")), str(getattr(args, "publication_feedback_cycles", "kept") or "kept")
         )
     )
     combined_baseline = _validated_fresh_conventional_baseline(result) if result.get("combined") else {}
@@ -154,7 +154,6 @@ def run_publication_endpoint_chooser(prep: PrepConfig, result: dict, args: argpa
         extra_candidates=extra_candidates,
         min_hkl_safe_factor=getattr(args, "publication_endpoint_min_hkl_safe_factor", 0.25),
         max_modulation_p95=getattr(args, "publication_endpoint_max_modulation_p95", 20.0),
-        allow_npd=bool(getattr(args, "publication_allow_npd", False)),
         combined_baseline_r1_all=(
             safe_float(combined_baseline.get("R1_all"), float("nan")) if combined_baseline else None
         ),

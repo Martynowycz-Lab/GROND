@@ -199,20 +199,18 @@ def _publication_model_endpoint_candidate(result: Mapping[str, object]) -> dict[
 def _multi_feedback_endpoint_candidates(
     result: Mapping[str, object],
     run_root: Path,
-    policy: str = "all",
+    policy: str = "kept",
 ) -> list[dict[str, object]]:
     """Expose shared SHELXL feedback cycles to the endpoint chooser.
 
     ``kept`` (AUTO) offers only the cycle the loop kept (``kept_cycle``), the model that every row table, held-out
-    number and map of the run describes.  Ranking the other cycles by in-sample SHELXL R1 compares refinements
-    against differently corrected data and can publish an earlier, less refined model (for example cycle 2
-    chosen while the loop kept cycle 5).  Under ``all`` every adopted cycle is a candidate and the ordinary
-    publication gates and ranking decide.
+    number and map of the run describes.  Ranking the other cycles by in-sample SHELXL R1 would compare
+    refinements against differently corrected data and could publish an earlier, less refined model.
     """
 
     if not result.get("combined"):
         return []
-    if policy not in {"kept", "all"}:
+    if policy != "kept":
         raise ValueError(f"unknown --publication-feedback-cycles {policy!r}")
     summary_path = run_root / "runs" / "shared_shelxl_feedback" / "multi_shelxl_feedback_loop_summary.json"
     summary = try_read_json(summary_path)
@@ -222,7 +220,7 @@ def _multi_feedback_endpoint_candidates(
     for raw_cycle in raw_cycles:
         if not isinstance(raw_cycle, Mapping) or not bool(raw_cycle.get("adopted_for_feedback", False)):
             continue
-        if policy == "kept" and _quick_int(raw_cycle.get("cycle")) != kept_cycle:
+        if _quick_int(raw_cycle.get("cycle")) != kept_cycle:
             continue
         model_text = str(raw_cycle.get("output_model") or "").strip()
         combined_text = str(raw_cycle.get("combined") or "").strip()

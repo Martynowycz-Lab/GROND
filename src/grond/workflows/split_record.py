@@ -37,7 +37,7 @@ from grond.validation import heldout
 SPLIT_RECORD_SCHEMA = "grond.split_record.v1"
 SPLIT_ROLES = {
     "free": (
-        "held out inside the run: never fitted, selected on (except the flagged hand and best-free keep decisions) "
+        "held out inside the run: never fitted, selected on (except the flagged hand decision) "
         "or written to a GROND SHELXL HKL; AUTO reports held-out R on these rows with orbit-bootstrap 95% CIs "
         "(HELDOUT_VALIDATION.md)"
     ),

@@ -41,10 +41,7 @@ def cmd_finish(args: argparse.Namespace) -> int:
             publication_endpoint_chooser=True,
             publication_endpoint_min_hkl_safe_factor=safe_float(chooser_config.get("min_hkl_safe_factor"), 0.25),
             publication_endpoint_max_modulation_p95=safe_float(chooser_config.get("max_modulation_p95"), 20.0),
-            publication_allow_npd=bool(chooser_config.get("allow_npd", False)),
-            publication_feedback_cycles=str(
-                getattr(args, "publication_feedback_cycles", None) or chooser_config.get("feedback_cycles") or "kept"
-            ),
+            publication_feedback_cycles=str(getattr(args, "publication_feedback_cycles", None) or "kept"),
         )
         result["publication_endpoint_chooser"] = run_publication_endpoint_chooser(prep, result, chooser_args)
     quick = write_quick_stats(prep, result, argparse.Namespace(out_dir=str(run_dir)))

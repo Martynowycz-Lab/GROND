@@ -132,14 +132,14 @@ def run_all_data_refinement(prep: PrepConfig, result: Mapping[str, object], args
     lines, n_work, n_free = all_data_lines(Path(str(free["validation_hkl"])))
     write_hklf4_lines(out_dir / f"{STEM}.hkl", lines)
     record["reflections"] = {"work": n_work, "free": n_free}
-    mode = str(getattr(args, "endpoint_wght_mode", "freeze-zero"))
+    mode = str(getattr(args, "endpoint_wght_mode", "converge"))
     # Olex2/SHELXLE-ready input: no stale Q-peaks, LIST 6.
     native = SimpleNamespace(zerr_esds=str(getattr(args, "resolved_zerr_esds", "") or ""), strip_q_peaks=True,
                              endpoint_list_code=6)
     write_endpoint_ins(
         Path(str(endpoint["endpoint_res"])), out_dir / f"{STEM}.ins", hkl_name=f"{STEM}.hkl",
         keep_exti=bool(endpoint.get("keep_exti", False)), wght=endpoint_initial_wght(mode),
-        ls_cycles=int(getattr(args, "endpoint_ls_cycles", 1)), keep_damp=bool(getattr(args, "shelxl_carry_damp", False)),
+        ls_cycles=int(getattr(args, "endpoint_ls_cycles", 1)),
         **endpoint_native_outputs(native),
     )
     if free.get("extra_hkl_factor"):
@@ -150,7 +150,6 @@ def run_all_data_refinement(prep: PrepConfig, result: Mapping[str, object], args
         endpoint_ls_cycles=int(getattr(args, "endpoint_ls_cycles", 1)),
         convergence_shift_esd=float(getattr(args, "shelxl_convergence_shift_esd", 0.0) or 0.0),
         npd_recovery=str(getattr(args, "shelxl_npd_recovery", "damp") or "damp"),
-        keep_damp=bool(getattr(args, "shelxl_carry_damp", False)),
         wght_converge_max_calls=WGHT_CONVERGE_MAX_CALLS,
     )
     record["shelxl"] = {key: value for key, value in refined.items() if key != "iteration_history"}

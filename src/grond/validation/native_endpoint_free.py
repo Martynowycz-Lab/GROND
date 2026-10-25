@@ -19,9 +19,10 @@ and the one kept).  The replay reads those records and predicts and refines noth
 3. the published .res is scored with SHELXL L.S. 0 on the published HKL plus the free rows flagged -1, with the WGHT its
    last refinement applied (grond.validation.endpoint_free.score_model_on_work_and_free).
 
-Supported: the AUTO contract (``--rescale absolute``, free rows kept out of the HKL, endpoint B 0, error-model or no
-post-Bloch sigma policy).  The legacy median-IOBS rescale needs the per-row fitted scales, which the row table does not
-record, and the uniform_z_rms policy is not replayed: those give a ``not_supported_*`` status.  Reporting only.
+Supported: the AUTO contract (``--rescale absolute``, free rows kept out of the HKL, q policy exclude, endpoint B 0,
+error-model or no post-Bloch sigma policy).  The legacy median-IOBS rescale needs the per-row fitted scales, which the
+row table does not record; it, the legacy q clip of older runs and the uniform_z_rms policy are not replayed: those give a
+``not_supported_*`` status.  Reporting only.
 """
 
 from __future__ import annotations
@@ -97,6 +98,9 @@ def replay_contract(config: Mapping[str, object], manifest: Mapping[str, object]
                 "the row table does not record")
     if bool(config.get("endpoint_include_free_rows")):
         return ("not_supported_free_rows_in_hkl", "the endpoint HKL was written with the free rows: nothing is held out")
+    q_policy = str(manifest.get("q_policy") or config.get("endpoint_q_policy"))
+    if q_policy != "exclude":
+        return ("not_supported_legacy_q_policy", f"--endpoint-q-policy {q_policy}: only the exclude policy is replayed")
     try:
         endpoint_b = float(manifest["endpoint_b"])
     except (KeyError, TypeError, ValueError, OverflowError):

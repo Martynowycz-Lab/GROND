@@ -43,27 +43,21 @@ def add_endpoints(ap: argparse.ArgumentParser, *, expose_lambda_controls: bool) 
     )
     ap.add_argument(
         "--endpoint-wght-mode",
-        choices=["freeze-zero", "inherit", "promote", "promote-gold", "converge"],
+        choices=["converge"],
         default="converge",
-        help="SHELXL weight policy for corrected-HKL endpoint files. converge (default) starts each handoff at WGHT 0 0 and promotes SHELXL's suggested WGHT until the applied and suggested WGHT agree (|da| < 0.002, |db| < 0.02) and max shift/esd < --shelxl-convergence-shift-esd, at most 20 calls, so the written .res carries the converged WGHT; promote-gold starts at WGHT 0.1 0 and promotes on later calls until shift/esd converges; promote keeps the source-model WGHT on the first call and then promotes; freeze-zero is the legacy WGHT 0 0 after GROND sigma calibration; inherit keeps the source-model WGHT.",
+        help="SHELXL weight policy for corrected-HKL endpoint files. converge (default) starts each handoff at WGHT 0 0 and promotes SHELXL's suggested WGHT until the applied and suggested WGHT agree (|da| < 0.002, |db| < 0.02) and max shift/esd < --shelxl-convergence-shift-esd, at most 20 calls, so the written .res carries the converged WGHT.",
     )
     ap.add_argument(
         "--endpoint-intensity-scale",
-        choices=["absolute", "median-iobs"],
+        choices=["absolute"],
         default="absolute",
-        help="Corrected-intensity scale of every dynamical handoff HKL. absolute (default) writes kappa*|F|^2 * Iobs/Icalc with kappa=10 and resets the SHELXL OSF to sqrt(kappa) at every handoff; median-iobs is the legacy per-cycle median rescale.",
+        help="Corrected-intensity scale of every dynamical handoff HKL. absolute (default) writes kappa*|F|^2 * Iobs/Icalc with kappa=10 and resets the SHELXL OSF to sqrt(kappa) at every handoff.",
     )
     ap.add_argument(
         "--endpoint-q-policy",
-        choices=["exclude", "clip"],
+        choices=["exclude"],
         default="exclude",
-        help="Rows whose correction ratio relative to the dataset median lies outside (0.05, 20). exclude (default) drops and counts them; clip is the legacy q clip into [0.05, 20].",
-    )
-    ap.add_argument(
-        "--endpoint-include-free-rows",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Write split=free rows into the feedback-loop and publication HKLs. Default off: free rows are predicted and scored every cycle but never refined against, so R_free is honest. --endpoint-include-free-rows is the legacy setting.",
+        help="Rows whose correction ratio relative to the dataset median lies outside (0.05, 20). exclude (default) drops and counts them.",
     )
     ap.add_argument(
         "--shelxl-convergence-shift-esd",
@@ -76,12 +70,6 @@ def add_endpoints(ap: argparse.ArgumentParser, *, expose_lambda_controls: bool) 
         choices=["isor", "damp"],
         default="isor",
         help="Recovery when an ADP goes non-positive definite: isor (default) restrains only the NPD atoms with ISOR 0.01 0.02 and repeats the call; damp is the legacy DAMP 100..10000 ladder.",
-    )
-    ap.add_argument(
-        "--shelxl-carry-damp",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Legacy: carry an active DAMP instruction into later SHELXL calls, macro-cycles and the publication endpoint. Default strips DAMP at every handoff.",
     )
     ap.add_argument(
         "--shelxl",
@@ -114,13 +102,9 @@ def add_endpoints(ap: argparse.ArgumentParser, *, expose_lambda_controls: bool) 
     )
     ap.add_argument(
         "--shelxl-feedback-keep",
-        choices=["best-free", "last"],
+        choices=["last"],
         default="last",
-        help=(
-            "Macro-cycle model to keep: last (default) keeps the last adopted cycle, so free rows never choose the "
-            "model; best-free keeps the output with the lowest free-row R_obs, ties to the later cycle, and is flagged "
-            "as a free-row selection in the report."
-        ),
+        help="Macro-cycle model to keep: last (default) keeps the last adopted cycle, so free rows never choose the model.",
     )
     ap.add_argument(
         "--dataset-sigma-policy",
@@ -213,12 +197,11 @@ def add_endpoints(ap: argparse.ArgumentParser, *, expose_lambda_controls: bool) 
     )
     ap.add_argument(
         "--publication-feedback-cycles",
-        choices=["kept", "all"],
+        choices=["kept"],
         default="kept",
         help=(
             "SHELXL feedback cycles offered to the publication chooser: kept (default) offers only the cycle the loop "
-            "kept, the model the row tables, held-out numbers and maps describe; all ranks every adopted cycle by "
-            "in-sample R1, which compares refinements against differently corrected data."
+            "kept, the model the row tables, held-out numbers and maps describe."
         ),
     )
     ap.add_argument(
@@ -232,12 +215,6 @@ def add_endpoints(ap: argparse.ArgumentParser, *, expose_lambda_controls: bool) 
         type=float,
         default=20.0,
         help="Warning level for 95th-percentile endpoint intensity modulation; never a promotion or validity gate.",
-    )
-    ap.add_argument(
-        "--publication-allow-npd",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Explicit diagnostic override allowing endpoints with NPD pathology to pass publication selection gates. Default requires NPD == 0. The endpoint chooser reports split warnings without withholding a usable model.",
     )
     ap.add_argument(
         "--instability-u",

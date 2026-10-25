@@ -202,17 +202,15 @@ def run_multi_shelxl_feedback_loop(
     kinematically equivalent intensities with the dynamical ratio frozen at p_k, and SHELXL solves the
     kinematic least squares against them.  Its stationary point is not the dynamical least-squares
     solution (the gradient term through d ln q/dp is dropped), so the loop can contract towards a biased,
-    even unphysical point.  The legacy single-step settings make that worse (one L.S. step per cycle, DAMP
-    carried forward, free rows and all-row per-frame scales inside the refinement, q clipping, an arbitrary
-    per-cycle intensity scale): such a loop can drift to an NPD ADP while the entering-model row R rises.
+    even unphysical point.  Single-step settings (one L.S. step per cycle) make that worse: such a loop can
+    drift to an NPD ADP while the entering-model row R rises.
 
     The loop therefore records a per-cycle ``trajectory`` (held-out and work row R of the entering model,
     converged SHELXL statistics, max coordinate shift, NPD/ISOR/DAMP state, excluded q rows), stops when
     the max non-H shift between successive models is below ``--shelxl-feedback-xyz-tol`` (stop_reason
     ``converged``) or at ``--shelxl-feedback-cycles`` (``cap``; status ``ok`` under the legacy rule of
-    tolerance 0 and keep last, otherwise the stop reason), still stops on ADP pathology, and keeps the
-    last adopted output model (``--shelxl-feedback-keep last``, the default) or, with ``best-free``, the
-    output with the lowest free-row R_obs, reported as ``kept_cycle``.  The output of cycle k is scored by the rows of cycle k+1,
+    tolerance 0, otherwise the stop reason), still stops on ADP pathology, and keeps the last adopted output
+    model (``--shelxl-feedback-keep last``), reported as ``kept_cycle``.  The output of cycle k is scored by the rows of cycle k+1,
     and the last output by the final fixed-nuisance row recompute, all with the same N/Q and nuisance.
     See grond.refine.feedback_trajectory for the derivation.
 
@@ -251,11 +249,11 @@ def run_multi_shelxl_feedback_loop(
             "shelxl_convergence_shift_esd": float(getattr(args, "shelxl_convergence_shift_esd", 0.0) or 0.0),
             "endpoint_ls_cycles": int(getattr(args, "shelxl_feedback_endpoint_ls_cycles", 1) or 1),
             "shelxl_npd_recovery": str(getattr(args, "shelxl_npd_recovery", "damp")),
-            "carry_damp": bool(getattr(args, "shelxl_carry_damp", False)),
-            "endpoint_include_free_rows": bool(getattr(args, "endpoint_include_free_rows", True)),
-            "endpoint_q_policy": str(getattr(args, "endpoint_q_policy", "clip")),
-            "endpoint_intensity_scale": str(getattr(args, "endpoint_intensity_scale", "median-iobs")),
-            "endpoint_wght_mode": str(getattr(args, "endpoint_wght_mode", "freeze-zero")),
+            "carry_damp": False,
+            "endpoint_include_free_rows": False,
+            "endpoint_q_policy": str(getattr(args, "endpoint_q_policy", "exclude")),
+            "endpoint_intensity_scale": str(getattr(args, "endpoint_intensity_scale", "absolute")),
+            "endpoint_wght_mode": str(getattr(args, "endpoint_wght_mode", "converge")),
             # The weighting rule the macro-cycles actually used (the endpoint rule).
             "feedback_wght_mode": resolved_feedback_wght_mode(args),
             "dataset_sigma_policy": str(getattr(args, "dataset_sigma_policy", "auto")),
@@ -537,7 +535,7 @@ def run_multi_shelxl_feedback_loop(
             break
     if not stopped:
         summary["stop_reason"] = stop_status
-        summary["status"] = completed_loop_status(stop_status, xyz_tol=xyz_tol, keep_policy=keep_policy)
+        summary["status"] = completed_loop_status(stop_status, xyz_tol=xyz_tol)
 
     if summary.get("status") in COMPLETED_LOOP_STATUSES:
         if thickness is not None:
@@ -575,27 +573,15 @@ def run_multi_shelxl_feedback_loop(
                 "source": "final_row_recompute",
             }
 
-    try:
-        current_model = _keep_macro_cycle_model(summary, adopted, keep_policy, current_model)
-    except RuntimeError as exc:
-        # Refuse to guess, but leave the trajectory and the reason on disk first.
-        summary["status"] = "failed_keep_best" if summary.get("status") in COMPLETED_LOOP_STATUSES else summary["status"]
-        summary["kept_reason"] = str(exc)
-        record_thickness_update()
-        write_json(feedback_root / "multi_shelxl_feedback_loop_summary.json", summary)
-        raise
+    _record_kept_macro_cycle(summary, adopted, keep_policy)
     # The kept model's thickness: selected before the cycle it entered, or for the final model after the loop.
     record_thickness_update()
     write_json(feedback_root / "multi_shelxl_feedback_loop_summary.json", summary)
     return current_model, summary
 
 
-def _keep_macro_cycle_model(summary: dict, adopted: list[dict], keep_policy: str, current_model: str) -> str:
-    """Record ``kept_cycle`` and bind the final rows to the kept model; returns the kept model.
-
-    A kept model other than the last adopted one reuses the entering-model rows of the next cycle, which
-    are the same fixed-nuisance final-N/Q rows of exactly that model, so no extra Bloch pass is needed.
-    """
+def _record_kept_macro_cycle(summary: dict, adopted: list[dict], keep_policy: str) -> None:
+    """Record the adopted cycles' free/work row R and ``kept_cycle``, the last adopted cycle."""
 
     summary["adopted_cycle_scores"] = [
         {"cycle": item["cycle"], "free_r_obs": (item.get("rows") or {}).get("free_r_obs"),
@@ -607,26 +593,3 @@ def _keep_macro_cycle_model(summary: dict, adopted: list[dict], keep_policy: str
     )
     summary["kept_cycle"] = kept_cycle
     summary["kept_reason"] = reason
-    if kept_cycle <= 0 or keep_policy == "last":
-        return current_model
-    kept = next(item for item in adopted if item["cycle"] == kept_cycle)
-    if kept is adopted[-1] and summary.get("status") in COMPLETED_LOOP_STATUSES:
-        return current_model
-    next_record = next(record for record in summary["cycles"] if int(record.get("cycle", 0)) == kept_cycle + 1)
-    if "final_row_recompute" in summary:
-        summary["last_model_row_recompute"] = summary.pop("final_row_recompute")
-    summary["final_row_recompute"] = {
-        "status": "ok",
-        "model": kept["model"],
-        "definition": (
-            f"fixed-nuisance Bloch rows of the kept macro-cycle {kept_cycle} output model, computed as the "
-            f"entering-model rows of cycle {kept_cycle + 1}; no additional LS step"
-        ),
-        "source_cycle": kept_cycle + 1,
-        "raw_runs": dict(next_record.get("raw_runs") or {}),
-        "runs": dict(next_record.get("runs") or {}),
-        "weighted_runs": dict(next_record.get("weighted_runs") or next_record.get("combined_input_runs") or {}),
-        "active_runs": dict(next_record.get("combined_input_runs") or {}),
-    }
-    summary["current_model"] = kept["model"]
-    return kept["model"]

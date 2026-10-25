@@ -70,8 +70,8 @@ def apply_push_checkpoint(args: argparse.Namespace) -> dict:
 
 # The continuation contract a push must replay from the run it continues: the free split, the P-spline
 # frame-scale grids and the dynamical SHELXL handoff.  Each entry is (push attribute = source-summary config
-# key, value of the historical behaviour for summaries that predate the key).  The current AUTO defaults are
-# never used.
+# key, value of the historical behaviour for summaries that predate the key; a value outside CONTINUATION_CHOICES
+# refuses the continuation).  The current AUTO defaults are never used.
 CONTINUATION_SPLIT_SCALE_KEYS = (
     ("split_scheme", "legacy"),
     ("split_salt", DEFAULT_FREE_SALT),
@@ -82,34 +82,26 @@ CONTINUATION_SPLIT_SCALE_KEYS = (
     ("scale_spline_lambda_grid", "0.3,1,3,10,30,100"),
 )
 CONTINUATION_HANDOFF_KEYS = (
-    ("endpoint_include_free_rows", True),
     ("endpoint_q_policy", "clip"),
     ("rescale", "median-iobs"),
     ("shelxl_npd_recovery", "damp"),
     ("shelxl_convergence_shift_esd", 0.0),
     ("endpoint_wght_mode", "freeze-zero"),
-    # Before --keep-damp existed the endpoint writer always carried an active DAMP forward.
-    ("keep_damp", True),
 )
 CONTINUATION_CHOICES = {
     "split_scheme": ("orbit-hash", "legacy"),
-    "endpoint_q_policy": ("clip", "exclude"),
-    "rescale": ("median-iobs", "none", "absolute"),
+    "endpoint_q_policy": ("exclude",),
+    "rescale": ("none", "absolute"),
     "shelxl_npd_recovery": ("damp", "isor"),
-    "endpoint_wght_mode": ("freeze-zero", "inherit", "promote", "promote-gold", "converge"),
+    "endpoint_wght_mode": ("converge",),
 }
-_CONTINUATION_BOOL_KEYS = {"endpoint_include_free_rows", "keep_damp"}
 _CONTINUATION_FLOAT_KEYS = {"free_fraction", "shelxl_convergence_shift_esd"}
 _CONTINUATION_INT_KEYS = {"split_seed"}
 
 
 def _continuation_value(key: str, value: object) -> object:
-    """Convert a recorded continuation value to the type of its contract key (bool, float, int or str)."""
+    """Convert a recorded continuation value to the type of its contract key (float, int or str)."""
 
-    if key in _CONTINUATION_BOOL_KEYS:
-        if isinstance(value, str):
-            return value.strip().lower() in {"1", "true", "yes"}
-        return bool(value)
     if key in _CONTINUATION_FLOAT_KEYS:
         return float(value)
     if key in _CONTINUATION_INT_KEYS:
@@ -194,19 +186,14 @@ def apply_push_continuation_contract_multi(args: argparse.Namespace, contract: M
     for key, _legacy in CONTINUATION_SPLIT_SCALE_KEYS:
         setattr(args, key, contract[key]["value"])
     rescale = str(contract["rescale"]["value"])
-    if rescale not in {"absolute", "median-iobs"}:
-        raise SystemExit(
-            f"multi-dataset continuation supports the absolute or median-iobs endpoint intensity scale, not {rescale!r}"
-        )
+    if rescale != "absolute":
+        raise SystemExit(f"multi-dataset continuation supports the absolute endpoint intensity scale, not {rescale!r}")
     args.endpoint_intensity_scale = rescale
     args.rescale = rescale
-    args.endpoint_include_free_rows = bool(contract["endpoint_include_free_rows"]["value"])
     args.endpoint_q_policy = str(contract["endpoint_q_policy"]["value"])
     args.shelxl_npd_recovery = str(contract["shelxl_npd_recovery"]["value"])
     args.shelxl_convergence_shift_esd = float(contract["shelxl_convergence_shift_esd"]["value"])
     args.endpoint_wght_mode = str(contract["endpoint_wght_mode"]["value"])
-    args.keep_damp = bool(contract["keep_damp"]["value"])
-    args.shelxl_carry_damp = bool(contract["keep_damp"]["value"])
 
 
 def continuation_contract_record(contract: Mapping[str, Mapping]) -> dict[str, dict[str, object]]:
@@ -227,10 +214,6 @@ def single_push_handoff_args(contract: Mapping[str, Mapping]) -> list[str]:
         str(contract["shelxl_npd_recovery"]["value"]),
         "--endpoint-q-policy",
         str(contract["endpoint_q_policy"]["value"]),
-        "--endpoint-include-free-rows"
-        if bool(contract["endpoint_include_free_rows"]["value"])
-        else "--no-endpoint-include-free-rows",
-        *(["--keep-damp"] if bool(contract["keep_damp"]["value"]) else []),
     ]
 
 

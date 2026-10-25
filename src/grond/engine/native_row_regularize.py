@@ -83,7 +83,6 @@ from grond.refine.shelxl_iterations import (
     wght_call_limit as wght_call_limit,
     wght_convergence_summary as wght_convergence_summary,
     wght_promotes as wght_promotes,
-    write_active_wght as write_active_wght,
 )
 from grond.regularize.arguments_native import build_parser as build_native_parser
 from grond.regularize.contracts import (
@@ -556,9 +555,9 @@ def run_shelxl(
     work_dir: Path,
     stem: str,
     iterations: int = 1,
-    wght_mode: str = "freeze-zero",
-    endpoint_ls_cycles: int = 1,
     *,
+    wght_mode: str,
+    endpoint_ls_cycles: int = 1,
     convergence_shift_esd: float = 0.0,
     npd_recovery: str = "damp",
     keep_damp: bool = False,
@@ -567,7 +566,8 @@ def run_shelxl(
     """Run up to ``iterations`` SHELXL calls; with ``convergence_shift_esd`` > 0 stop once |max shift/esd| < it.
 
     ``wght_mode="converge"`` makes up to ``wght_converge_max_calls`` calls from WGHT 0 0, promoting SHELXL's
-    suggested WGHT, and stops only once the applied and suggested weights agree as well.
+    suggested WGHT, and stops only once the applied and suggested weights agree as well; ``inherit`` keeps the
+    model's WGHT.
     """
 
     exe = str(SHELXL)
@@ -578,10 +578,9 @@ def run_shelxl(
     history = []
     last_safe = None
     last_proc = None
-    mode = str(wght_mode or "freeze-zero")
+    mode = str(wght_mode)
     n_iter = wght_call_limit(mode, iterations, wght_converge_max_calls)
     tolerance = float(convergence_shift_esd or 0.0)
-    freeze_zero = mode == "freeze-zero"
     if mode not in WGHT_MODES:
         return {"returncode": None, "status": "invalid_wght_mode", "wght_mode": mode}
     if mode == "converge" and not tolerance > 0.0:
@@ -590,11 +589,7 @@ def run_shelxl(
         return {"returncode": None, "status": "invalid_npd_recovery", "npd_recovery": str(npd_recovery)}
     # An endpoint written with ACTA keeps it on every call, so the CIF is SHELXL's CIF of the kept .res.
     acta = requests_acta(work_dir / f"{stem}.ins")
-    if freeze_zero:
-        write_active_wght(work_dir / f"{stem}.ins", 0.0, 0.0)
     for i in range(n_iter):
-        if freeze_zero:
-            write_active_wght(work_dir / f"{stem}.ins", 0.0, 0.0)
         ins = work_dir / f"{stem}.ins"
         base_ins_text = ins.read_text(errors="replace") if ins.exists() else ""
         proc, stats = run_one_shelxl_attempt(
@@ -631,7 +626,7 @@ def run_shelxl(
             break
         res = work_dir / f"{stem}.res"
         if i + 1 < n_iter and res.exists():
-            active = (0.0, 0.0) if freeze_zero else _active_wght_from_stats(stats)
+            active = _active_wght_from_stats(stats)
             write_endpoint_ins(
                 res,
                 ins,
@@ -647,8 +642,6 @@ def run_shelxl(
                     ins,
                     recommended_wght_from_stats(stats),
                 )
-            elif freeze_zero:
-                stats["next_wght"] = {"promoted": False, "frozen": True, "active_wght_a": 0.0, "active_wght_b": 0.0}
             else:
                 stats["next_wght"] = {"promoted": False, "inherited": True}
     if last_proc is not None:
@@ -662,7 +655,7 @@ def run_shelxl(
         final["status"] = "invalid_res_output"
         final["invalid_res_reason"] = final["res_health"].get("reason")
     else:
-        active = (0.0, 0.0) if freeze_zero else _active_wght_from_stats(final)
+        active = _active_wght_from_stats(final)
         write_endpoint_ins(
             work_dir / f"{stem}.res",
             work_dir / f"{stem}.res",
@@ -815,24 +808,21 @@ def export_corrected_endpoint(
     post_bloch_sigma_holdout_fraction: float = 0.20,
     post_bloch_sigma_min_scale: float = 0.25,
     post_bloch_sigma_max_scale: float = 4.0,
-    endpoint_wght_mode: str = "freeze-zero",
+    endpoint_wght_mode: str = "converge",
     target_mode: str = "iobs",
     *,
-    q_policy: str = "clip",
-    include_free_rows: bool = True,
+    q_policy: str = "exclude",
     convergence_shift_esd: float = 0.0,
     npd_recovery: str = "damp",
-    keep_damp: bool = False,
     wght_converge_max_calls: int = WGHT_CONVERGE_DEFAULT_MAX_CALLS,
     native_outputs: dict | None = None,
     error_model_refits: int = 1,
 ):
     """Write the corrected HKL/INS for one dataset and refine it with SHELXL.
 
-    The keyword-only options select the dynamical handoff contract; their defaults are the legacy one
-    (clipped q, free rows written, median-IOBS rescale via ``rescale``).  AUTO passes its default contract:
-    free rows excluded, pathological correction ratios excluded, ``rescale="absolute"`` (kappa*|F|^2 with
-    the OSF reset to sqrt(kappa)), SHELXL iterated to shift/esd convergence and ISOR-only NPD recovery.
+    Free rows are predicted and scored but never written to the HKL, and rows with a pathological correction
+    ratio are excluded.  AUTO passes ``rescale="absolute"`` (kappa*|F|^2 with the OSF reset to sqrt(kappa)),
+    SHELXL iterated to shift/esd convergence and ISOR-only NPD recovery.
     ``post_bloch_sigma_policy="error_model"`` fits this crystal's error model on its unmerged work rows
     (free rows scored, never fitted); ``native_outputs`` are write_endpoint_ins SHELXL-native options.
     """
@@ -840,7 +830,6 @@ def export_corrected_endpoint(
     out_dir.mkdir(parents=True, exist_ok=True)
     arrays = best_eval["arrays"]
     q = arrays["dyn_raw"] / np.maximum(arrays["born_raw"], 1e-30)
-    q_clip = np.clip(q, 0.05, 20.0)
     # P-spline scales are per row, not per frame group.
     scales = np.asarray(arrays["dyn_row_scale"], dtype=float)
     endpoint_target, endpoint_sig, endpoint_restore_factor = endpoint_observation_arrays(
@@ -863,56 +852,39 @@ def export_corrected_endpoint(
     )
     if not np.any(valid):
         raise ValueError("no finite rows with positive sigma, prediction, and fitted scale are available for endpoint export")
-    free_rows_excluded = 0
     free_candidates = valid & np.asarray(masks.get("free", np.zeros(len(valid), dtype=bool)), dtype=bool)
-    if not include_free_rows:
-        # Free rows are predicted and scored in the row table but never written to the HKL.  Keep only
-        # rows marked work, as the combine does (split == "work"), so no other held-out label can leak in.
-        work = np.asarray(masks["work"], dtype=bool)
-        free_rows_excluded = int(np.count_nonzero(valid & ~work))
-        valid = valid & work
-        if not np.any(valid):
-            raise ValueError("no work rows are available for endpoint export after excluding free rows")
-    correction_audit: dict = {"q_policy": str(q_policy), "rescale": str(rescale), "n_excluded_q_rows": 0}
+    # Free rows are predicted and scored in the row table but never written to the HKL.  Keep only
+    # rows marked work, as the combine does (split == "work"), so no other held-out label can leak in.
+    work = np.asarray(masks["work"], dtype=bool)
+    free_rows_excluded = int(np.count_nonzero(valid & ~work))
+    valid = valid & work
+    if not np.any(valid):
+        raise ValueError("no work rows are available for endpoint export after excluding free rows")
     fc2 = None
-    if q_policy == "clip" and rescale != "absolute":
-        denom = scales * (q_clip ** float(lambda_q))
-    else:
-        if rescale == "absolute":
-            model_now = parse_model(res_path)
-            fc2 = np.abs(fcalc_res_grid(model_now, data.hkl[:, 0], data.hkl[:, 1], data.hkl[:, 2])) ** 2
-        denom, valid, correction_audit = endpoint_correction_denominators(
-            endpoint_target,
-            arrays["dyn_raw"],
-            arrays["dyn_scaled"],
-            q,
-            float(lambda_q),
-            valid,
-            q_policy=q_policy,
-            rescale=rescale,
-            fc2=fc2,
-            restore=endpoint_restore_factor,
-            scales=scales,
-        )
-        if not np.any(valid):
-            raise ValueError("no rows remain for endpoint export after the q-ratio/|Fcalc| exclusions")
+    if rescale == "absolute":
+        model_now = parse_model(res_path)
+        fc2 = np.abs(fcalc_res_grid(model_now, data.hkl[:, 0], data.hkl[:, 1], data.hkl[:, 2])) ** 2
+    denom, valid, correction_audit = endpoint_correction_denominators(
+        endpoint_target,
+        arrays["dyn_raw"],
+        arrays["dyn_scaled"],
+        q,
+        float(lambda_q),
+        valid,
+        q_policy=q_policy,
+        rescale=rescale,
+        fc2=fc2,
+        restore=endpoint_restore_factor,
+        scales=scales,
+    )
+    if not np.any(valid):
+        raise ValueError("no rows remain for endpoint export after the q-ratio/|Fcalc| exclusions")
     Icorr = endpoint_target / denom
     sigcorr = endpoint_sig / denom
     modulation, modulation_meta = endpoint_resolution_modulation(data, valid, endpoint_b)
     Icorr = Icorr * modulation
     sigcorr = sigcorr * modulation
-    if rescale == "median-iobs":
-        src = float(np.nanmedian(endpoint_target[valid]))
-        dst = float(np.nanmedian(Icorr[valid]))
-        factor = src / max(dst, 1e-30)
-        Icorr *= factor
-        sigcorr *= factor
-    else:
-        factor = 1.0
-    modulation_audit = modulation_manifest_fields(
-        float(factor) * modulation / np.maximum(denom, 1e-30),
-        valid,
-    )
+    modulation_audit = modulation_manifest_fields(modulation / np.maximum(denom, 1e-30), valid)
     rows_unmerged = [(data.hkl[i, 0], data.hkl[i, 1], data.hkl[i, 2], Icorr[i], sigcorr[i]) for i in np.where(valid)[0]]
     rows_merged = exact_hkl_merge(data.hkl[valid], Icorr[valid], sigcorr[valid])
     rows_merged, rows_unmerged, hkl_safe_factor = enforce_hkl_row_width(
@@ -920,32 +892,24 @@ def export_corrected_endpoint(
     )
     post_bloch_sigma = {"policy": str(post_bloch_sigma_policy), "status": "not_requested"}
     if str(post_bloch_sigma_policy) == "error_model":
-        if include_free_rows:
-            raise ValueError(
-                "--post-bloch-sigma-policy error_model is fitted on work rows only and needs "
-                "--no-endpoint-include-free-rows (free rows in the HKL would enter the fit)"
-            )
         free_rows = []
         if np.any(free_candidates):
             # Free rows (own q-ratio median) are put on the work rows' scale, scored by the fitted error
             # model and reported; they are never fitted and never written to an HKL.
-            if q_policy == "clip" and rescale != "absolute":
-                free_denom, free_valid = scales * (q_clip ** float(lambda_q)), free_candidates
-            else:
-                free_denom, free_valid, _free_audit = endpoint_correction_denominators(
-                    endpoint_target,
-                    arrays["dyn_raw"],
-                    arrays["dyn_scaled"],
-                    q,
-                    float(lambda_q),
-                    free_candidates,
-                    q_policy=q_policy,
-                    rescale=rescale,
-                    fc2=fc2,
-                    restore=endpoint_restore_factor,
-                    scales=scales,
-                )
-            free_factor = modulation * float(factor) * float(hkl_safe_factor) / np.maximum(free_denom, 1e-30)
+            free_denom, free_valid, _free_audit = endpoint_correction_denominators(
+                endpoint_target,
+                arrays["dyn_raw"],
+                arrays["dyn_scaled"],
+                q,
+                float(lambda_q),
+                free_candidates,
+                q_policy=q_policy,
+                rescale=rescale,
+                fc2=fc2,
+                restore=endpoint_restore_factor,
+                scales=scales,
+            )
+            free_factor = modulation * float(hkl_safe_factor) / np.maximum(free_denom, 1e-30)
             free_rows = [
                 (data.hkl[i, 0], data.hkl[i, 1], data.hkl[i, 2], endpoint_target[i] * free_factor[i], endpoint_sig[i] * free_factor[i])
                 for i in np.where(free_valid)[0]
@@ -984,7 +948,7 @@ def export_corrected_endpoint(
             "status": "unknown_policy",
         }
     base_hkl_safe_factor = hkl_safe_factor
-    # freeze-zero and converge: WGHT 0 0; promote-gold: WGHT 0.1 0; promote and inherit: the source's.
+    # converge: WGHT 0 0.
     initial_wght = endpoint_initial_wght(str(endpoint_wght_mode))
 
     def write_and_refine(pass_dir: Path, merged, unmerged, start_res: Path):
@@ -1004,7 +968,6 @@ def export_corrected_endpoint(
             keep_exti=keep_exti,
             wght=initial_wght,
             ls_cycles=endpoint_ls_cycles,
-            keep_damp=keep_damp,
             osf=pass_osf,
             **dict(native_outputs or {}),
         )
@@ -1016,7 +979,6 @@ def export_corrected_endpoint(
             endpoint_ls_cycles=endpoint_ls_cycles,
             convergence_shift_esd=convergence_shift_esd,
             npd_recovery=npd_recovery,
-            keep_damp=keep_damp,
             wght_converge_max_calls=wght_converge_max_calls,
         )
         return result, post_factor, pass_osf, merged, unmerged
@@ -1080,7 +1042,7 @@ def export_corrected_endpoint(
         "q_min": 0.05,
         "q_max": 20.0,
         "rescale": rescale,
-        "rescale_factor": factor,
+        "rescale_factor": 1.0,
         "hkl_safe_factor": hkl_safe_factor,
         "post_sigma_hkl_safe_factor": post_sigma_hkl_safe_factor,
         **modulation_audit,
@@ -1093,8 +1055,8 @@ def export_corrected_endpoint(
         "native_outputs": dict(native_outputs or {}),
         "shelxl_convergence_shift_esd": float(convergence_shift_esd),
         "shelxl_npd_recovery": str(npd_recovery),
-        "keep_damp": bool(keep_damp),
-        "free_rows": {"policy": "include" if include_free_rows else "exclude", "n_excluded": free_rows_excluded},
+        "keep_damp": False,
+        "free_rows": {"policy": "exclude", "n_excluded": free_rows_excluded},
         "q_policy": str(q_policy),
         "n_excluded_q_rows": int(correction_audit.get("n_excluded_q_rows", 0)),
         "endpoint_correction": correction_audit,
@@ -1113,9 +1075,9 @@ def export_corrected_endpoint(
         "endpoint_target_factor_p95": float(np.nanpercentile(endpoint_restore_factor[valid], 95)),
         "rows_unmerged": len(rows_unmerged),
         "rows_merged_exact_hkl": len(rows_merged),
-        "q_median": float(np.nanmedian((q_clip if q_policy == "clip" else q)[valid])),
-        "q_p05": float(np.nanpercentile((q_clip if q_policy == "clip" else q)[valid], 5)),
-        "q_p95": float(np.nanpercentile((q_clip if q_policy == "clip" else q)[valid], 95)),
+        "q_median": float(np.nanmedian(q[valid])),
+        "q_p05": float(np.nanpercentile(q[valid], 5)),
+        "q_p95": float(np.nanpercentile(q[valid], 95)),
         "shelxl": shelxl,
         "maps": maps,
         "artifacts": {
@@ -1235,12 +1197,8 @@ def main():
     # The precision every prediction Config uses: --double, else GROND_PRECISION (complex64 when unset).
     prediction_precision = prediction_precision_record(args.double_precision)
     args.double_precision = prediction_precision["double_precision"]
-    if args.endpoint_wght_mode == "converge" and not float(args.shelxl_convergence_shift_esd or 0.0) > 0.0:
+    if not args.skip_endpoint_refinement and not float(args.shelxl_convergence_shift_esd or 0.0) > 0.0:
         ap.error("--endpoint-wght-mode converge needs --shelxl-convergence-shift-esd > 0 (AUTO 0.01)")
-    if args.post_bloch_sigma_policy == "error_model" and args.endpoint_include_free_rows:
-        ap.error(
-            "--post-bloch-sigma-policy error_model is fitted on work rows only and needs --no-endpoint-include-free-rows"
-        )
     if str(args.zerr_esds or "").strip():
         try:
             parsed = [float(value) for value in str(args.zerr_esds).split(",")]
@@ -1589,10 +1547,8 @@ def main():
                             endpoint_wght_mode=args.endpoint_wght_mode,
                             target_mode=args.target_mode,
                             q_policy=args.endpoint_q_policy,
-                            include_free_rows=args.endpoint_include_free_rows,
                             convergence_shift_esd=args.shelxl_convergence_shift_esd,
                             npd_recovery=args.shelxl_npd_recovery,
-                            keep_damp=args.keep_damp,
                             wght_converge_max_calls=args.wght_converge_max_calls,
                             native_outputs=native_endpoint_outputs(args),
                             error_model_refits=args.error_model_refits,
@@ -1890,6 +1846,8 @@ def main():
         "endpoint_results_sorted": endpoint_results,
         "best_endpoint": final_endpoint_results[0] if final_endpoint_results else {},
         "skip_endpoint_refinement": bool(args.skip_endpoint_refinement),
+        # read by reports/heldout.py (leak flag for the SHELXL HKL): the endpoint HKLs hold work rows only
+        "free_rows_in_hkl": False,
         "endpoint_factor_decision": endpoint_factor_decision,
         "baseline_exti": baseline,
         "wall_seconds": time.perf_counter() - t0,

@@ -40,7 +40,6 @@ from grond.refine.feedback_contract import (
     summary_value as summary_value,
 )
 from grond.refine.feedback_trajectory import (
-    COMPLETED_LOOP_STATUSES,
     KEEP_POLICIES,
     completed_loop_status,
     row_r_by_split,
@@ -63,7 +62,7 @@ def native_output_args(args: argparse.Namespace) -> list[str]:
     """
 
     out: list[str] = []
-    if str(getattr(args, "endpoint_wght_mode", "freeze-zero")) == "converge":
+    if str(getattr(args, "endpoint_wght_mode", "converge")) == "converge":
         out += ["--wght-converge-max-calls", str(int(getattr(args, "wght_converge_max_calls", 20) or 20))]
     if str(getattr(args, "post_bloch_sigma_policy", "none")) == "error_model":
         out += ["--error-model-refits", str(int(getattr(args, "error_model_refits", 1)))]
@@ -209,15 +208,14 @@ def native_command(
         "--endpoint-ls-cycles",
         str(int(args.endpoint_ls_cycles)),
         "--endpoint-wght-mode",
-        str(getattr(args, "endpoint_wght_mode", "freeze-zero")),
+        str(getattr(args, "endpoint_wght_mode", "converge")),
         *native_output_args(args),
         "--shelxl-convergence-shift-esd",
         grid_value(getattr(args, "shelxl_convergence_shift_esd", 0.0), "0"),
         "--shelxl-npd-recovery",
         str(getattr(args, "shelxl_npd_recovery", "damp")),
         "--endpoint-q-policy",
-        str(getattr(args, "endpoint_q_policy", "clip")),
-        "--endpoint-include-free-rows" if bool(getattr(args, "endpoint_include_free_rows", True)) else "--no-endpoint-include-free-rows",
+        str(getattr(args, "endpoint_q_policy", "exclude")),
         "--post-bloch-sigma-policy",
         str(args.post_bloch_sigma_policy),
         "--post-bloch-sigma-holdout-fraction",
@@ -291,8 +289,6 @@ def native_command(
     max_rows = int(args.max_rows) if args.max_rows > 0 else int(cfg.get("max_rows") or 0)
     if max_rows > 0:
         cmd.extend(["--max-rows", str(max_rows)])
-    if bool(getattr(args, "keep_damp", False)):
-        cmd.append("--keep-damp")
     if make_maps:
         cmd.append("--make-maps")
     if skip_endpoint_refinement:
@@ -426,9 +422,8 @@ def main() -> None:
     point is not the dynamical least-squares solution, so the loop records a ``trajectory`` (row R of the
     entering model on work and free rows, converged SHELXL statistics, coordinate shift, NPD/ISOR/DAMP),
     stops on ``--shelxl-feedback-xyz-tol`` (stop_reason ``converged``) or the cycle cap (``cap``), still
-    stops on an unsafe or NPD model, and with ``--shelxl-feedback-keep best-free`` keeps the output model
-    with the lowest free-row R_obs (``kept_cycle``).  Legacy settings (tolerance 0, keep last) reproduce
-    the fixed-count loop and record status ``ok``; otherwise the status is the stop reason.
+    stops on an unsafe or NPD model, and keeps the last adopted output model (``kept_cycle``).  A tolerance of 0
+    reproduces the fixed-count loop and records status ``ok``; otherwise the status is the stop reason.
 
     With ``--feedback-thickness-update on`` every structure the loop corrects with (each entering model and the
     final model) has its own thickness distribution and lambda, re-selected on its spectra with the nested
@@ -451,7 +446,7 @@ def main() -> None:
     env["SHELXL"] = str(args.shelxl)
     xyz_tol = float(args.shelxl_feedback_xyz_tol or 0.0)
     keep_policy = str(args.shelxl_feedback_keep)
-    monitored = xyz_tol > 0.0 or keep_policy != "last"
+    monitored = xyz_tol > 0.0
 
     result = {
         "source_summary": str(source_summary_path.resolve()),
@@ -475,9 +470,9 @@ def main() -> None:
             "shelxl_iterations": int(args.shelxl_iterations),
             "shelxl_convergence_shift_esd": float(args.shelxl_convergence_shift_esd),
             "shelxl_npd_recovery": str(args.shelxl_npd_recovery),
-            "keep_damp": bool(args.keep_damp),
-            "endpoint_include_free_rows": bool(args.endpoint_include_free_rows),
-            "free_rows_in_hkl": bool(args.endpoint_include_free_rows),
+            "keep_damp": False,
+            "endpoint_include_free_rows": False,
+            "free_rows_in_hkl": False,
             "endpoint_q_policy": str(args.endpoint_q_policy),
             "rescale": str(args.rescale),
         },
@@ -615,7 +610,7 @@ def main() -> None:
             break
     if not stopped:
         result["stop_reason"] = stop_status
-        result["status"] = completed_loop_status(stop_status, xyz_tol=xyz_tol, keep_policy=keep_policy)
+        result["status"] = completed_loop_status(stop_status, xyz_tol=xyz_tol)
 
     final_summary = source_summary
     if thickness is not None and (not result["runs"] or result["runs"][-1].get("returncode") == 0):
@@ -626,68 +621,16 @@ def main() -> None:
             raise
     recompute_n_basis = int(args.final_n_basis) if int(args.final_n_basis) > 0 else int(args.n_basis)
     recompute_n_points = int(args.final_n_points) if int(args.final_n_basis) > 0 else int(args.n_points)
-    last_scored_recompute = None
-    scored_dir: Path | None = None
-    loop_ok = not result["runs"] or result["runs"][-1].get("returncode") == 0
-    if loop_ok and keep_policy == "best-free" and len(adopted) > 1 and adopted[-1]["rows"] is None:
-        # The last output is scored with the same N/Q as the cycles that scored the others.
-        last_cycle = int(adopted[-1]["cycle"])
-        score_dir = (
-            out / f"final_row_recompute_N{recompute_n_basis}Q{recompute_n_points}"
-            if int(args.final_n_basis) <= 0
-            else out / f"score_cycle_{last_cycle:02d}_N{int(args.n_basis)}Q{int(args.n_points)}"
-        )
-        rec = run_cycle(
-            args,
-            final_summary,
-            current_model,
-            score_dir,
-            n_basis=args.n_basis,
-            n_points=args.n_points,
-            label="final_row_recompute" if int(args.final_n_basis) <= 0 else f"score_cycle_{last_cycle:02d}",
-            env=env,
-            make_maps=False,
-            skip_endpoint_refinement=True,
-        )
-        result["runs"].append(rec)
-        scored_dir = score_dir
-        if rec["returncode"] == 0:
-            adopted[-1]["rows"] = {**row_r_by_split([rec["run_dir"]]), "source": rec["label"]}
-            if int(args.final_n_basis) <= 0:
-                last_scored_recompute = rec
-        else:
-            result["stopped_reason"] = rec.get("endpoint_error") or f"{rec['label']} returned {rec['returncode']}"
     result["adopted_cycle_scores"] = [
         {"cycle": item["cycle"], "free_r_obs": (item.get("rows") or {}).get("free_r_obs"),
          "work_r_obs": (item.get("rows") or {}).get("work_r_obs"), "source": (item.get("rows") or {}).get("source")}
         for item in adopted
     ]
-    try:
-        kept_cycle, kept_reason = select_kept_cycle(
-            [(item["cycle"], (item.get("rows") or {}).get("free_r_obs")) for item in adopted], keep_policy
-        )
-    except RuntimeError as exc:
-        # Refuse to guess, but leave the trajectory and the reason on disk first.
-        result["status"] = "failed_keep_best" if result.get("status") in COMPLETED_LOOP_STATUSES else result["status"]
-        result["kept_reason"] = str(exc)
-        result["wall_seconds"] = time.perf_counter() - t0
-        (out / "shelxl_feedback_loop_summary.json").write_text(json.dumps(result, indent=2, allow_nan=True) + "\n")
-        detail = f" ({result['stopped_reason']})" if result.get("stopped_reason") else ""
-        raise RuntimeError(f"{exc}{detail}") from exc
+    kept_cycle, kept_reason = select_kept_cycle(
+        [(item["cycle"], (item.get("rows") or {}).get("free_r_obs")) for item in adopted], keep_policy
+    )
     result["kept_cycle"] = kept_cycle
     result["kept_reason"] = kept_reason
-    if kept_cycle > 0 and keep_policy != "last":
-        current_model = Path(next(item["model"] for item in adopted if item["cycle"] == kept_cycle)).resolve()
-        result["current_model"] = str(current_model)
-        if kept_cycle != int(adopted[-1]["cycle"]):
-            last_scored_recompute = None
-            if thickness is not None:
-                # An earlier kept output entered the next cycle, where its thickness was selected.
-                try:
-                    final_summary, _final_record = summary_for(current_model, "final")
-                except Exception as exc:
-                    fail_thickness("for the kept model", exc)
-                    raise
 
     if (not result["runs"] or result["runs"][-1].get("returncode") == 0) and int(args.final_n_basis) > 0:
         rec = run_cycle(
@@ -722,15 +665,8 @@ def main() -> None:
         else:
             result["stopped_reason"] = rec.get("endpoint_error") or f"final polish returned {rec['returncode']}"
 
-    if last_scored_recompute is not None:
-        result["current_model"] = str(current_model)
-        result["final_row_stats_run"] = last_scored_recompute["run_dir"]
-        result["final_row_stats_model"] = str(current_model)
-    elif not result["runs"] or result["runs"][-1].get("returncode") == 0:
+    if not result["runs"] or result["runs"][-1].get("returncode") == 0:
         recompute_dir = out / f"final_row_recompute_N{recompute_n_basis}Q{recompute_n_points}"
-        if scored_dir is not None and recompute_dir == scored_dir:
-            # The standard directory already holds the rows that scored the last output; never overwrite it.
-            recompute_dir = out / f"final_row_recompute_kept_cycle_{kept_cycle:02d}_N{recompute_n_basis}Q{recompute_n_points}"
         rec = run_cycle(
             args,
             final_summary,

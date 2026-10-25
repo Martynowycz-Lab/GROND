@@ -22,9 +22,9 @@ def build_parser(description: str) -> argparse.ArgumentParser:
     )
     ap.add_argument(
         "--endpoint-source",
-        choices=("native", "hkl"),
+        choices=("native",),
         default="native",
-        help="Build corrected endpoint rows from native_dyn_calc.csv, or read normalized endpoint HKL rows from each run.",
+        help="Build corrected endpoint rows from native_dyn_calc.csv.",
     )
     ap.add_argument(
         "--interdataset-scale",
@@ -99,14 +99,11 @@ def build_parser(description: str) -> argparse.ArgumentParser:
     )
     ap.add_argument(
         "--endpoint-wght-mode",
-        choices=("freeze-zero", "inherit", "promote", "promote-gold", "converge"),
-        default="freeze-zero",
+        choices=("converge",),
+        default="converge",
         help=(
-            "SHELXL weight policy for the shared combined endpoint. freeze-zero is the production default after "
-            "GROND sigma calibration; inherit preserves the source active WGHT; promote keeps the source WGHT on the "
-            "first pass and uses SHELXL recommendations on later passes; promote-gold starts at WGHT 0.1 0 "
-            "and then promotes like promote; converge starts at WGHT 0 0 and promotes until the applied and "
-            "suggested WGHT agree and max shift/esd < --shelxl-convergence-shift-esd (AUTO)."
+            "SHELXL weight policy for the shared combined endpoint: converge starts at WGHT 0 0 and promotes until "
+            "the applied and suggested WGHT agree and max shift/esd < --shelxl-convergence-shift-esd (AUTO 0.01)."
         ),
     )
     ap.add_argument(
@@ -156,36 +153,16 @@ def build_parser(description: str) -> argparse.ArgumentParser:
         help="Recovery for a non-positive-definite ADP step: legacy DAMP ladder, or ISOR on the NPD atoms only (AUTO).",
     )
     ap.add_argument(
-        "--keep-damp",
-        action="store_true",
-        help="Legacy: carry an active DAMP instruction into later calls and the written RES. Default strips it.",
-    )
-    ap.add_argument(
-        "--endpoint-include-free-rows",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help=(
-            "Write rows with split=free into the corrected HKL (legacy default). AUTO passes "
-            "--no-endpoint-include-free-rows so free rows are predicted and scored but never refined against."
-        ),
-    )
-    ap.add_argument(
         "--endpoint-q-policy",
-        choices=("clip", "exclude"),
-        default="clip",
-        help=(
-            "Rows whose correction ratio relative to the dataset median lies outside (0.05, 20): clip q into "
-            "[0.05, 20] and keep them (legacy) or exclude them from the HKL and count them (AUTO)."
-        ),
+        choices=("exclude",),
+        default="exclude",
+        help="Rows whose correction ratio relative to the dataset median lies outside (0.05, 20) are excluded from the HKL and counted.",
     )
     ap.add_argument(
         "--rescale",
-        choices=("median-iobs", "absolute"),
-        default="median-iobs",
-        help=(
-            "Corrected-intensity scale: median-iobs rescales each dataset to its median IOBS (legacy); absolute writes "
-            "kappa*|F|^2 * Iobs/Icalc with kappa=10 and resets the SHELXL OSF to sqrt(kappa) (AUTO)."
-        ),
+        choices=("absolute",),
+        default="absolute",
+        help="Corrected-intensity scale: kappa*|F|^2 * Iobs/Icalc with kappa=10 and the SHELXL OSF reset to sqrt(kappa).",
     )
     ap.add_argument(
         "--post-bloch-sigma-policy",
@@ -217,8 +194,7 @@ def build_parser(description: str) -> argparse.ArgumentParser:
         help=(
             "Reporting only: score the final merged (and unmerged) endpoint model with SHELXL L.S. 0 on the corrected "
             "free rows (built exactly like the work rows, never fitted) and on its own work HKL; recorded as "
-            "combined_endpoint.free_validation. Needs --no-endpoint-include-free-rows and --endpoint-source native "
-            "(AUTO on; off is the legacy command)."
+            "combined_endpoint.free_validation (AUTO on; off is the legacy command)."
         ),
     )
     ap.add_argument(

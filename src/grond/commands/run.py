@@ -219,8 +219,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             "enabled": args.publication_endpoint_chooser,
             "min_hkl_safe_factor": args.publication_endpoint_min_hkl_safe_factor,
             "max_modulation_p95": args.publication_endpoint_max_modulation_p95,
-            "allow_npd": args.publication_allow_npd,
-            "feedback_cycles": str(getattr(args, "publication_feedback_cycles", "all") or "all"),
+            "feedback_cycles": str(getattr(args, "publication_feedback_cycles", "kept") or "kept"),
         },
         # the command line, so that `grond refine` can repeat this run's own options
         "argv": list(getattr(args, "argv", []) or []),

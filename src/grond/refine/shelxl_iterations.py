@@ -208,21 +208,6 @@ def select_last_safe_shelxl_iteration(
     return final
 
 
-def write_active_wght(path: Path, a: float, b: float) -> dict:
-    """Force one active WGHT line in a SHELX input or output file."""
-
-    if not path.exists():
-        return {"written": False, "reason": "missing_file"}
-    lines = []
-    for line in path.read_text(errors="replace").splitlines():
-        lines.append(line)
-        if line.strip().upper().startswith("END"):
-            break
-    lines = set_active_wght_lines(lines, a, b)
-    path.write_text("\n".join(lines).rstrip() + "\n")
-    return {"written": True, "active_wght_a": float(a), "active_wght_b": float(b)}
-
-
 def promote_recommended_wght(ins_path: Path, recommended: tuple[float, float] | None) -> dict:
     """Move SHELXL's recommended WGHT into the active pre-END input block.
 
@@ -714,33 +699,29 @@ def recover_npd_attempt(
     raise ValueError(f"unknown NPD recovery {method!r}; use one of {', '.join(NPD_RECOVERY_METHODS)}")
 
 
-# SHELXL weighting-scheme policies of a corrected-HKL endpoint.  converge (the AUTO default)
-# starts at WGHT 0 0 and promotes SHELXL's suggested WGHT on every call until the applied and suggested
-# weights agree and the last L.S. cycle has converged, so the written .res carries one converged WGHT.
-WGHT_MODES = ("freeze-zero", "inherit", "promote", "promote-gold", "converge")
+# SHELXL weighting-scheme policies.  converge (every corrected-HKL endpoint) starts at WGHT 0 0 and promotes
+# SHELXL's suggested WGHT on every call until the applied and suggested weights agree and the last L.S. cycle
+# has converged, so the written .res carries one converged WGHT.  inherit keeps the model's own WGHT (the
+# conventional baseline replay of the user's model and HKL).
+WGHT_MODES = ("inherit", "converge")
 WGHT_CONVERGE_TOL_A = 0.002
 WGHT_CONVERGE_TOL_B = 0.02
 WGHT_CONVERGE_DEFAULT_MAX_CALLS = 20
 
 
 def endpoint_initial_wght(mode: str) -> tuple[float, float] | None:
-    """Active WGHT of the first SHELXL call of one endpoint handoff.
+    """Active WGHT of the first SHELXL call of one endpoint handoff: WGHT 0 0 under converge; inherit keeps the
+    source model's WGHT (None)."""
 
-    freeze-zero and converge start at WGHT 0 0, promote-gold at WGHT 0.1 0; inherit and promote keep the
-    source model's WGHT (promote promotes SHELXL's suggestion only on later calls).
-    """
-
-    if mode in {"freeze-zero", "converge"}:
+    if mode == "converge":
         return (0.0, 0.0)
-    if mode == "promote-gold":
-        return (0.1, 0.0)
     return None
 
 
 def wght_promotes(mode: str) -> bool:
     """Whether later calls of this weighting mode apply SHELXL's suggested WGHT."""
 
-    return mode in {"promote", "promote-gold", "converge"}
+    return mode == "converge"
 
 
 def wght_call_limit(mode: str, iterations: int, converge_max_calls: int) -> int:

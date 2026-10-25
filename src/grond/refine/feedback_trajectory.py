@@ -11,10 +11,7 @@ d ln pred = d ln |F|^2 + d ln q, so at p* the true gradient is -2 sum_i (r_i/sig
 which vanishes only if the residuals are orthogonal to the dynamical sensitivity d ln q/dp.  The map
 converges only while the spectral radius of its Jacobian -(J_B' W J_B)^-1 J_B' W J_q stays below 1.
 
-The legacy single-step settings add moving parts on top of that bias: one L.S. step per macro-cycle (no
-convergence), a DAMP rescue carried into every later call, per-frame scales refitted on all rows (free
-rows included, so "free" R is not held out), q clipped into [0.05, 20] instead of excluding pathological
-rows, freeze-zero weights, and an arbitrary per-cycle median intensity scale that the OSF has to chase.
+Single-step settings (one L.S. step per macro-cycle, no convergence) add moving parts on top of that bias.
 Such a loop can contract towards an unphysical point, for example an atom whose smallest ADP eigenvalue
 turns negative (NPD) while the row R of the entering model rises every cycle.  The same drift can appear
 with undamped refinements converged to shift/esd < 0.01, so convergence inside a cycle does not make the
@@ -26,10 +23,8 @@ Every macro-cycle records the held-out (split == free) and work row amplitude R 
 entered it, the SHELXL statistics of the converged inner refinement, the maximum non-H coordinate shift
 between successive models, the NPD/ISOR/DAMP state and the number of rows excluded for a pathological
 correction ratio.  The loop stops when the coordinate shift falls below a tolerance (converged) or at the
-cycle cap; an ADP pathology still stops it.  The kept model is the last adopted cycle by default
-(--shelxl-feedback-keep last), so free rows never choose the model; --shelxl-feedback-keep best-free keeps
-the cycle with the lowest free-row R_obs instead (ties to the later cycle) and flags it as a free-row
-selection.
+cycle cap; an ADP pathology still stops it.  The kept model is the last adopted cycle
+(--shelxl-feedback-keep last), so free rows never choose the model.
 """
 
 from __future__ import annotations
@@ -45,24 +40,23 @@ import numpy as np
 from grond.refine.shelxl_iterations import shelxl_model_restraint_audit
 from grond.validation.heldout import r_metrics
 
-KEEP_POLICIES = ("best-free", "last")
+KEEP_POLICIES = ("last",)
 # How a loop that no unsafe model stopped ended, recorded as ``stop_reason``.
 LOOP_STOP_REASONS = ("cap", "converged")
 # Summary ``status`` values of such a loop (see completed_loop_status).
 COMPLETED_LOOP_STATUSES = ("ok", *LOOP_STOP_REASONS)
 
 
-def completed_loop_status(stop_reason: str, *, xyz_tol: float, keep_policy: str) -> str:
+def completed_loop_status(stop_reason: str, *, xyz_tol: float) -> str:
     """Summary ``status`` of a macro-cycle loop that ran without an unsafe stop.
 
-    Under the legacy fixed-count rule (xyz tolerance 0 and keep last) it is ``ok``; the monitored loop
-    reports its stop reason (``cap`` or ``converged``).  The stop reason is always recorded separately as
-    ``stop_reason``.
+    Under the legacy fixed-count rule (xyz tolerance 0) it is ``ok``; the monitored loop reports its stop
+    reason (``cap`` or ``converged``).  The stop reason is always recorded separately as ``stop_reason``.
     """
 
     if stop_reason not in LOOP_STOP_REASONS:
         raise ValueError(f"unknown macro-cycle stop reason {stop_reason!r}; use one of {', '.join(LOOP_STOP_REASONS)}")
-    return "ok" if float(xyz_tol) <= 0.0 and str(keep_policy) == "last" else stop_reason
+    return "ok" if float(xyz_tol) <= 0.0 else stop_reason
 
 # Lines that are instructions, not atoms, inside the FVAR..HKLF block.
 _INSTRUCTIONS = {
@@ -276,30 +270,14 @@ def trajectory_entry(
 
 
 def select_kept_cycle(scores: list[tuple[int, float | None]], policy: str) -> tuple[int, str]:
-    """Pick the macro-cycle whose output model is kept.
+    """Pick the macro-cycle whose output model is kept: the last adopted cycle (``last``).
 
     ``scores`` are (cycle, free-row R_obs of that cycle's output model) for every adopted cycle in order.
-    ``best-free`` keeps the lowest score, ties to the later cycle; it refuses to guess when a score is
-    missing.  ``last`` (the default) keeps the last adopted cycle.  Returns (0, reason) when no cycle was
-    adopted.
+    Returns (0, reason) when no cycle was adopted.
     """
 
     if policy not in KEEP_POLICIES:
         raise ValueError(f"unknown macro-cycle keep policy {policy!r}; use one of {', '.join(KEEP_POLICIES)}")
     if not scores:
         return 0, "no macro-cycle model was adopted; the start model is kept"
-    if policy == "last":
-        return int(scores[-1][0]), "last adopted macro-cycle (legacy rule)"
-    if len(scores) == 1:
-        return int(scores[0][0]), "only adopted macro-cycle"
-    missing = [cycle for cycle, value in scores if _finite_or_none(value) is None]
-    if missing:
-        raise RuntimeError(
-            "cannot keep the best free-row model: no free-row R_obs for the output of macro-cycle(s) "
-            f"{missing} (no free rows or missing row tables). Use --shelxl-feedback-keep last explicitly."
-        )
-    best_cycle, best_value = scores[0]
-    for cycle, value in scores[1:]:
-        if float(value) <= float(best_value):
-            best_cycle, best_value = cycle, value
-    return int(best_cycle), f"lowest free-row R_obs {float(best_value):.4f}% (ties to the later cycle)"
+    return int(scores[-1][0]), "last adopted macro-cycle (legacy rule)"

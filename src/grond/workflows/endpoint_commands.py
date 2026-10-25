@@ -24,10 +24,10 @@ ERROR_MODEL_REFITS = 1
 
 
 def endpoint_intensity_rescale(args: argparse.Namespace) -> str:
-    """Engine ``--rescale`` value for the AUTO ``--endpoint-intensity-scale`` choice (legacy when absent)."""
+    """Engine ``--rescale`` value for the AUTO ``--endpoint-intensity-scale`` choice."""
 
-    requested = str(getattr(args, "endpoint_intensity_scale", "median-iobs") or "median-iobs")
-    if requested not in {"absolute", "median-iobs"}:
+    requested = str(getattr(args, "endpoint_intensity_scale", "absolute") or "absolute")
+    if requested != "absolute":
         raise ValueError(f"unknown --endpoint-intensity-scale {requested!r}")
     return requested
 
@@ -35,8 +35,8 @@ def endpoint_intensity_rescale(args: argparse.Namespace) -> str:
 def endpoint_handoff_args(args: argparse.Namespace) -> list[str]:
     """Engine options of the dynamical SHELXL handoff shared by combine, native and feedback-loop stages.
 
-    Missing attributes resolve to the legacy contract so that partial namespaces (continuations, tests)
-    never pick up a new behaviour implicitly; the AUTO parser supplies the new defaults explicitly.
+    Missing attributes resolve to the engines' own defaults (no shift/esd test, the DAMP ladder for NPD); the AUTO
+    parser supplies its defaults explicitly.
     """
 
     cmd = [
@@ -45,15 +45,10 @@ def endpoint_handoff_args(args: argparse.Namespace) -> list[str]:
         "--shelxl-npd-recovery",
         str(getattr(args, "shelxl_npd_recovery", "damp") or "damp"),
         "--endpoint-q-policy",
-        str(getattr(args, "endpoint_q_policy", "clip") or "clip"),
+        str(getattr(args, "endpoint_q_policy", "exclude") or "exclude"),
         "--rescale",
         endpoint_intensity_rescale(args),
-        "--endpoint-include-free-rows"
-        if bool(getattr(args, "endpoint_include_free_rows", True))
-        else "--no-endpoint-include-free-rows",
     ]
-    if bool(getattr(args, "shelxl_carry_damp", False)):
-        cmd.append("--keep-damp")
     return cmd + endpoint_native_output_args(args)
 
 
@@ -67,7 +62,7 @@ def endpoint_native_output_args(args: argparse.Namespace) -> list[str]:
     """
 
     cmd: list[str] = []
-    if "converge" in {str(getattr(args, "endpoint_wght_mode", "freeze-zero")), resolved_feedback_wght_mode(args)}:
+    if "converge" in {str(getattr(args, "endpoint_wght_mode", "converge")), resolved_feedback_wght_mode(args)}:
         cmd += ["--wght-converge-max-calls", str(WGHT_CONVERGE_MAX_CALLS)]
     if error_model_sigma_active(args) or str(getattr(args, "post_bloch_sigma_policy", "auto")) == "error_model":
         cmd += ["--error-model-refits", str(ERROR_MODEL_REFITS)]
