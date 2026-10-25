@@ -88,7 +88,8 @@ def add_observations_and_outputs(ap: argparse.ArgumentParser) -> None:
     """Add observations and outputs options in the established order."""
 
     ap.add_argument("--hkl-transform", default="identity")
-    ap.add_argument("--min-d-spacing", type=float, default=0.70, help="Resolution limit of the observations in Å (default %(default)s).")
+    ap.add_argument("--min-d-spacing", type=float, default=None,
+                    help="Resolution limit of the observations in Å (default: the finest dmin of the prep file's crystals; 0.70 without one).")
     ap.add_argument("--min-peak", type=float, default=90.0, help="Minimum XDS PEAK, or 100 x DIALS partiality, of an observation (default %(default)s).")
     ap.add_argument("--geometry-percentile", type=float, default=99.0)
     ap.add_argument(

@@ -74,7 +74,7 @@ def prep_from_args(args: argparse.Namespace) -> PrepConfig:
                     hkl=hkl,
                     xds_dir=xds_dir,
                     hkl_transform=args.hkl_transform,
-                    min_d_spacing=args.min_d_spacing,
+                    min_d_spacing=args.min_d_spacing if args.min_d_spacing is not None else 0.70,
                     min_peak=args.min_peak,
                     geometry_percentile=args.geometry_percentile,
                 )
@@ -84,6 +84,8 @@ def prep_from_args(args: argparse.Namespace) -> PrepConfig:
     for ds in prep.datasets:
         if args.geometry_percentile is not None:
             ds.geometry_percentile = float(args.geometry_percentile)
+    if getattr(args, "min_d_spacing", 0.70) is None:   # the combine and endpoint stages follow the prep file's crystals
+        args.min_d_spacing = min(float(ds.min_d_spacing) for ds in prep.datasets)
     return prep
 
 

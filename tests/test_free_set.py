@@ -30,3 +30,21 @@ def test_free_set_is_on_by_default_and_on_keeps_the_endpoint():
     assert run_all_data_refinement(None, {}, argparse.Namespace(free_set="on"))["status"] == "skipped_free_set_on"
     # a namespace without the option (continuations, older callers) keeps the free set out
     assert run_all_data_refinement(None, {}, argparse.Namespace())["status"] == "skipped_free_set_on"
+
+
+def test_resolution_limit_follows_the_prep_file_unless_given(tmp_path):
+    import json
+
+    from grond.commands.preparation import prep_from_args
+
+    prep = tmp_path / "prep.json"
+    datasets = [{"name": name, "hkl": str(tmp_path / name / "INTEGRATE.HKL"), "xds_dir": str(tmp_path / name),
+                 "min_d_spacing": dmin} for name, dmin in (("c1", 0.80), ("c2", 0.85))]
+    prep.write_text(json.dumps({"structure": str(tmp_path / "model.res"), "datasets": datasets}))
+    args = build_parser().parse_args(["auto", "--prep", str(prep), "--out-dir", str(tmp_path / "out")])
+    assert args.min_d_spacing is None
+    prep_from_args(args)
+    assert args.min_d_spacing == 0.80
+    args = build_parser().parse_args(["auto", "--prep", str(prep), "--out-dir", "o", "--min-d-spacing", "0.75"])
+    prep_from_args(args)
+    assert args.min_d_spacing == 0.75
