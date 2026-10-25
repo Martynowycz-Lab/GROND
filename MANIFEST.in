@@ -1,3 +1,2 @@
-include LIMITATIONS.md CITATION.cff
-recursive-include docs *.md
+include CITATION.cff
 recursive-include tests *.py

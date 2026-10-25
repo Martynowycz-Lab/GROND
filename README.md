@@ -1,111 +1,110 @@
 # GROND
 
 GROND (Global Regularization Of Non-kinematical Diffraction) corrects electron-diffraction intensities for multiple
-scattering. It reads unmerged observations integrated by DIALS or XDS and a solved SHELX model, calculates every
-observation with Bloch waves, and writes an HKLF 4 file of corrected intensities that SHELXL or Olex2 refine as
-usual. GROND recalculates the correction for each new model until the model stops moving.
+scattering. It calculates each observation with Bloch waves and writes corrected intensities. SHELXL or Olex2 then
+refines the structure as for X-ray data. GROND repeats the correction until the model stops moving.
 
-The method is described in the paper (preprint link to follow). This repository holds the code used for it.
+GROND does not integrate images or solve structures. It starts from DIALS or XDS integration and a solved SHELX model.
+
+The paper describes the method (preprint link to follow).
 
 ## Install
 
-Python 3.11 or later on Linux or macOS, and SHELXL. NumPy, SciPy and gemmi are installed with the package.
+You need:
+
+- Linux or macOS with Python 3.11 to 3.14.
+- SHELXL on your `PATH`.
+- Optional: `shelx2map` (CCP4) for SHELXL Fo−Fc maps.
+- Optional: DIALS, only to convert DIALS files.
+
+Do these steps:
 
 ```bash
 git clone https://github.com/Martynowycz-Lab/GROND.git
 cd GROND
-python3 -m venv .venv && source .venv/bin/activate
+python3 -m venv .venv
+source .venv/bin/activate
 python -m pip install .
-grond init-config --out grond.config.json      # put the SHELXL path in this file
-grond doctor --workflow small-molecule --config grond.config.json
+grond doctor
 ```
 
-Details are in [docs/INSTALL.md](docs/INSTALL.md).
+`grond doctor` must show `Ready.` and the path of `shelxl`. You do not set environment variables. GROND sets its own
+thread limits. The PyPI package `grond` is a different program. Install from this repository.
 
-## Inputs
+## Run the example
 
-- A SHELX `.res` model with numeric electron scattering factors on its SFAC lines (`grond sfac-check` checks this),
-  and the HKLF 4 file it was refined against.
-- For each crystal, the unmerged summation intensities and the scan geometry:
-  - DIALS: `integrated.refl` and `integrated.expt`, converted once with `grond import-dials`
-    ([docs/DIALS.md](docs/DIALS.md));
-  - XDS: a directory with `INTEGRATE.HKL` from a run with `PROFILE_FITTING= FALSE` ([docs/XDS.md](docs/XDS.md)).
-
-## Run
+The example has two L-tyrosine crystals (DIALS, 300 kV) and their kinematic model. Download it from Zenodo (DOI to
+follow) and extract it. Then do these steps:
 
 ```bash
-grond import-dials --refl c1/integrated.refl --expt c1/integrated.expt \
-    --dials-python /path/to/dials.python --out-dir bridges/c1
+cd grond_example_tyrosine
 grond prep --structure model.res --baseline-hkl model.hkl \
-    --dataset c1=bridges/c1,dmin=0.80 --dataset c2=/data/c2/xds,dmin=0.80 --out prep.json
-grond auto --prep prep.json --config grond.config.json --workers 40 --out-dir run
-grond finish --run-dir run
+    --dataset noef_4_2=noef_4_2,dmin=0.80 --dataset noef_6_2=noef_6_2,dmin=0.80 --out prep.json
+grond auto --prep prep.json --out-dir run --preset fast --free-set on --nested-response-tables --min-d-spacing 0.80
 ```
 
-`grond auto --preset fast` gives a quick answer with every check kept. Rerunning a stopped command with the same
-`--out-dir` resumes it. `grond <command> -h` lists the common options; `-h -v` and `-h -vv` list the rest.
+The fast run takes approximately 15 minutes on 10 cores. The held-out R_obs is approximately 9.7%. Without
+`--preset fast`, the run gives the paper value, 9.3%.
 
-| Command | What it does |
-|---|---|
-| `auto` | Full run: indexing check, held-out set, settings by cross-validation, hand test, SHELXL rounds. |
-| `manual` | The same calculation one stage at a time, for inspection. |
-| `refine` | Runs the calculation again on a model you refined yourself, with the run's data, indexing, hand and held-out set. |
-| `finish` | Writes the maps and summary tables of a finished run. |
-| `prep` | Writes the input file for one model and one or more crystals. |
-| `import-dials` | Converts a DIALS `integrated.refl`/`.expt` pair. |
-| `sfac-check`, `init-config`, `doctor` | Check the model, write the tool config, check the installation. |
+## Use your data
 
-## What `auto` does
+1. Integrate with DIALS or XDS.
+   - DIALS: convert each crystal one time. GROND finds `dials.python` on your `PATH`.
 
-1. Holds out 10% of the unique reflections (a salted hash of each reflection under the Laue class) and refines the
-   supplied model again without them.
-2. For each observation, selects the beams with |S_g| ≤ 0.01 Å⁻¹ and diagonalizes the Bloch-wave matrix with SciPy
-   (`eigh`, single precision) at each rocking point and mosaic tilt. One diagonalization gives every thickness and
-   both hands.
-3. Chooses the thickness distribution (gamma or wedge), mosaic spread, radiation damage and the smoothness of a
-   B-spline frame scale for each crystal by threefold cross-validation on the working reflections.
-4. Writes I_corr = κ |F_c|² I_obs / (s I_dyn), fits a two-parameter error model and runs SHELXL. It recalculates
-   I_dyn from the refined model, for up to five rounds or until no non-hydrogen atom moves by more than 0.002 Å.
-5. Tests the hand of non-centrosymmetric models with a sign test over unique reflections, and reports R factors on
-   the held-out reflections with bootstrap confidence intervals.
+     ```bash
+     grond import-dials --refl integrated.refl --expt integrated.expt --out-dir c1
+     ```
 
-The run ends by listing the files to open first: `TABLE1_FINAL_STATISTICS.md`, `FINAL_SUMMARY.md`,
-`HELDOUT_VALIDATION.md`, the refined model with its corrected HKL file, and `grond_continue_checkpoint.json` for
-`grond refine`.
+   - XDS: set `PROFILE_FITTING= FALSE` in `XDS.INP` and integrate again. Use the XDS directory.
+2. Prepare the model. The `.res` file must have numeric electron scattering factors on its SFAC lines. Check it:
 
-`grond refine --checkpoint run/grond_continue_checkpoint.json --start-res model.res --out-dir run2` takes a model you
-refined in SHELXL or Olex2 from GROND's HKL file and runs `grond auto` on it with the run's data, options, indexing,
-hand and held-out set. Beams, rocking points, thickness, mosaic spread and damage are chosen again from the new model,
-for any number of crystals. Options of `grond auto` given to `refine` override the run's. `--reuse-settings` keeps the
-run's settings instead and refits only the frame scales, error model and weights.
+   ```bash
+   grond sfac-check --structure model.res
+   ```
 
-By default (`--free-set off`) the chosen model is refined once more against all reflections at the end. With
-`--free-set on` the held-out reflections stay out of the final model. All runs in the paper used `--free-set on`.
+3. Write the prep file. Give each crystal as `NAME=DIRECTORY,dmin=RESOLUTION`. Also give the HKLF 4 file that the
+   model was refined against.
 
-Large cells (SU-102 has about 800 beams per matrix) need `--shared-grid auto`, which diagonalizes each matrix once
-per scan orientation and interpolates onto the rocking points of every reflection. The SU-102 runs of the paper used
+   ```bash
+   grond prep --structure model.res --baseline-hkl model.hkl \
+       --dataset c1=c1,dmin=0.80 --dataset c2=c2,dmin=0.80 --out prep.json
+   ```
 
-```bash
-GROND_SHARED_GRID_TABLE_PER_DEGREE=50 GROND_SHARED_GRID_TABLE_PRECISION=single \
-grond auto --prep su102.json --out-dir run --workers 40 --free-set on --nested-response-tables \
-    --shared-grid auto --basis-centring-coset on --n-points 240 --nested-n-points 60 --chunksize 1 \
-    --max-support-sg 0.01 --final-basis-scan-limit 4000 --final-basis-max 4000 --nested-n-basis 1000 \
-    --row-plan-cache off
-```
+4. Run GROND:
 
-With matrices of 2,000 beams or more (for example SU-102 at |S_g| ≤ 0.04 Å⁻¹), `--shared-grid-gpus 0,1,2` solves
-them on NVIDIA GPUs with JAX (`python -m pip install ".[gpu]"`); smaller matrices stay on the CPU cores.
+   ```bash
+   grond auto --prep prep.json --out-dir run --free-set on --nested-response-tables
+   ```
 
-Read [LIMITATIONS.md](LIMITATIONS.md) before relying on a result.
+   All runs in the paper used `--free-set on --nested-response-tables`. To continue a stopped run, give the same
+   command again.
 
-## Tests
+5. For a large cell (for example, a metal–organic framework), add `--shared-grid auto`. GROND then calculates each
+   orientation one time for all reflections. For GPU calculation of very large matrices, install
+   `python -m pip install ".[gpu]"` and add `--shared-grid-gpus 0`.
 
-```bash
-python -m pip install -e ".[dev]"
-python -m pytest
-```
+## Results
+
+`grond auto` writes these files in the output directory. Open them first:
+
+- `TABLE1_FINAL_STATISTICS.md`: SHELXL R factors and the held-out R factors.
+- `FINAL_SUMMARY.md`: the selected settings, the hand and the final model.
+- `HELDOUT_VALIDATION.md`: R factors on the held-out reflections.
+- The refined model and its corrected HKL file.
+
+`grond finish --run-dir run` writes Fo−Fc maps. `grond <command> -h` shows the options. `-h -v` and `-h -vv` show more.
+
+## Limits
+
+- GROND keeps the correction fixed during each SHELXL refinement. SHELXL standard uncertainties do not include the
+  uncertainty of the correction.
+- The thickness distribution, mosaic spread and damage term are parameters of the calculation, not measurements.
+- GROND does not model absorption, twinning or solvent masks. It refuses HKLF 5, TWIN, BASF and SWAT.
+- The hand test compares the model with its inverse. Calibrate the rotation axis and detector on a crystal of known
+  hand.
+- Do not accept a lower R factor if the maps, displacement parameters or held-out statistics get worse.
 
 ## License and citation
 
-MIT ([LICENSE](LICENSE)). Please cite the paper and the software ([CITATION.cff](CITATION.cff)). AI coding assistants
-were used to write and test this code; the authors checked the algorithms and the numbers.
+MIT ([LICENSE](LICENSE)). Cite the paper and the software ([CITATION.cff](CITATION.cff)). AI coding assistants helped
+to write and test this code. The authors checked the algorithms and the numbers.
