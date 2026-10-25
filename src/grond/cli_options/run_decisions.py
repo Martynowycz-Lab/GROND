@@ -45,9 +45,10 @@ def add_decision_controls(ap: argparse.ArgumentParser) -> None:
     ap.add_argument(
         "--free-set",
         choices=["off", "on"],
-        default="off",
+        default="on",
         help=(
-            "off (default): after validation, refine the chosen model once more against all reflections. on: keep the held-out reflections out of the final model (all runs in the paper)."
+            "on (default, as in the paper): keep the held-out reflections out of every fit and the final model. off: after "
+            "validation, refine the chosen model once more against all reflections; the held-out R factors are then biased."
         ),
     )
     ap.add_argument(

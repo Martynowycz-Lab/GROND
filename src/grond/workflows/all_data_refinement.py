@@ -1,4 +1,4 @@
-"""Final all-data refinement, the last step of ``--free-set off`` (the AUTO default).
+"""Final all-data refinement, the last step of ``--free-set off``.
 
 AUTO always chooses the hand, the nuisance settings and the publication endpoint with the orbit-hash free set held
 out, and scores that endpoint on it (HELDOUT_VALIDATION).  With ``--free-set off`` the published model is then refined

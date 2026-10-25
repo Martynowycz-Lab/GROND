@@ -39,9 +39,9 @@ def _default_double_precision() -> bool:
 
 
 def _default_centring_coset() -> bool:
-    """Default of Config.basis_centring_coset: GROND_BASIS_CENTRING_COSET=1 (or true/on/yes) turns it on."""
+    """Default of Config.basis_centring_coset: on (exact; no effect on primitive lattices). GROND_BASIS_CENTRING_COSET=0 turns it off."""
 
-    value = os.environ.get("GROND_BASIS_CENTRING_COSET", "0").strip().lower()
+    value = os.environ.get("GROND_BASIS_CENTRING_COSET", "1").strip().lower()
     if value in {"1", "true", "on", "yes"}:
         return True
     if value in {"0", "false", "off", "no", ""}:

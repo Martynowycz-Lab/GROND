@@ -75,10 +75,13 @@ def per_degree() -> float:
 
 
 def table_per_degree() -> float:
-    """Grid density for response tables (nested selection, thickness updates): GROND_SHARED_GRID_TABLE_PER_DEGREE."""
+    """Grid density for response tables (nested selection, thickness updates): GROND_SHARED_GRID_TABLE_PER_DEGREE.
+
+    The default, 50 per degree, is the SU-102 setting of the paper.
+    """
     value = os.environ.get(ENV_TABLE_PER_DEGREE, "")
     if not value:
-        return per_degree()
+        return 50.0
     value = float(value)
     if not math.isfinite(value) or value < 10.0:
         raise ValueError(f"{ENV_TABLE_PER_DEGREE} must be at least 10 grid points per degree")
@@ -93,10 +96,10 @@ def precision() -> str:
 
 
 def table_precision() -> str:
-    """CPU solve precision for response tables (GROND_SHARED_GRID_TABLE_PRECISION, default as predictions)."""
+    """CPU solve precision for response tables (GROND_SHARED_GRID_TABLE_PRECISION; default single, the SU-102 setting)."""
     value = str(os.environ.get("GROND_SHARED_GRID_TABLE_PRECISION", "") or "").strip().lower()
     if not value:
-        return precision()
+        return "single"
     if value not in {"double", "single"}:
         raise ValueError("GROND_SHARED_GRID_TABLE_PRECISION must be double or single")
     return value
@@ -154,7 +157,7 @@ def apply_cli_options(args) -> dict:
     if coset is not None:
         os.environ["GROND_BASIS_CENTRING_COSET"] = "1" if coset == "on" else "0"
     record = settings_record()
-    record["basis_centring_coset"] = str(os.environ.get("GROND_BASIS_CENTRING_COSET", "0")).strip().lower() in {
+    record["basis_centring_coset"] = str(os.environ.get("GROND_BASIS_CENTRING_COSET", "1")).strip().lower() in {
         "1", "true", "on", "yes"}
     return record
 

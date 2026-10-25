@@ -23,9 +23,10 @@ def test_hklf_scale_undoes_the_extra_fixed_width_factor(tmp_path):
     assert "HKLF 4 2" in ins.read_text()
 
 
-def test_free_set_is_off_by_default_and_on_keeps_the_endpoint():
+def test_free_set_is_on_by_default_and_on_keeps_the_endpoint():
     args = build_parser().parse_args(["auto", "--prep", "prep.json", "--out-dir", "out"])
-    assert args.free_set == "off"
+    assert args.free_set == "on"
+    assert build_parser().parse_args(["auto", "--prep", "p", "--out-dir", "o", "--free-set", "off"]).free_set == "off"
     assert run_all_data_refinement(None, {}, argparse.Namespace(free_set="on"))["status"] == "skipped_free_set_on"
     # a namespace without the option (continuations, older callers) keeps the free set out
     assert run_all_data_refinement(None, {}, argparse.Namespace())["status"] == "skipped_free_set_on"

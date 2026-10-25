@@ -47,6 +47,7 @@ def test_grid_solve_matches_a_dense_eigendecomposition(tmp_path):
 
 def test_response_table_reduces_to_the_grid_predictions(tmp_path, monkeypatch):
     monkeypatch.setenv("GROND_SHARED_GRID_PER_DEGREE", "50")
+    monkeypatch.setenv("GROND_SHARED_GRID_TABLE_PRECISION", "double")  # the identity needs the predictions' precision
     port = _port(tmp_path, paired_inverse_hand=True)
     rows = _adjacent_rows(port, 2)
     pred = SG.predict_rows(port, rows, workers=1, log=lambda *_: None)
@@ -94,7 +95,7 @@ def test_run_options_set_the_environment_for_every_stage(monkeypatch):
         monkeypatch.delenv(name)
     args = build_parser().parse_args(["auto", "--prep", "p.json", "--out-dir", "o"])
     assert (args.shared_grid, args.shared_grid_gpus, args.basis_centring_coset) == (None, None, None)
-    assert SG.apply_cli_options(args) == {"mode": "off", "basis_centring_coset": False}
+    assert SG.apply_cli_options(args) == {"mode": "off", "basis_centring_coset": True}
     args = build_parser().parse_args(["auto", "--prep", "p.json", "--out-dir", "o", "--shared-grid", "auto",
                                       "--shared-grid-gpus", "0,1", "--basis-centring-coset", "on"])
     record = SG.apply_cli_options(args)
@@ -109,3 +110,9 @@ def test_prediction_cache_identity_binds_the_evaluator(monkeypatch):
     monkeypatch.setenv("GROND_SHARED_GRID_GPUS", "0,1,2")
     identity = SG.cache_identity()
     assert identity["mode"] == "auto" and identity["gpus"] is True and identity["per_degree"] == 100.0
+
+
+def test_response_table_defaults_are_the_su102_settings(monkeypatch):
+    for name in ("GROND_SHARED_GRID_TABLE_PER_DEGREE", "GROND_SHARED_GRID_TABLE_PRECISION", "GROND_SHARED_GRID_PER_DEGREE"):
+        monkeypatch.delenv(name, raising=False)
+    assert (SG.per_degree(), SG.table_per_degree(), SG.table_precision()) == (100.0, 50.0, "single")

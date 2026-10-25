@@ -245,9 +245,11 @@ def add_nuisance(ap: argparse.ArgumentParser) -> None:
     )
     ap.add_argument(
         "--nested-response-tables",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help=(
-            "Keep only the thickness tables while the settings are chosen (less memory; needed with --shared-grid and for large cells)."
+            "Keep only the thickness tables while the settings are chosen (default on, as in the paper; less memory, needed "
+            "with --shared-grid and for large cells). --no-nested-response-tables uses the exact thickness average instead."
         ),
     )
     ap.add_argument(

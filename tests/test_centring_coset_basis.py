@@ -36,7 +36,7 @@ def test_coset_basis_reproduces_the_full_basis_intensities(tmp_path):
     res.write_text(I_CENTRED_MODEL)
     support = ThicknessSupport(100.0, 3000.0, 2.0)
     common = dict(n_basis=1000, n_points=3, topup_d_min=1.2, ug_d_min=1.0, max_support_sg=0.02)
-    full_port = S.build_port(str(hkl_path), "identity", str(res), Config(**common))
+    full_port = S.build_port(str(hkl_path), "identity", str(res), Config(**common, basis_centring_coset=False))
     coset_port = S.build_port(str(hkl_path), "identity", str(res), Config(**common, basis_centring_coset=True))
     rows = [i for i, h in enumerate(full_port.data.hkl) if centring_coset_mask([h], -2)[0]][:6]
     assert len(rows) >= 3
@@ -59,9 +59,9 @@ def test_coset_basis_reproduces_the_full_basis_intensities(tmp_path):
 
 def test_centring_coset_default_comes_from_the_environment(monkeypatch):
     monkeypatch.delenv("GROND_BASIS_CENTRING_COSET", raising=False)
-    assert Config().basis_centring_coset is False
-    monkeypatch.setenv("GROND_BASIS_CENTRING_COSET", "1")
     assert Config().basis_centring_coset is True
+    monkeypatch.setenv("GROND_BASIS_CENTRING_COSET", "0")
+    assert Config().basis_centring_coset is False
     assert Config(basis_centring_coset=False).basis_centring_coset is False
     monkeypatch.setenv("GROND_BASIS_CENTRING_COSET", "maybe")
     with pytest.raises(ValueError, match="GROND_BASIS_CENTRING_COSET"):

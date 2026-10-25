@@ -40,11 +40,11 @@ follow) and extract it. Then do these steps:
 cd grond_example_tyrosine
 grond prep --structure model.res --baseline-hkl model.hkl \
     --dataset noef_4_2=noef_4_2,dmin=0.80 --dataset noef_6_2=noef_6_2,dmin=0.80 --out prep.json
-grond auto --prep prep.json --out-dir run --preset fast --free-set on --nested-response-tables --min-d-spacing 0.80
+grond auto --prep prep.json --out-dir run --preset fast
 ```
 
-These are the settings of the paper's tyrosine run. The fast run takes approximately 15 minutes on 10 cores. The
-held-out R_obs is approximately 9.7%. Without `--preset fast`, the run gives the paper value, 9.3%.
+The fast run takes approximately 15 minutes on 10 cores. The held-out R_obs is approximately 9.7%. Without
+`--preset fast`, the run gives the paper value, 9.3%.
 
 ## Use your data
 
@@ -76,12 +76,14 @@ held-out R_obs is approximately 9.7%. Without `--preset fast`, the run gives the
    grond auto --prep prep.json --out-dir run
    ```
 
-   Add `--free-set on` to keep the held-out reflections out of the final model, as in the paper. To continue a stopped
+   The defaults are the settings of the paper. GROND keeps 10% of the unique reflections out of all fits and out of
+   the final model, and reports R factors on them. To refine the final model against all reflections, add
+   `--free-set off`. The cross-validation still runs, but the held-out R factors are then biased. To continue a stopped
    run, give the same command again.
 
 5. For a large cell (for example, a metal–organic framework), add `--shared-grid auto`. GROND then calculates each
-   orientation one time for all reflections. For GPU calculation of very large matrices, install
-   `python -m pip install ".[gpu]"` and add `--shared-grid-gpus 0`.
+   orientation one time for all reflections. The shared grid runs on the CPU. A GPU is optional: for matrices of
+   2,000 beams or more, install `python -m pip install ".[gpu]"` and add `--shared-grid-gpus 0`.
 
 ## Results
 
