@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "grond"
-version = "0.4.0"
+version = "0.4.1"
 description = "Bloch-wave corrections of electron-diffraction intensities for SHELXL refinement."
 readme = "README.md"
 requires-python = ">=3.11"

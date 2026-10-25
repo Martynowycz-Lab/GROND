@@ -59,15 +59,58 @@ class DialsBridgeOutput:
     prep: Path | None = None
 
 
+def _imports_dials(python: str) -> bool:
+    """True when ``python`` can import dials and dxtbx."""
+
+    try:
+        return subprocess.run([python, "-c", "import dials, dxtbx"], capture_output=True, timeout=120).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def find_dials_python() -> str:
+    """Find a Python that can import DIALS: this one, else the DIALS whose commands are on PATH.
+
+    DIALS 3.30 and later put forwarder scripts in ``<install>/dialsbin`` (on PATH) and no longer ship
+    ``dials.python``; their Python is ``<install>/bin/python``, and ``dialsbin/cctbx.python`` still exists.
+    Older DIALS and CCP4 have ``dials.python`` and ``libtbx.python`` beside the ``dials.*`` commands.
+    """
+
+    if importlib.util.find_spec("dials") is not None and importlib.util.find_spec("dxtbx") is not None:
+        return sys.executable
+    candidates = []
+    for command in ("dials.version", "dials.import", "dials.integrate"):
+        found = shutil.which(command)
+        if found:
+            here = Path(found).parent
+            candidates += [here / name for name in ("dials.python", "cctbx.python", "libtbx.python")]
+            candidates += [here.parent / "bin" / "python", here / "python"]
+            break
+    candidates += [Path(found) for name in ("dials.python", "cctbx.python", "libtbx.python", "ccp4-python")
+                   if (found := shutil.which(name))]
+    seen = set()
+    for candidate in candidates:
+        if candidate in seen or not candidate.is_file() or not os.access(candidate, os.X_OK):
+            continue
+        seen.add(candidate)
+        if _imports_dials(str(candidate)):
+            return str(candidate)
+    return ""
+
+
 def _run_dials_helper(refl: Path, expt: Path, dials_python: str = "") -> tuple[dict[str, np.ndarray], dict[str, Any]]:
     """Extract DIALS reflection and experiment arrays using a DIALS-capable Python."""
 
     for label, path in (("reflection table", refl), ("experiment list", expt)):
         if not path.is_file():
             raise FileNotFoundError(f"DIALS {label} does not exist: {path}")
-    if not dials_python and importlib.util.find_spec("dials") is None:
-        dials_python = shutil.which("dials.python") or ""     # a DIALS installation puts dials.python on PATH
-    requested_python = str(dials_python or sys.executable)
+    dials_python = dials_python or find_dials_python()
+    if not dials_python:
+        raise FileNotFoundError(
+            "GROND reads .refl and .expt files with DIALS, and it found no DIALS on PATH. Install DIALS and put its "
+            "commands on PATH (source its setpaths.sh), or give --dials-python <DIALS>/bin/python."
+        )
+    requested_python = str(dials_python)
     explicit_path = Path(os.path.abspath(Path(requested_python).expanduser())) if os.sep in requested_python else None
     if explicit_path is not None:
         if not explicit_path.is_file():
@@ -83,7 +126,7 @@ def _run_dials_helper(refl: Path, expt: Path, dials_python: str = "") -> tuple[d
         if not resolved_python:
             raise FileNotFoundError(
                 f"DIALS Python executable was not found on PATH: {requested_python}. "
-                "Pass --dials-python /absolute/path/to/dials.python."
+                "Pass --dials-python <DIALS>/bin/python."
             )
         python = resolved_python
     with tempfile.TemporaryDirectory(prefix="grond_dials_") as tmp:
@@ -97,8 +140,7 @@ def _run_dials_helper(refl: Path, expt: Path, dials_python: str = "") -> tuple[d
             raise RuntimeError(f"Could not start DIALS Python {python}: {exc}") from None
         if proc.returncode != 0:
             hint = (
-                "Could not import DIALS reflection data. Run GROND from a DIALS Python environment "
-                "or pass --dials-python /path/to/dials.python or another Python executable that can "
+                "Could not read the DIALS files. Give --dials-python <DIALS>/bin/python, a Python that can "
                 "import dials and dxtbx."
             )
             stderr_tail = "\n".join(proc.stderr.strip().splitlines()[-30:])

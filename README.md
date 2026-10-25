@@ -49,7 +49,7 @@ The fast run takes approximately 15 minutes on 10 cores. The held-out R_obs is a
 ## Use your data
 
 1. Integrate with DIALS or XDS.
-   - DIALS: convert each crystal one time. GROND finds `dials.python` on your `PATH`.
+   - DIALS: convert each crystal one time. GROND finds DIALS from the `dials.*` commands on your `PATH`.
 
      ```bash
      grond import-dials --refl integrated.refl --expt integrated.expt --out-dir c1
