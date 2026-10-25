@@ -12,20 +12,6 @@ AUTO_MAX_SUPPORT_SG = 0.01
 AUTO_SG_WINDOW = 0.010
 
 
-def add_profile_coordinates(ap: argparse.ArgumentParser, *, continuation: bool = False) -> None:
-    """Expose the observation measure; continuations inherit saved values unless explicitly overridden."""
-
-    ap.add_argument("--profile-coordinate", choices=["target_sg", "direct_angle"],
-                    default=None if continuation else "target_sg")
-    ap.add_argument("--profile-normalization", choices=["legacy", "target_sg_equivalent_v1"],
-                    default=None if continuation else "legacy",
-                    help="Explicit direct-angle measure. target_sg_equivalent_v1 preserves the target-Sg row convention.")
-    ap.add_argument("--profile-angle-max-half-width-deg", type=float, default=None if continuation else 2.0,
-                    help="Direct-angle bound; target_sg_equivalent_v1 refuses truncation at this bound.")
-    ap.add_argument("--profile-basis-mode", choices=["center", "common_profile"],
-                    default=None if continuation else "center")
-
-
 def add_crystal_overrides(ap: argparse.ArgumentParser) -> None:
     """Use the same named controls for fresh runs and continuation."""
 
@@ -180,7 +166,6 @@ def add_geometry(ap: argparse.ArgumentParser) -> None:
             "Beams with |S_g| up to this value (1/Å) at the observation centre enter the calculation (default %(default)s)."
         ),
     )
-    add_profile_coordinates(ap)
     ap.add_argument(
         "--profile-quadrature",
         choices=["uniform", "trapezoid", "gauss_legendre"],
@@ -219,7 +204,7 @@ def add_nuisance(ap: argparse.ArgumentParser) -> None:
     )
     ap.add_argument(
         "--mosaicity-mode",
-        choices=["none", "transverse_target", "gaussian_cone"],
+        choices=["none", "transverse_target"],
         default="transverse_target",
         help=(
             "Mosaic model: transverse_target (default; Gaussian tilt about the axis normal to the beam and the rotation axis) or none."
@@ -233,12 +218,6 @@ def add_nuisance(ap: argparse.ArgumentParser) -> None:
     ap.add_argument(
         "--mosaicity-points", type=int, default=3, help="Gauss-Hermite tilt points of the mosaic cone quadrature."
     )
-    ap.add_argument("--mosaicity-support-sigma-deg", type=float, default=0.0,
-                    help="Declared largest two-axis cone width; must cover every tested sigma.")
-    ap.add_argument("--mosaicity-support-points", type=int, default=5,
-                    help="Points per axis in the common beam-support envelope.")
-    ap.add_argument("--mosaicity-support-width-sigma", type=float, default=4.0,
-                    help="Half-width of the common beam-support envelope in support-sigma units.")
     ap.add_argument(
         "--nuisance-selection",
         choices=["nested", "sequential"],

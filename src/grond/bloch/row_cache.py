@@ -75,13 +75,6 @@ class RowCacheMixin:
             "mosaicity_sigma_deg": float(self.cfg.mosaicity_sigma_deg),
             "mosaicity_max_sigma_deg": float(self.cfg.mosaicity_max_sigma_deg),
             "mosaicity_points": int(self.cfg.mosaicity_points),
-            "mosaicity_support_sigma_deg": float(self.cfg.mosaicity_support_sigma_deg),
-            "mosaicity_support_points": int(self.cfg.mosaicity_support_points),
-            "mosaicity_support_width_sigma": float(self.cfg.mosaicity_support_width_sigma),
-            "profile_coordinate": str(self.cfg.profile_coordinate),
-            "profile_normalization": str(self.cfg.profile_normalization),
-            "profile_basis_mode": str(self.cfg.profile_basis_mode),
-            "profile_angle_max_half_width_deg": float(self.cfg.profile_angle_max_half_width_deg),
             "geometry_path_sha256": (str(self.geometry_path["sha256"]) if self.geometry_path is not None else ""),
             "profile_quadrature": str(self.cfg.profile_quadrature),
             "profile_accumulation": str(self.cfg.profile_accumulation),
@@ -192,14 +185,7 @@ class RowCacheMixin:
             ) = self.row_profile_orientation_points(row_idx, hkl, omega_c, c_sg, sg_window_i)
             profile_omegas = np.asarray(solved_omegas, dtype=float)
             profile_tilts = np.asarray(mosaic_tilts, dtype=float).reshape(-1, 2)
-            basis, _cone_basis_meta = self.select_basis_for_profile(
-                hkl,
-                omega_c,
-                sg_window_i,
-                solved_omegas,
-                mosaic_tilts,
-                row_idx=row_idx,
-            )
+            basis = self.select_basis(hkl, omega_c, row_idx=row_idx)
             sg_basis_rows = []
             for omega, (along_deg, transverse_deg) in zip(solved_omegas, mosaic_tilts, strict=True):
                 sg_basis = self.sg_for_hkls_at_orientation(basis, omega, along_deg, transverse_deg)

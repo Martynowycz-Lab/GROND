@@ -11,8 +11,8 @@ from grond.engine.bloch_engine import XDSBlochPort
 
 def stub_port(sigma: float, points: int = 5, n_points: int = 5):
     port = object.__new__(XDSBlochPort)
-    port.cfg = Config(n_points=n_points, profile_coordinate="target_sg", mosaicity_mode="transverse_target",
-                      mosaicity_sigma_deg=sigma, mosaicity_points=points)
+    port.cfg = Config(n_points=n_points, mosaicity_mode="transverse_target", mosaicity_sigma_deg=sigma,
+                      mosaicity_points=points)
     requested = np.linspace(-0.002, 0.002, n_points)
     port.row_profile_sg_points = lambda *_a: (requested, np.ones(n_points), {})
     a, omega_b = 0.02, 10.0          # dSg/domega (1/A per deg) and Bragg angle of the untilted target
@@ -44,11 +44,6 @@ def test_zero_width_equals_untilted_target_profile():
     omegas, tilts, weights, resid, _p, _m = port.row_profile_orientation_points(0, np.array([1, 0, 0]), 10.0, 0.0, 0.004)
     assert np.allclose(omegas, 10.0 + requested / 0.02) and np.all(tilts == 0.0)
     assert np.allclose(weights, np.ones(5))
-
-
-def test_transverse_target_requires_target_sg_profiles():
-    with pytest.raises(ValueError, match="target_sg"):
-        Config(profile_coordinate="direct_angle", mosaicity_mode="transverse_target", mosaicity_sigma_deg=0.1)
 
 
 def test_adaptive_window_weights_integrate_rather_than_average():

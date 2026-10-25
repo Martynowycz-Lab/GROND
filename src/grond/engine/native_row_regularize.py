@@ -1839,21 +1839,8 @@ def main():
                 mosaicity_mode=best["nuisance"].get("mosaicity_mode", "none"),
                 mosaicity_sigma_deg=best["nuisance"].get("mosaicity_sigma_deg", 0.0),
                 mosaicity_points=best["nuisance"].get("mosaicity_points", 1),
-                mosaicity_support_sigma_deg=best["nuisance"].get(
-                    "mosaicity_support_sigma_deg", 0.0
-                ),
-                mosaicity_support_points=best["nuisance"].get(
-                    "mosaicity_support_points", 5
-                ),
-                mosaicity_support_width_sigma=best["nuisance"].get(
-                    "mosaicity_support_width_sigma", 4.0
-                ),
                 geometry_path_file=best["nuisance"].get("geometry_path_file", ""),
-                profile_basis_mode=args.profile_basis_mode,
                 mosaicity_max_sigma_deg=args.mosaicity_max_sigma_deg,
-                profile_coordinate=args.profile_coordinate,
-                profile_normalization=args.profile_normalization,
-                profile_angle_max_half_width_deg=args.profile_angle_max_half_width_deg,
                 profile_quadrature=args.profile_quadrature,
                 profile_accumulation=args.profile_accumulation,
                 topup_d_min=effective_topup_d_min,

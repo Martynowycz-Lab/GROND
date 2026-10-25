@@ -214,35 +214,6 @@ def resolve_final_n_basis(
         cmd += ["--max-rows", str(args.max_rows)]
     if alternate_hand:
         cmd.append("--alternate-hand")
-    # The support basis is sized for the rocking window, profile sampling and mosaic cone the
-    # stages actually use, not the engine defaults.
-    cmd += [
-        "--sg-window",
-        f"{args.sg_window:g}",
-        "--sg-window-mode",
-        resolved_sg_window_mode(args, ds),
-        "--sg-window-min",
-        f"{args.sg_window_min:g}",
-        "--sg-window-max",
-        f"{resolved_sg_window_max(args, ds):g}",
-        "--sg-window-scale",
-        f"{args.sg_window_scale:g}",
-        "--sg-window-frame-floor",
-        f"{args.sg_window_frame_floor:g}",
-        "--n-points",
-        str(resolved_final_n_points(args, ds)),
-    ]
-    mosaicity_modes, mosaicity_sigmas = auto_mosaicity_grid(args)
-    active_modes = [mode for mode in mosaicity_modes.split(",") if mode != "none"]
-    if active_modes:
-        cmd += [
-            "--mosaicity-mode",
-            active_modes[0],
-            "--mosaicity-sigma-deg",
-            f"{max(parse_strict_grid(mosaicity_sigmas, 'mosaicity sigma')):g}",
-            "--mosaicity-points",
-            str(int(args.mosaicity_points)),
-        ]
     run_logged(cmd, logs, f"{ds.name}_{safe_label(stage)}_support_basis", dry_run=args.dry_run)
     payload = read_json(scan)
     n_basis = int(payload.get("recommended_n_basis") or FINAL_BASIS_FALLBACK)
@@ -559,19 +530,6 @@ def auto_mosaicity_grid(args: argparse.Namespace) -> tuple[str, str]:
         raise ValueError(
             "--mosaicity-sigma-grid must include 0, the no-cone reference every cone width is compared with"
         )
-    if mode == "gaussian_cone":
-        if getattr(args, "nuisance_selection", "nested") != "nested":
-            raise ValueError("AUTO gaussian_cone currently requires nested selection so its zero-width reference "
-                             "uses the same common beam envelope; fixed native/refine replays remain available")
-        if (getattr(args, "profile_coordinate", "target_sg") != "direct_angle"
-                or getattr(args, "profile_normalization", "legacy") != "target_sg_equivalent_v1"):
-            raise ValueError("AUTO gaussian_cone needs --profile-coordinate direct_angle and "
-                             "--profile-normalization target_sg_equivalent_v1 for comparable row intensities")
-        support = float(getattr(args, "mosaicity_support_sigma_deg", 0.0))
-        if support < max(sigmas):
-            raise ValueError("--mosaicity-support-sigma-deg must cover the entire two-axis cone sigma grid")
-        # Retain the cone selector at zero width so the reference uses the same declared maximum beam envelope.
-        return "gaussian_cone", ",".join(f"{value:.15g}" for value in dict.fromkeys(sigmas))
     modes = (["none"] if any(value == 0.0 for value in sigmas) else []) + ([mode] if positive else [])
     return ",".join(modes), (",".join(f"{value:.15g}" for value in positive) or "0.0")
 

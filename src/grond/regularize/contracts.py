@@ -38,9 +38,6 @@ class Nuisance:
     mosaicity_mode: str = "none"
     mosaicity_sigma_deg: float = 0.0
     mosaicity_points: int = 1
-    mosaicity_support_sigma_deg: float = 0.0
-    mosaicity_support_points: int = 5
-    mosaicity_support_width_sigma: float = 4.0
     geometry_path_file: str = ""
     absorption_mode: str = "none"
     absorption_mu: float = 0.0

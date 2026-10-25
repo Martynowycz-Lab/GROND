@@ -259,16 +259,12 @@ def native_command(
     # fields absent only for historical summaries that never recorded them.
     pinned_fields = (
         "sg_window_min", "sg_window_max", "sg_window_scale", "sg_window_frame_floor",
-        "profile_basis_mode", "profile_coordinate", "profile_normalization", "profile_angle_max_half_width_deg",
         "mosaicity_mode", "mosaicity_sigma_deg", "mosaicity_max_sigma_deg", "mosaicity_points",
-        "mosaicity_support_sigma_deg", "mosaicity_support_points", "mosaicity_support_width_sigma",
         "dose_b_ref_frame",
         "row_contract", "split_contract",
     )
     for key in pinned_fields:
         value = nui.get(key, cfg.get(key))
-        if key.startswith("profile_") and getattr(args, key, None) is not None:
-            value = getattr(args, key)
         if value is not None and str(value) != "":
             cmd.extend(["--" + key.replace("_", "-"), str(value)])
     # The free-split scheme travels with the split contract: an orbit-hash

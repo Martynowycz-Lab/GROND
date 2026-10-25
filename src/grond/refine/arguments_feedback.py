@@ -9,8 +9,6 @@ import argparse
 import os
 import sys
 
-from grond.cli_options.run_physics import add_profile_coordinates
-
 
 def build_parser(description: str) -> argparse.ArgumentParser:
     """Build the parser without reading data or starting a calculation."""
@@ -31,7 +29,6 @@ def build_parser(description: str) -> argparse.ArgumentParser:
         ),
     )
     ap.add_argument("--hkl-transform", default="")
-    add_profile_coordinates(ap, continuation=True)
     ap.add_argument("--profile-quadrature", choices=["uniform", "trapezoid", "gauss_legendre"], default=None)
     ap.add_argument("--profile-accumulation", choices=["sum", "mean"], default=None)
     ap.add_argument("--cycles", type=int, default=3)

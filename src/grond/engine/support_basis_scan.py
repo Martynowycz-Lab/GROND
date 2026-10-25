@@ -60,37 +60,15 @@ def _init_worker(port):
 
 
 def _basis_size_worker(idx):
-    """Return (row index, basis size) for one row, with the basis the predictions would use.
-
-    Centre mode uses the row-centre basis, and other modes the basis over the rocking window and mosaic orientations.
-    """
+    """Return (row index, basis size) for one row, with the row-centre basis the predictions use."""
 
     if _WORKER_PORT is None:
         raise RuntimeError("support scan worker was not initialized")
     port = _WORKER_PORT
     row_idx = int(idx)
-    hkl = port.data.hkl[row_idx]
-    if _uses_center_basis(getattr(port, "cfg", None)):
-        omega_center = port.omega_from_z(port.data.zcal[row_idx])
-        basis = port.select_basis(hkl, omega_center, row_idx=row_idx)
-    else:
-        # Profile-dependent bases (common_profile, gaussian_cone) are selected over the same
-        # rocking window and mosaic orientations the predictions integrate.
-        omega_center = port.omega_from_z(port.data.zcal[row_idx])
-        center_sg = float(port.sg_for_hkls(np.asarray([hkl], dtype=int), omega_center)[0])
-        sg_window_i, _meta = port.row_sg_window(row_idx, hkl, omega_center)
-        omegas, tilts, *_rest = port.row_profile_orientation_points(row_idx, hkl, omega_center, center_sg, sg_window_i)
-        basis, _basis_meta = port.select_basis_for_profile(hkl, omega_center, sg_window_i, omegas, tilts, row_idx=row_idx)
+    omega_center = port.omega_from_z(port.data.zcal[row_idx])
+    basis = port.select_basis(port.data.hkl[row_idx], omega_center, row_idx=row_idx)
     return row_idx, int(len(basis))
-
-
-def _uses_center_basis(cfg) -> bool:
-    """The row-centre basis does not depend on the rocking window or a re-centred cone."""
-
-    return (
-        str(getattr(cfg, "profile_basis_mode", "center")).lower() == "center"
-        and str(getattr(cfg, "mosaicity_mode", "none")).lower() != "gaussian_cone"
-    )
 
 
 def scan_basis_sizes(port: XDSBlochPort, indices: np.ndarray, workers: int, chunksize: int) -> np.ndarray:
@@ -167,27 +145,6 @@ def main() -> int:
     ap.add_argument("--workers", type=int, default=1)
     ap.add_argument("--chunksize", type=int, default=1)
     ap.add_argument("--alternate-hand", dest="alternate_hand", action="store_true")
-    # Profile contract of the stages this basis serves.  The historical row-centre basis
-    # depends only on --max-support-sg; profile-dependent bases use all of these.
-    ap.add_argument("--n-points", type=int, default=1)
-    ap.add_argument("--sg-window", type=float, default=Config.sg_window)
-    ap.add_argument(
-        "--sg-window-mode",
-        choices=["fixed", "zobs_residual", "zobs_plus_floor", "rlp_peak", "dials_bbox"],
-        default=Config.sg_window_mode,
-    )
-    ap.add_argument("--sg-window-min", type=float, default=Config.sg_window_min)
-    ap.add_argument("--sg-window-max", type=float, default=Config.sg_window_max)
-    ap.add_argument("--sg-window-scale", type=float, default=Config.sg_window_scale)
-    ap.add_argument("--sg-window-frame-floor", type=float, default=Config.sg_window_frame_floor)
-    ap.add_argument("--profile-basis-mode", choices=["center", "common_profile"], default="center")
-    ap.add_argument(
-        "--mosaicity-mode",
-        choices=["none", "gaussian_omega", "gaussian_cone", "transverse_target"],
-        default="none",
-    )
-    ap.add_argument("--mosaicity-sigma-deg", type=float, default=0.0, help="Largest mosaic width the basis must serve.")
-    ap.add_argument("--mosaicity-points", type=int, default=3)
     args = ap.parse_args()
     effective_topup_d_min = min(float(args.topup_d_min), float(args.min_d_spacing)) if args.min_d_spacing > 0 else float(args.topup_d_min)
 
@@ -198,22 +155,8 @@ def main() -> int:
     model = parse_model(Path(args.res))
     if args.alternate_hand:
         model = alternate_hand_model(model)
-    cone = str(args.mosaicity_mode) == "gaussian_cone"
     cfg = Config(
         n_basis=int(args.n_basis_limit),
-        n_points=int(args.n_points),
-        sg_window=float(args.sg_window),
-        sg_window_mode=str(args.sg_window_mode),
-        sg_window_min=float(args.sg_window_min),
-        sg_window_max=float(args.sg_window_max),
-        sg_window_scale=float(args.sg_window_scale),
-        sg_window_frame_floor=float(args.sg_window_frame_floor),
-        profile_basis_mode=str(args.profile_basis_mode),
-        profile_coordinate="direct_angle" if cone else "target_sg",
-        mosaicity_mode=str(args.mosaicity_mode),
-        mosaicity_sigma_deg=float(args.mosaicity_sigma_deg),
-        mosaicity_points=int(args.mosaicity_points),
-        mosaicity_support_sigma_deg=float(args.mosaicity_sigma_deg) if cone else 0.0,
         topup_d_min=effective_topup_d_min,
         max_support_sg=float(args.max_support_sg),
     )
@@ -248,14 +191,7 @@ def main() -> int:
             "topup_d_min": float(effective_topup_d_min),
             "requested_topup_d_min": float(args.topup_d_min),
             "max_support_sg": float(args.max_support_sg),
-            "n_points": int(args.n_points),
-            "sg_window": float(args.sg_window),
-            "sg_window_mode": str(args.sg_window_mode),
-            "sg_window_max": float(args.sg_window_max),
-            "profile_basis_mode": str(args.profile_basis_mode),
-            "mosaicity_mode": str(args.mosaicity_mode),
-            "mosaicity_sigma_deg": float(args.mosaicity_sigma_deg),
-            "basis_rule": "row_center_max_support_sg" if _uses_center_basis(cfg) else "profile_support",
+            "basis_rule": "row_center_max_support_sg",
         },
         "wall_seconds": time.perf_counter() - t0,
     }

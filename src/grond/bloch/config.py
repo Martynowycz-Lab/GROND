@@ -101,14 +101,7 @@ class Config:
     mosaicity_sigma_deg: float = 0.0
     mosaicity_max_sigma_deg: float = 0.5
     mosaicity_points: int = 3
-    mosaicity_support_sigma_deg: float = 0.0
-    mosaicity_support_points: int = 5
-    mosaicity_support_width_sigma: float = 4.0
     geometry_path_file: str = ""
-    profile_basis_mode: str = "center"
-    profile_coordinate: str = "target_sg"
-    profile_normalization: str = "legacy"
-    profile_angle_max_half_width_deg: float = 2.0
     profile_quadrature: str = "uniform"
     profile_accumulation: str = "sum"
     topup_d_min: float = 0.8
@@ -159,7 +152,6 @@ class Config:
             "n_points": (self.n_points, 1),
             "sg_jitter_points": (self.sg_jitter_points, 1),
             "mosaicity_points": (self.mosaicity_points, 1),
-            "mosaicity_support_points": (self.mosaicity_support_points, 2),
             "thickness_points": (self.thickness_points, 1),
         }
         for name, (value, minimum) in integer_minima.items():
@@ -179,8 +171,6 @@ class Config:
             "topup_d_min": self.topup_d_min,
             "max_support_sg": self.max_support_sg,
             "mosaicity_max_sigma_deg": self.mosaicity_max_sigma_deg,
-            "mosaicity_support_width_sigma": self.mosaicity_support_width_sigma,
-            "profile_angle_max_half_width_deg": self.profile_angle_max_half_width_deg,
             "thickness_A": self.thickness_A,
             "group_width_deg": self.group_width_deg,
             "ug_d_min": self.ug_d_min,
@@ -197,7 +187,6 @@ class Config:
             "sg_jitter_sigma_d_inv": self.sg_jitter_sigma_d_inv,
             "sg_jitter_sigma_frame": self.sg_jitter_sigma_frame,
             "mosaicity_sigma_deg": self.mosaicity_sigma_deg,
-            "mosaicity_support_sigma_deg": self.mosaicity_support_sigma_deg,
             "thickness_grad_frac": self.thickness_grad_frac,
             "thickness_sigma_frac": self.thickness_sigma_frac,
             "variance_a": self.variance_a,
@@ -211,34 +200,6 @@ class Config:
                 raise ValueError(f"{name} must be finite and nonnegative")
         if float(self.mosaicity_sigma_deg) > float(self.mosaicity_max_sigma_deg):
             raise ValueError("mosaicity_sigma_deg exceeds the explicit mosaicity_max_sigma_deg bound")
-        if float(self.mosaicity_support_sigma_deg) > float(self.mosaicity_max_sigma_deg):
-            raise ValueError("mosaicity_support_sigma_deg exceeds the explicit mosaicity_max_sigma_deg bound")
-        if (
-            str(self.mosaicity_mode).lower() == "gaussian_cone"
-            and float(self.mosaicity_sigma_deg) > float(self.mosaicity_support_sigma_deg) + 1e-15
-        ):
-            raise ValueError(
-                "gaussian_cone requires mosaicity_support_sigma_deg to be at least "
-                "mosaicity_sigma_deg so candidate widths share one enclosing beam basis"
-            )
-        if (
-            str(self.mosaicity_mode).lower() == "transverse_target"
-            and str(self.profile_coordinate).lower() != "target_sg"
-        ):
-            raise ValueError(
-                "transverse_target re-centres every mosaic block on the target's excitation errors and "
-                "requires profile_coordinate=target_sg"
-            )
-        if (
-            str(self.mosaicity_mode).lower() == "gaussian_cone"
-            and str(self.profile_coordinate).lower() != "direct_angle"
-        ):
-            raise ValueError(
-                "gaussian_cone currently requires profile_coordinate=direct_angle; "
-                "this keeps the physical scan interval explicit and avoids extra Sg roots"
-            )
-        if str(self.profile_normalization).lower() != "legacy" and str(self.profile_coordinate).lower() != "direct_angle":
-            raise ValueError("profile_normalization=target_sg_equivalent_v1 requires profile_coordinate=direct_angle")
 
         choices = {
             "sg_window_mode": (
@@ -246,19 +207,7 @@ class Config:
                 {"fixed", "zobs_residual", "zobs_plus_floor", "rlp_peak", "dials_bbox"},
             ),
             "sg_jitter_mode": (self.sg_jitter_mode, {"none", "gaussian", "student_t"}),
-            "mosaicity_mode": (
-                self.mosaicity_mode,
-                {"none", "gaussian_omega", "gaussian_cone", "transverse_target"},
-            ),
-            "profile_coordinate": (
-                self.profile_coordinate,
-                {"target_sg", "direct_angle"},
-            ),
-            "profile_normalization": (self.profile_normalization, {"legacy", "target_sg_equivalent_v1"}),
-            "profile_basis_mode": (
-                self.profile_basis_mode,
-                {"center", "common_profile"},
-            ),
+            "mosaicity_mode": (self.mosaicity_mode, {"none", "gaussian_omega", "transverse_target"}),
             "profile_quadrature": (
                 self.profile_quadrature,
                 {"uniform", "trapezoid", "gauss_legendre", "legendre"},
@@ -338,9 +287,7 @@ def frozen_kernel_contract(cfg: Config | None = None):
         "geometry": {
             "g(alpha)": "S @ R(alpha) @ F @ A(alpha) @ h (S=F=identity for ordinary XDS)",
             "Sg": "(k^2 - |s0 + g(alpha)|^2) / (2*k)",
-            "profile_mode": "target_sg_to_angle or explicit direct-angle integration",
-            "profile_coordinate": (None if cfg is None else str(getattr(cfg, "profile_coordinate", "target_sg"))),
-            "profile_normalization": None if cfg is None else str(getattr(cfg, "profile_normalization", "legacy")),
+            "profile_mode": "target_sg_to_angle",
             "profile_quadrature": None if cfg is None else str(getattr(cfg, "profile_quadrature", "uniform")),
             "profile_accumulation": None if cfg is None else str(getattr(cfg, "profile_accumulation", "sum")),
             "profile_weight_mode": "rocking-profile samples are summed by default; legacy normalized averaging is available as profile_accumulation=mean",
@@ -348,8 +295,7 @@ def frozen_kernel_contract(cfg: Config | None = None):
             "profile_width_mode": "fixed unless cfg.sg_window_mode explicitly requests an auditable XDS metadata-derived per-row width",
             "orientation_distribution": (
                 "optional target-Sg jitter, projected one-axis mosaic convolution, or "
-                "an incoherent two-axis Gaussian orientation cone with one beam basis "
-                "fixed over the widest declared cone; all disabled by default"
+                "the re-centred transverse mosaic spread; all disabled by default"
             ),
             "geometry_path": (
                 "optional fixed geometry-only Chebyshev slew and two-axis tilt contract; "
@@ -390,7 +336,6 @@ def frozen_kernel_contract(cfg: Config | None = None):
         },
         "basis": {
             "mode": "direct_target_topup",
-            "profile_basis_mode": None if cfg is None else str(cfg.profile_basis_mode),
             "first_beams": ["direct (0,0,0)", "target signed hkl"],
             "topup_d_min_A": None if cfg is None else float(cfg.topup_d_min),
             "max_support_sg_inv_A": None if cfg is None else float(cfg.max_support_sg),

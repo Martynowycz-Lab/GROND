@@ -74,8 +74,7 @@ THICKNESS_NUISANCE_FIELDS = (
     "thickness_max_A",
     "thickness_table_dt_A",
 )
-VARIANT_NUISANCE_FIELDS = ("mosaicity_mode", "mosaicity_sigma_deg", "mosaicity_points", "mosaicity_support_sigma_deg",
-                           "mosaicity_support_points", "mosaicity_support_width_sigma", "dose_b_mode", "dose_b_per_frame")
+VARIANT_NUISANCE_FIELDS = ("mosaicity_mode", "mosaicity_sigma_deg", "mosaicity_points", "dose_b_mode", "dose_b_per_frame")
 ABSORPTION_NUISANCE_FIELDS = ("absorption_mode", "absorption_mu")
 # Config fields a spectrum never depends on or that only steer caches / the paired hand; the base spectral
 # Config of a request resets them.

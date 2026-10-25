@@ -27,14 +27,7 @@ class RowPlanMixin:
             jitter_meta,
             mosaicity_meta,
         ) = self.row_profile_orientation_points(row_idx, hkl, omega_center, center_sg, sg_window_i)
-        basis, cone_basis_meta = self.select_basis_for_profile(
-            hkl,
-            omega_center,
-            sg_window_i,
-            solved_omegas,
-            mosaic_tilts,
-            row_idx=row_idx,
-        )
+        basis = self.select_basis(hkl, omega_center, row_idx=row_idx)
         if not np.array_equal(basis[0], np.asarray([0, 0, 0], dtype=int)) or not np.array_equal(
             basis[1], np.asarray(hkl, dtype=int)
         ):
@@ -76,7 +69,6 @@ class RowPlanMixin:
             **sg_width_meta,
             **jitter_meta,
             **mosaicity_meta,
-            **cone_basis_meta,
         }
 
     def finish_row_prediction_plan(self, plan, dyn_vals):

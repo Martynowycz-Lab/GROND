@@ -21,7 +21,7 @@ from .contracts import (
     thickness_support_fields,
 )
 
-MOSAICITY_MODES = {"none", "gaussian_omega", "gaussian_cone", "transverse_target"}
+MOSAICITY_MODES = {"none", "gaussian_omega", "transverse_target"}
 
 
 def mosaicity_candidate_grid(args) -> list[tuple[str, float]]:
@@ -126,14 +126,7 @@ def populate_nuisance_trials(
                                                             mosaicity_sigma_deg=mosaicity_sigma_deg,
                                                             mosaicity_max_sigma_deg=args.mosaicity_max_sigma_deg,
                                                             mosaicity_points=args.mosaicity_points,
-                                                            mosaicity_support_sigma_deg=args.mosaicity_support_sigma_deg,
-                                                            mosaicity_support_points=args.mosaicity_support_points,
-                                                            mosaicity_support_width_sigma=args.mosaicity_support_width_sigma,
                                                             geometry_path_file=args.geometry_path,
-                                                            profile_basis_mode=args.profile_basis_mode,
-                                                            profile_coordinate=args.profile_coordinate,
-                                                            profile_normalization=getattr(args, "profile_normalization", "legacy"),
-                                                            profile_angle_max_half_width_deg=args.profile_angle_max_half_width_deg,
                                                             profile_quadrature=args.profile_quadrature,
                                                             profile_accumulation=args.profile_accumulation,
                                                             topup_d_min=effective_topup_d_min,
@@ -288,9 +281,6 @@ def populate_nuisance_trials(
                                                                 mosaicity_mode=mosaicity_mode,
                                                                 mosaicity_sigma_deg=mosaicity_sigma_deg,
                                                                 mosaicity_points=args.mosaicity_points,
-                                                                mosaicity_support_sigma_deg=args.mosaicity_support_sigma_deg,
-                                                                mosaicity_support_points=args.mosaicity_support_points,
-                                                                mosaicity_support_width_sigma=args.mosaicity_support_width_sigma,
                                                                 geometry_path_file=args.geometry_path,
                                                                 dose_b_mode=dose_b_mode,
                                                                 dose_b_per_frame=dose_b_per_frame,

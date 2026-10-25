@@ -11,7 +11,7 @@ import numpy as np
 from numpy.polynomial.hermite import hermgauss
 from numpy.polynomial.legendre import leggauss
 
-from grond.bloch.errors import LocalSgCrossingError, MissingObservedCentroidError
+from grond.bloch.errors import MissingObservedCentroidError
 
 
 class ProfileMixin:
@@ -231,17 +231,6 @@ class ProfileMixin:
                     "mosaicity_offset_abs_p95_deg": 0.0,
                 },
             )
-        if mode == "gaussian_cone":
-            return (
-                np.asarray([0.0], dtype=float),
-                np.asarray([1.0], dtype=float),
-                {
-                    "mosaicity_mode": mode,
-                    "mosaicity_sigma_deg": sigma,
-                    "mosaicity_kernel_points": 1,
-                    "mosaicity_offset_abs_p95_deg": 0.0,
-                },
-            )
         if mode != "gaussian_omega":
             raise ValueError(f"unknown mosaicity_mode={mode!r}")
         n = max(1, int(getattr(self.cfg, "mosaicity_points", 3)))
@@ -261,56 +250,6 @@ class ProfileMixin:
                 "mosaicity_sigma_deg": sigma,
                 "mosaicity_kernel_points": int(len(offsets)),
                 "mosaicity_offset_abs_p95_deg": float(np.quantile(np.abs(offsets), 0.95)),
-            },
-        )
-
-    def row_mosaicity_cone_points(self):
-        """Return tensor Gauss-Hermite points for a 2D Gaussian cone.
-
-        The two rotations are incoherent mosaic orientations.  Intensities,
-        not amplitudes, are averaged over this normalized distribution.
-        """
-
-        mode = str(getattr(self.cfg, "mosaicity_mode", "none") or "none").lower()
-        sigma = float(getattr(self.cfg, "mosaicity_sigma_deg", 0.0))
-        if mode != "gaussian_cone" or sigma <= 0.0:
-            return (
-                np.zeros((1, 2), dtype=float),
-                np.asarray([1.0], dtype=float),
-                {
-                    "mosaicity_cone_points": 1,
-                    "mosaicity_cone_quadrature": "zero_width",
-                    "mosaicity_cone_weight_sum": 1.0,
-                },
-            )
-        n = max(1, int(getattr(self.cfg, "mosaicity_points", 3)))
-        if n == 1:
-            offsets = np.asarray([0.0], dtype=float)
-            weights = np.asarray([1.0], dtype=float)
-        else:
-            nodes, raw_weights = hermgauss(n)
-            offsets = math.sqrt(2.0) * sigma * np.asarray(nodes, dtype=float)
-            weights = np.asarray(raw_weights, dtype=float) / math.sqrt(math.pi)
-            weights /= max(float(np.sum(weights)), 1e-30)
-        support_sigma = float(getattr(self.cfg, "mosaicity_support_sigma_deg", 0.0))
-        support_width = float(getattr(self.cfg, "mosaicity_support_width_sigma", 4.0))
-        if float(np.max(np.abs(offsets))) > support_sigma * support_width + 1e-12:
-            raise ValueError(
-                "mosaicity quadrature extends beyond the declared common-cone "
-                "basis envelope; increase mosaicity_support_sigma_deg or "
-                "mosaicity_support_width_sigma"
-            )
-        points = np.stack(np.meshgrid(offsets, offsets, indexing="ij"), axis=-1).reshape(-1, 2)
-        pair_weights = np.outer(weights, weights).reshape(-1)
-        pair_weights /= max(float(np.sum(pair_weights)), 1e-30)
-        return (
-            points,
-            pair_weights,
-            {
-                "mosaicity_cone_points": int(len(points)),
-                "mosaicity_cone_quadrature": f"tensor_gauss_hermite_{n}x{n}",
-                "mosaicity_cone_weight_sum": float(np.sum(pair_weights)),
-                "mosaicity_cone_offset_radius_p95_deg": float(np.quantile(np.linalg.norm(points, axis=1), 0.95)),
             },
         )
 
@@ -382,167 +321,17 @@ class ProfileMixin:
                 np.asarray(residuals, dtype=float), jitter_meta, mosaicity_meta)
 
     def row_profile_orientation_points(self, row_idx, hkl, omega_center, center_sg, sg_window_i):
-        """Return explicit scan angles and two-axis mosaic orientations."""
+        """Return explicit scan angles and two-axis mosaic orientations (untilted outside transverse_target)."""
 
         if str(getattr(self.cfg, "mosaicity_mode", "none") or "none").lower() == "transverse_target":
             return self.row_transverse_target_points(row_idx, hkl, omega_center, center_sg, sg_window_i)
-
-        (
-            base_omegas,
-            base_weights,
-            sg_resid,
-            profile_meta,
-            mosaicity_meta,
-        ) = self.row_profile_omega_points(row_idx, hkl, omega_center, center_sg, sg_window_i)
-        cone_points, cone_weights, cone_meta = self.row_mosaicity_cone_points()
-        count_base = len(base_omegas)
-        count_cone = len(cone_points)
-        omegas = np.repeat(np.asarray(base_omegas, dtype=float), count_cone)
-        tilts = np.tile(np.asarray(cone_points, dtype=float), (count_base, 1))
-        weights = (
-            np.asarray(base_weights, dtype=float)[:, None] * np.asarray(cone_weights, dtype=float)[None, :]
-        ).reshape(-1)
-        profile_meta = dict(profile_meta)
-        profile_meta.update(
-            {
-                "sg_profile_points_total": int(len(weights)),
-                "sg_profile_weight_sum": float(np.sum(weights)),
-            }
+        omegas, weights, sg_resid, profile_meta, mosaicity_meta = self.row_profile_omega_points(
+            row_idx, hkl, omega_center, center_sg, sg_window_i
         )
-        mosaicity_meta = {**mosaicity_meta, **cone_meta}
-        if str(getattr(self.cfg, "mosaicity_mode", "none")).lower() == "gaussian_cone":
-            mosaicity_meta["mosaicity_kernel_points"] = int(count_cone)
-            mosaicity_meta["mosaicity_offset_abs_p95_deg"] = float(
-                cone_meta.get("mosaicity_cone_offset_radius_p95_deg", 0.0)
-            )
-        return omegas, tilts, weights, sg_resid, profile_meta, mosaicity_meta
-
-    def target_sg_angular_interval(self, row_idx, hkl, omega_center, center_sg, sg_window_i, meta):
-        """Exact untilted angular interval of the configured Sg window, on one monotonic branch.
-
-        The versioned direct-angle convention must integrate this entire interval. Truncation at an angular cap
-        would describe a different observation, so exceeding that explicit cap is an error rather than clipping.
-        """
-
-        targets = float(center_sg) + np.asarray([-0.5, 0.5]) * float(sg_window_i)
-        roots = np.asarray([self.solve_sg_profile_target(row_idx, hkl, omega_center, target, meta)
-                            for target in targets], dtype=float)
-        lower, upper = float(np.min(roots)), float(np.max(roots))
-        if not np.all(np.isfinite(roots)) or not lower < upper:
-            raise LocalSgCrossingError("target-Sg equivalent angular interval has non-finite or coincident endpoints")
-        maximum = float(self.cfg.profile_angle_max_half_width_deg)
-        excursion = float(np.max(np.abs(roots - float(omega_center))))
-        if excursion > maximum + 1e-12:
-            raise LocalSgCrossingError(
-                f"row {row_idx}: target_sg_equivalent_v1 needs angular interval [{lower:.9g}, {upper:.9g}] degrees "
-                f"about {float(omega_center):.9g}, exceeding profile_angle_max_half_width_deg={maximum:g}; "
-                "refusing to clip a different observation window. Review geometry before raising the explicit bound."
-            )
-        derivative = float(self.sg_derivative_per_deg(hkl, omega_center))
-        oscillation = abs(float(self.data.oscillation_range))
-        strict_bound = max(2.0 * oscillation, min(2.0, 10.0 * oscillation))
-        error = self.same_branch_interval_error(hkl, lower, upper, derivative, strict_bound)
-        if error:
-            raise LocalSgCrossingError(f"row {row_idx}: target-Sg equivalent interval leaves the selected branch: {error}")
-        residuals = np.asarray([float(self.sg_for_hkls(np.asarray([hkl]), omega)[0]) - target
-                                for omega, target in zip(roots, targets, strict=True)])
-        if np.max(np.abs(residuals)) > 1e-9:
-            raise LocalSgCrossingError(f"row {row_idx}: target-Sg angular endpoint residual exceeds 1e-9 inverse Angstrom")
-        return lower, upper, residuals
+        return omegas, np.zeros((len(omegas), 2), dtype=float), weights, sg_resid, profile_meta, mosaicity_meta
 
     def row_profile_omega_points(self, row_idx, hkl, omega_center, center_sg, sg_window_i):
-        """Build solved base-profile angles convolved with direct angular mosaicity."""
-
-        coordinate = str(getattr(self.cfg, "profile_coordinate", "target_sg") or "target_sg").lower()
-        if coordinate == "direct_angle":
-            jitter_sigma, jitter_meta = self.row_sg_jitter_sigma(row_idx, hkl)
-            if jitter_sigma > 0.0:
-                raise ValueError("direct-angle profile quadrature cannot be combined with target-Sg jitter")
-            n_base = max(1, int(self.cfg.n_points))
-            derivative = abs(float(self.sg_derivative_per_deg(hkl, omega_center)))
-            if not math.isfinite(derivative) or derivative <= 1e-12:
-                raise ValueError("direct-angle profile requires a finite nonzero dSg/domega")
-            raw_half_width_deg = 0.5 * float(sg_window_i) / derivative
-            maximum = float(getattr(self.cfg, "profile_angle_max_half_width_deg", 2.0))
-            half_width_deg = min(raw_half_width_deg, maximum)
-            normalization = str(getattr(self.cfg, "profile_normalization", "legacy") or "legacy").lower()
-            endpoint_residuals = np.asarray([], dtype=float)
-            midpoint = float(omega_center)
-            normalization_factor = 1.0
-            if normalization == "target_sg_equivalent_v1":
-                lower, upper, endpoint_residuals = self.target_sg_angular_interval(
-                    row_idx, hkl, omega_center, center_sg, sg_window_i, jitter_meta
-                )
-                midpoint = 0.5 * (lower + upper)
-                half_width_deg = 0.5 * (upper - lower)
-                normalization_factor = self.window_integral_factor(sg_window_i)
-            elif normalization == "legacy":
-                lower, upper = midpoint - half_width_deg, midpoint + half_width_deg
-            else:
-                raise ValueError(f"unknown profile_normalization={normalization!r}")
-            rule = str(getattr(self.cfg, "profile_quadrature", "uniform") or "uniform").lower()
-            accumulation = str(getattr(self.cfg, "profile_accumulation", "sum") or "sum").lower()
-            if n_base == 1:
-                base_offsets = np.asarray([0.0], dtype=float)
-                base_weights = np.asarray([1.0], dtype=float)
-            elif rule == "uniform":
-                base_offsets = np.linspace(-half_width_deg, half_width_deg, n_base)
-                base_weights = np.ones(n_base, dtype=float)
-            elif rule == "trapezoid":
-                base_offsets = np.linspace(-half_width_deg, half_width_deg, n_base)
-                base_weights = np.ones(n_base, dtype=float)
-                base_weights[[0, -1]] = 0.5
-                base_weights *= n_base / max(float(np.sum(base_weights)), 1e-30)
-            elif rule in {"gauss_legendre", "legendre"}:
-                nodes, weights = leggauss(n_base)
-                base_offsets = half_width_deg * np.asarray(nodes, dtype=float)
-                base_weights = np.asarray(weights, dtype=float)
-                base_weights *= n_base / max(float(np.sum(base_weights)), 1e-30)
-            else:
-                raise ValueError(f"unknown profile_quadrature={rule!r}")
-            if accumulation == "mean":
-                base_weights /= max(float(np.sum(base_weights)), 1e-30)
-            elif accumulation != "sum":
-                raise ValueError(f"unknown profile_accumulation={accumulation!r}")
-            # The legacy target-Sg weights are normalized angular weights times the adaptive Sg-width ratio.
-            # Using the exact same interval makes these two coordinates equivalent at quadrature convergence.
-            base_weights *= normalization_factor
-            angular_offsets, angular_weights, mosaicity_meta = self.row_mosaicity_angle_points()
-            sample_omegas = (
-                midpoint + base_offsets[:, None] + np.asarray(angular_offsets, dtype=float)[None, :]
-            ).reshape(-1)
-            profile_weights = (base_weights[:, None] * np.asarray(angular_weights, dtype=float)[None, :]).reshape(-1)
-            jitter_meta.update(
-                {
-                    "sg_profile_coordinate": "direct_angle",
-                    "sg_profile_quadrature": rule,
-                    "sg_profile_accumulation": accumulation,
-                    "sg_profile_angle_jacobian": False,
-                    "sg_profile_angle_half_width_deg": float(half_width_deg),
-                    "sg_profile_angle_raw_half_width_deg": float(raw_half_width_deg),
-                    "sg_profile_angle_half_width_clipped": bool(normalization == "legacy" and half_width_deg < raw_half_width_deg),
-                    "sg_profile_angle_interval_deg": [lower, upper],
-                    "sg_profile_angle_center_offset_deg": midpoint - float(omega_center),
-                    "sg_profile_normalization": normalization,
-                    "sg_profile_normalization_factor": float(normalization_factor),
-                    "sg_profile_weight_sum": float(np.sum(profile_weights)),
-                    "sg_profile_points_total": int(len(profile_weights)),
-                    "sg_profile_same_branch_continuation_used": bool(jitter_meta.get("sg_profile_same_branch_continuation_used", False)),
-                    "sg_profile_same_branch_continuation_segments": int(jitter_meta.get("sg_profile_same_branch_continuation_segments", 1)),
-                    "sg_profile_root_search": "target_sg_endpoints" if normalization == "target_sg_equivalent_v1" else "not_used_direct_angle",
-                    "sg_jitter_kernel_points": 1,
-                    "sg_jitter_offset_abs_p95_inv_A": 0.0,
-                }
-            )
-            return (
-                np.asarray(sample_omegas, dtype=float),
-                np.asarray(profile_weights, dtype=float),
-                endpoint_residuals,
-                jitter_meta,
-                mosaicity_meta,
-            )
-        if coordinate != "target_sg":
-            raise ValueError(f"unknown profile_coordinate={coordinate!r}")
+        """Build solved target-Sg profile angles convolved with direct angular mosaicity."""
 
         requested, base_weights, jitter_meta = self.row_profile_sg_points(row_idx, hkl, sg_window_i)
         physical_targets = float(center_sg) + np.asarray(requested, dtype=float)
