@@ -4,7 +4,7 @@
 For every requested row the production row plan (``XDSBlochPort.row_prediction_plan``) gives the rocking-profile
 weights and one Hamiltonian per profile point, for any Config: fixed or per-row (``dials_bbox``) Sg windows,
 ``n_points``, the re-centred transverse cone (``transverse_target`` sigma and points), dose B, ``max_support_sg``,
-``n_basis``. Each Hamiltonian is split exactly as H = H0 + i*mu*I (non-uniform absorption fails
+``n_basis``. Each Hamiltonian is split exactly as H = H0 + i*mu*I (any other anti-Hermitian part fails
 closed) and H0 is diagonalised once. The packed record per row has the layout of
 tests/reference/reference_lib.py pack_spectra: profile weights, eigenvalues, couplings
 V[1, j] conj(V[0, j]), the Born terms |H10|^2 and Re(H11 - H00), and mu. Spectra do not depend on thickness,
@@ -84,8 +84,8 @@ def split_uniform_absorption(H, rtol: float = UNIFORM_ABSORPTION_RTOL) -> tuple[
     off = anti - np.diag(np.diag(anti))
     if float(np.max(np.abs(off), initial=0.0)) > rtol * scale or float(np.max(np.abs(mu_diag - mu))) > rtol * scale:
         raise ValueError(
-            "spectra need a Hermitian Hamiltonian plus a uniform absorptive potential i*mu*I; this absorption "
-            "model is non-uniform or off-diagonal (use absorption_mode none, mean or midgley_like with absorption_frac 0)"
+            "spectra need a Hermitian Hamiltonian plus a uniform absorptive potential i*mu*I; the anti-Hermitian "
+            "part of this Hamiltonian is not i*mu*I within the single-precision tolerance"
         )
     return herm, mu
 

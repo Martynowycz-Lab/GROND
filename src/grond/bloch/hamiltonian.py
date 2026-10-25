@@ -5,7 +5,6 @@ is required for passive propagation. Physical defaults remain unchanged."""
 
 from __future__ import annotations
 
-import math
 import operator
 from collections.abc import Sequence
 
@@ -114,68 +113,10 @@ class HamiltonianMixin:
     """One cohesive part of XDSBlochPort; initialized by the public facade."""
 
     def absorption_enabled(self):
-        """Return True when an absorption mode is set and at least one absorption strength is nonzero."""
+        """Return True when an absorption mode is set and the uniform absorption strength is nonzero."""
 
         mode = str(getattr(self.cfg, "absorption_mode", "none") or "none").lower()
-        return mode != "none" and (
-            abs(float(getattr(self.cfg, "absorption_mu", 0.0))) > 0.0
-            or abs(float(getattr(self.cfg, "absorption_frac", 0.0))) > 0.0
-            or abs(float(getattr(self.cfg, "absorption_mu_g2", 0.0))) > 0.0
-            or abs(float(getattr(self.cfg, "absorption_mu_theta2", 0.0))) > 0.0
-        )
-
-    def beam_absorption_mu(self, basis):
-        """Beam-specific diagonal absorptive potential in Hamiltonian units.
-
-        The returned values are added as ``+i*mu_i``. With the project
-        convention ``exp(2*pi*i*H*t)``, positive ``mu_i`` damps amplitudes as
-        ``exp(-2*pi*mu_i*t)``.  ``absorption_mu`` is the uniform term.  The
-        optional slopes are global, auditable damping probes versus |g|^2 and
-        the small Bragg angle squared; they are not row-wise fitted knobs.
-        """
-        inv_d2 = np.asarray(self.inv_d2_for_hkls(np.asarray(basis, dtype=int)), dtype=float)
-        sin_theta = np.sqrt(np.maximum(inv_d2, 0.0)) / max(2.0 * float(self.data.k), 1e-30)
-        theta = np.arcsin(np.clip(sin_theta, 0.0, 1.0))
-        return (
-            float(getattr(self.cfg, "absorption_mu", 0.0))
-            + float(getattr(self.cfg, "absorption_mu_g2", 0.0)) * inv_d2
-            + float(getattr(self.cfg, "absorption_mu_theta2", 0.0)) * theta * theta
-        )
-
-    def offdiag_absorption_eta(self, diff):
-        """Return the off-diagonal absorption fraction eta for one beam difference (0.0 when inactive).
-
-        offdiag_fraction and midgley modes return absorption_frac; offdiag_tds scales it by 1 - exp(-B_tds/(4 d^2)),
-        with 1/d^2 of the difference in Å⁻².
-        """
-
-        mode = str(getattr(self.cfg, "absorption_mode", "none") or "none").lower()
-        eta = float(getattr(self.cfg, "absorption_frac", 0.0))
-        if eta == 0.0:
-            return 0.0
-        if mode in {"offdiag_fraction", "midgley_like", "midgley"}:
-            return eta
-        if mode == "offdiag_tds":
-            inv_d2 = float(self.inv_d2_for_hkls(diff))
-            b_tds = max(float(getattr(self.cfg, "absorption_tds_b", 0.0)), 0.0)
-            return eta * (1.0 - math.exp(-0.25 * b_tds * inv_d2))
-        return 0.0
-
-    def offdiag_absorption_eta_array(self, diffs):
-        """Return offdiag_absorption_eta along the last axis of ``diffs``, as an array of shape ``diffs.shape[:-1]``."""
-
-        mode = str(getattr(self.cfg, "absorption_mode", "none") or "none").lower()
-        eta = float(getattr(self.cfg, "absorption_frac", 0.0))
-        diffs = np.asarray(diffs, dtype=int)
-        if eta == 0.0:
-            return np.zeros(diffs.shape[:-1], dtype=float)
-        if mode in {"offdiag_fraction", "midgley_like", "midgley"}:
-            return np.full(diffs.shape[:-1], eta, dtype=float)
-        if mode == "offdiag_tds":
-            inv_d2 = self.inv_d2_for_hkls(diffs.reshape(-1, 3)).reshape(diffs.shape[:-1])
-            b_tds = max(float(getattr(self.cfg, "absorption_tds_b", 0.0)), 0.0)
-            return eta * (1.0 - np.exp(-0.25 * b_tds * inv_d2))
-        return np.zeros(diffs.shape[:-1], dtype=float)
+        return mode != "none" and abs(float(getattr(self.cfg, "absorption_mu", 0.0))) > 0.0
 
     def hamiltonian_static_part(self, basis, absorb: bool = True, row_idx=None):
         """Return the row-static Hamiltonian terms for a fixed beam basis.
@@ -196,8 +137,6 @@ class HamiltonianMixin:
             # Positive imaginary diagonal gives exp(2*pi*i*(S+i*mu)*t),
             # i.e. uniform elastic-beam damping exp(-2*pi*mu*t).
             H[np.diag_indices(n)] += 1j * float(getattr(self.cfg, "absorption_mu", 0.0))
-        elif absorb and mode == "beam_dependent":
-            H[np.diag_indices(n)] += 1j * self.beam_absorption_mu(basis)
         convention = str(getattr(self.cfg, "matrix_convention", "j_minus_i") or "j_minus_i")
         if convention not in {"j_minus_i", "i_minus_j"}:
             raise ValueError(f"unknown matrix_convention={convention!r}; expected j_minus_i or i_minus_j")
@@ -209,18 +148,6 @@ class HamiltonianMixin:
             else basis[:, None, :] - basis[None, :, :]
         )
         u_mat = self.ug_array(diffs) if row_idx is None else self.ug_for_row_array(diffs, row_idx)
-        if absorb:
-            eta = self.offdiag_absorption_eta_array(diffs)
-            if np.any(eta):
-                # Absorptive Fourier coefficients are represented as a
-                # same-phase imaginary potential. V(-g)=conj(U_g)+i*eta*conj(U_g),
-                # not conj(V(g)), so the matrix is intentionally non-Hermitian.
-                # The midgley_like mode is an optical-potential diagnostic
-                # following Colmey, Doherty, Malik, and Midgley's absorption
-                # analysis for electron-diffraction Bloch row modelling; it is gated rather
-                # than assumed because absorption can be negligible for many
-                # routine light-atom integrated-intensity regularizations.
-                u_mat = u_mat + 1j * eta * u_mat
         np.fill_diagonal(u_mat, 0.0 + 0.0j)
         H += u_mat.astype(h_dtype, copy=False) / (2.0 * self.data.k)
         if absorb and self.absorption_enabled():

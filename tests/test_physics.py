@@ -289,20 +289,8 @@ def test_nonhermitian_passivity_check_rejects_gain_and_exception_is_picklable():
     for thickness in [1,100,1000,5000]:
         U = expm(2j*np.pi*passive*thickness)
         assert np.linalg.svd(U, compute_uv=False)[0] <= 1 + 1e-13
-        port = minimal_port(absorption_mode='midgley_like', absorption_mu=3e-5, absorption_frac=.02)
+        port = minimal_port(absorption_mode='midgley_like', absorption_mu=3e-5)
         assert port.propagate_direct_to_target(passive, thickness) == pytest.approx(abs(U[1,0])**2, rel=1e-12, abs=1e-14)
-
-
-def test_passivity_rejection_applies_to_uncached_and_cached_row_matrices():
-    from grond.engine.bloch_engine import NonPassiveAbsorptionError
-    port = minimal_port(absorption_mode='midgley_like', absorption_mu=0, absorption_frac=.02)
-    port.ug_array = lambda hkls: np.ones(hkls.shape[:-1], dtype=complex) * .08
-    basis = np.array([[0,0,0], [1,0,0]])
-    with pytest.raises(NonPassiveAbsorptionError):
-        port.hamiltonian_static_part(basis)
-    diffs = (basis[None,:,:]-basis[:,None,:]).reshape(-1,3)
-    with pytest.raises(NonPassiveAbsorptionError):
-        port.cached_static_hamiltonian(basis, np.arange(4), diffs, np.zeros(4), np.full(4,.08+0j), 0, True, dose_delta_b=0)
 
 
 def test_thickness_average_matches_analytic_uniform_pendellosung():

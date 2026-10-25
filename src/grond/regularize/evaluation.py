@@ -184,12 +184,7 @@ def evaluate_trial(data, target, base_sig, pred, indices, masks, nui: Nuisance, 
     # Integer consumers get ceil(EDF); the EDF itself is reported separately.
     n_scales = int(math.ceil(spline["info"]["edf"]))
     frame_scale_count = int(n_scales)
-    n_abs = int(str(nui.absorption_mode) != "none" and (
-        abs(float(nui.absorption_mu)) > 0.0
-        or abs(float(nui.absorption_frac)) > 0.0
-        or abs(float(nui.absorption_mu_g2)) > 0.0
-        or abs(float(nui.absorption_mu_theta2)) > 0.0
-    ))
+    n_abs = int(str(nui.absorption_mode) != "none" and abs(float(nui.absorption_mu)) > 0.0)
     # gamma (mean, shape) has as many parameters as uniform_gradient (t0, grad): its shape takes the gradient's slot.
     n_thick_shape = int(str(nui.thickness_model) not in {"uniform_gradient", "gamma"} or abs(float(nui.thickness_sigma_frac)) > 0.0)
     n_dose = int(str(nui.dose_b_mode) != "none" and abs(float(nui.dose_b_per_frame)) > 0.0)

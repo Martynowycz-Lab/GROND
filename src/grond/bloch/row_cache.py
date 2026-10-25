@@ -398,11 +398,11 @@ class RowCacheMixin:
         return self.calculate_ug_array(unique_diffs)
 
     def cached_static_hamiltonian(
-        self, basis, diff_idx, unique_diffs, unique_inv_d2, unique_ug, row_idx, absorb: bool, dose_delta_b=None
+        self, basis, diff_idx, unique_inv_d2, unique_ug, row_idx, absorb: bool, dose_delta_b=None
     ):
         """Return a row's static Hamiltonian from cached beam-difference lookups (see hamiltonian_static_part).
 
-        ``diff_idx`` maps the n*n beam differences into ``unique_diffs``, ``unique_inv_d2`` and ``unique_ug``. Dose
+        ``diff_idx`` maps the n*n beam differences into ``unique_inv_d2`` and ``unique_ug``. Dose
         attenuation uses ``dose_delta_b`` when given, else the row's current value; absorption terms and the passivity
         check are those of hamiltonian_static_part.
         """
@@ -414,18 +414,11 @@ class RowCacheMixin:
         mode = str(getattr(self.cfg, "absorption_mode", "none") or "none").lower()
         if absorb and mode in {"mean", "midgley_like", "midgley"}:
             H[np.diag_indices(n)] += 1j * float(getattr(self.cfg, "absorption_mu", 0.0))
-        elif absorb and mode == "beam_dependent":
-            H[np.diag_indices(n)] += 1j * self.beam_absorption_mu(basis)
         u_mat = np.asarray(unique_ug[diff_idx], dtype=h_dtype).reshape(n, n).copy()
         delta_b = float(self.row_delta_b(row_idx) if dose_delta_b is None else dose_delta_b)
         if delta_b != 0.0:
             inv_d2 = np.asarray(unique_inv_d2[diff_idx], dtype=float).reshape(n, n)
             u_mat *= np.exp(-0.25 * delta_b * inv_d2)
-        if absorb:
-            diffs = np.asarray(unique_diffs[diff_idx], dtype=int).reshape(n, n, 3)
-            eta = self.offdiag_absorption_eta_array(diffs)
-            if np.any(eta):
-                u_mat = u_mat + 1j * eta * u_mat
         np.fill_diagonal(u_mat, 0.0 + 0.0j)
         H += u_mat / (2.0 * self.data.k)
         if absorb and self.absorption_enabled():
@@ -452,7 +445,6 @@ class RowCacheMixin:
         H_dyn_static = self.cached_static_hamiltonian(
             basis,
             diff_idx,
-            cache["unique_diffs"],
             cache["unique_inv_d2"],
             unique_ug,
             row_idx,
@@ -463,7 +455,6 @@ class RowCacheMixin:
             H_born_static = self.cached_static_hamiltonian(
                 basis,
                 diff_idx,
-                cache["unique_diffs"],
                 cache["unique_inv_d2"],
                 unique_ug,
                 row_idx,

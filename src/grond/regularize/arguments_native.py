@@ -119,12 +119,8 @@ def build_parser(description: str, *, default_hkl, default_res, default_baseline
             "scan-datum mismatch without using intensities and tests a compact symmetric residual grid."
         ),
     )
-    ap.add_argument("--absorption-mode-grid", default="none", help="Comma grid: none, mean, beam_dependent, offdiag_fraction, offdiag_tds, midgley_like.")
+    ap.add_argument("--absorption-mode-grid", default="none", help="Comma grid: none, mean, midgley_like (both uniform).")
     ap.add_argument("--absorption-mu-grid", default="0.0", help="Uniform imaginary diagonal damping grid in inverse Angstrom.")
-    ap.add_argument("--absorption-frac-grid", default="0.0", help="Imaginary absorptive off-diagonal fraction grid.")
-    ap.add_argument("--absorption-mu-g2-grid", default="0.0", help="Beam-dependent diagonal damping slope grid versus |g|^2.")
-    ap.add_argument("--absorption-mu-theta2-grid", default="0.0", help="Beam-dependent diagonal damping slope grid versus Bragg-angle^2.")
-    ap.add_argument("--absorption-tds-b-grid", default="0.0", help="B_TDS grid for offdiag_tds eta*U_g*(1-exp(-B_TDS*|g|^2/4)).")
     ap.add_argument("--dose-b-mode-grid", default="none", help="Comma grid: none, linear_frame.")
     ap.add_argument("--dose-b-per-frame-grid", default="0.0", help="Extra isotropic B per XDS frame for dose_b_mode=linear_frame.")
     ap.add_argument("--dose-b-ref-frame", type=float, default=float("nan"), help="Reference ZCAL frame for dose-dependent B. Default uses the first frame in the data.")

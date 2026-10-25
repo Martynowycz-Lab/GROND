@@ -346,7 +346,7 @@ def _elastic_pair_records(
         try:
             elastic, source_absorption = elastic_hand_nuisance(nuisance)
         except ValueError as exc:
-            # Non-uniform absorption: fail closed for this dataset, never approximate.
+            # An absorption the exact pair cannot keep: fail closed for this dataset, never approximate.
             record.update(
                 status="calculation_error",
                 reason=f"ValueError: {exc}",

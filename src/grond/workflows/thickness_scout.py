@@ -291,12 +291,8 @@ def _thickness_scout_variant_args(
         variant.sg_jitter_points = 1
         variant.absorption_mode_grid = "none"
         variant.absorption_mu_grid = "0.0"
-        variant.absorption_frac_grid = "0.0"
-        variant.absorption_mu_g2_grid = "0.0"
-        variant.absorption_mu_theta2_grid = "0.0"
-        variant.absorption_tds_b_grid = "0.0"
     elif feature_mode in {"final", "final-diagnostic", "final_diagnostic"}:
-        # final-diagnostic: the Sg jitter and absorption of a typical final run.
+        # final-diagnostic: the Sg jitter of a typical final run and a uniform absorption.
         variant.sg_jitter_mode_grid = "gaussian"
         variant.sg_jitter_sigma0_grid = "0.0015"
         variant.sg_jitter_sigma_d_inv_grid = "0.0"
@@ -304,10 +300,6 @@ def _thickness_scout_variant_args(
         variant.sg_jitter_points = 3
         variant.absorption_mode_grid = "midgley_like"
         variant.absorption_mu_grid = "5e-05"
-        variant.absorption_frac_grid = "0.02"
-        variant.absorption_mu_g2_grid = "0.0"
-        variant.absorption_mu_theta2_grid = "0.0"
-        variant.absorption_tds_b_grid = "0.0"
     else:
         raise SystemExit(f"Unknown thickness-scout feature mode {feature_mode!r}. Use bare or final-diagnostic.")
     return variant

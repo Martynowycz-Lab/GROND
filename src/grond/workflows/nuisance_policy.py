@@ -33,7 +33,7 @@ LEGACY_SG_WINDOW_MAX = 0.012
 MOSAICITY_MAX_SIGMA_DEG = 0.5
 # Sequential per-crystal feature gates.  The mosaic cone precedes the Sg-jitter proxy because the
 # two profile broadenings exclude each other and the cone is the geometrically defined one.
-FEATURE_GATE_FAMILIES = ("row_resolution", "absorption", "mosaicity", "sg_jitter", "sigma_error", "dose")
+FEATURE_GATE_FAMILIES = ("row_resolution", "mosaicity", "sg_jitter", "sigma_error", "dose")
 
 # Beams of the screen, gate and nested-selection stages.
 SCREEN_N_BASIS = 24
@@ -56,10 +56,6 @@ NUISANCE_GRIDS = {
     "sg_jitter_sigma_frame_grid": "0.0",
     "absorption_mode_grid": "none",
     "absorption_mu_grid": "0.0",
-    "absorption_frac_grid": "0.0",
-    "absorption_mu_g2_grid": "0.0",
-    "absorption_mu_theta2_grid": "0.0",
-    "absorption_tds_b_grid": "0.0",
     "dose_b_mode_grid": "none,linear_frame",
     "dose_b_per_frame_grid": "",
 }
@@ -290,10 +286,6 @@ def compact_base_nuisance(args: argparse.Namespace) -> dict:
         "sg_jitter_sigma_frame": "0.0",
         "absorption_mode": "none",
         "absorption_mu": "0.0",
-        "absorption_frac": "0.0",
-        "absorption_mu_g2": "0.0",
-        "absorption_mu_theta2": "0.0",
-        "absorption_tds_b": "0.0",
         "dose_b_mode": "none",
         "dose_b_per_frame": "0.0",
         "mosaicity_mode": "none",
@@ -342,10 +334,6 @@ def transform_scout_nuisance(args: argparse.Namespace) -> dict:
         "sg_jitter_sigma_frame": "0.0",
         "absorption_mode": "none",
         "absorption_mu": "0.0",
-        "absorption_frac": "0.0",
-        "absorption_mu_g2": "0.0",
-        "absorption_mu_theta2": "0.0",
-        "absorption_tds_b": "0.0",
         "dose_b_mode": "none",
         "dose_b_per_frame": "0.0",
         "mosaicity_mode": "none",
@@ -372,16 +360,6 @@ def feature_grid(args: argparse.Namespace, family: str, nui: dict, ds: DatasetSp
 
     if family == "row_resolution":
         return nuisance_with_updates(nui, row_resolution_b=nuisance_grid(args, "row_resolution_b_grid"))
-    if family == "absorption":
-        return nuisance_with_updates(
-            nui,
-            absorption_mode=nuisance_grid(args, "absorption_mode_grid"),
-            absorption_mu=nuisance_grid(args, "absorption_mu_grid"),
-            absorption_frac=nuisance_grid(args, "absorption_frac_grid"),
-            absorption_mu_g2=nuisance_grid(args, "absorption_mu_g2_grid"),
-            absorption_mu_theta2=nuisance_grid(args, "absorption_mu_theta2_grid"),
-            absorption_tds_b=nuisance_grid(args, "absorption_tds_b_grid"),
-        )
     if family == "sg_jitter":
         return nuisance_with_updates(
             nui,
@@ -421,15 +399,6 @@ def feature_is_enabled(args: argparse.Namespace, family: str) -> bool:
 
     if family == "row_resolution":
         return grid_has_variation(nuisance_grid(args, "row_resolution_b_grid"))
-    if family == "absorption":
-        return (
-            grid_has_variation(nuisance_grid(args, "absorption_mode_grid"))
-            or grid_has_variation(nuisance_grid(args, "absorption_mu_grid"))
-            or grid_has_variation(nuisance_grid(args, "absorption_frac_grid"))
-            or grid_has_variation(nuisance_grid(args, "absorption_mu_g2_grid"))
-            or grid_has_variation(nuisance_grid(args, "absorption_mu_theta2_grid"))
-            or grid_has_variation(nuisance_grid(args, "absorption_tds_b_grid"))
-        )
     if family == "sg_jitter":
         return (
             grid_has_variation(nuisance_grid(args, "sg_jitter_mode_grid"))
@@ -754,7 +723,6 @@ def configure_auto_physics(prep: PrepConfig, args: argparse.Namespace) -> dict:
         "absorption": {
             "mode_grid": str(nuisance_grid(args, "absorption_mode_grid")),
             "mu_grid": str(nuisance_grid(args, "absorption_mu_grid")),
-            "frac_grid": str(nuisance_grid(args, "absorption_frac_grid")),
         },
         "physics_gate_selection": "orbit-cv",
         "thickness_gate_split": "matched",

@@ -130,26 +130,10 @@ def cmd_hand_check(args: argparse.Namespace) -> int:
         bool(args.dry_run),
     )
     elastic_nuisance = dict(nuisance)
-    source_absorption = {
-        key: elastic_nuisance.get(key)
-        for key in (
-            "absorption_mode",
-            "absorption_mu",
-            "absorption_frac",
-            "absorption_mu_g2",
-            "absorption_mu_theta2",
-            "absorption_tds_b",
-        )
-    }
-    source_absorption_active = str(source_absorption.get("absorption_mode") or "none").lower() != "none" or any(
-        abs(float(source_absorption.get(key) or 0.0)) > 0.0
-        for key in (
-            "absorption_mu",
-            "absorption_frac",
-            "absorption_mu_g2",
-            "absorption_mu_theta2",
-            "absorption_tds_b",
-        )
+    source_absorption = {key: elastic_nuisance.get(key) for key in ("absorption_mode", "absorption_mu")}
+    source_absorption_active = (
+        str(source_absorption.get("absorption_mode") or "none").lower() != "none"
+        or abs(float(source_absorption.get("absorption_mu") or 0.0)) > 0.0
     )
     elastic_only = args.hand_check_method == "negative-thickness" or args.hand_check_absorption == "elastic"
     if args.hand_check_method == "negative-thickness" and args.hand_check_absorption == "preserve":
@@ -159,16 +143,7 @@ def cmd_hand_check(args: argparse.Namespace) -> int:
             "--hand-check-method explicit to preserve absorption."
         )
     if elastic_only:
-        elastic_nuisance.update(
-            {
-                "absorption_mode": "none",
-                "absorption_mu": 0.0,
-                "absorption_frac": 0.0,
-                "absorption_mu_g2": 0.0,
-                "absorption_mu_theta2": 0.0,
-                "absorption_tds_b": 0.0,
-            }
-        )
+        elastic_nuisance.update({"absorption_mode": "none", "absorption_mu": 0.0})
     selected_run = out / "selected"
     selected_cmd = native_stage_cmd(
         python,

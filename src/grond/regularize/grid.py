@@ -172,8 +172,6 @@ def populate_nuisance_trials(
                                                             f"sg_jitter={sg_jitter_mode} sigma0={sg_jitter_sigma0:g} "
                                                             f"sigma_d_inv={sg_jitter_sigma_d_inv:g} sigma_frame={sg_jitter_sigma_frame:g} "
                                                             f"abs={abs_par['absorption_mode']} mu={abs_par['absorption_mu']:g} "
-                                                            f"frac={abs_par['absorption_frac']:g} mu_g2={abs_par['absorption_mu_g2']:g} "
-                                                            f"mu_theta2={abs_par['absorption_mu_theta2']:g} tds_b={abs_par['absorption_tds_b']:g} "
                                                             f"dose_b={dose_b_mode} per_frame={dose_b_per_frame:g} "
                                                             f"mosaicity={mosaicity_mode} sigma_deg={mosaicity_sigma_deg:g}",
                                                             flush=True,

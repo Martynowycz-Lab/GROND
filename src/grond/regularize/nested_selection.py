@@ -774,6 +774,5 @@ def engine_config_fields(pick: dict, support: ThicknessSupport | None = None) ->
     else:
         fields.update(thickness_model="uniform_gradient", thickness_A=params["t0"], thickness_grad_frac=params["grad"])
     mu = float(pick.get("mu", 0.0))
-    fields.update(absorption_mode="mean" if mu > 0.0 else "none", absorption_mu=mu, absorption_frac=0.0,
-                  absorption_mu_g2=0.0, absorption_mu_theta2=0.0, absorption_tds_b=0.0)
+    fields.update(absorption_mode="mean" if mu > 0.0 else "none", absorption_mu=mu)
     return fields

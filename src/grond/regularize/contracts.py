@@ -44,10 +44,6 @@ class Nuisance:
     geometry_path_file: str = ""
     absorption_mode: str = "none"
     absorption_mu: float = 0.0
-    absorption_frac: float = 0.0
-    absorption_mu_g2: float = 0.0
-    absorption_mu_theta2: float = 0.0
-    absorption_tds_b: float = 0.0
     dose_b_mode: str = "none"
     dose_b_per_frame: float = 0.0
     dose_b_ref_frame: float = float("nan")
@@ -186,33 +182,12 @@ def scale_model_from_args(args) -> ScaleModel:
 
 
 def absorption_parameter_grid(args, mode: str) -> list[dict[str, float | str]]:
-    """Return every absorption parameter set of one mode as Nuisance fields; parameters the mode does not use are 0."""
+    """Return every uniform absorption parameter set of one mode as Nuisance fields; mode none has mu 0."""
 
-    valid_modes = {"none", "mean", "beam_dependent", "offdiag_fraction", "offdiag_tds", "midgley_like"}
-    if mode not in valid_modes:
+    if mode not in {"none", "mean", "midgley_like"}:
         raise ValueError(f"unknown absorption mode {mode!r}")
-    mu_values = parse_float_grid(args.absorption_mu_grid) if mode in {"mean", "beam_dependent", "midgley_like"} else [0.0]
-    frac_values = parse_float_grid(args.absorption_frac_grid) if mode in {"offdiag_fraction", "offdiag_tds", "midgley_like"} else [0.0]
-    mu_g2_values = parse_float_grid(args.absorption_mu_g2_grid) if mode == "beam_dependent" else [0.0]
-    mu_theta2_values = parse_float_grid(args.absorption_mu_theta2_grid) if mode == "beam_dependent" else [0.0]
-    tds_b_values = parse_float_grid(args.absorption_tds_b_grid) if mode == "offdiag_tds" else [0.0]
-    out = []
-    for mu in mu_values:
-        for frac in frac_values:
-            for mu_g2 in mu_g2_values:
-                for mu_theta2 in mu_theta2_values:
-                    for tds_b in tds_b_values:
-                        out.append(
-                            {
-                                "absorption_mode": mode,
-                                "absorption_mu": float(mu),
-                                "absorption_frac": float(frac),
-                                "absorption_mu_g2": float(mu_g2),
-                                "absorption_mu_theta2": float(mu_theta2),
-                                "absorption_tds_b": float(tds_b),
-                            }
-                        )
-    return out
+    mu_values = parse_float_grid(args.absorption_mu_grid) if mode != "none" else [0.0]
+    return [{"absorption_mode": mode, "absorption_mu": float(mu)} for mu in mu_values]
 
 
 AUTO_EXACT_ROW_PLAN_MIN_REUSE = 16

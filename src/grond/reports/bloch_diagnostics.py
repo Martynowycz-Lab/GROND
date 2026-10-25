@@ -149,7 +149,7 @@ def _write_bloch_diagnostics_report(
         f"| geometry filter summary | `{geometry}` |",
         f"| thickness model | `{nuisance.get('thickness_model', 'n/a')}`; center `{_quick_number(nuisance.get('thickness_A', nuisance.get('thickness_grid')), 3)}` A; gradient `{_quick_number(nuisance.get('thickness_grad_frac', nuisance.get('thickness_grad_grid')), 6)}` |",
         f"| Sg jitter | `{nuisance.get('sg_jitter_mode', 'n/a')}`; sigma0 `{_quick_number(nuisance.get('sg_jitter_sigma0'), 6)}`; sigma d^-1 `{_quick_number(nuisance.get('sg_jitter_sigma_d_inv'), 6)}`; sigma frame `{_quick_number(nuisance.get('sg_jitter_sigma_frame'), 6)}`; points `{nuisance.get('sg_jitter_points', 'n/a')}` |",
-        f"| absorption | `{nuisance.get('absorption_mode', 'n/a')}`; mu `{_quick_number(nuisance.get('absorption_mu'), 6)}`; frac `{_quick_number(nuisance.get('absorption_frac'), 6)}` |",
+        f"| absorption | `{nuisance.get('absorption_mode', 'n/a')}`; mu `{_quick_number(nuisance.get('absorption_mu'), 6)}` |",
         f"| scale model | {scale_text} |",
         f"| native row weights | a `{_quick_number(native_weight.get('a'), 6)}`; b `{_quick_number(native_weight.get('b'), 6)}` |",
         "",

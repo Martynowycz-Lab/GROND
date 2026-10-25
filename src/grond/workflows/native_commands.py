@@ -226,18 +226,6 @@ def native_stage_cmd(
         else nuisance_grid(args, "absorption_mode_grid"),
         "--absorption-mu-grid",
         grid_from_nuisance(pinned, "absorption_mu", "0.0") if pinned else nuisance_grid(args, "absorption_mu_grid"),
-        "--absorption-frac-grid",
-        grid_from_nuisance(pinned, "absorption_frac", "0.0")
-        if pinned
-        else nuisance_grid(args, "absorption_frac_grid"),
-        "--absorption-mu-g2-grid",
-        grid_from_nuisance(pinned, "absorption_mu_g2", "0.0")
-        if pinned
-        else nuisance_grid(args, "absorption_mu_g2_grid"),
-        "--absorption-mu-theta2-grid",
-        grid_from_nuisance(pinned, "absorption_mu_theta2", "0.0") if pinned else "0.0",
-        "--absorption-tds-b-grid",
-        grid_from_nuisance(pinned, "absorption_tds_b", "0.0") if pinned else "0.0",
         "--dose-b-mode-grid",
         grid_from_nuisance(pinned, "dose_b_mode", "none")
         if pinned

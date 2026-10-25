@@ -138,7 +138,7 @@ def _quick_dataset_nuisance_table_lines(contracts: list[Mapping[str, object]]) -
                     _quick_number(grad, 3),
                     _quick_number(nuisance.get("frame_offset"), 3),
                     f"{_quick_number(nuisance.get('group_width_deg'), 3)} deg / {nuisance.get('detector_scale_bins', 'n/a')}",
-                    f"{nuisance.get('absorption_mode', 'n/a')}; frac {_quick_number(nuisance.get('absorption_frac'), 4)}",
+                    f"{nuisance.get('absorption_mode', 'n/a')}; mu {_quick_number(nuisance.get('absorption_mu'), 4)}",
                     str(nuisance.get("sg_jitter_mode", "n/a")),
                     _quick_number(nuisance.get("row_resolution_b"), 4),
                     str(contract.get("scale_count", "n/a")),

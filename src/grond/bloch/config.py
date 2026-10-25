@@ -129,10 +129,6 @@ class Config:
     ug_d_min: float = 0.30
     absorption_mode: str = "none"
     absorption_mu: float = 0.0
-    absorption_frac: float = 0.0
-    absorption_mu_g2: float = 0.0
-    absorption_mu_theta2: float = 0.0
-    absorption_tds_b: float = 0.0
     dose_b_mode: str = "none"
     dose_b_per_frame: float = 0.0
     dose_b_ref_frame: float = float("nan")
@@ -208,10 +204,6 @@ class Config:
             "variance_b_corr": self.variance_b_corr,
             "variance_c_peak": self.variance_c_peak,
             "absorption_mu": self.absorption_mu,
-            "absorption_frac": self.absorption_frac,
-            "absorption_mu_g2": self.absorption_mu_g2,
-            "absorption_mu_theta2": self.absorption_mu_theta2,
-            "absorption_tds_b": self.absorption_tds_b,
             "dose_b_per_frame": self.dose_b_per_frame,
         }
         for name, value in nonnegative_fields.items():
@@ -277,18 +269,7 @@ class Config:
                 {"single", "uniform_gradient", "gaussian", "gaussian_gradient", "gamma"},
             ),
             "thickness_evaluator": (self.thickness_evaluator, set(THICKNESS_EVALUATORS)),
-            "absorption_mode": (
-                self.absorption_mode,
-                {
-                    "none",
-                    "mean",
-                    "beam_dependent",
-                    "offdiag_fraction",
-                    "offdiag_tds",
-                    "midgley_like",
-                    "midgley",
-                },
-            ),
+            "absorption_mode": (self.absorption_mode, {"none", "mean", "midgley_like", "midgley"}),
             "dose_b_mode": (self.dose_b_mode, {"none", "linear_frame"}),
             "matrix_convention": (self.matrix_convention, {"j_minus_i", "i_minus_j"}),
             "row_plan_cache": (
@@ -325,30 +306,17 @@ class Config:
             raise ValueError("frame_offset must be finite")
         if not (math.isnan(float(self.dose_b_ref_frame)) or math.isfinite(float(self.dose_b_ref_frame))):
             raise ValueError("dose_b_ref_frame must be finite or NaN")
-        if bool(self.paired_inverse_hand):
-            # The exact pair holds for H = H0 + i*mu*I only: a uniform diagonal
-            # loss (mean/midgley modes add i*mu to every beam) and no
-            # off-diagonal, |g|- or angle-dependent absorptive terms.
-            nonuniform_values = (
-                self.absorption_frac,
-                self.absorption_mu_g2,
-                self.absorption_mu_theta2,
-                self.absorption_tds_b,
+        # The exact hand pair holds for H = H0 + i*mu*I: no absorption, or a uniform diagonal loss (mean/midgley
+        # modes add i*mu to every beam).
+        if (
+            bool(self.paired_inverse_hand)
+            and str(self.absorption_mode).lower() == "none"
+            and abs(float(self.absorption_mu)) > 0.0
+        ):
+            raise ValueError(
+                "paired_inverse_hand requires absorption_mode=none with absorption_mu 0, or a uniform absorption "
+                "mode (mean, midgley_like, midgley) with absorption_mu >= 0"
             )
-            mode = str(self.absorption_mode).lower()
-            uniform_mode = mode in {"mean", "midgley_like", "midgley"}
-            if (
-                (mode != "none" and not uniform_mode)
-                or any(abs(float(value)) > 0.0 for value in nonuniform_values)
-                or (mode == "none" and abs(float(self.absorption_mu)) > 0.0)
-                or not math.isfinite(float(self.absorption_mu))
-                or float(self.absorption_mu) < 0.0
-            ):
-                raise ValueError(
-                    "paired_inverse_hand requires absorption_mode=none, or a uniform absorption mode "
-                    "(mean, midgley_like, midgley) with absorption_mu >= 0 and zero absorption_frac, "
-                    "absorption_mu_g2, absorption_mu_theta2 and absorption_tds_b"
-                )
 
 
 def frozen_kernel_contract(cfg: Config | None = None):
@@ -411,7 +379,7 @@ def frozen_kernel_contract(cfg: Config | None = None):
                     "absorption_allowed": "uniform_scalar_only",
                 }
             ),
-            "absorption": "optional non-Hermitian optical-potential diagnostics; default none. Modes are mean, beam_dependent, offdiag_fraction, offdiag_tds, and midgley_like.",
+            "absorption": "optional uniform imaginary potential i*mu*I; default none. Modes are mean and midgley_like.",
             "absorption_passivity": "the static loss operator (H-H^dagger)/(2i) must be positive semidefinite within numerical tolerance; nonpassive grid candidates are rejected",
             "rejected_nonhermitian_modes": [
                 "row-specific imaginary diagonal terms",

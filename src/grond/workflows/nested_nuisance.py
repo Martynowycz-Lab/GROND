@@ -57,7 +57,6 @@ from grond.workflows.nuisance_policy import (
     SCREEN_N_BASIS,
     auto_mosaicity_grid,
     dose_b_per_frame_grid,
-    feature_is_enabled,
     nuisance_grid,
     parse_strict_grid,
     stage_n_points,
@@ -172,12 +171,6 @@ def validate_nested_nuisance_policy(args: argparse.Namespace, prep: PrepConfig |
                 raise ValueError
         except ValueError:
             raise ValueError("--nested-n-points must be screen, final or an integer of at least 2") from None
-    if feature_is_enabled(args, "absorption"):
-        raise ValueError(
-            "--nuisance-selection nested keeps absorption off (uniform mu is degenerate with the thickness "
-            "distribution; the spectra need H = H0 + i*mu*I); an absorption grid needs "
-            "--nuisance-selection sequential"
-        )
     nested_grids(args)
     auto_mosaicity_grid(args)
     evaluator, evaluator_reason = nested_evaluator(args)
