@@ -255,7 +255,6 @@ def write_no_exti_ins(
     *,
     wght: tuple[float, float] | None = None,
     ls_cycles: int = 1,
-    keep_damp: bool = False,
     osf: float | None = None,
     **native_outputs,
 ):
@@ -268,7 +267,6 @@ def write_no_exti_ins(
         keep_exti=False,
         wght=wght,
         ls_cycles=ls_cycles,
-        keep_damp=keep_damp,
         osf=osf,
         **native_outputs,
     )
@@ -428,7 +426,6 @@ def run_shelxl(
     endpoint_ls_cycles: int = 1,
     convergence_shift_esd: float = 0.0,
     npd_recovery: str = "damp",
-    keep_damp: bool = False,
     wght_converge_max_calls: int = WGHT_CONVERGE_DEFAULT_MAX_CALLS,
     allow_basf: bool = False,
 ):
@@ -507,7 +504,6 @@ def run_shelxl(
                 keep_exti=False,
                 wght=active,
                 ls_cycles=n_ls,
-                keep_damp=keep_damp,
                 allow_basf=allow_basf,
                 acta=acta,
             )
@@ -533,7 +529,6 @@ def run_shelxl(
             keep_exti=False,
             wght=active,
             ls_cycles=n_ls,
-            keep_damp=keep_damp,
             allow_basf=allow_basf,
             acta=acta,
         )
@@ -555,7 +550,7 @@ def run_shelxl(
         history, final, mode=mode, max_calls=n_iter, shift_tolerance=tolerance
     )
     final["npd_recovery_method"] = str(npd_recovery)
-    final["keep_damp"] = bool(keep_damp)
+    final["keep_damp"] = False
     if acta:
         cif = work / f"{stem}.cif"
         final["acta_cif"] = str(cif) if cif.is_file() else ""
