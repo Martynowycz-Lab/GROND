@@ -148,9 +148,8 @@ def split_summary(prep, args: argparse.Namespace, runs: Mapping[str, Path], root
     exclusion = heldout.load_orbit_exclusion(exclusion_path) if exclusion_path else None
     record: dict[str, object] = {
         "schema": SPLIT_SUMMARY_SCHEMA,
-        "split_scheme": str(getattr(args, "split_scheme", "legacy") or "legacy"),
+        "split_scheme": str(getattr(args, "split_scheme", "orbit-hash") or "orbit-hash"),
         "split_salt": str(getattr(args, "split_salt", "") or ""),
-        "split_seed": getattr(args, "split_seed", None),
         "free_fraction": float(getattr(args, "free_fraction", 0.10)),
         "excluded_orbits_json": exclusion_path,
         "excluded_orbits_sha256": exclusion["sha256"] if exclusion else "",
@@ -195,9 +194,7 @@ def split_summary_lines(record: Mapping[str, object]) -> list[str]:
     """
 
     scheme = str(record.get("split_scheme"))
-    rule = (
-        f"salt {record.get('split_salt')}" if scheme == "orbit-hash" else f"seed {record.get('split_seed')}"
-    )
+    rule = f"salt {record.get('split_salt')}"
     exclusion = (
         f"excluded orbits {record.get('excluded_orbit_count')} (sha256 {str(record.get('excluded_orbits_sha256'))[:12]})"
         if record.get("excluded_orbits_json")
@@ -507,7 +504,7 @@ def _nuisance_values(nuisance: Mapping[str, object] | None, keys: Iterable[str])
     return ", ".join(f"{key}={nuisance.get(key)}" for key in keys if key in nuisance) or "n/a"
 
 
-THICKNESS_KEYS = ("thickness_model", "thickness_A", "thickness_grad_frac", "thickness_sigma_frac", "frame_offset")
+THICKNESS_KEYS = ("thickness_model", "thickness_A", "thickness_grad_frac", "frame_offset")
 CV_FAMILY_KEYS = {"mosaicity": ("mosaicity_mode", "mosaicity_sigma_deg"), "dose": ("dose_b_mode", "dose_b_per_frame")}
 
 

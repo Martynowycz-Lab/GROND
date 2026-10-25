@@ -236,7 +236,6 @@ def compact_base_nuisance(args: argparse.Namespace) -> dict:
         "thickness_A": args.thickness_grid,
         "thickness_model": "uniform_gradient",
         "thickness_grad_frac": args.thickness_grad_grid,
-        "thickness_sigma_frac": "0.0",
         "frame_offset": nuisance_grid(args, "frame_offset_grid"),
         "group_width_deg": nuisance_grid(args, "group_width_grid"),
         "detector_scale_bins": "0",  # recorded nuisance field; no detector scale field
@@ -284,7 +283,6 @@ def transform_scout_nuisance(args: argparse.Namespace) -> dict:
         "thickness_A": first_numeric(base.get("thickness_A"), 1200.0),
         "thickness_model": "uniform_gradient",
         "thickness_grad_frac": first_numeric(base.get("thickness_grad_frac"), 0.0),
-        "thickness_sigma_frac": "0.0",
         "frame_offset": "0.0",
         "group_width_deg": "frame",
         "detector_scale_bins": "0",

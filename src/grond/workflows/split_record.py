@@ -81,13 +81,11 @@ def _crystal_split(
         candidate_invariant_split_membership,
         orbit_hash_realised_free_fraction,
         orbit_hash_split_masks,
-        split_masks,
         validate_transform_split_contract,
     )
     from grond.hkl_transform import parse_hkl_transform_info
     from grond.io.xds import XDSData
 
-    scheme = str(getattr(args, "split_scheme", "orbit-hash") or "orbit-hash")
     free_fraction = float(getattr(args, "free_fraction", 0.10))
     salt = str(getattr(args, "split_salt", heldout.DEFAULT_FREE_SALT))
     if not Path(ds.hkl).expanduser().is_file():
@@ -102,9 +100,7 @@ def _crystal_split(
             symmetry_ops,
             list(union_entry["split_candidates"]),
             free_fraction=free_fraction,
-            seed=int(getattr(args, "split_seed", 42)),
             include_friedel=True,
-            scheme=scheme,
             salt=salt,
             excluded_orbits=set(exclusion["ordered_orbits"]) if exclusion else None,
         )
@@ -125,14 +121,10 @@ def _crystal_split(
         matrix = np.asarray(parse_hkl_transform_info(str(entry["hkl_transform"])).matrix, dtype=np.int64)
         model_hkl = raw @ matrix.T
         keys = heldout.orbit_keys(model_hkl, symmetry_ops, True)
-        if scheme == "orbit-hash":
-            masks, excluded = orbit_hash_split_masks(
-                model_hkl, free_fraction, salt, symmetry_ops, excluded_orbits=exclusion["orbits"] if exclusion else None
-            )
-            membership = np.where(excluded, 2, np.where(masks["free"], 1, 0))
-        else:
-            masks = split_masks(model_hkl, free_fraction, int(getattr(args, "split_seed", 42)), symmetry_ops)
-            membership = np.where(masks["free"], 1, 0)
+        masks, excluded = orbit_hash_split_masks(
+            model_hkl, free_fraction, salt, symmetry_ops, excluded_orbits=exclusion["orbits"] if exclusion else None
+        )
+        membership = np.where(excluded, 2, np.where(masks["free"], 1, 0))
         unique = sorted({str(key) for key in keys})
         index = {key: position for position, key in enumerate(unique)}
         groups = np.asarray([index[str(key)] for key in keys], dtype=int)
@@ -162,15 +154,14 @@ def _crystal_split(
         "mixed_status_components": mixed,
         "free_fraction_of_used_rows": (free / (work + free)) if work + free else None,
     }
-    if scheme == "orbit-hash":
-        record["realised_free_fraction"] = orbit_hash_realised_free_fraction(
-            free_rows=free,
-            rows=rows,
-            free_components=free_components,
-            components=components,
-            requested=free_fraction,
-            mixed_status_group_count=mixed,
-        )
+    record["realised_free_fraction"] = orbit_hash_realised_free_fraction(
+        free_rows=free,
+        rows=rows,
+        free_components=free_components,
+        components=components,
+        requested=free_fraction,
+        mixed_status_group_count=mixed,
+    )
     status_names = {0: "work", 1: "free", 2: "excluded"}
     key_status: dict[str, str] = {}
     if group_keys is not None:
@@ -193,10 +184,7 @@ def build_split_record(
     from grond.bloch.splits import load_split_exclusion
     from grond.workflows.transform_selection import plan_split_candidates
 
-    scheme = str(getattr(args, "split_scheme", "orbit-hash") or "orbit-hash")
     exclusion_path = str(getattr(args, "exclude_orbits_json", "") or "").strip()
-    if exclusion_path and scheme != "orbit-hash":
-        raise ValueError("--exclude-orbits-json requires --split-scheme orbit-hash")
     exclusion = load_split_exclusion(exclusion_path) if exclusion_path else None
     plan = dict(plan) if plan is not None else plan_split_candidates(prep, args)
     symmetry_ops = parse_model(Path(prep.structure)).get("symmetry_ops")
@@ -210,15 +198,12 @@ def build_split_record(
         crystals[ds.name] = record
         for key, status in key_status.items():
             status_by_key.setdefault(key, {})[ds.name] = status
-    if scheme == "orbit-hash":
-        free_fraction = float(getattr(args, "free_fraction", 0.10))
-        settings = {
-            "split_salt": str(getattr(args, "split_salt", heldout.DEFAULT_FREE_SALT)),
-            "n_folds": max(2, int(round(1.0 / free_fraction))),
-            "free_rule": "fold 0 of round(1/free_fraction) sha256(salt|model Laue-orbit key) folds",
-        }
-    else:
-        settings = {"split_seed": int(getattr(args, "split_seed", 42)), "free_rule": "per-dataset shuffle"}
+    free_fraction = float(getattr(args, "free_fraction", 0.10))
+    settings = {
+        "split_salt": str(getattr(args, "split_salt", heldout.DEFAULT_FREE_SALT)),
+        "n_folds": max(2, int(round(1.0 / free_fraction))),
+        "free_rule": "fold 0 of round(1/free_fraction) sha256(salt|model Laue-orbit key) folds",
+    }
     totals = {
         name: sum(int(record[name]) for record in crystals.values())
         for name in ("rows", "work_rows", "free_rows", "excluded_rows")
@@ -231,26 +216,25 @@ def build_split_record(
             else None
         ),
     }
-    if scheme == "orbit-hash":
-        conflicts = sorted(key for key, per in status_by_key.items() if len(set(per.values())) > 1)
-        pooled.update(
-            {
-                "orbit_keys": len(status_by_key),
-                "work_orbit_keys": sum(1 for per in status_by_key.values() if set(per.values()) == {"work"}),
-                "free_orbit_keys": sum(1 for per in status_by_key.values() if set(per.values()) == {"free"}),
-                "excluded_orbit_keys": sum(1 for per in status_by_key.values() if set(per.values()) == {"excluded"}),
-                "orbit_keys_in_more_than_one_crystal": sum(1 for per in status_by_key.values() if len(per) > 1),
-                "cross_crystal_status_conflicts": len(conflicts),
-                "cross_crystal_status_conflict_examples": conflicts[:20],
-            }
-        )
+    conflicts = sorted(key for key, per in status_by_key.items() if len(set(per.values())) > 1)
+    pooled.update(
+        {
+            "orbit_keys": len(status_by_key),
+            "work_orbit_keys": sum(1 for per in status_by_key.values() if set(per.values()) == {"work"}),
+            "free_orbit_keys": sum(1 for per in status_by_key.values() if set(per.values()) == {"free"}),
+            "excluded_orbit_keys": sum(1 for per in status_by_key.values() if set(per.values()) == {"excluded"}),
+            "orbit_keys_in_more_than_one_crystal": sum(1 for per in status_by_key.values() if len(per) > 1),
+            "cross_crystal_status_conflicts": len(conflicts),
+            "cross_crystal_status_conflict_examples": conflicts[:20],
+        }
+    )
     candidate_set: dict[str, object] = {"policy": str(union.get("policy") or "")}
     for field in ("shared_group", "shared_group_order", "laue_coset_count", "pseudo_symmetric", "shared_group_sha256"):
         if field in union:
             candidate_set[field] = union[field]
     record = {
         "schema": SPLIT_RECORD_SCHEMA,
-        "split_scheme": scheme,
+        "split_scheme": "orbit-hash",
         "free_fraction": float(getattr(args, "free_fraction", 0.10)),
         **settings,
         "excluded_orbits": (
@@ -272,7 +256,6 @@ def format_split_summary(record: Mapping[str, object]) -> list[str]:
     """Console lines of a split record."""
 
     lines = []
-    scheme = str(record.get("split_scheme") or "")
     candidate_set = record.get("split_candidate_set") if isinstance(record.get("split_candidate_set"), Mapping) else {}
     policy = str(candidate_set.get("policy") or "")
     closure = (
@@ -280,17 +263,11 @@ def format_split_summary(record: Mapping[str, object]) -> list[str]:
         if "shared" in policy
         else "per-crystal candidate sets"
     )
-    if scheme == "orbit-hash":
-        lines.append(
-            f"split: orbit-hash free set, salt {record.get('split_salt')}, fraction {float(record['free_fraction']):g} "
-            f"(fold 0 of {record.get('n_folds')} salted Laue-orbit folds); {closure}; transform canonicalisation "
-            f"{record.get('transform_canonicalization')}"
-        )
-    else:
-        lines.append(
-            f"split: legacy per-dataset shuffle, seed {record.get('split_seed')}, fraction "
-            f"{float(record['free_fraction']):g}; {closure}"
-        )
+    lines.append(
+        f"split: orbit-hash free set, salt {record.get('split_salt')}, fraction {float(record['free_fraction']):g} "
+        f"(fold 0 of {record.get('n_folds')} salted Laue-orbit folds); {closure}; transform canonicalisation "
+        f"{record.get('transform_canonicalization')}"
+    )
     excluded = record.get("excluded_orbits")
     if isinstance(excluded, Mapping):
         lines.append(
@@ -314,17 +291,13 @@ def format_split_summary(record: Mapping[str, object]) -> list[str]:
     pooled = record.get("pooled") if isinstance(record.get("pooled"), Mapping) else {}
     if pooled:
         used = pooled.get("free_fraction_of_used_rows")
-        text = (
+        lines.append(
             f"split: pooled: {pooled['rows']} rows = work {pooled['work_rows']} + free {pooled['free_rows']} "
             f"({'n/a' if used is None else f'{100.0 * float(used):.1f}%'}) + excluded {pooled['excluded_rows']}"
+            f"; {pooled['orbit_keys']} Laue orbits (free {pooled['free_orbit_keys']}, excluded "
+            f"{pooled['excluded_orbit_keys']}), {pooled['orbit_keys_in_more_than_one_crystal']} in more than one "
+            f"crystal, {pooled['cross_crystal_status_conflicts']} cross-crystal status conflicts"
         )
-        if "orbit_keys" in pooled:
-            text += (
-                f"; {pooled['orbit_keys']} Laue orbits (free {pooled['free_orbit_keys']}, excluded "
-                f"{pooled['excluded_orbit_keys']}), {pooled['orbit_keys_in_more_than_one_crystal']} in more than one "
-                f"crystal, {pooled['cross_crystal_status_conflicts']} cross-crystal status conflicts"
-            )
-        lines.append(text)
         if int(pooled.get("cross_crystal_status_conflicts") or 0):
             lines.append(
                 "WARN split: some Laue orbits are free in one crystal and work or excluded in another "

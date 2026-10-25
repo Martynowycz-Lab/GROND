@@ -199,7 +199,7 @@ def test_structure_factors_match_independent_gemmi_electron_calculator(tmp_path)
 
 def minimal_port(**kwargs):
     port = object.__new__(XDSBlochPort)
-    port.cfg = Config(thickness_model='single', **kwargs)
+    port.cfg = Config(thickness_grad_frac=0.0, **kwargs)
     port.data = SimpleNamespace(k=40.)
     port.thick, port.thick_w = port.thickness_grid()
     return port
@@ -261,10 +261,10 @@ def test_physical_electron_units_give_expected_extinction_distance():
     assert port.propagate_direct_to_target(H, extinction_distance) == pytest.approx(0, abs=1e-25)
 
 
-@pytest.mark.parametrize('model,grad,sigma,variance_factor', [('uniform_gradient',.4,0,.4**2/3), ('gaussian',0,.1,.1**2), ('gaussian_gradient',.3,.1,.3**2/3+.1**2)])
-def test_thickness_quadrature_matches_distribution_moments(model, grad, sigma, variance_factor):
+def test_thickness_quadrature_matches_distribution_moments():
+    variance_factor = .4**2/3
     port = object.__new__(XDSBlochPort)
-    port.cfg = Config(thickness_A=1000, thickness_model=model, thickness_grad_frac=grad, thickness_sigma_frac=sigma, thickness_points=9)
+    port.cfg = Config(thickness_A=1000, thickness_model='uniform_gradient', thickness_grad_frac=.4, thickness_points=9)
     nodes, weights = port.thickness_grid()
     assert np.sum(weights) == pytest.approx(1)
     assert np.sum(weights * nodes) == pytest.approx(1000)

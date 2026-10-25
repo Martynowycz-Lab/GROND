@@ -9,16 +9,13 @@ import argparse
 
 
 def add_split_scheme_args(ap: argparse.ArgumentParser) -> None:
-    """Engine split-scheme options; the engine default stays the legacy per-dataset shuffle."""
+    """Engine split-scheme options."""
 
     ap.add_argument(
         "--split-scheme",
-        choices=["legacy", "orbit-hash"],
-        default="legacy",
-        help=(
-            "Free-set definition: legacy shuffles this dataset's orbits with --split-seed; orbit-hash is "
-            "crystal-independent (salted hash of the model Laue-orbit key, grond.validation.heldout)."
-        ),
+        choices=["orbit-hash"],
+        default="orbit-hash",
+        help="Free-set definition: orbit-hash is crystal-independent (salted hash of the model Laue-orbit key, grond.validation.heldout).",
     )
     from grond.validation.heldout import DEFAULT_FREE_SALT
 
@@ -78,8 +75,8 @@ def build_parser(description: str, *, default_hkl, default_res, default_baseline
     ap.add_argument("--mosaicity-max-sigma-deg", type=float, default=0.5, help="Hard upper bound for projected mosaicity sigma.")
     ap.add_argument("--mosaicity-points", type=int, default=3, help="Gauss-Hermite points for the mosaic quadrature.")
     ap.add_argument("--geometry-path", default="", help="Fixed geometry-only slew/two-axis tilt contract fitted without intensities.")
-    ap.add_argument("--profile-quadrature", choices=["uniform", "trapezoid", "gauss_legendre"], default="uniform", help="Rocking-profile Sg quadrature rule.")
-    ap.add_argument("--profile-accumulation", choices=["sum", "mean"], default="sum", help="Accumulate rocking-profile samples as summed detector sub-exposures or legacy normalized means.")
+    ap.add_argument("--profile-quadrature", choices=["uniform"], default="uniform", help="Rocking-profile Sg quadrature rule.")
+    ap.add_argument("--profile-accumulation", choices=["sum"], default="sum", help="Accumulate rocking-profile samples as summed detector sub-exposures.")
     ap.add_argument("--min-d-spacing", type=float, default=0.70)
     ap.add_argument("--min-peak", type=float, default=0.0)
     ap.add_argument("--geometry-percentile", type=float, default=100.0, help="Keep this broad geometry percentile after PEAK/d-spacing filters; 99 removes only the worst 1 percent geometry tail.")
@@ -87,9 +84,8 @@ def build_parser(description: str, *, default_hkl, default_res, default_baseline
     ap.add_argument("--positive-only", action="store_true", default=True)
     ap.add_argument("--include-nonpositive", dest="positive_only", action="store_false")
     ap.add_argument("--thickness-grid", default="1200,1600,1800,2200")
-    ap.add_argument("--thickness-model-grid", default="uniform_gradient", help="Comma grid: single, uniform_gradient, gaussian, gaussian_gradient, gamma.")
+    ap.add_argument("--thickness-model-grid", default="uniform_gradient", help="Comma grid: uniform_gradient, gamma.")
     ap.add_argument("--thickness-grad-grid", default="0.0,0.2,0.4,0.6")
-    ap.add_argument("--thickness-sigma-frac-grid", default="0.0", help="Gaussian thickness sigma/t0 grid. Used only by thickness_model=gaussian.")
     ap.add_argument("--thickness-gamma-shape-grid", default="1.0", help="Gamma thickness shape grid (the mean is --thickness-grid). Used only by thickness_model=gamma.")
     ap.add_argument(
         "--thickness-evaluator",
@@ -120,9 +116,9 @@ def build_parser(description: str, *, default_hkl, default_res, default_baseline
     ap.add_argument("--row-resolution-b-grid", default="0.0", help="Raw-row dynamical resolution-envelope grid. Positive values boost high-resolution Idyn and are roughly the alternate sign of endpoint-B.")
     ap.add_argument(
         "--matrix-convention",
-        choices=["j_minus_i", "i_minus_j"],
+        choices=["j_minus_i"],
         default="j_minus_i",
-        help="Off-diagonal U_g indexing convention. j_minus_i is the production signed-row default; i_minus_j is a diagnostic.",
+        help="Off-diagonal U_g indexing convention: U(h_j - h_i).",
     )
     ap.add_argument(
         "--group-width-grid",
@@ -143,17 +139,15 @@ def build_parser(description: str, *, default_hkl, default_res, default_baseline
         help="Maximum absolute excitation error for beam-basis support (default 0.01 A^-1).",
     )
     ap.add_argument("--free-fraction", type=float, default=0.10)
-    ap.add_argument("--split-seed", type=int, default=42)
     add_split_scheme_args(ap)
     ap.add_argument("--scale-fit-split", choices=["work", "all"], default="work", help="Rows used to fit the P-spline frame scales. Use 'all' to reproduce final all-data model-update statistics; use 'work' for validation.")
     ap.add_argument(
         "--selection-metric",
-        choices=["work_born_wR2", "work_wR2", "free_wR2", "all_wR2", "all_R1", "cv_Rall"],
+        choices=["work_born_wR2", "work_wR2"],
         default="work_wR2",
         help=(
             "Metric used to choose the reported best nuisance trial. "
-            "work_born_wR2 is reserved for hand-invariant transform scouting; "
-            "cv_Rall is the inner orbit-CV R_all of the P-spline scale fit."
+            "work_born_wR2 is reserved for hand-invariant transform scouting."
         ),
     )
     ap.add_argument(

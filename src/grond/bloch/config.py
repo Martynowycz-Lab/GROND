@@ -109,12 +109,10 @@ class Config:
     thickness_A: float = 1240.0
     thickness_model: str = "uniform_gradient"
     thickness_grad_frac: float = 0.25
-    thickness_sigma_frac: float = 0.0
     thickness_points: int = 7
     gamma: float | None = None
     group_width_deg: float = 3.0
     free_fraction: float = 0.10
-    split_seed: int = 42
     variance_a: float = 0.0
     variance_b_corr: float = 0.0
     variance_c_peak: float = 0.0
@@ -131,7 +129,7 @@ class Config:
     paired_inverse_hand: bool = False
     double_precision: bool = field(default_factory=_default_double_precision)
     # Physical thickness distributions on a support (grond.bloch.thickness). The default "quadrature" keeps the
-    # legacy node quadrature of the legacy thickness models; "table", "cf" and "auto" evaluate uniform_gradient or
+    # legacy node quadrature of uniform_gradient; "table", "cf" and "auto" evaluate uniform_gradient or
     # gamma (mean thickness_A, shape thickness_gamma_shape) on [thickness_min_A, thickness_max_A].
     thickness_gamma_shape: float = 1.0
     thickness_evaluator: str = "quadrature"
@@ -188,7 +186,6 @@ class Config:
             "sg_jitter_sigma_frame": self.sg_jitter_sigma_frame,
             "mosaicity_sigma_deg": self.mosaicity_sigma_deg,
             "thickness_grad_frac": self.thickness_grad_frac,
-            "thickness_sigma_frac": self.thickness_sigma_frac,
             "variance_a": self.variance_a,
             "variance_b_corr": self.variance_b_corr,
             "variance_c_peak": self.variance_c_peak,
@@ -205,19 +202,13 @@ class Config:
             "sg_window_mode": (self.sg_window_mode, {"fixed", "dials_bbox"}),
             "sg_jitter_mode": (self.sg_jitter_mode, {"none", "gaussian", "student_t"}),
             "mosaicity_mode": (self.mosaicity_mode, {"none", "gaussian_omega", "transverse_target"}),
-            "profile_quadrature": (
-                self.profile_quadrature,
-                {"uniform", "trapezoid", "gauss_legendre", "legendre"},
-            ),
-            "profile_accumulation": (self.profile_accumulation, {"sum", "mean"}),
-            "thickness_model": (
-                self.thickness_model,
-                {"single", "uniform_gradient", "gaussian", "gaussian_gradient", "gamma"},
-            ),
+            "profile_quadrature": (self.profile_quadrature, {"uniform"}),
+            "profile_accumulation": (self.profile_accumulation, {"sum"}),
+            "thickness_model": (self.thickness_model, {"uniform_gradient", "gamma"}),
             "thickness_evaluator": (self.thickness_evaluator, set(THICKNESS_EVALUATORS)),
             "absorption_mode": (self.absorption_mode, {"none", "mean", "midgley_like", "midgley"}),
             "dose_b_mode": (self.dose_b_mode, {"none", "linear_frame"}),
-            "matrix_convention": (self.matrix_convention, {"j_minus_i", "i_minus_j"}),
+            "matrix_convention": (self.matrix_convention, {"j_minus_i"}),
             "row_plan_cache": (
                 self.row_plan_cache,
                 {"off", "exact", "readwrite", "rebuild"},
@@ -272,8 +263,6 @@ def frozen_kernel_contract(cfg: Config | None = None):
     observation contracts must not silently mutate the production Bloch kernel.
     """
     convention = str(getattr(cfg, "matrix_convention", "j_minus_i") if cfg is not None else "j_minus_i")
-    offdiag_expr = "U(h_j - h_i) / (2*k)" if convention == "j_minus_i" else "U(h_i - h_j) / (2*k)"
-    offdiag_sign = "basis[j] - basis[i]" if convention == "j_minus_i" else "basis[i] - basis[j]"
     contract = {
         "name": "audited_signed_row_simple_hermitian",
         "structure_factors": {
@@ -287,7 +276,7 @@ def frozen_kernel_contract(cfg: Config | None = None):
             "profile_mode": "target_sg_to_angle",
             "profile_quadrature": None if cfg is None else str(getattr(cfg, "profile_quadrature", "uniform")),
             "profile_accumulation": None if cfg is None else str(getattr(cfg, "profile_accumulation", "sum")),
-            "profile_weight_mode": "rocking-profile samples are summed by default; legacy normalized averaging is available as profile_accumulation=mean",
+            "profile_weight_mode": "rocking-profile samples are summed",
             "profile_coordinate_jacobian": "target-Sg quadrature weights include relative abs(domega/dSg) so exposure sampling is uniform in angle",
             "profile_width_mode": "fixed unless cfg.sg_window_mode explicitly requests an auditable XDS metadata-derived per-row width",
             "orientation_distribution": (
@@ -306,9 +295,9 @@ def frozen_kernel_contract(cfg: Config | None = None):
         "hamiltonian": {
             "matrix_convention": convention,
             "diagonal": "H_ii = S_i",
-            "offdiagonal": offdiag_expr,
-            "offdiagonal_sign": offdiag_sign,
-            "default_convention_note": "j_minus_i is the production signed-row convention; i_minus_j is an explicit raw-forward-model diagnostic.",
+            "offdiagonal": "U(h_j - h_i) / (2*k)",
+            "offdiagonal_sign": "basis[j] - basis[i]",
+            "default_convention_note": "j_minus_i is the production signed-row convention.",
             "dose_b": "optional frame-dependent isotropic Debye-Waller attenuation U_g -> U_g exp(-DeltaB/(4d_g^2)); default none",
             "hermitian_fill": "H_ji = conj(H_ij)",
             "propagation": "psi(t) = exp(2*pi*i*H*t) psi(0)",

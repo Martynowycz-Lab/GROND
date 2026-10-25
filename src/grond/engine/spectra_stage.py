@@ -57,7 +57,6 @@ THICKNESS_FIELDS = (
     "thickness_points",
     "thickness_model",
     "thickness_grad_frac",
-    "thickness_sigma_frac",
     "thickness_gamma_shape",
     "thickness_evaluator",
     "thickness_min_A",

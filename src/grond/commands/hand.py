@@ -79,7 +79,6 @@ def _apply_source_physics_to_hand_args(
         "topup_d_min",
         "max_support_sg",
         "free_fraction",
-        "split_seed",
         "matrix_convention",
         "thickness_points",
     )

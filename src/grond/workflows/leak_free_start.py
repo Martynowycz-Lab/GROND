@@ -274,9 +274,6 @@ def run_leak_free_start(
     too.  Without a plan the membership is the Laue-orbit one (identical whenever no candidate is pseudo-symmetric).
     """
 
-    if str(getattr(args, "split_scheme", "legacy")) != "orbit-hash":
-        return {"status": "not_applicable_legacy_split",
-                "leak": "start model as supplied; the legacy per-dataset split has no crystal-independent free orbits"}
     refined_from = str((prep.metadata or {}).get("refined_from") or "")
     if refined_from:
         # grond refine starts from the user's model; GROND's HKL files hold no held-out reflection when the run used

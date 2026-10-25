@@ -29,8 +29,8 @@ def build_parser(description: str) -> argparse.ArgumentParser:
         ),
     )
     ap.add_argument("--hkl-transform", default="")
-    ap.add_argument("--profile-quadrature", choices=["uniform", "trapezoid", "gauss_legendre"], default=None)
-    ap.add_argument("--profile-accumulation", choices=["sum", "mean"], default=None)
+    ap.add_argument("--profile-quadrature", choices=["uniform"], default=None)
+    ap.add_argument("--profile-accumulation", choices=["sum"], default=None)
     ap.add_argument("--cycles", type=int, default=3)
     ap.add_argument("--n-basis", type=int, default=20)
     ap.add_argument("--n-points", type=int, default=10)

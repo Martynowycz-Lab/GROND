@@ -48,21 +48,13 @@ def metric_row(trial):
 
 
 def trial_metric(trial, metric_name: str) -> float:
-    """Return one selection metric of a trial: <split>_wR2 or <split>_R1 (Bloch), work_born_wR2 or cv_Rall.
-
-    cv_Rall is the P-spline inner-CV R_all converted from percent to a fraction, like the other metrics.
-    """
+    """Return one selection metric of a trial: work_wR2 (Bloch) or work_born_wR2."""
 
     if metric_name == "work_born_wR2":
         return float(trial["metrics"]["work"]["born"]["wR2_all"])
-    if metric_name == "cv_Rall":
-        # Inner 3-fold orbit-CV amplitude R_all over the scale-fit rows.
-        return float(trial["scale_model"]["inner_cv_r_all"]) / 100.0
-    split, value = metric_name.split("_", 1)
-    if split not in trial["metrics"]:
-        raise ValueError(f"unknown selection split {split!r} in {metric_name!r}")
-    key = "wR2_all" if value == "wR2" else "R1_all"
-    return float(trial["metrics"][split]["dyn"][key])
+    if metric_name == "work_wR2":
+        return float(trial["metrics"]["work"]["dyn"]["wR2_all"])
+    raise ValueError(f"unknown selection metric {metric_name!r}")
 
 
 def rank_trials(trials, metric_name: str):

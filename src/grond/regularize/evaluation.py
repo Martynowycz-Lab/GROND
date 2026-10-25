@@ -186,7 +186,6 @@ def evaluate_trial(data, target, base_sig, pred, indices, masks, nui: Nuisance, 
     frame_scale_count = int(n_scales)
     n_abs = int(str(nui.absorption_mode) != "none" and abs(float(nui.absorption_mu)) > 0.0)
     # gamma (mean, shape) has as many parameters as uniform_gradient (t0, grad): its shape takes the gradient's slot.
-    n_thick_shape = int(str(nui.thickness_model) not in {"uniform_gradient", "gamma"} or abs(float(nui.thickness_sigma_frac)) > 0.0)
     n_dose = int(str(nui.dose_b_mode) != "none" and abs(float(nui.dose_b_per_frame)) > 0.0)
     n_jitter = int(str(nui.sg_jitter_mode) != "none" and (
         abs(float(nui.sg_jitter_sigma0)) > 0.0
@@ -203,7 +202,6 @@ def evaluate_trial(data, target, base_sig, pred, indices, masks, nui: Nuisance, 
         n_scales
         + 7
         + n_abs
-        + n_thick_shape
         + n_dose
         + n_jitter
         + n_mosaicity

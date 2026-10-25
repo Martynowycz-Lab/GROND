@@ -158,7 +158,6 @@ def _declared_nuisance_contract(config: Mapping[str, object]) -> dict[str, str]:
         "thickness_A": "thickness_grid",
         "thickness_model": "thickness_model_grid",
         "thickness_grad_frac": "thickness_grad_grid",
-        "thickness_sigma_frac": "thickness_sigma_frac_grid",
         "frame_offset": "frame_offset_grid",
         "group_width_deg": "group_width_grid",
         # No detector scale field: every run declares 0 bins.
@@ -208,7 +207,6 @@ def _grid_physics_contract(config: Mapping[str, object]) -> dict[str, object]:
         "topup_d_min",
         "max_support_sg",
         "free_fraction",
-        "split_seed",
         "split_scheme",
         "split_salt",
         "scale_fit_split",
@@ -292,7 +290,6 @@ def _job_contract(summary: Mapping[str, object]) -> dict[str, object]:
         "n_basis": int(config.get("n_basis") or 0),
         "n_points": int(config.get("n_points") or 0),
         "max_rows": int(config.get("max_rows") or 0),
-        "split_seed": int(config.get("split_seed") or 0),
         "split_scheme": str(config.get("split_scheme") or "legacy"),
         "split_salt": str(config.get("split_salt") or ""),
         "free_fraction": float(config.get("free_fraction") or 0.0),

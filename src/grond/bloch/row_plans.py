@@ -65,7 +65,6 @@ class RowPlanMixin:
             "sg_window_inv_A": float(sg_window_i),
             "dose_delta_b_A2": float(self.row_delta_b(row_idx)),
             "thickness_model": str(getattr(self.cfg, "thickness_model", "uniform_gradient")),
-            "thickness_sigma_frac": float(getattr(self.cfg, "thickness_sigma_frac", 0.0)),
             **sg_width_meta,
             **jitter_meta,
             **mosaicity_meta,

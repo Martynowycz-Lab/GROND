@@ -40,7 +40,7 @@ N_SHELLS = 5
 HKL_SPLIT_KEYS = ("hkl_split", "shelxl_hkl_split", "endpoint_hkl_split")
 HKL_FREE_FLAG_KEYS = ("free_rows_in_hkl", "free_rows_in_shelxl_hkl", "endpoint_include_free_rows")
 NUISANCE_FIELDS = (
-    "thickness_model", "thickness_A", "thickness_grad_frac", "thickness_sigma_frac", "frame_offset",
+    "thickness_model", "thickness_A", "thickness_grad_frac", "frame_offset",
     "absorption_mode", "absorption_mu", "dose_b_mode", "dose_b_per_frame",
     "sg_jitter_mode", "mosaicity_mode", "mosaicity_sigma_deg", "row_resolution_b",
     "sigma_a", "sigma_b_corr", "sigma_c_peak",
@@ -739,7 +739,7 @@ def build_heldout_report(
 
 
 def _free_split_record(summaries: Mapping[str, Mapping[str, object]]) -> dict[str, object]:
-    """Return each crystal's free-split settings (scheme, salt, free fraction, seed) from its run config."""
+    """Return each crystal's free-split settings (scheme, salt, free fraction) from its run config."""
 
     record = {}
     for name, summary in summaries.items():
@@ -748,7 +748,6 @@ def _free_split_record(summaries: Mapping[str, Mapping[str, object]]) -> dict[st
             "split_scheme": config.get("split_scheme", "legacy"),
             "split_salt": config.get("split_salt"),
             "free_fraction": config.get("free_fraction"),
-            "split_seed": config.get("split_seed"),
         }
     return record
 

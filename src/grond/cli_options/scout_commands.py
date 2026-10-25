@@ -23,7 +23,7 @@ def register_scouts(sub: argparse._SubParsersAction) -> None:
     p_scout.add_argument("--workers", type=int, default=0)
     p_scout.add_argument(
         "--transform-parity-policy",
-        choices=["proper-only", "all-diagnostic"],
+        choices=["proper-only"],
         default="proper-only",
     )
     p_scout.set_defaults(func=cmd_scout)

@@ -1,6 +1,6 @@
 """Rocking quadrature and incoherent mosaic-orientation distributions.
 
-Weights retain the existing sum/mean and relative angular-Jacobian convention.
+Weights retain the existing summed and relative angular-Jacobian convention.
 They are not silently promoted to absolute detector exposure weights."""
 
 from __future__ import annotations
@@ -9,7 +9,6 @@ import math
 
 import numpy as np
 from numpy.polynomial.hermite import hermgauss
-from numpy.polynomial.legendre import leggauss
 
 
 class ProfileMixin:
@@ -102,29 +101,16 @@ class ProfileMixin:
         half_width = 0.5 * float(sg_window_i)
         rule = str(getattr(self.cfg, "profile_quadrature", "uniform") or "uniform").lower()
         accumulation = str(getattr(self.cfg, "profile_accumulation", "sum") or "sum").lower()
-        if accumulation not in {"sum", "mean"}:
-            raise ValueError(f"unknown profile_accumulation={accumulation!r}; expected sum or mean")
+        if rule != "uniform":
+            raise ValueError(f"unknown profile_quadrature={rule!r}; expected uniform")
+        if accumulation != "sum":
+            raise ValueError(f"unknown profile_accumulation={accumulation!r}; expected sum")
         if n_base == 1:
             base = np.asarray([0.0], dtype=float)
             base_w = np.asarray([1.0], dtype=float)
-        elif rule == "uniform":
-            base = np.linspace(-half_width, half_width, n_base)
-            base_w = np.ones(n_base, dtype=float)
-        elif rule == "trapezoid":
-            base = np.linspace(-half_width, half_width, n_base)
-            base_w = np.ones(n_base, dtype=float)
-            base_w[0] = 0.5
-            base_w[-1] = 0.5
-            base_w *= n_base / max(float(np.sum(base_w)), 1e-30)
-        elif rule in {"gauss_legendre", "legendre"}:
-            nodes, weights = leggauss(n_base)
-            base = half_width * nodes
-            base_w = np.asarray(weights, dtype=float)
-            base_w *= n_base / max(float(np.sum(base_w)), 1e-30)
         else:
-            raise ValueError(f"unknown profile_quadrature={rule!r}; expected uniform, trapezoid, or gauss_legendre")
-        if accumulation == "mean":
-            base_w = base_w / max(float(np.sum(base_w)), 1e-30)
+            base = np.linspace(-half_width, half_width, n_base)
+            base_w = np.ones(n_base, dtype=float)
         sigma, meta = self.row_sg_jitter_sigma(row_idx, hkl)
         meta["sg_profile_same_branch_continuation_used"] = False
         meta["sg_profile_same_branch_continuation_segments"] = 1

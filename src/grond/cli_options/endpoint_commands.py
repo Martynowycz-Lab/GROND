@@ -75,8 +75,8 @@ def register_push(sub: argparse._SubParsersAction) -> None:
     p_push.add_argument("--final-n-basis", type=int, default=0, help="Single-dataset final beam override; for multiple crystals use --dataset-n-basis or --n-basis.")
     p_push.add_argument("--final-n-points", type=int, default=20)
     add_crystal_overrides(p_push)
-    p_push.add_argument("--profile-quadrature", choices=["uniform", "trapezoid", "gauss_legendre"], default=None)
-    p_push.add_argument("--profile-accumulation", choices=["sum", "mean"], default=None)
+    p_push.add_argument("--profile-quadrature", choices=["uniform"], default=None)
+    p_push.add_argument("--profile-accumulation", choices=["sum"], default=None)
     p_push.add_argument("--shelxl", default=default_shelxl_executable(), help="SHELXL executable (default: from --config or PATH).")
     p_push.add_argument("--shelxl-iterations", type=int, default=1, help="SHELXL executable calls per macrocycle.")
     p_push.add_argument(

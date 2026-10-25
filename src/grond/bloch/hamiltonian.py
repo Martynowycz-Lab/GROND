@@ -137,16 +137,8 @@ class HamiltonianMixin:
             # Positive imaginary diagonal gives exp(2*pi*i*(S+i*mu)*t),
             # i.e. uniform elastic-beam damping exp(-2*pi*mu*t).
             H[np.diag_indices(n)] += 1j * float(getattr(self.cfg, "absorption_mu", 0.0))
-        convention = str(getattr(self.cfg, "matrix_convention", "j_minus_i") or "j_minus_i")
-        if convention not in {"j_minus_i", "i_minus_j"}:
-            raise ValueError(f"unknown matrix_convention={convention!r}; expected j_minus_i or i_minus_j")
         # Production signed-row convention: use U(h_j - h_i).
-        # The alternate sign is kept as an auditable raw-forward-model test.
-        diffs = (
-            basis[None, :, :] - basis[:, None, :]
-            if convention == "j_minus_i"
-            else basis[:, None, :] - basis[None, :, :]
-        )
+        diffs = basis[None, :, :] - basis[:, None, :]
         u_mat = self.ug_array(diffs) if row_idx is None else self.ug_for_row_array(diffs, row_idx)
         np.fill_diagonal(u_mat, 0.0 + 0.0j)
         H += u_mat.astype(h_dtype, copy=False) / (2.0 * self.data.k)

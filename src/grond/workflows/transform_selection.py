@@ -325,28 +325,19 @@ def _materialize_transform_hand_split_contract(
     )
 
     path = (root / "decisions" / ds.name / "transform_hand_split_contract.json").resolve()
-    scheme = str(getattr(args, "split_scheme", "legacy"))
-    scheme_kwargs: dict[str, object] = {}
-    if scheme != "legacy":
-        from grond.bloch.splits import load_split_exclusion
+    from grond.bloch.splits import load_split_exclusion
 
-        exclusion_path = str(getattr(args, "exclude_orbits_json", "") or "").strip()
-        scheme_kwargs = {
-            "scheme": scheme,
-            "salt": str(args.split_salt),
-            "excluded_orbits": load_split_exclusion(exclusion_path)["ordered_orbits"] if exclusion_path else None,
-        }
-    elif str(getattr(args, "exclude_orbits_json", "") or "").strip():
-        raise ValueError("--exclude-orbits-json requires --split-scheme orbit-hash")
+    exclusion_path = str(getattr(args, "exclude_orbits_json", "") or "").strip()
     payload = build_transform_split_contract(
         Path(ds.hkl),
         Path(prep.structure),
         candidates,
         dataset=ds.name,
         free_fraction=float(args.free_fraction),
-        seed=int(args.split_seed),
         include_friedel=True,
-        **scheme_kwargs,
+        scheme=str(args.split_scheme),
+        salt=str(args.split_salt),
+        excluded_orbits=load_split_exclusion(exclusion_path)["ordered_orbits"] if exclusion_path else None,
         **({"candidate_set": candidate_set} if candidate_set is not None else {}),
     )
     validation = validate_transform_split_contract(
@@ -431,13 +422,9 @@ def run_cross_crystal_split_check(
     grond.validation.heldout.orbit_key (model Laue group + Friedel, final-transform model setting) and
     pooled: no orbit may be free in one crystal and work in another, and no orbit excluded in one
     crystal (the lockbox listing, or the contract's candidate-union exclusion) may be used in another.
-    The record is decisions/cross_crystal_split_check.json.  The legacy per-dataset split has no
-    crystal-independent free set; it is not checked and nothing is written, so legacy runs are unchanged.
+    The record is decisions/cross_crystal_split_check.json.
     """
 
-    scheme = str(getattr(args, "split_scheme", "legacy") or "legacy")
-    if scheme != "orbit-hash":
-        return {"status": "not_applicable_legacy_split", "split_scheme": scheme}
     from grond.bloch.model import parse_model
     from grond.bloch.splits import load_split_exclusion
 
@@ -446,7 +433,7 @@ def run_cross_crystal_split_check(
     exclusion = load_split_exclusion(exclusion_path) if exclusion_path else None
     record: dict[str, object] = {
         "schema": CROSS_CRYSTAL_SPLIT_CHECK_SCHEMA,
-        "split_scheme": scheme,
+        "split_scheme": str(args.split_scheme),
         "split_salt": str(getattr(args, "split_salt", "")),
         "free_fraction": float(getattr(args, "free_fraction", 0.10)),
         "excluded_orbits_sha256": str(exclusion["sha256"]) if exclusion else "",
@@ -766,12 +753,11 @@ def choose_transform_by_scout(
     parity_policy = str(getattr(args, "transform_parity_policy", "proper-only"))
     if getattr(args, "trust_hkl_transform", False):
         selected_info = parse_hkl_transform_info(ds.hkl_transform or "identity")
-        if not selected_info.proper and parity_policy != "all-diagnostic":
+        if not selected_info.proper:
             raise ValueError(
                 f"trusted transform {selected_info.canonical!r} is improper (determinant -1) "
                 "and cannot be accepted under --transform-parity-policy=proper-only; invert the model "
-                f"coordinates and declare the proper transform {selected_info.proper_canonical_transform!r}, "
-                "or explicitly use all-diagnostic mode without a named absolute-configuration claim"
+                f"coordinates and declare the proper transform {selected_info.proper_canonical_transform!r}"
             )
         selected_transform = selected_info.canonical
         selected = {
@@ -992,8 +978,7 @@ def choose_transform_by_scout(
             "proper-only metadata/Bloch transform scouting by default, followed by higher N/Q "
             "rerank of the top candidates; transform rankings use independently scaled matched-Born "
             "work rows only, reserve free rows, and never use coordinate-hand-sensitive Bloch terms; "
-            "default metadata overlap may order but never eliminate candidates; all-diagnostic is an "
-            "explicit mixed-parity mode that cannot by itself establish named absolute configuration"
+            "default metadata overlap may order but never eliminate candidates"
         ),
         "selection_target": "matched_born_work_only_hand_invariant_v1",
         "selection_nuisance_contract": transform_scout_nuisance(args),

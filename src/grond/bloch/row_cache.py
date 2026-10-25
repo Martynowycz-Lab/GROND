@@ -162,9 +162,6 @@ class RowCacheMixin:
         sg_profile_same_branch_continuation_segments = []
         sg_residual_max = []
         dose_delta_b = []
-        convention = str(getattr(self.cfg, "matrix_convention", "j_minus_i") or "j_minus_i")
-        if convention not in {"j_minus_i", "i_minus_j"}:
-            raise ValueError(f"unknown matrix_convention={convention!r}; expected j_minus_i or i_minus_j")
 
         t0 = time.perf_counter()
         for pos, row_idx in enumerate(indices):
@@ -197,11 +194,7 @@ class RowCacheMixin:
                     "Frozen row-plan basis contract violated: basis must start with direct beam then exact signed target hkl."
                 )
 
-            diffs = (
-                basis[None, :, :] - basis[:, None, :]
-                if convention == "j_minus_i"
-                else basis[:, None, :] - basis[None, :, :]
-            )
+            diffs = basis[None, :, :] - basis[:, None, :]
             row_diff_idx = []
             for diff in diffs.reshape(-1, 3):
                 tup = tuple(int(v) for v in diff)
@@ -500,7 +493,6 @@ class RowCacheMixin:
             ),
             "dose_delta_b_A2": float(cache["dose_delta_b"][pos]),
             "thickness_model": str(getattr(self.cfg, "thickness_model", "uniform_gradient")),
-            "thickness_sigma_frac": float(getattr(self.cfg, "thickness_sigma_frac", 0.0)),
         }
         if inverse_dyn_vals:
             result["dyn_inverse"] = float(np.sum(weights * np.asarray(inverse_dyn_vals, dtype=float)))

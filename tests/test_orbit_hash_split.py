@@ -19,7 +19,6 @@ from grond.bloch.splits import (
     candidate_invariant_split_membership,
     orbit_hash_split_masks,
     resolve_split_masks,
-    split_masks,
     validate_transform_split_contract,
 )
 from grond.cli_options.parser import build_parser
@@ -105,12 +104,6 @@ def test_orbit_hash_free_set_is_the_reference_free_fold_in_every_crystal():
     common = set(status_a) & set(status_b)
     assert len(common) > 50
     assert all(status_a[key] == status_b[key] for key in common)
-    # The legacy per-dataset shuffle puts some shared orbits on opposite sides (the leak).
-    legacy_a = split_masks(crystal_a, 0.10, 42, symmetry_ops=MMM)
-    legacy_b = split_masks(crystal_b, 0.10, 42, symmetry_ops=MMM)
-    legacy_status_a = {G.orbit_key(*h): bool(f) for h, f in zip(crystal_a, legacy_a["free"], strict=True)}
-    legacy_status_b = {G.orbit_key(*h): bool(f) for h, f in zip(crystal_b, legacy_b["free"], strict=True)}
-    assert any(legacy_status_a[key] != legacy_status_b[key] for key in common)
 
 
 def test_orbit_exclusion_rows_are_neither_work_nor_free():
@@ -136,10 +129,6 @@ def test_candidate_union_orbit_hash_membership_for_laue_equivalent_candidates():
     assert result["multi_orbit_group_count"] == 0
     assert result["mixed_status_group_count"] == 0
     assert result["excluded_group_count"] == 2
-    legacy = candidate_invariant_split_membership(raw, MMM, KLEIN_FOUR, free_fraction=0.10, seed=42)
-    assert set(np.unique(legacy["membership"])) <= {0, 1}
-    with pytest.raises(ValueError, match="orbit exclusion requires"):
-        candidate_invariant_split_membership(raw, MMM, KLEIN_FOUR, excluded_orbits=lockbox)
 
 
 def test_candidate_union_orbit_hash_frees_a_component_when_any_orbit_is_free():
@@ -164,9 +153,6 @@ def test_orbit_hash_contract_round_trip_records_scheme_salt_and_exclusion(tmp_pa
     lock_path = tmp_path / "lockbox.json"
     sha = _write_lockbox(lock_path, lockbox)
 
-    legacy = build_transform_split_contract(hkl, model, KLEIN_FOUR, dataset="d")
-    assert legacy["algorithm"] == "candidate_union_model_symmetry_friedel_orbits_v1"
-    assert "split_scheme" not in legacy
     payload = build_transform_split_contract(
         hkl, model, KLEIN_FOUR, dataset="d", scheme="orbit-hash", salt="S", excluded_orbits=lockbox
     )
@@ -176,7 +162,7 @@ def test_orbit_hash_contract_round_trip_records_scheme_salt_and_exclusion(tmp_pa
     # The calibration rebuild (transform_binding) reproduces the contract from its recorded fields.
     rebuilt = build_transform_split_contract(
         hkl, model, payload["candidate_transforms"], dataset="d", free_fraction=payload["free_fraction"],
-        seed=payload["split_seed"], include_friedel=payload["include_friedel"], scheme=payload["split_scheme"],
+        include_friedel=payload["include_friedel"], scheme=payload["split_scheme"],
         salt=payload["split_salt"], excluded_orbits=payload["excluded_orbits"],
     )
     assert rebuilt["contract_payload_sha256"] == payload["contract_payload_sha256"]
@@ -209,10 +195,6 @@ def test_orbit_hash_contract_round_trip_records_scheme_salt_and_exclusion(tmp_pa
         resolve_split_masks(data, parsed, exclude_orbits_json=str(lock_path), **{**common, "split_salt": "T"})
     with pytest.raises(ValueError, match="--exclude-orbits-json does not match"):
         resolve_split_masks(data, parsed, **common)
-    with pytest.raises(ValueError, match="--split-scheme legacy does not match"):
-        resolve_split_masks(data, parsed, **{**common, "split_scheme": "legacy"})
-    with pytest.raises(ValueError, match="requires --split-scheme orbit-hash"):
-        resolve_split_masks(data, parsed, split_scheme="legacy", exclude_orbits_json=str(lock_path))
 
 
 def _engine(tmp_path: Path, name: str, *extra: str) -> tuple[list[dict], dict]:
@@ -243,7 +225,7 @@ def _engine(tmp_path: Path, name: str, *extra: str) -> tuple[list[dict], dict]:
     return rows, json.loads((out / "summary.json").read_text())
 
 
-def test_engine_drops_excluded_orbits_before_fitting_and_keeps_legacy_default(tmp_path: Path):
+def test_engine_drops_excluded_orbits_before_fitting(tmp_path: Path):
     keys = sorted({G.orbit_key(*h) for h in _grid_hkls()})
     lockbox = keys[::7]
     lock_path = tmp_path / "lockbox.json"
@@ -258,14 +240,8 @@ def test_engine_drops_excluded_orbits_before_fitting_and_keeps_legacy_default(tm
     assert selection["split_scheme"]["excluded_orbits_sha256"] == sha
     assert summary["config"]["split_scheme"] == "orbit-hash"
 
-    legacy_rows, legacy_summary = _engine(tmp_path, "legacy")
-    assert len(legacy_rows) == len(_grid_hkls())
-    assert legacy_summary["row_selection"]["split_scheme"]["split_scheme"] == "legacy"
-    legacy = split_masks(np.asarray(_grid_hkls()), 0.10, 42, symmetry_ops=MMM)
-    assert [r["split"] == "free" for r in legacy_rows] == legacy["free"].tolist()
 
-
-def test_auto_defaults_forward_orbit_hash_split_and_legacy_flags_restore_it(tmp_path: Path):
+def test_auto_defaults_forward_orbit_hash_split(tmp_path: Path):
     lock_path = tmp_path / "lockbox.json"
     _write_lockbox(lock_path, ["2|0|0"])
     base = ["auto", "--out-dir", str(tmp_path / "o"), "--hkl", "x.HKL", "--structure", "m.res"]
@@ -281,14 +257,6 @@ def test_auto_defaults_forward_orbit_hash_split_and_legacy_flags_restore_it(tmp_
     cmd = native_stage_cmd("python", ds, "m.res", "", tmp_path / "run", lock_args, n_basis=8, n_points=3, stage="screen")
     assert cmd[cmd.index("--exclude-orbits-json") + 1] == str(lock_path.resolve())
 
-    legacy = build_parser().parse_args([*base, "--split-scheme", "legacy", "--split-seed", "42"])
-    cmd = native_stage_cmd("python", ds, "m.res", "", tmp_path / "run", legacy, n_basis=8, n_points=3, stage="screen")
-    assert cmd[cmd.index("--split-scheme") + 1] == "legacy"
-    # Parsers without the new options keep the legacy split.
-    old = SimpleNamespace(**{k: v for k, v in vars(legacy).items() if k not in {"split_scheme", "split_salt"}})
-    cmd = native_stage_cmd("python", ds, "m.res", "", tmp_path / "run", old, n_basis=8, n_points=3, stage="screen")
-    assert cmd[cmd.index("--split-scheme") + 1] == "legacy"
-
 
 def test_transform_scout_contract_follows_the_split_flags(tmp_path: Path):
     from grond.io.config import PrepConfig
@@ -301,18 +269,11 @@ def test_transform_scout_contract_follows_the_split_flags(tmp_path: Path):
     lock_path = tmp_path / "lockbox.json"
     sha = _write_lockbox(lock_path, ["2|0|0", "0|1|1"])
     prep = PrepConfig(structure=str(model), datasets=[DatasetSpec(name="d", hkl=str(hkl))])
-    args = SimpleNamespace(free_fraction=0.10, split_seed=42, split_scheme="orbit-hash", split_salt="S", exclude_orbits_json=str(lock_path))
+    args = SimpleNamespace(free_fraction=0.10, split_scheme="orbit-hash", split_salt="S", exclude_orbits_json=str(lock_path))
     ds, binding = _materialize_transform_hand_split_contract(prep, prep.datasets[0], KLEIN_FOUR, args, tmp_path)
     payload = json.loads(Path(ds.split_contract).read_text())
     assert payload["split_scheme"] == "orbit-hash" and payload["excluded_orbits_sha256"] == sha
     assert binding["split_salt"] == "S" and binding["excluded_row_count"] > 0
-    legacy_args = SimpleNamespace(free_fraction=0.10, split_seed=42, split_scheme="legacy", split_salt="S", exclude_orbits_json="")
-    ds, _ = _materialize_transform_hand_split_contract(prep, prep.datasets[0], KLEIN_FOUR, legacy_args, tmp_path / "legacy")
-    assert json.loads(Path(ds.split_contract).read_text())["algorithm"] == "candidate_union_model_symmetry_friedel_orbits_v1"
-    with pytest.raises(ValueError, match="requires --split-scheme orbit-hash"):
-        _materialize_transform_hand_split_contract(
-            prep, prep.datasets[0], KLEIN_FOUR, SimpleNamespace(**{**vars(legacy_args), "exclude_orbits_json": str(lock_path)}), tmp_path
-        )
 
 
 def _native_parser():
@@ -368,7 +329,7 @@ def test_single_dataset_shelxl_feedback_cycles_replay_the_orbit_hash_split(tmp_p
     # The source summary records the engine config (vars(args)) of an AUTO orbit-hash stage.
     config = {
         "split_contract": str(contract), "split_scheme": "orbit-hash", "split_salt": "S",
-        "exclude_orbits_json": str(lock_path), "free_fraction": 0.10, "split_seed": 42,
+        "exclude_orbits_json": str(lock_path), "free_fraction": 0.10,
     }
     summary = {"config": config, "best_native": {"nuisance": {"thickness_A": 700.0}}}
     command = feedback.native_command(args, summary, model, tmp_path / "cycle", n_basis=8, n_points=3)
@@ -377,22 +338,11 @@ def test_single_dataset_shelxl_feedback_cycles_replay_the_orbit_hash_split(tmp_p
     data = XDSData(hkl, hkl_transform="identity")
     masks, excluded, _contract, scheme = resolve_split_masks(
         data, parse_model(model), split_contract=parsed.split_contract, free_fraction=parsed.free_fraction,
-        split_seed=parsed.split_seed, split_scheme=parsed.split_scheme, split_salt=parsed.split_salt,
+        split_scheme=parsed.split_scheme, split_salt=parsed.split_salt,
         exclude_orbits_json=parsed.exclude_orbits_json,
     )
     assert scheme["split_scheme"] == "orbit-hash" and excluded.any()
     assert np.array_equal(masks["free"], validate_transform_split_contract(payload)["masks"]["free"])
-    # Without the scheme the cycle's engine default (legacy) would refuse the orbit-hash contract.
-    with pytest.raises(ValueError, match="--split-scheme legacy does not match"):
-        resolve_split_masks(data, parse_model(model), split_contract=str(contract), split_scheme="legacy")
-
-    # Historical summaries that never recorded a scheme keep the engine's legacy split.
-    old = feedback.native_command(
-        args, {"config": {"free_fraction": 0.10, "split_seed": 42}, "best_native": {"nuisance": {"thickness_A": 700.0}}},
-        model, tmp_path / "old", n_basis=8, n_points=3,
-    )
-    assert "--split-scheme" not in old and "--split-salt" not in old and "--exclude-orbits-json" not in old
-    assert _native_parser().parse_args(old[2:]).split_scheme == "legacy"
 
 
 def test_engine_max_rows_subset_is_ranked_without_excluded_orbits(tmp_path: Path):

@@ -9,7 +9,6 @@ import json
 import math
 
 import numpy as np
-from numpy.polynomial.hermite import hermgauss
 from numpy.polynomial.legendre import leggauss
 
 from grond.bloch.cache import (
@@ -282,8 +281,8 @@ class PotentialMixin:
         """Return thickness nodes (Å) and weights for the configured thickness model and evaluator.
 
         ``table`` gives the support-table nodes and ``cf`` gives (None, None), since the gamma average is then closed
-        form. The legacy quadrature uses Gauss-Legendre nodes (uniform_gradient), Gauss-Hermite nodes (gaussian) or
-        their product (gaussian_gradient), drops nonpositive thicknesses and renormalises the weights to sum 1.
+        form. The legacy quadrature uses Gauss-Legendre nodes (uniform_gradient), drops nonpositive thicknesses and
+        renormalises the weights to sum 1.
         """
         evaluator = resolved_config_evaluator(self.cfg)
         if evaluator == "table":
@@ -295,33 +294,12 @@ class PotentialMixin:
         model = str(getattr(self.cfg, "thickness_model", "uniform_gradient") or "uniform_gradient").lower()
         n = max(1, int(self.cfg.thickness_points))
         t0 = float(self.cfg.thickness_A)
-        if model == "single" or n <= 1:
-            return np.array([t0], dtype=float), np.array([1.0], dtype=float)
-        if model == "uniform_gradient":
-            if self.cfg.thickness_grad_frac <= 0.0:
-                return np.array([t0], dtype=float), np.array([1.0], dtype=float)
-            x, w = leggauss(n)
-            t = t0 * (1.0 + float(self.cfg.thickness_grad_frac) * x)
-        elif model == "gaussian":
-            sigma = abs(float(getattr(self.cfg, "thickness_sigma_frac", 0.0))) * t0
-            if sigma <= 0.0:
-                return np.array([t0], dtype=float), np.array([1.0], dtype=float)
-            x, w = hermgauss(n)
-            t = t0 + math.sqrt(2.0) * sigma * x
-            w = w / math.sqrt(math.pi)
-        elif model == "gaussian_gradient":
-            sigma = abs(float(getattr(self.cfg, "thickness_sigma_frac", 0.0))) * t0
-            grad = float(self.cfg.thickness_grad_frac)
-            if sigma <= 0.0 and grad <= 0.0:
-                return np.array([t0], dtype=float), np.array([1.0], dtype=float)
-            xg, wg = leggauss(n)
-            xh, wh = hermgauss(n)
-            centers = t0 * (1.0 + grad * xg)
-            wh = wh / math.sqrt(math.pi)
-            t = (centers[:, None] + math.sqrt(2.0) * sigma * xh[None, :]).reshape(-1)
-            w = (wg[:, None] * wh[None, :]).reshape(-1)
-        else:
+        if model != "uniform_gradient":
             raise ValueError(f"unknown thickness_model={self.cfg.thickness_model!r}")
+        if n <= 1 or self.cfg.thickness_grad_frac <= 0.0:
+            return np.array([t0], dtype=float), np.array([1.0], dtype=float)
+        x, w = leggauss(n)
+        t = t0 * (1.0 + float(self.cfg.thickness_grad_frac) * x)
         ok = np.asarray(t, dtype=float) > 0.0
         if not np.any(ok):
             return np.array([self.cfg.thickness_A], dtype=float), np.array([1.0], dtype=float)

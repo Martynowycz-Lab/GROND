@@ -236,10 +236,11 @@ def nested_variants(args: argparse.Namespace, ds: DatasetSpec) -> list[dict]:
 def selection_row_policy(args: argparse.Namespace) -> dict:
     """The orbit-hash free set and the orbit exclusion the stage removes on top of the engine split."""
 
-    policy: dict = {"extra_free": None, "exclude_orbits_json": ""}
-    if str(getattr(args, "split_scheme", "legacy")) == "orbit-hash":
-        policy["extra_free"] = {"salt": str(getattr(args, "split_salt", "") or DEFAULT_FREE_SALT),
-                                "fraction": float(getattr(args, "free_fraction", 0.10))}
+    policy: dict = {
+        "extra_free": {"salt": str(getattr(args, "split_salt", "") or DEFAULT_FREE_SALT),
+                       "fraction": float(getattr(args, "free_fraction", 0.10))},
+        "exclude_orbits_json": "",
+    }
     exclusion = str(getattr(args, "exclude_orbits_json", "") or "")
     if exclusion:
         policy["exclude_orbits_json"] = str(Path(exclusion).expanduser().resolve())

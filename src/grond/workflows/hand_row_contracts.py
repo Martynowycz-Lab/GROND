@@ -85,7 +85,6 @@ def _args_with_recorded_native_contract(
         "topup_d_min",
         "max_support_sg",
         "free_fraction",
-        "split_seed",
         "split_scheme",
         "split_salt",
         "exclude_orbits_json",

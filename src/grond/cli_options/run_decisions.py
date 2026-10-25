@@ -13,13 +13,9 @@ def add_decision_controls(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--max-rows", type=int, default=0)
     ap.add_argument(
         "--transform-parity-policy",
-        choices=["proper-only", "all-diagnostic"],
+        choices=["proper-only"],
         default="proper-only",
-        help=(
-            "Use only determinant +1 transforms for automatic selection (default). "
-            "all-diagnostic also scouts mixed-parity transforms for diagnostics, but cannot by itself "
-            "support a named absolute-configuration claim."
-        ),
+        help="Use only determinant +1 transforms for automatic selection (default).",
     )
     ap.add_argument(
         "--trust-hkl-transform",
@@ -56,12 +52,11 @@ def add_decision_controls(ap: argparse.ArgumentParser) -> None:
     )
     ap.add_argument(
         "--split-scheme",
-        choices=["orbit-hash", "legacy"],
+        choices=["orbit-hash"],
         default="orbit-hash",
         help=(
             "Free-set definition. orbit-hash (default): crystal-independent salted hash of the model Laue-orbit "
-            "key (grond.validation.heldout), so one orbit is free in every crystal. legacy: per-dataset shuffle "
-            "with --split-seed."
+            "key (grond.validation.heldout), so one orbit is free in every crystal."
         ),
     )
     ap.add_argument(

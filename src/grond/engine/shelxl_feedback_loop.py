@@ -134,8 +134,6 @@ def native_command(
         str(nui.get("thickness_model", "single")),
         "--thickness-grad-grid",
         grid_value(nui.get("thickness_grad_frac")),
-        "--thickness-sigma-frac-grid",
-        grid_value(nui.get("thickness_sigma_frac")),
         "--frame-offset-grid",
         grid_value(nui.get("frame_offset")),
         "--group-width-grid",
@@ -189,12 +187,10 @@ def native_command(
         ),
         "--free-fraction",
         grid_value(summary_value(source_summary, "free_fraction", 0.10), "0.10"),
-        "--split-seed",
-        str(int(float(summary_value(source_summary, "split_seed", 42)))),
         "--scale-fit-split",
         str(summary_value(source_summary, "scale_fit_split", "all")),
         "--selection-metric",
-        str(summary_value(source_summary, "selection_metric", "all_wR2")),
+        str(summary_value(source_summary, "selection_metric", "work_wR2")),
         "--lambda-grid",
         str(args.lambda_grid),
         "--endpoint-b-grid",
@@ -265,9 +261,7 @@ def native_command(
         value = nui.get(key, cfg.get(key))
         if value is not None and str(value) != "":
             cmd.extend(["--" + key.replace("_", "-"), str(value)])
-    # The free-split scheme travels with the split contract: an orbit-hash
-    # contract refuses the engine's legacy default.  Historical summaries that
-    # never recorded a scheme keep the engine's legacy split.
+    # The free-split scheme, salt and orbit exclusion travel with the split contract.
     for key in ("split_scheme", "split_salt", "exclude_orbits_json"):
         value = cfg.get(key)
         if value is not None and str(value) != "":

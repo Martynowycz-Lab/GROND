@@ -17,8 +17,7 @@ from grond.bloch.numerics import sha256
 from grond.io.xds import XDSData
 from grond.validation import heldout
 
-SPLIT_SCHEMES = ("orbit-hash", "legacy")
-LEGACY_SPLIT_ALGORITHM = "candidate_union_model_symmetry_friedel_orbits_v1"
+SPLIT_SCHEMES = ("orbit-hash",)
 ORBIT_HASH_SPLIT_ALGORITHM = "candidate_union_model_symmetry_friedel_orbit_hash_v1"
 # Every crystal's split contract is built from one shared candidate set (the closure of all crystals' candidates).
 SHARED_CANDIDATE_POLICY = "shared_relative_candidates_closed_modulo_model_laue_group_v1"
@@ -49,35 +48,6 @@ def reflection_orbit_key(hkl, symmetry_ops=None, include_friedel: bool = True):
     return min(equivalents)
 
 
-def split_masks(hkls, free_fraction=0.10, seed=42, symmetry_ops=None, include_friedel: bool = True):
-    """Return ``all``, ``work`` and ``free`` row masks that keep every reflection orbit on one side.
-
-    Orbit keys come from reflection_orbit_key (model symmetry, Friedel mates by default). The sorted unique keys are
-    shuffled with numpy default_rng(seed) and the first round(n*free_fraction) orbits, at least 1 and at most n - 1, are
-    free.
-    """
-
-    if not 0.0 < float(free_fraction) < 1.0:
-        raise ValueError("free_fraction must be between 0 and 1")
-    orbit_keys = [reflection_orbit_key(h, symmetry_ops, include_friedel) for h in hkls]
-    unique = sorted(set(orbit_keys))
-    if len(unique) < 2:
-        raise ValueError("held-out splitting requires at least two unique HKLs")
-    rng = np.random.default_rng(int(seed))
-    rng.shuffle(unique)
-    n_free = min(len(unique) - 1, max(1, int(round(len(unique) * float(free_fraction)))))
-    free = set(unique[:n_free])
-    masks = {
-        "all": np.ones(len(hkls), dtype=bool),
-        "work": np.zeros(len(hkls), dtype=bool),
-        "free": np.zeros(len(hkls), dtype=bool),
-    }
-    for i, key in enumerate(orbit_keys):
-        masks["free"][i] = key in free
-    masks["work"] = ~masks["free"]
-    return masks
-
-
 def load_split_exclusion(path) -> dict:
     """Load a lockbox orbit exclusion list (hash verified) with its listing order."""
 
@@ -92,8 +62,8 @@ def require_orbit_hash_work_and_free(
 ) -> None:
     """Refuse an orbit-hash split without free (or work) rows; one message for every code path.
 
-    The legacy shuffle always holds out at least one orbit group.  The hash fold of a small dataset
-    can be empty, and a run must not continue with no held-out rows (or no rows to fit).
+    The hash fold of a small dataset can be empty, and a run must not continue with no held-out rows (or no rows
+    to fit).
     """
 
     n_folds = max(2, int(round(1.0 / float(free_fraction))))
@@ -102,7 +72,7 @@ def require_orbit_hash_work_and_free(
         raise ValueError(
             f"orbit-hash free split is empty: none of the {int(orbit_count)} non-excluded Laue orbits lies in the "
             f"free fold ({rule}); this dataset is too small for a held-out set at this fraction. Use more "
-            "reflections, a larger --free-fraction, or --split-scheme legacy"
+            "reflections or a larger --free-fraction"
         )
     if int(work_rows) == 0:
         # "Held out as free" rather than "in the free fold": a candidate-union component is free as a
@@ -156,51 +126,37 @@ def resolve_split_masks(
     *,
     split_contract: str = "",
     free_fraction: float = 0.10,
-    split_seed: int = 42,
-    split_scheme: str = "legacy",
+    split_scheme: str = "orbit-hash",
     split_salt: str = heldout.DEFAULT_FREE_SALT,
     exclude_orbits_json: str = "",
 ):
     """Return ``(masks, excluded, contract_summary, scheme_summary)`` for one native stage.
 
     An immutable split contract is authoritative; the declared scheme, salt,
-    fraction, seed (legacy) and exclusion list must match it exactly.  Rows in
+    fraction and exclusion list must match it exactly.  Rows in
     ``excluded`` must be dropped from the row selection by the caller.
     """
 
-    scheme = str(split_scheme or "legacy")
+    scheme = str(split_scheme)
     if scheme not in SPLIT_SCHEMES:
         raise ValueError(f"unknown split scheme {scheme!r}; expected one of {list(SPLIT_SCHEMES)}")
     exclusion = load_split_exclusion(exclude_orbits_json) if str(exclude_orbits_json or "").strip() else None
-    if exclusion is not None and scheme != "orbit-hash":
-        raise ValueError("--exclude-orbits-json requires --split-scheme orbit-hash")
     contract_summary: dict = {}
     if str(split_contract or "").strip():
         masks, contract_summary = load_transform_split_contract_masks(Path(split_contract), data, model)
         excluded = np.asarray(masks.pop("excluded", np.zeros(len(masks["all"]), dtype=bool)), dtype=bool)
         if not math.isclose(float(free_fraction), float(contract_summary["free_fraction"]), rel_tol=0.0, abs_tol=1e-12):
             raise ValueError("--free-fraction does not match the immutable transform/hand split contract")
-        contract_scheme = str(contract_summary.get("split_scheme") or "legacy")
-        if scheme != contract_scheme:
+        if str(split_salt) != str(contract_summary.get("split_salt") or ""):
+            raise ValueError("--split-salt does not match the immutable transform/hand split contract")
+        recorded_exclusion = str(contract_summary.get("excluded_orbits_sha256") or "")
+        requested_exclusion = str(exclusion["sha256"]) if exclusion is not None else ""
+        if recorded_exclusion != requested_exclusion:
             raise ValueError(
-                f"--split-scheme {scheme} does not match the immutable transform/hand split contract ({contract_scheme})"
+                "--exclude-orbits-json does not match the orbit exclusion recorded in the immutable "
+                f"transform/hand split contract (contract={recorded_exclusion or 'none'}, "
+                f"requested={requested_exclusion or 'none'})"
             )
-        if scheme == "legacy" and int(split_seed) != int(contract_summary["split_seed"]):
-            raise ValueError("--split-seed does not match the immutable transform/hand split contract")
-        if scheme == "orbit-hash":
-            if str(split_salt) != str(contract_summary.get("split_salt") or ""):
-                raise ValueError("--split-salt does not match the immutable transform/hand split contract")
-            recorded_exclusion = str(contract_summary.get("excluded_orbits_sha256") or "")
-            requested_exclusion = str(exclusion["sha256"]) if exclusion is not None else ""
-            if recorded_exclusion != requested_exclusion:
-                raise ValueError(
-                    "--exclude-orbits-json does not match the orbit exclusion recorded in the immutable "
-                    f"transform/hand split contract (contract={recorded_exclusion or 'none'}, "
-                    f"requested={requested_exclusion or 'none'})"
-                )
-    elif scheme == "legacy":
-        masks = split_masks(data.hkl, free_fraction, split_seed, symmetry_ops=model.get("symmetry_ops"))
-        excluded = np.zeros(len(masks["all"]), dtype=bool)
     else:
         masks, excluded = orbit_hash_split_masks(
             data.hkl,
@@ -212,12 +168,8 @@ def resolve_split_masks(
     scheme_summary = {
         "split_scheme": scheme,
         "free_fraction": float(free_fraction),
-        **({"split_seed": int(split_seed)} if scheme == "legacy" else {"split_salt": str(split_salt)}),
-        "orbit_key": (
-            "grond.bloch.splits.reflection_orbit_key (per-dataset shuffled orbits)"
-            if scheme == "legacy"
-            else "grond.validation.heldout.orbit_key (model Laue group + Friedel, crystal-independent)"
-        ),
+        "split_salt": str(split_salt),
+        "orbit_key": "grond.validation.heldout.orbit_key (model Laue group + Friedel, crystal-independent)",
         "split_contract": str(split_contract or ""),
         "excluded_orbits_sha256": str(exclusion["sha256"]) if exclusion is not None else "",
         "excluded_orbits_source": str(exclusion["path"]) if exclusion is not None else "",
@@ -592,8 +544,7 @@ def point_group_proper_rotations(symmetry_ops) -> list[tuple]:
     rotation subgroup (Pc: 1 only; P21/c: 1 and 2).  Improper point-group elements (mirrors, glides, -1) are also
     symmetries of the structure and give identical dynamical intensities, but an improper transform carries GROND's
     parity bookkeeping ((model, T) == (inverted model, -T)), so they are deliberately not used: a proper and an improper
-    candidate are never merged, and improper candidates (only generated under --transform-parity-policy
-    all-diagnostic) are merged only with each other, by proper rotations.
+    candidate are never merged, and improper candidates are merged only with each other, by proper rotations.
     """
 
     group = _close_integer_group(model_hkl_rotations(symmetry_ops), what="model symmetry rotations")
@@ -900,9 +851,8 @@ def candidate_invariant_split_membership(
     transforms,
     *,
     free_fraction: float = 0.10,
-    seed: int = 42,
     include_friedel: bool = True,
-    scheme: str = "legacy",
+    scheme: str = "orbit-hash",
     salt: str = heldout.DEFAULT_FREE_SALT,
     excluded_orbits=None,
 ):
@@ -914,8 +864,7 @@ def candidate_invariant_split_membership(
     duplicates) from changing split merely because a different indexing
     candidate is being scored.
 
-    ``scheme="legacy"`` shuffles this dataset's components with ``seed``.
-    ``scheme="orbit-hash"`` is crystal-independent: a component is free iff any
+    The orbit-hash scheme is crystal-independent: a component is free iff any
     of its model-orbit keys (``heldout.orbit_key`` under any candidate) lies in
     the salted free fold, and excluded (membership 2) iff any key is in
     ``excluded_orbits``.  With Laue-equivalent candidates every component is
@@ -933,8 +882,6 @@ def candidate_invariant_split_membership(
         raise ValueError("free_fraction must be between 0 and 1")
     if scheme not in SPLIT_SCHEMES:
         raise ValueError(f"unknown split scheme {scheme!r}; expected one of {list(SPLIT_SCHEMES)}")
-    if excluded_orbits and scheme != "orbit-hash":
-        raise ValueError("orbit exclusion requires the orbit-hash split scheme")
 
     canonical_transforms = []
     matrices = []
@@ -985,7 +932,7 @@ def candidate_invariant_split_membership(
     # same held-out observation whenever those transformed HKLs share a
     # model-symmetry/Friedel orbit.
     first_by_orbit = {}
-    orbit_keys_by_row: list[set[str]] = [set() for _ in range(len(raw))] if scheme == "orbit-hash" else []
+    orbit_keys_by_row: list[set[str]] = [set() for _ in range(len(raw))]
     for matrix in matrices:
         transformed = (raw @ matrix.T).astype(int)
         for row_index, hkl in enumerate(transformed):
@@ -996,8 +943,7 @@ def candidate_invariant_split_membership(
             )
             first = first_by_orbit.setdefault(key, row_index)
             union(first, row_index)
-            if scheme == "orbit-hash":
-                orbit_keys_by_row[row_index].add(heldout.orbit_key(hkl, symmetry_ops, include_friedel))
+            orbit_keys_by_row[row_index].add(heldout.orbit_key(hkl, symmetry_ops, include_friedel))
 
     components = {}
     for row_index in range(len(raw)):
@@ -1010,75 +956,51 @@ def candidate_invariant_split_membership(
 
     group_by_row = np.zeros(len(raw), dtype=int)
     membership = np.zeros(len(raw), dtype=np.uint8)
-    if scheme == "orbit-hash":
-        all_keys = sorted(set().union(*orbit_keys_by_row))
-        free_by_key = dict(zip(all_keys, heldout.free_mask(all_keys, str(salt), float(free_fraction)), strict=True))
-        excluded_set = set(excluded_orbits or ())
-        free_groups: set[int] = set()
-        excluded_groups: set[int] = set()
-        multi_orbit_groups = 0
-        mixed_status_groups = 0
-        # Orbit keys of the components that are not excluded: a free key merged into an excluded
-        # component is not held out, so it must not be counted by the empty-free-set refusal.
-        kept_keys: set[str] = set()
-        group_orbit_keys: list[list[str]] = []
-        for group_id, row_indices in enumerate(ordered_components):
-            group_by_row[row_indices] = group_id
-            keys = set().union(*(orbit_keys_by_row[row] for row in row_indices))
-            group_orbit_keys.append(sorted(keys))
-            multi_orbit_groups += int(len(keys) > 1)
-            status = {bool(free_by_key[key]) for key in keys}
-            mixed_status_groups += int(len(status) > 1)
-            if keys & excluded_set:
-                excluded_groups.add(group_id)
-                membership[row_indices] = 2
-                continue
-            kept_keys |= keys
-            if True in status:
-                free_groups.add(group_id)
-                membership[row_indices] = 1
-        require_orbit_hash_work_and_free(
-            work_rows=int(np.count_nonzero(membership == 0)),
-            free_rows=int(np.count_nonzero(membership == 1)),
-            orbit_count=len(kept_keys),
-            salt=str(salt),
-            free_fraction=float(free_fraction),
-        )
-        return {
-            "candidate_transforms": canonical_transforms,
-            "membership": membership,
-            "orbit_group_by_row": group_by_row,
-            "group_count": len(ordered_components),
-            "work_group_count": len(ordered_components) - len(free_groups) - len(excluded_groups),
-            "free_group_count": len(free_groups),
-            "excluded_group_count": len(excluded_groups),
-            "multi_orbit_group_count": multi_orbit_groups,
-            "mixed_status_group_count": mixed_status_groups,
-            # Model-setting Laue-orbit keys of every component (group id order); reported, not in the contract.
-            "group_orbit_keys": group_orbit_keys,
-        }
-
-    shuffled_group_ids = np.arange(len(ordered_components), dtype=int)
-    rng = np.random.default_rng(int(seed))
-    rng.shuffle(shuffled_group_ids)
-    n_free_groups = min(
-        len(ordered_components) - 1,
-        max(1, int(round(len(ordered_components) * float(free_fraction)))),
-    )
-    free_groups = set(int(value) for value in shuffled_group_ids[:n_free_groups])
+    all_keys = sorted(set().union(*orbit_keys_by_row))
+    free_by_key = dict(zip(all_keys, heldout.free_mask(all_keys, str(salt), float(free_fraction)), strict=True))
+    excluded_set = set(excluded_orbits or ())
+    free_groups: set[int] = set()
+    excluded_groups: set[int] = set()
+    multi_orbit_groups = 0
+    mixed_status_groups = 0
+    # Orbit keys of the components that are not excluded: a free key merged into an excluded
+    # component is not held out, so it must not be counted by the empty-free-set refusal.
+    kept_keys: set[str] = set()
+    group_orbit_keys: list[list[str]] = []
     for group_id, row_indices in enumerate(ordered_components):
         group_by_row[row_indices] = group_id
-        if group_id in free_groups:
+        keys = set().union(*(orbit_keys_by_row[row] for row in row_indices))
+        group_orbit_keys.append(sorted(keys))
+        multi_orbit_groups += int(len(keys) > 1)
+        status = {bool(free_by_key[key]) for key in keys}
+        mixed_status_groups += int(len(status) > 1)
+        if keys & excluded_set:
+            excluded_groups.add(group_id)
+            membership[row_indices] = 2
+            continue
+        kept_keys |= keys
+        if True in status:
+            free_groups.add(group_id)
             membership[row_indices] = 1
-    if not np.any(membership == 0) or not np.any(membership == 1):
-        raise ValueError("candidate-invariant split must contain both work and free rows")
+    require_orbit_hash_work_and_free(
+        work_rows=int(np.count_nonzero(membership == 0)),
+        free_rows=int(np.count_nonzero(membership == 1)),
+        orbit_count=len(kept_keys),
+        salt=str(salt),
+        free_fraction=float(free_fraction),
+    )
     return {
         "candidate_transforms": canonical_transforms,
         "membership": membership,
         "orbit_group_by_row": group_by_row,
         "group_count": len(ordered_components),
-        "work_group_count": len(ordered_components) - len(free_groups),
+        "work_group_count": len(ordered_components) - len(free_groups) - len(excluded_groups),
         "free_group_count": len(free_groups),
+        "excluded_group_count": len(excluded_groups),
+        "multi_orbit_group_count": multi_orbit_groups,
+        "mixed_status_group_count": mixed_status_groups,
+        # Model-setting Laue-orbit keys of every component (group id order); reported, not in the contract.
+        "group_orbit_keys": group_orbit_keys,
     }
 
 
@@ -1137,9 +1059,8 @@ def build_transform_split_contract(
     *,
     dataset: str,
     free_fraction: float = 0.10,
-    seed: int = 42,
     include_friedel: bool = True,
-    scheme: str = "legacy",
+    scheme: str = "orbit-hash",
     salt: str = heldout.DEFAULT_FREE_SALT,
     excluded_orbits=None,
     candidate_set: dict | None = None,
@@ -1147,8 +1068,7 @@ def build_transform_split_contract(
     """Build the immutable raw-row split shared by transform and hand scouts.
 
     ``excluded_orbits`` is the ordered orbit listing of a lockbox file (its
-    SHA-256 is recorded and re-verified); legacy contracts keep their original
-    byte layout.  ``candidate_set`` is the
+    SHA-256 is recorded and re-verified).  ``candidate_set`` is the
     shared-closure block (``contract_candidate_set``) when ``transforms`` is a
     crystal's share of the shared candidate closure; it is recorded and
     re-validated, and per-crystal contracts carry none.
@@ -1165,7 +1085,6 @@ def build_transform_split_contract(
         model.get("symmetry_ops"),
         transforms,
         free_fraction=free_fraction,
-        seed=seed,
         include_friedel=include_friedel,
         scheme=scheme,
         salt=salt,
@@ -1177,7 +1096,7 @@ def build_transform_split_contract(
     payload = {
         "schema_version": 1,
         "kind": "grond_transform_hand_split_contract",
-        "algorithm": ORBIT_HASH_SPLIT_ALGORITHM if scheme == "orbit-hash" else LEGACY_SPLIT_ALGORITHM,
+        "algorithm": ORBIT_HASH_SPLIT_ALGORITHM,
         "dataset": str(dataset),
         "source_hkl": str(hkl_path),
         "source_hkl_sha256": sha256(hkl_path),
@@ -1190,7 +1109,8 @@ def build_transform_split_contract(
         "candidate_transforms_sha256": _canonical_json_sha256(list(result["candidate_transforms"])),
         "include_friedel": bool(include_friedel),
         "free_fraction": float(free_fraction),
-        "split_seed": int(seed),
+        # Field of the schema-1 contract layout; the orbit-hash membership does not depend on it.
+        "split_seed": 42,
         "row_count": int(len(membership)),
         "group_count": int(result["group_count"]),
         "work_group_count": int(result["work_group_count"]),
@@ -1203,38 +1123,37 @@ def build_transform_split_contract(
         "orbit_group_by_row": [int(value) for value in group_by_row],
         "orbit_group_by_row_sha256": _canonical_json_sha256([int(value) for value in group_by_row]),
     }
-    if scheme == "orbit-hash":
-        realised = orbit_hash_realised_free_fraction(
-            free_rows=payload["free_row_count"],
-            rows=payload["row_count"],
-            free_components=payload["free_group_count"],
-            components=payload["group_count"],
-            requested=float(free_fraction),
-            mixed_status_group_count=int(result["mixed_status_group_count"]),
-        )
-        for warning in realised["warnings"]:
-            print(f"WARN split {dataset}: {warning}", flush=True)
-        payload.update(
-            {
-                "realised_free_fraction": realised,
-                "split_scheme": "orbit-hash",
-                "split_salt": str(salt),
-                "orbit_key": "grond.validation.heldout.orbit_key (model Laue group + Friedel, crystal-independent)",
-                "free_rule": (
-                    "component free iff any of its model-orbit keys under any candidate is in fold 0 of "
-                    "round(1/free_fraction) sha256(salt|key) folds; excluded iff any key is excluded"
-                ),
-                "membership_encoding": "0=work,1=free,2=excluded; ordered raw numeric reflection rows",
-                "excluded_row_count": int(np.count_nonzero(membership == 2)),
-                "excluded_group_count": int(result["excluded_group_count"]),
-                "excluded_orbits": excluded_listing,
-                "excluded_orbits_sha256": (
-                    hashlib.sha256("\n".join(excluded_listing).encode()).hexdigest() if excluded_listing else ""
-                ),
-                "multi_orbit_group_count": int(result["multi_orbit_group_count"]),
-                "mixed_status_group_count": int(result["mixed_status_group_count"]),
-            }
-        )
+    realised = orbit_hash_realised_free_fraction(
+        free_rows=payload["free_row_count"],
+        rows=payload["row_count"],
+        free_components=payload["free_group_count"],
+        components=payload["group_count"],
+        requested=float(free_fraction),
+        mixed_status_group_count=int(result["mixed_status_group_count"]),
+    )
+    for warning in realised["warnings"]:
+        print(f"WARN split {dataset}: {warning}", flush=True)
+    payload.update(
+        {
+            "realised_free_fraction": realised,
+            "split_scheme": "orbit-hash",
+            "split_salt": str(salt),
+            "orbit_key": "grond.validation.heldout.orbit_key (model Laue group + Friedel, crystal-independent)",
+            "free_rule": (
+                "component free iff any of its model-orbit keys under any candidate is in fold 0 of "
+                "round(1/free_fraction) sha256(salt|key) folds; excluded iff any key is excluded"
+            ),
+            "membership_encoding": "0=work,1=free,2=excluded; ordered raw numeric reflection rows",
+            "excluded_row_count": int(np.count_nonzero(membership == 2)),
+            "excluded_group_count": int(result["excluded_group_count"]),
+            "excluded_orbits": excluded_listing,
+            "excluded_orbits_sha256": (
+                hashlib.sha256("\n".join(excluded_listing).encode()).hexdigest() if excluded_listing else ""
+            ),
+            "multi_orbit_group_count": int(result["multi_orbit_group_count"]),
+            "mixed_status_group_count": int(result["mixed_status_group_count"]),
+        }
+    )
     if candidate_set is not None:
         validate_contract_candidate_set(candidate_set, list(result["candidate_transforms"]))
         payload["candidate_set"] = dict(candidate_set)
@@ -1259,11 +1178,12 @@ def validate_transform_split_contract(
         raise ValueError("transform/hand split contract schema_version must be 1")
     if payload.get("kind") != "grond_transform_hand_split_contract":
         raise ValueError("transform/hand split contract kind must be 'grond_transform_hand_split_contract'")
-    algorithm = payload.get("algorithm")
-    if algorithm not in {LEGACY_SPLIT_ALGORITHM, ORBIT_HASH_SPLIT_ALGORITHM}:
-        raise ValueError("unsupported transform/hand split-contract algorithm")
-    orbit_hash = algorithm == ORBIT_HASH_SPLIT_ALGORITHM
-    if orbit_hash and payload.get("split_scheme") != "orbit-hash":
+    if payload.get("algorithm") != ORBIT_HASH_SPLIT_ALGORITHM:
+        raise ValueError(
+            f"unsupported transform/hand split-contract algorithm {payload.get('algorithm')!r}; only the orbit-hash "
+            "split is supported"
+        )
+    if payload.get("split_scheme") != "orbit-hash":
         raise ValueError("orbit-hash transform/hand split contract must declare split_scheme 'orbit-hash'")
     recorded_contract_hash = str(payload.get("contract_payload_sha256") or "")
     without_hash = dict(payload)
@@ -1276,8 +1196,8 @@ def validate_transform_split_contract(
     row_count = int(payload.get("row_count") or -1)
     if membership.shape != (row_count,) or groups.shape != (row_count,):
         raise ValueError("transform/hand split membership/group lengths do not match row_count")
-    excluded_listing = [str(key) for key in payload.get("excluded_orbits") or []] if orbit_hash else []
-    excluded_sha = str(payload.get("excluded_orbits_sha256") or "") if orbit_hash else ""
+    excluded_listing = [str(key) for key in payload.get("excluded_orbits") or []]
+    excluded_sha = str(payload.get("excluded_orbits_sha256") or "")
     if (excluded_listing or excluded_sha) and hashlib.sha256(
         "\n".join(excluded_listing).encode()
     ).hexdigest() != excluded_sha:
@@ -1301,7 +1221,7 @@ def validate_transform_split_contract(
     if work_rows != int(payload.get("work_row_count") or -1) or free_rows != int(payload.get("free_row_count") or -1):
         raise ValueError("transform/hand split recorded row counts do not match membership")
     excluded_rows = int(np.count_nonzero(membership == 2))
-    if orbit_hash and excluded_rows != int(payload.get("excluded_row_count", -1)):
+    if excluded_rows != int(payload.get("excluded_row_count", -1)):
         raise ValueError("transform/hand split recorded excluded-row count does not match membership")
     transforms = [parse_hkl_transform_info(value).canonical for value in payload.get("candidate_transforms") or []]
     if not transforms:
@@ -1333,27 +1253,22 @@ def validate_transform_split_contract(
             hkl_matrix_label(rotation) for rotation in laue_proper_rotations(model.get("symmetry_ops"))
         ] != list(candidate_set.get("laue_proper_rotations_hkl") or []):
             raise ValueError("transform/hand split shared candidate set was closed with another model Laue group")
-    scheme_fields = (
-        {
-            "split_scheme": "orbit-hash",
-            "split_salt": str(payload.get("split_salt") or ""),
-            "excluded_orbits_sha256": excluded_sha,
-            "excluded_row_count": excluded_rows,
-            "multi_orbit_group_count": int(payload.get("multi_orbit_group_count") or 0),
-            "mixed_status_group_count": int(payload.get("mixed_status_group_count") or 0),
-            # Absent from contracts written before the realised fraction was recorded.
-            "realised_free_fraction": payload.get("realised_free_fraction"),
-        }
-        if orbit_hash
-        else {}
-    )
+    scheme_fields = {
+        "split_scheme": "orbit-hash",
+        "split_salt": str(payload.get("split_salt") or ""),
+        "excluded_orbits_sha256": excluded_sha,
+        "excluded_row_count": excluded_rows,
+        "multi_orbit_group_count": int(payload.get("multi_orbit_group_count") or 0),
+        "mixed_status_group_count": int(payload.get("mixed_status_group_count") or 0),
+        # Absent from contracts written before the realised fraction was recorded.
+        "realised_free_fraction": payload.get("realised_free_fraction"),
+    }
     masks = {
         "all": np.ones(row_count, dtype=bool),
         "work": membership == 0,
         "free": membership == 1,
+        "excluded": membership == 2,
     }
-    if orbit_hash:
-        masks["excluded"] = membership == 2
     return {
         **scheme_fields,
         **({"candidate_set": dict(candidate_set)} if candidate_set is not None else {}),

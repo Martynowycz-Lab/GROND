@@ -83,17 +83,6 @@ def _quick_thickness_text(
             f"{thickness_nm:.2f} nm mean ({thickness_a:.1f} A); "
             f"uniform-gradient support {low_nm:.2f}-{high_nm:.2f} nm"
         )
-    if model in {"gaussian", "gaussian_gradient"}:
-        sigma_frac = abs(
-            safe_float(
-                nuisance.get("thickness_sigma_frac", meta.get("thickness_sigma_frac")),
-                0.0,
-            )
-        )
-        return (
-            f"{thickness_nm:.2f} nm mean ({thickness_a:.1f} A); "
-            f"{model} sigma {sigma_frac * thickness_nm:.2f} nm"
-        )
     return f"{thickness_nm:.2f} nm ({thickness_a:.1f} A); {model}"
 
 

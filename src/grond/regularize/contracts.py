@@ -27,7 +27,6 @@ class Nuisance:
     sigma_b_corr: float
     sigma_c_peak: float
     thickness_model: str = "uniform_gradient"
-    thickness_sigma_frac: float = 0.0
     sg_jitter_mode: str = "none"
     sg_jitter_sigma0: float = 0.0
     sg_jitter_sigma_d_inv: float = 0.0
@@ -60,20 +59,19 @@ class Nuisance:
     thickness_table_dt_A: float = 2.0
 
 
-THICKNESS_MODELS = ("single", "uniform_gradient", "gaussian", "gaussian_gradient", "gamma")
+THICKNESS_MODELS = ("uniform_gradient", "gamma")
 
 
-def thickness_shape_grids(args, thickness_model: str) -> tuple[list[float], list[float], list[float]]:
-    """(grad, gaussian sigma fraction, gamma shape) grids of one thickness model; unused axes are one value."""
+def thickness_shape_grids(args, thickness_model: str) -> tuple[list[float], list[float]]:
+    """(grad, gamma shape) grids of one thickness model; the unused axis is one value."""
 
     if thickness_model not in THICKNESS_MODELS:
         raise ValueError(f"unknown thickness_model {thickness_model!r}")
-    grad_values = parse_float_grid(args.thickness_grad_grid) if thickness_model in {"uniform_gradient", "gaussian_gradient"} else [0.0]
-    sigma_values = parse_float_grid(args.thickness_sigma_frac_grid) if thickness_model in {"gaussian", "gaussian_gradient"} else [0.0]
+    grad_values = parse_float_grid(args.thickness_grad_grid) if thickness_model == "uniform_gradient" else [0.0]
     shape_values = (
         parse_float_grid(getattr(args, "thickness_gamma_shape_grid", "1.0")) if thickness_model == "gamma" else [1.0]
     )
-    return grad_values, sigma_values, shape_values
+    return grad_values, shape_values
 
 
 def thickness_support_fields(args) -> dict[str, float | str]:
@@ -206,8 +204,8 @@ def estimated_row_plan_reuse_per_geometry_key(
     thickness_candidates = 0
     for _thickness in parse_float_grid(args.thickness_grid):
         for model in thickness_models:
-            grad_values, sigma_values, shape_values = thickness_shape_grids(args, model)
-            thickness_candidates += len(grad_values) * len(sigma_values) * len(shape_values)
+            grad_values, shape_values = thickness_shape_grids(args, model)
+            thickness_candidates += len(grad_values) * len(shape_values)
     absorption_candidates = sum(
         len(absorption_parameter_grid(args, mode)) for mode in absorption_modes
     )

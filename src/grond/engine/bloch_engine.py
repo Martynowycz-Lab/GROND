@@ -76,10 +76,7 @@ from grond.bloch.hamiltonian import (
     validate_passive_absorption as validate_passive_absorption,
 )
 from grond.bloch.metrics import (
-    effective_sigma as effective_sigma,
-    evaluate_predictions as evaluate_predictions,
     read_row_index_file as read_row_index_file,
-    scale_by_groups as scale_by_groups,
 )
 from grond.bloch.model import (
     alternate_hand_model as alternate_hand_model,
@@ -128,7 +125,6 @@ from grond.bloch.splits import (
     build_transform_split_contract as build_transform_split_contract,
     candidate_invariant_split_membership as candidate_invariant_split_membership,
     metric_filter_signed_axis_transforms as metric_filter_signed_axis_transforms,
-    split_masks as split_masks,
     validate_transform_split_contract as validate_transform_split_contract,
 )
 from grond.bloch.thickness import gamma_cf_point as gamma_cf_point, uniform_grid_amplitudes as uniform_grid_amplitudes

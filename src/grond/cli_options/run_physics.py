@@ -73,9 +73,9 @@ def add_backend(ap: argparse.ArgumentParser) -> None:
     )
     ap.add_argument(
         "--matrix-convention",
-        choices=["j_minus_i", "i_minus_j"],
+        choices=["j_minus_i"],
         default="j_minus_i",
-        help="Off-diagonal U_g indexing convention. Keep j_minus_i for production; i_minus_j is diagnostic.",
+        help="Off-diagonal U_g indexing convention: U(h_j - h_i).",
     )
 
 
@@ -168,23 +168,22 @@ def add_geometry(ap: argparse.ArgumentParser) -> None:
     )
     ap.add_argument(
         "--profile-quadrature",
-        choices=["uniform", "trapezoid", "gauss_legendre"],
+        choices=["uniform"],
         default="uniform",
         help="Rocking-profile Sg quadrature rule used inside Bloch row predictions.",
     )
     ap.add_argument(
         "--profile-accumulation",
-        choices=["sum", "mean"],
+        choices=["sum"],
         default="sum",
-        help="Accumulate rocking-profile samples as summed detector sub-exposures; mean is the legacy normalized diagnostic.",
+        help="Accumulate rocking-profile samples as summed detector sub-exposures.",
     )
     ap.add_argument("--free-fraction", type=float, default=0.10)
-    ap.add_argument("--split-seed", type=int, default=42)
     ap.add_argument(
         "--selection-metric",
-        choices=["work_wR2", "free_wR2", "all_wR2", "all_R1"],
+        choices=["work_wR2"],
         default="work_wR2",
-        help="Metric used to choose nuisance trials. Work-row wR2 keeps free rows held out; all/free choices are diagnostics.",
+        help="Metric used to choose nuisance trials: work-row wR2, so free rows stay held out.",
     )
 
 

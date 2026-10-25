@@ -36,13 +36,10 @@ def _all_signed_axis_permutations(determinant: int) -> list[str]:
 
 
 ALL_PROPER_SIGNED_PERMUTATIONS = _all_signed_axis_permutations(1)
-ALL_IMPROPER_SIGNED_PERMUTATIONS = _all_signed_axis_permutations(-1)
-# Backward-compatible names for callers that used the historical four-item
-# "common" list.  Their value is now deliberately the complete 24-operator
-# signed-axis universe for each determinant.
+# Backward-compatible name for callers that used the historical four-item
+# "common" list.  Its value is now deliberately the complete 24-operator
+# proper signed-axis universe.
 COMMON_PROPER_TRANSFORMS = list(ALL_PROPER_SIGNED_PERMUTATIONS)
-COMMON_IMPROPER_TRANSFORMS = list(ALL_IMPROPER_SIGNED_PERMUTATIONS)
-ALL_COMMON_TRANSFORMS = [*COMMON_PROPER_TRANSFORMS, *COMMON_IMPROPER_TRANSFORMS]
 
 
 @dataclass
@@ -291,21 +288,16 @@ def apply_preflight(ds: DatasetSpec, decision: PreflightDecision) -> DatasetSpec
 def expand_transform_candidates(current: str, *, parity_policy: str = "proper-only") -> list[str]:
     """Build the HKL transform list used by the transform scout: the declared transform and the common ones.
 
-    Scouting is proper-only by default.  The historical mixed-parity search remains available as the explicit
-    ``all-diagnostic`` policy, but downstream reports then remain conditional and cannot silently claim named
-    absolute configuration.
+    Scouting is proper-only: improper (determinant -1) transforms are never candidates.
     """
 
-    if parity_policy not in {"proper-only", "all-diagnostic"}:
-        raise ValueError(
-            "transform parity policy must be 'proper-only' or 'all-diagnostic'"
-        )
+    if parity_policy != "proper-only":
+        raise ValueError("transform parity policy must be 'proper-only'")
     out: list[str] = []
-    common = ALL_COMMON_TRANSFORMS if parity_policy == "all-diagnostic" else COMMON_PROPER_TRANSFORMS
-    for item in (current, *common):
+    for item in (current, *COMMON_PROPER_TRANSFORMS):
         item = "identity" if item in {"", "auto"} else item
         info = parse_hkl_transform_info(item)
-        if parity_policy == "proper-only" and not info.proper:
+        if not info.proper:
             continue
         if info.canonical not in out:
             out.append(info.canonical)

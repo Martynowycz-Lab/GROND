@@ -77,7 +77,6 @@ CONTINUATION_SPLIT_SCALE_KEYS = (
     ("split_salt", DEFAULT_FREE_SALT),
     ("exclude_orbits_json", ""),
     ("free_fraction", 0.10),
-    ("split_seed", 42),
     ("scale_spline_n_basis_grid", "32"),
     ("scale_spline_lambda_grid", "0.3,1,3,10,30,100"),
 )
@@ -89,23 +88,20 @@ CONTINUATION_HANDOFF_KEYS = (
     ("endpoint_wght_mode", "freeze-zero"),
 )
 CONTINUATION_CHOICES = {
-    "split_scheme": ("orbit-hash", "legacy"),
+    "split_scheme": ("orbit-hash",),
     "endpoint_q_policy": ("exclude",),
     "rescale": ("none", "absolute"),
     "shelxl_npd_recovery": ("damp", "isor"),
     "endpoint_wght_mode": ("converge",),
 }
 _CONTINUATION_FLOAT_KEYS = {"free_fraction", "shelxl_convergence_shift_esd"}
-_CONTINUATION_INT_KEYS = {"split_seed"}
 
 
 def _continuation_value(key: str, value: object) -> object:
-    """Convert a recorded continuation value to the type of its contract key (float, int or str)."""
+    """Convert a recorded continuation value to the type of its contract key (float or str)."""
 
     if key in _CONTINUATION_FLOAT_KEYS:
         return float(value)
-    if key in _CONTINUATION_INT_KEYS:
-        return int(float(value))
     return str(value)
 
 
