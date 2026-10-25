@@ -77,11 +77,11 @@ def per_degree() -> float:
 def table_per_degree() -> float:
     """Grid density for response tables (nested selection, thickness updates): GROND_SHARED_GRID_TABLE_PER_DEGREE.
 
-    The default, 50 per degree, is the SU-102 setting of the paper.
+    The default is the prediction density. The paper's SU-102 run used 50 per degree to save time.
     """
     value = os.environ.get(ENV_TABLE_PER_DEGREE, "")
     if not value:
-        return 50.0
+        return per_degree()
     value = float(value)
     if not math.isfinite(value) or value < 10.0:
         raise ValueError(f"{ENV_TABLE_PER_DEGREE} must be at least 10 grid points per degree")
@@ -96,10 +96,10 @@ def precision() -> str:
 
 
 def table_precision() -> str:
-    """CPU solve precision for response tables (GROND_SHARED_GRID_TABLE_PRECISION; default single, the SU-102 setting)."""
+    """CPU solve precision for response tables (GROND_SHARED_GRID_TABLE_PRECISION; default as predictions, SU-102 used single)."""
     value = str(os.environ.get("GROND_SHARED_GRID_TABLE_PRECISION", "") or "").strip().lower()
     if not value:
-        return "single"
+        return precision()
     if value not in {"double", "single"}:
         raise ValueError("GROND_SHARED_GRID_TABLE_PRECISION must be double or single")
     return value

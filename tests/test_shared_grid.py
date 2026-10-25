@@ -112,7 +112,8 @@ def test_prediction_cache_identity_binds_the_evaluator(monkeypatch):
     assert identity["mode"] == "auto" and identity["gpus"] is True and identity["per_degree"] == 100.0
 
 
-def test_response_table_defaults_are_the_su102_settings(monkeypatch):
-    for name in ("GROND_SHARED_GRID_TABLE_PER_DEGREE", "GROND_SHARED_GRID_TABLE_PRECISION", "GROND_SHARED_GRID_PER_DEGREE"):
+def test_response_tables_default_to_the_prediction_grid(monkeypatch):
+    for name in ("GROND_SHARED_GRID_TABLE_PER_DEGREE", "GROND_SHARED_GRID_TABLE_PRECISION", "GROND_SHARED_GRID_PER_DEGREE",
+                 "GROND_SHARED_GRID_PRECISION"):
         monkeypatch.delenv(name, raising=False)
-    assert (SG.per_degree(), SG.table_per_degree(), SG.table_precision()) == (100.0, 50.0, "single")
+    assert (SG.per_degree(), SG.table_per_degree(), SG.table_precision()) == (100.0, 100.0, "double")
