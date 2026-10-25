@@ -11,29 +11,7 @@ def register_runtime(sub: argparse._SubParsersAction) -> None:
     from grond.cli_support.tools import add_tool_config_args
     from grond.commands.doctor import cmd_doctor
 
-    p_doc = sub.add_parser(
-        "doctor", help="Check the Python packages and the external programs."
-    )
-    p_doc.add_argument("--python", default="", help="Python to check (default: the one running grond).")
+    p_doc = sub.add_parser("doctor", help="Check the Python packages, the Bloch-wave kernel and SHELXL.")
     add_tool_config_args(p_doc)
-    p_doc.add_argument(
-        "--probe-bloch", action="store_true", help="Also test complex eig/eigh support needed by the Bloch wave kernel."
-    )
-    p_doc.add_argument(
-        "--workflow",
-        choices=["core", "small-molecule", "native-maps", "endpoint-maps"],
-        default="core",
-        help="Readiness scope: core/native-maps need no external program; small-molecule adds SHELXL; endpoint-maps also adds shelx2map.",
-    )
-    p_doc.add_argument(
-        "--all-tools",
-        action="store_true",
-        help="Also report optional endpoint tools.",
-    )
-    p_doc.add_argument(
-        "--strict",
-        action="store_true",
-        help="Exit nonzero when required packages, installed features, or requested Bloch operations are not ready.",
-    )
+    p_doc.add_argument("--json", action="store_true", help="Print the full report as JSON.")
     p_doc.set_defaults(func=cmd_doctor)
-

@@ -33,6 +33,15 @@ HELP_LEVELS = {
         0: ["--checkpoint", "--start-res", "--out-dir", "--reuse-settings", "--cycles", "--workers", "--config", "--shelxl"],
         1: ["--python", "--resume"],
     },
+    "prep": {
+        0: ["--structure", "--baseline-hkl", "--dataset", "--out", "--hkl-transform"],
+        1: ["--geometry-percentile", "--config"],
+    },
+    "import-dials": {
+        0: ["--refl", "--expt", "--out-dir", "--dials-python", "--dataset-name"],
+        1: ["--row-selection", "--intensity-mode", "--sigma-mode"],
+    },
+    "doctor": {0: ["--config", "--json"]},
     "finish": {
         0: ["--run-dir", "--config", "--map-mode", "--native-map-spacing"],
         1: ["--checkpoint", "--model", "--shelxl", "--make-maps", "--publication-feedback-cycles", "--json"],

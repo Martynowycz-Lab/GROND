@@ -15,6 +15,7 @@ scan-varying orientation matrices for excitation-error calculations.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import shutil
@@ -64,6 +65,8 @@ def _run_dials_helper(refl: Path, expt: Path, dials_python: str = "") -> tuple[d
     for label, path in (("reflection table", refl), ("experiment list", expt)):
         if not path.is_file():
             raise FileNotFoundError(f"DIALS {label} does not exist: {path}")
+    if not dials_python and importlib.util.find_spec("dials") is None:
+        dials_python = shutil.which("dials.python") or ""     # a DIALS installation puts dials.python on PATH
     requested_python = str(dials_python or sys.executable)
     explicit_path = Path(os.path.abspath(Path(requested_python).expanduser())) if os.sep in requested_python else None
     if explicit_path is not None:

@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import hashlib
 import io
-import json
 import math
 from pathlib import Path
 
@@ -403,82 +402,6 @@ class XDSData:
         lo = int(math.floor(scan_index))
         frac = float(scan_index) - lo
         return (1.0 - frac) * self.A_at_scan_points[lo] + frac * self.A_at_scan_points[lo + 1]
-
-    def integration_profile_provenance(self):
-        """Return profile/mosaic metadata without treating it as fitted physics.
-
-        XDS reflecting range and beam divergence describe the integration
-        profile, not a uniquely separable crystal mosaicity.  DIALS profile
-        dictionaries are likewise retained in their native representation.
-        The values are therefore suitable as reported provenance or bounded
-        prior centres, but are never activated implicitly by the Bloch engine.
-        """
-
-        def first_float(key):
-            """Return the first number of a header entry, or None when it is missing or not finite."""
-
-            text = str(self.header.get(key, "") or "").strip()
-            if not text:
-                return None
-            try:
-                value = float(text.split()[0])
-            except (TypeError, ValueError):
-                return None
-            return value if math.isfinite(value) else None
-
-        profile_json = str(self.header.get("DIALS_PROFILE_PARAMETERS_JSON", "") or "").strip()
-        dials_profile = None
-        if profile_json:
-            try:
-                dials_profile = json.loads(profile_json)
-            except json.JSONDecodeError:
-                dials_profile = {"status": "unparsed", "raw": profile_json}
-        reflecting = first_float("REFLECTING_RANGE_E.S.D.")
-        divergence = first_float("BEAM_DIVERGENCE_E.S.D.")
-        dials_sigma_m_values = []
-        if isinstance(dials_profile, dict) and dials_profile.get("__id__") == "gaussian_rs":
-            raw_sigma_m = dials_profile.get("sigma_m")
-            if not isinstance(raw_sigma_m, (list, tuple)):
-                raw_sigma_m = [raw_sigma_m]
-            for raw_value in raw_sigma_m:
-                try:
-                    value = float(raw_value)
-                except (TypeError, ValueError):
-                    continue
-                if math.isfinite(value) and value >= 0.0:
-                    dials_sigma_m_values.append(value)
-        if dials_sigma_m_values:
-            prior_sigma = float(np.median(dials_sigma_m_values))
-            prior_source = "DIALS GaussianRS sigma_m (degrees)"
-        else:
-            prior_sigma = reflecting
-            prior_source = "XDS REFLECTING_RANGE_E.S.D. (degrees)"
-        return {
-            "source": str(self.header.get("GROND_SOURCE", "XDS") or "XDS").strip(),
-            "profile_fitting": str(self.header.get("PROFILE_FITTING", "") or "").strip() or None,
-            "xds": {
-                "reflecting_range_esd_deg": reflecting,
-                "beam_divergence_esd_deg": divergence,
-            },
-            "dials": {
-                "profile_model": str(self.header.get("DIALS_PROFILE_MODEL", "") or "").strip() or None,
-                "profile_parameters": dials_profile,
-                "gaussian_rs_sigma_m_deg": dials_sigma_m_values or None,
-                "frame_sliced_shoebox_available": (
-                    str(self.header.get("DIALS_FRAME_SLICED_SHOEBOX_AVAILABLE", "FALSE")).strip().upper() == "TRUE"
-                ),
-            },
-            "optional_prior": {
-                "projected_mosaicity_sigma_deg": prior_sigma,
-                "source": prior_source,
-                "status": "provenance_only_not_activated",
-                "warning": (
-                    "The recorded integration-profile width is a prior centre, not an automatic "
-                    "Bloch nuisance value. XDS reflecting range can contain multiple broadening "
-                    "terms, while DIALS GaussianRS sigma_m remains tied to its integration model."
-                ),
-            },
-        }
 
     def recorded_proxy(self):
         """Return IOBS * (PEAK/100) / RLP, an estimate of the recorded (uncorrected) intensity of each row."""

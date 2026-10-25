@@ -15,12 +15,6 @@ DEFAULT_ELECTRON_WAVELENGTH_A = 0.025079
 DEFAULT_MAX_SUPPORT_SG = 0.01
 
 
-XDS_TARGET_MODE_LABELS = {
-    "iobs": "IOBS",
-    "iobs_over_rlp": "IOBS/RLP",
-    "iobs_times_peak": "IOBS*PEAK/100",
-    "recorded_proxy": "IOBS*PEAK/(100*RLP)",
-}
 
 
 def parse_numeric_grid(text: str) -> list[float]:

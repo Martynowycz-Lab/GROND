@@ -16,10 +16,11 @@ def register_inputs(sub: argparse._SubParsersAction) -> None:
     )
 
     p_prep = sub.add_parser("prep", help="Write the input file for one model and one or more crystals.")
-    p_prep.add_argument("--structure", required=True)
-    p_prep.add_argument("--baseline-hkl", default="")
-    p_prep.add_argument("--dataset", action="append", required=True)
-    p_prep.add_argument("--hkl-transform", default="identity")
+    p_prep.add_argument("--structure", required=True, help="SHELX .res model with electron scattering factors on its SFAC lines.")
+    p_prep.add_argument("--baseline-hkl", default="", help="The HKLF 4 file the model was refined against.")
+    p_prep.add_argument("--dataset", action="append", required=True,
+                        help="One crystal: NAME=DIR[,dmin=0.80]. DIR is an import-dials output or an XDS directory. Repeat for each crystal.")
+    p_prep.add_argument("--hkl-transform", default="identity", help="Index transform from the data to the model (default identity; auto checks it).")
     p_prep.add_argument("--geometry-percentile", type=float, default=99.0)
     p_prep.add_argument(
         "--parity-setup-id",
@@ -32,7 +33,7 @@ def register_inputs(sub: argparse._SubParsersAction) -> None:
         help="SHA-256 of the immutable acquisition/import setup manifest.",
     )
     p_prep.add_argument("--notes", default="")
-    p_prep.add_argument("--out", required=True)
+    p_prep.add_argument("--out", required=True, help="Prep file to write, for grond auto --prep.")
     add_tool_config_args(p_prep)
     p_prep.set_defaults(func=cmd_prep)
 
