@@ -1,8 +1,11 @@
 name: tests
 
 on:
+  # Documentation-only changes (README, citation, license) do not run the tests.
   push:
+    paths-ignore: ["**.md", "CITATION.cff", "LICENSE"]
   pull_request:
+    paths-ignore: ["**.md", "CITATION.cff", "LICENSE"]
 
 permissions:
   contents: read
