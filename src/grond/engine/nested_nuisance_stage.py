@@ -93,6 +93,17 @@ def file_sha256(path) -> str:
     return h.hexdigest()
 
 
+REQUEST_INPUT_KEYS = ("hkl", "res", "rows_npz")
+
+
+def request_input_sha256(request: dict) -> dict[str, str]:
+    """SHA-256 of the files a request names. Stored in the request, so a resumed run reruns the stage when one of
+    them changed under the same path (resume fingerprints the request file, not the files it names)."""
+
+    return {key: file_sha256(request[key]) for key in REQUEST_INPUT_KEYS
+            if request.get(key) and Path(request[key]).is_file()}
+
+
 def read_json(path) -> dict:
     """Read a JSON file."""
 
@@ -481,6 +492,7 @@ def reselect_request(contract: dict, *, res, base_config: dict, label: str) -> d
     request.update(mode="reselect", res=str(res), base_config=dict(base_config), label=str(label),
                    variants=[{"label": str(pick["variant"]), "params": dict(pick.get("variant_params") or {}),
                               "config": variant_cfg}])
+    request["input_sha256"] = request_input_sha256(request)
     return request
 
 

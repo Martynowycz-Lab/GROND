@@ -20,16 +20,21 @@ from typing import Any
 
 INPUT_PATH_FLAGS = {
     "--baseline-hkl",
+    "--best",
     "--config",
     "--datasets-csv",
+    "--exclude-orbits-json",
     "--expt",
     "--hkl",
     "--input",
     "--model",
+    "--other",
     "--prep",
     "--refl",
+    "--request",
     "--resolution-limit",
     "--res",
+    "--row-contract",
     "--row-table",
     "--rows",
     "--run",
@@ -38,6 +43,7 @@ INPUT_PATH_FLAGS = {
     "--structure",
     "--summary",
     "--shelxl",
+    "--split-contract",
     "--xds-dir",
 }
 OUTPUT_PATH_FLAGS = {"--out", "--out-dir", "--output", "--write-rows"}

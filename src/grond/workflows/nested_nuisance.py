@@ -250,10 +250,10 @@ def selection_row_policy(args: argparse.Namespace) -> dict:
 def nested_request(args: argparse.Namespace, ds: DatasetSpec, *, model: str, rows_npz: Path, base_config: dict) -> dict:
     """Build the request the nested nuisance stage engine reads for one crystal."""
 
-    from grond.engine.nested_nuisance_stage import REQUEST_SCHEMA
+    from grond.engine.nested_nuisance_stage import REQUEST_SCHEMA, request_input_sha256
 
     contract = scale_model_from_args(args)
-    return {
+    request = {
         "schema": REQUEST_SCHEMA,
         "mode": "select",
         "dataset": ds.name,
@@ -275,6 +275,8 @@ def nested_request(args: argparse.Namespace, ds: DatasetSpec, *, model: str, row
         "salt": INNER_CV_SALT,
         "workers": int(getattr(args, "workers", 1) or 1),
     }
+    request["input_sha256"] = request_input_sha256(request)
+    return request
 
 
 def nested_contract_path(root: Path, ds_name: str) -> Path:
