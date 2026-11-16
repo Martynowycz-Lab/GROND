@@ -1,8 +1,9 @@
 """Messages and docstrings name only options and commands that exist.
 
-0.4.3 named four options no parser registers (--split-candidate-set, --transform-candidates,
---validation-console, --conventional-fcf), and the missing-SHELXL hint named `GROND init-config` (the command is
-lower case; `GROND` is not found on a case-sensitive file system).
+0.4.3 named five options no parser registers (--split-candidate-set, --transform-candidates,
+--validation-console, --conventional-fcf, and --allow-improper-space-group-operations in the model-placement
+refusal), and the missing-SHELXL hint named `GROND init-config` (the command is lower case; `GROND` is not found on
+a case-sensitive file system).
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ MODULES = (
     "workflows/split_record.py",
     "workflows/transform_selection.py",
     "cli_support/tools.py",
+    "maps/placement.py",
 )
 OPTION = re.compile(r"(?<![\w-])(--[a-z][a-z0-9-]*[a-z0-9])")
 

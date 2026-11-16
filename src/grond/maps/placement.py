@@ -595,8 +595,8 @@ def place_model_on_reference(
             raise PlacementRefused(
                 f"the model matches the reference {how} through an improper space-group operation "
                 f"(RMSD {improper[1]['rmsd_A']:.3f} A; applicable operations: {found_text}), which is not "
-                "applied in a non-centrosymmetric group by default; pass --allow-improper-space-group-operations "
-                "to use it",
+                "applied in a non-centrosymmetric group (no grond command applies it; in Python, "
+                "PlacementOptions(allow_improper_space_group_operations=True) does)",
                 report,
             )
         report["status"] = "refused_rmsd"
