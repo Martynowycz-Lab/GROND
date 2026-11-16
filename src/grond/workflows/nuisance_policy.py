@@ -6,6 +6,7 @@ import argparse
 import functools
 import json
 import math
+import os
 from pathlib import Path
 
 from grond.cli_support.values import read_json
@@ -386,9 +387,18 @@ def feature_is_enabled(args: argparse.Namespace, family: str) -> bool:
 
 
 def prediction_cache_dir(args: argparse.Namespace, ds: DatasetSpec, stage: str) -> Path:
-    """Choose the prediction-cache directory for a dataset and stage."""
+    """Choose the prediction-cache directory for a dataset and stage.
 
-    root = Path(args.prediction_cache_dir).expanduser() if args.prediction_cache_dir else Path(args.out_dir) / "cache"
+    A relative --prediction-cache-dir is taken from the directory grond was started in: the stages run in the
+    package directory (run_logged), where the relative path would point. os.path.abspath leaves an absolute path
+    as given apart from '.', '..' and repeated '/' (symlinks are not resolved).
+    """
+
+    root = (
+        Path(os.path.abspath(Path(args.prediction_cache_dir).expanduser()))
+        if args.prediction_cache_dir
+        else Path(args.out_dir) / "cache"
+    )
     if args.prediction_cache_scope == "stage":
         return root / "stage_predictions" / stage / ds.name
     return root / "native_predictions" / ds.name
