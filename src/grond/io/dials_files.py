@@ -109,6 +109,46 @@ def _oscillation(scan: dict) -> list[float]:
     return [starts[0] / PI_180, float(scan["properties"]["oscillation_width"][0]) * PI_180 / PI_180]
 
 
+def _axis_rotation(axis, degrees: float) -> np.ndarray:
+    """Right-handed rotation by ``degrees`` about ``axis`` (scitbx ``axis_and_angle_as_r3_rotation_matrix``)."""
+
+    a = np.asarray(axis, dtype=float)
+    a = a / np.linalg.norm(a)
+    k = np.array([[0.0, -a[2], a[1]], [a[2], 0.0, -a[0]], [-a[1], a[0], 0.0]])
+    theta = float(degrees) * PI_180
+    return np.eye(3) + math.sin(theta) * k + (1.0 - math.cos(theta)) * (k @ k)
+
+
+def _goniometer_frame(goniometer: dict) -> tuple[list[float], np.ndarray, np.ndarray]:
+    """Rotation-axis datum and the fixed and setting rotations (row-major 3x3) of a DIALS goniometer model.
+
+    A single-axis goniometer stores all three. A multi-axis goniometer (``MultiAxisGoniometer``, for example the
+    three-axis kappa model dxtbx uses for the Rigaku HyPix detector on a SynergyED) stores ``axes``, ``angles``,
+    ``names`` and ``scan_axis`` instead, and dxtbx derives the three from them: the datum is the scan axis, the
+    fixed rotation is the product of the rotations of the axes listed before it (the first applied first), and the
+    setting rotation that of the axes listed after it. The datum is returned as a unit vector.
+    """
+
+    identity = np.eye(3).ravel()
+    if "axes" not in goniometer:
+        datum = [float(v) for v in goniometer["rotation_axis"]]
+        return (datum, np.asarray(goniometer.get("fixed_rotation", identity), float),
+                np.asarray(goniometer.get("setting_rotation", identity), float))
+    axes, angles = goniometer["axes"], goniometer["angles"]
+    scan_axis = int(goniometer["scan_axis"])
+    if len(axes) != len(angles) or not 0 <= scan_axis < len(axes):
+        raise ValueError(f"multi-axis goniometer has {len(axes)} axes, {len(angles)} angles and scan axis "
+                         f"{scan_axis}; expected one angle per axis and a scan axis among them")
+    fixed = np.eye(3)
+    for axis, angle in zip(axes[:scan_axis], angles[:scan_axis]):
+        fixed = _axis_rotation(axis, angle) @ fixed
+    setting = np.eye(3)
+    for axis, angle in zip(axes[scan_axis + 1:], angles[scan_axis + 1:]):
+        setting = _axis_rotation(axis, angle) @ setting
+    datum = np.asarray(axes[scan_axis], dtype=float)
+    return [float(v) for v in datum / np.linalg.norm(datum)], fixed.ravel(), setting.ravel()
+
+
 def _space_group(hall: str) -> tuple[str, int | None]:
     """Name and number of a Hall symbol. The name is written as cctbx writes it ("R -3 c :H")."""
 
@@ -236,9 +276,7 @@ def read_dials(refl: Path, expt: Path) -> tuple[dict[str, np.ndarray], dict]:
         fixed = setting = identity
         setting_points = 0
     else:
-        datum = [float(v) for v in goniometer["rotation_axis"]]
-        fixed = np.asarray(goniometer.get("fixed_rotation", identity), float)
-        setting = np.asarray(goniometer.get("setting_rotation", identity), float)
+        datum, fixed, setting = _goniometer_frame(goniometer)
         axis = [float(setting[3 * i] * datum[0] + setting[3 * i + 1] * datum[1] + setting[3 * i + 2] * datum[2])
                 for i in range(3)]
         setting_points = len(goniometer.get("setting_rotation_at_scan_points") or [])

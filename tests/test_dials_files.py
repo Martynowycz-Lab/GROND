@@ -39,6 +39,31 @@ def test_one_experiment_only(tmp_path):
         read_dials(TINY / "tiny.refl", expt)
 
 
+@pytest.mark.parametrize("case", json.loads((TINY.parent / "dials_multiaxis_goniometer.json").read_text())["cases"],
+                         ids=lambda case: f"scan_axis_{case['goniometer']['scan_axis']}")
+def test_multi_axis_goniometer_matches_dxtbx(tmp_path, case):
+    """A three-axis kappa goniometer (as dxtbx writes the Rigaku HyPix on a SynergyED) gives dxtbx's frame."""
+
+    experiments = json.loads((TINY / "tiny.expt").read_text())
+    experiments["goniometer"] = [{"__id__": "MultiAxisGoniometer", **case["goniometer"]}]
+    expt = tmp_path / "kappa.expt"
+    expt.write_text(json.dumps(experiments))
+    _, meta = read_dials(TINY / "tiny.refl", expt)
+    got = meta["goniometer"]
+    for key in ("rotation_axis_datum", "fixed_rotation", "setting_rotation", "rotation_axis"):
+        np.testing.assert_allclose(np.ravel(got[key]), np.ravel(case[key]), rtol=0, atol=1e-14, err_msg=key)
+
+
+def test_multi_axis_goniometer_needs_one_angle_per_axis(tmp_path):
+    experiments = json.loads((TINY / "tiny.expt").read_text())
+    experiments["goniometer"] = [{"__id__": "MultiAxisGoniometer", "axes": [[1, 0, 0], [0, 1, 0]], "angles": [0.0],
+                                  "names": ["PHI", "OMEGA"], "scan_axis": 1}]
+    expt = tmp_path / "bad.expt"
+    expt.write_text(json.dumps(experiments))
+    with pytest.raises(ValueError, match="one angle per axis"):
+        read_dials(TINY / "tiny.refl", expt)
+
+
 def test_not_a_reflection_file(tmp_path):
     refl = tmp_path / "integrated.refl"
     refl.write_bytes(b"\x80\x04 not msgpack")
