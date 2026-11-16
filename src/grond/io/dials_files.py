@@ -140,10 +140,10 @@ def _goniometer_frame(goniometer: dict) -> tuple[list[float], np.ndarray, np.nda
         raise ValueError(f"multi-axis goniometer has {len(axes)} axes, {len(angles)} angles and scan axis "
                          f"{scan_axis}; expected one angle per axis and a scan axis among them")
     fixed = np.eye(3)
-    for axis, angle in zip(axes[:scan_axis], angles[:scan_axis]):
+    for axis, angle in zip(axes[:scan_axis], angles[:scan_axis], strict=True):
         fixed = _axis_rotation(axis, angle) @ fixed
     setting = np.eye(3)
-    for axis, angle in zip(axes[scan_axis + 1:], angles[scan_axis + 1:]):
+    for axis, angle in zip(axes[scan_axis + 1:], angles[scan_axis + 1:], strict=True):
         setting = _axis_rotation(axis, angle) @ setting
     datum = np.asarray(axes[scan_axis], dtype=float)
     return [float(v) for v in datum / np.linalg.norm(datum)], fixed.ravel(), setting.ravel()
