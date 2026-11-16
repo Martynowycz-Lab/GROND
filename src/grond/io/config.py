@@ -164,7 +164,10 @@ def resolve_hkl(path_text: str) -> tuple[str, str]:
             candidate = path / name
             if candidate.exists():
                 return str(candidate.resolve()), str(path.resolve())
-        return str((path / "INTEGRATE.HKL").resolve()), str(path.resolve())
+        raise FileNotFoundError(f"{path} has no INTEGRATE.HKL or XDS_ASCII.HKL (give an XDS directory or a grond "
+                                "import-dials output)")
+    if not path.is_file():
+        raise FileNotFoundError(f"no reflection file or directory {path}")
     return str(path.resolve()), str(path.parent.resolve())
 
 

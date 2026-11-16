@@ -32,10 +32,11 @@ def prep_from_args(args: argparse.Namespace) -> PrepConfig:
                 ds.baseline_hkl = prep.baseline_hkl
     else:
         prep_metadata = {}
-        if args.xds_dir:
-            hkl, xds_dir = resolve_hkl(args.xds_dir)
-        elif args.hkl:
-            hkl, xds_dir = resolve_hkl(args.hkl)
+        if args.xds_dir or args.hkl:
+            try:
+                hkl, xds_dir = resolve_hkl(args.xds_dir or args.hkl)
+            except FileNotFoundError as exc:
+                raise SystemExit(str(exc)) from exc
         elif getattr(args, "dials_refl", ""):
             if not getattr(args, "dials_expt", ""):
                 raise SystemExit("Provide --dials-expt with --dials-refl.")
@@ -91,10 +92,13 @@ def prep_from_args(args: argparse.Namespace) -> PrepConfig:
 def cmd_prep(args: argparse.Namespace) -> int:
     """CLI entrypoint for writing a reusable prep JSON file."""
 
-    datasets = [
-        parse_dataset_spec(item, default_hkl_transform=args.hkl_transform, geometry_percentile=args.geometry_percentile)
-        for item in args.dataset
-    ]
+    try:
+        datasets = [
+            parse_dataset_spec(item, default_hkl_transform=args.hkl_transform, geometry_percentile=args.geometry_percentile)
+            for item in args.dataset
+        ]
+    except FileNotFoundError as exc:
+        raise SystemExit(f"grond prep: {exc}") from exc
     prep = PrepConfig(
         structure=str(Path(args.structure).expanduser().resolve()),
         baseline_hkl=str(Path(args.baseline_hkl).expanduser().resolve()) if args.baseline_hkl else "",

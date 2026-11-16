@@ -57,17 +57,17 @@ def manual_setup(args) -> int:
             "Manual workflow model SFAC check failed: "
             + ("; ".join(messages) or f"see {setup_dir / 'sfac_check.json'}")
         )
-    datasets = [
-        parse_dataset_spec(
-            item,
-            default_hkl_transform=str(args.hkl_transform or "identity"),
-            geometry_percentile=float(args.geometry_percentile),
-        )
-        for item in args.dataset
-    ]
-    for dataset in datasets:
-        if not Path(dataset.hkl).is_file():
-            raise SystemExit(f"Dataset {dataset.name!r} is missing its row file: {dataset.hkl}")
+    try:
+        datasets = [
+            parse_dataset_spec(
+                item,
+                default_hkl_transform=str(args.hkl_transform or "identity"),
+                geometry_percentile=float(args.geometry_percentile),
+            )
+            for item in args.dataset
+        ]
+    except FileNotFoundError as exc:
+        raise SystemExit(f"Dataset row file missing: {exc}") from exc
     prep = PrepConfig(
         structure=str(structure),
         datasets=datasets,
