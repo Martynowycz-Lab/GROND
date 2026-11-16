@@ -7,6 +7,7 @@ import json
 import re
 from pathlib import Path
 
+from grond.bloch.model import SHELX_NON_ATOM_RECORDS
 from grond.reports.shelxl import _quick_lst_diagnostics
 
 SHELX_RESTRAINT_COMMANDS = {
@@ -26,10 +27,16 @@ SHELX_RESTRAINT_COMMANDS = {
 
 
 def is_shelx_atom_line(line: str) -> bool:
-    """Return true for ordinary SHELX atom records."""
+    """Return true for ordinary SHELX atom records.
+
+    Instruction records shaped like atoms (ZERR Z esd..., HKLF 4 matrix..., TWIN matrix...) are not atoms: with Z = 4
+    and H as SFAC 4, ZERR was once converted into an anisotropic hydrogen by the free-H preparation (29 Oct 2026).
+    """
 
     toks = line.split()
     if len(toks) < 7:
+        return False
+    if toks[0].upper() in SHELX_NON_ATOM_RECORDS:
         return False
     if not re.match(r"^[A-Za-z][A-Za-z0-9_]*$", toks[0]):
         return False
