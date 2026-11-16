@@ -196,20 +196,32 @@ def parse_dataset_spec(text: str, *, default_hkl_transform: str = "identity", ge
     unknown = sorted(set(values) - DATASET_OPTION_KEYS)
     if unknown:
         raise ValueError(f"unknown dataset option(s): {', '.join(unknown)}")
+
+    def number(keys: tuple[str, ...], default: float) -> float:
+        """The first of ``keys`` given as a float, else ``default``."""
+
+        key = next((key for key in keys if key in values), "")
+        if not key:
+            return float(default)
+        try:
+            return float(values[key])
+        except ValueError:
+            raise ValueError(f"--dataset {name.strip()}: {key} must be a number, got {values[key]!r}") from None
+
     return DatasetSpec(
         name=name.strip(),
         hkl=hkl,
         xds_dir=xds_dir,
         baseline_hkl=str(Path(values["baseline_hkl"]).expanduser().resolve()) if values.get("baseline_hkl") else "",
         hkl_transform=values.get("hkl_transform", default_hkl_transform),
-        min_d_spacing=float(values.get("dmin", values.get("min_d_spacing", 0.70))),
-        min_peak=float(values.get("min_peak", 90.0)),
+        min_d_spacing=number(("dmin", "min_d_spacing"), 0.70),
+        min_peak=number(("min_peak",), 90.0),
         target_mode=values.get("target_mode", "iobs"),
         include_nonpositive=parse_bool_text(
             values.get("include_nonpositive", "false"),
             field="include_nonpositive",
         ),
-        geometry_percentile=float(values.get("geometry_percentile", geometry_percentile)),
+        geometry_percentile=number(("geometry_percentile",), geometry_percentile),
         physical_crystal_id=values.get("physical_crystal_id", ""),
         acquisition_fingerprint=values.get("acquisition_fingerprint", ""),
     )

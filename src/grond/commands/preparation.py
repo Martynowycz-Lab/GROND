@@ -16,20 +16,51 @@ from grond.io.config import (
     write_prep,
 )
 
+BASELINE_HINT = "Give the HKLF 4 file the model was refined against, or leave out --baseline-hkl."
+
+
+def _existing_file(command: str, flag: str, value: str, hint: str) -> str:
+    """The resolved path of a file named on the command line; stop with one line when it is not a file."""
+
+    path = Path(value).expanduser()
+    if path.is_file():
+        return str(path.resolve())
+    problem = "is a directory, not a file" if path.is_dir() else "does not exist"
+    raise SystemExit(f"{command}: {flag} {value} {problem}. {hint}")
+
+
+def _load_prep_file(command: str, value: str) -> PrepConfig:
+    """Read the --prep file; stop with one line when it is missing or is not a prep file."""
+
+    path = Path(value).expanduser()
+    if not path.is_file():
+        raise SystemExit(f"{command}: --prep {value} does not exist. Write it with `grond prep` (see grond prep -h).")
+    try:
+        return load_prep(path)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise SystemExit(f"{command}: --prep {value} is not a GROND prep file ({type(exc).__name__}: {exc}). "
+                         "Write it again with `grond prep`.") from exc
+
 
 def prep_from_args(args: argparse.Namespace) -> PrepConfig:
     """Create a preparation record from CLI flags or an existing prep file."""
 
+    command = f"grond {getattr(args, 'command', '') or 'auto'}"
     if args.prep:
-        prep = load_prep(Path(args.prep))
+        prep = _load_prep_file(command, args.prep)
         # A new solution may have a different setting. Use its model/HKLF4 pair
         # for the baseline and indexing scout, not the old prep's pair.
         if args.structure:
             prep.structure = str(Path(args.structure).expanduser().resolve())
         if args.baseline_hkl:
-            prep.baseline_hkl = str(Path(args.baseline_hkl).expanduser().resolve())
+            prep.baseline_hkl = _existing_file(command, "--baseline-hkl", args.baseline_hkl, BASELINE_HINT)
             for ds in prep.datasets:
                 ds.baseline_hkl = prep.baseline_hkl
+        elif str(prep.baseline_hkl or "").strip() and not Path(prep.baseline_hkl).expanduser().is_file():
+            # the conventional-baseline stage would stop on it with a CalledProcessError traceback
+            raise SystemExit(f"{command}: the baseline HKL {prep.baseline_hkl} named in --prep {args.prep} does not "
+                             "exist. Put it back, give another with --baseline-hkl, or write the prep file again "
+                             "with `grond prep`.")
     else:
         prep_metadata = {}
         if args.xds_dir or args.hkl:
@@ -65,7 +96,8 @@ def prep_from_args(args: argparse.Namespace) -> PrepConfig:
             raise SystemExit("Provide --structure when not using --prep.")
         prep = PrepConfig(
             structure=str(Path(args.structure).expanduser().resolve()),
-            baseline_hkl=str(Path(args.baseline_hkl).expanduser().resolve()) if args.baseline_hkl else "",
+            baseline_hkl=(_existing_file(command, "--baseline-hkl", args.baseline_hkl, BASELINE_HINT)
+                          if args.baseline_hkl else ""),
             default_hkl_transform=args.hkl_transform,
             geometry_percentile=args.geometry_percentile,
             datasets=[
@@ -97,7 +129,7 @@ def cmd_prep(args: argparse.Namespace) -> int:
             parse_dataset_spec(item, default_hkl_transform=args.hkl_transform, geometry_percentile=args.geometry_percentile)
             for item in args.dataset
         ]
-    except FileNotFoundError as exc:
+    except (FileNotFoundError, ValueError) as exc:  # a malformed --dataset raises ValueError
         raise SystemExit(f"grond prep: {exc}") from exc
     prep = PrepConfig(
         structure=str(Path(args.structure).expanduser().resolve()),

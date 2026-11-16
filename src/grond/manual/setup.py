@@ -68,6 +68,8 @@ def manual_setup(args) -> int:
         ]
     except FileNotFoundError as exc:
         raise SystemExit(f"Dataset row file missing: {exc}") from exc
+    except ValueError as exc:  # a malformed --dataset
+        raise SystemExit(f"grond manual setup: {exc}") from exc
     prep = PrepConfig(
         structure=str(structure),
         datasets=datasets,
