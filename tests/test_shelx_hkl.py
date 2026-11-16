@@ -108,3 +108,15 @@ def test_common_width_guard_reapplies_after_sigma_calibration():
     assert safe_merged[0][4] == pytest.approx(90000.0)
     assert safe_unmerged[0][3] == pytest.approx(30.0)
     assert safe_unmerged[0][4] == pytest.approx(72000.0)
+
+
+def test_only_the_hklf4_layout_is_written(tmp_path: Path):
+    """SHELXL, Olex2 and cctbx read HKLF 4 by column position; a 3I4,2F14.4 file was once refined as if it were
+    HKLF 4 (GooF 7230), so no other layout is written."""
+
+    from grond.refine.shelx_input import write_hkl
+
+    with pytest.raises(ValueError, match="only shelx_fixed"):
+        write_hkl(tmp_path / "wide.hkl", [(1, 2, 3, 12345.67, 12.34)], "wide")
+    write_hkl(tmp_path / "ok.hkl", [(1, 2, -3, 12345.67, 12.34)])
+    assert (tmp_path / "ok.hkl").read_text().splitlines() == ["   1   2  -312345.67   12.34", "   0   0   0    0.00    0.00"]

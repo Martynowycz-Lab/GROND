@@ -201,7 +201,7 @@ def build_parser(description: str) -> argparse.ArgumentParser:
         "--score-res",
         default="",
         help=(
-            "Validation only (grond validate-endpoint --endpoint published); AUTO never passes it. Refine nothing: "
+            "Validation only; AUTO never passes it. Refine nothing: "
             "rebuild this command's merged endpoint HKL with its recipe and score this already refined .res with "
             "SHELXL L.S. 0 on that HKL plus the corrected free rows, with the WGHT its own last refinement applied. The "
             "rebuilt HKL must equal the .hkl beside the .res byte for byte, otherwise nothing is scored. Needs "

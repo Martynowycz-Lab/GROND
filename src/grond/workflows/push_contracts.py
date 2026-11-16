@@ -17,7 +17,7 @@ from grond.workflows.checkpoints import _checkpoint_path
 
 
 def apply_push_checkpoint(args: argparse.Namespace) -> dict:
-    """Fill push-endpoint inputs from a continue checkpoint when requested."""
+    """Fill grond refine inputs from a continue checkpoint when requested."""
 
     checkpoint_path = str(getattr(args, "checkpoint", "") or "")
     if not checkpoint_path:
@@ -141,7 +141,7 @@ def resolve_push_continuation_contract(
         distinct = {json.dumps(item, sort_keys=True) for item in recorded.values()}
         if len(distinct) > 1:
             raise SystemExit(
-                f"the continuation datasets record different {key} values {recorded}; one push-endpoint "
+                f"the continuation datasets record different {key} values {recorded}; one grond refine "
                 "continues one run contract."
             )
         value = next(iter(recorded.values())) if recorded else _continuation_value(key, legacy)
@@ -219,7 +219,7 @@ def warn_historical_continuation_defaults(contract: Mapping[str, Mapping]) -> No
     unrecorded = [key for key, item in contract.items() if item["source"] == "historical_default_not_recorded"]
     if unrecorded:
         print(
-            "WARN push-endpoint: the source summaries do not record "
+            "WARN refine: the source summaries do not record "
             + ", ".join(f"{key}={contract[key]['value']!r}" for key in unrecorded)
             + "; the continuation uses these historical values",
             flush=True,

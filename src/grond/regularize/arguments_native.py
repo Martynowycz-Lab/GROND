@@ -200,7 +200,7 @@ def build_parser(description: str, *, default_hkl, default_res, default_baseline
     ap.add_argument("--post-bloch-sigma-min-scale", type=float, default=0.25, help="Lower guardrail for the uniform_z_rms sigma multiplier.")
     ap.add_argument("--post-bloch-sigma-max-scale", type=float, default=4.0, help="Upper guardrail for the uniform_z_rms sigma multiplier.")
     ap.add_argument("--rescale", choices=["none", "absolute"], default="absolute", help="Corrected-intensity scale: absolute kappa*|F|^2 * Iobs/Icalc with the OSF reset to sqrt(kappa) (AUTO), or none.")
-    ap.add_argument("--hkl-float-format", choices=["shelx_fixed", "wide"], default="shelx_fixed")
+    ap.add_argument("--hkl-float-format", choices=["shelx_fixed"], default="shelx_fixed")
     ap.add_argument("--workers", type=int, default=1)
     ap.add_argument("--chunksize", type=int, default=8)
     ap.add_argument("--prediction-cache-dir", default=str(runtime_cache_directory("native_row_regularize", "predictions")))

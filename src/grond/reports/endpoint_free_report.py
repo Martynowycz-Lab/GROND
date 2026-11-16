@@ -2,8 +2,7 @@
 
 Rows come from the free_validation records written by the combine engine (combined_endpoint.free_validation and
 combined_unmerged_endpoint.free_validation in combined_summary.json) and by the leak-free start
-(controls/leak_free_start/summary.json); grond validate-endpoint writes the same records for a finished run into a new
-directory.  Reporting only: nothing is chosen on these numbers.
+(controls/leak_free_start/summary.json).  Reporting only: nothing is chosen on these numbers.
 """
 
 from __future__ import annotations
@@ -103,8 +102,7 @@ def endpoint_free_block_from_rows(rows: list[dict[str, object]], *, reason: str 
     available = [row for row in rows if row.get("status") == "ok"]
     return {
         "status": "available" if available else "not_available",
-        "reason": "" if available else (reason or "no endpoint free validation was recorded (--endpoint-free-validation off, "
-                                        "or a run that predates it: grond validate-endpoint computes it afterwards)"),
+        "reason": "" if available else (reason or "no endpoint free validation was recorded for this run"),
         "role": ROLE,
         "definition": DEFINITION,
         "rows": rows,

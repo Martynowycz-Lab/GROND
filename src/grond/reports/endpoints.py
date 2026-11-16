@@ -213,7 +213,7 @@ def _normalize_publication_endpoint_block(endpoint: Mapping[str, object], *, sel
     if not provenance_ok:
         out["provenance_error"] = (
             "publication endpoint RES/HKL/LST no longer match the exact paths and hashes selected by GROND; "
-            "use GROND push-endpoint for an edited model"
+            "use grond refine for an edited model"
         )
     elif not pathology_complete:
         out["provenance_error"] = (

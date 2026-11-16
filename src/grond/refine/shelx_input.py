@@ -76,23 +76,15 @@ def parse_wght(res_path: Path) -> tuple[float, float]:
 
 
 def write_hkl(path: Path, rows, float_format: str = "shelx_fixed") -> None:
-    """Write (h, k, l, I, sigma) rows as a SHELX HKLF 4 file ending with a 0 0 0 row.
+    """Write (h, k, l, I, sigma) rows as a validated fixed-width SHELX HKLF 4 file (3I4,2F8.2) ending with 0 0 0.
 
-    ``shelx_fixed`` writes the validated fixed-width HKLF 4 layout; ``wide`` writes
-    3I4,2F14.4 for inspection.
+    SHELXL, Olex2 and cctbx read HKLF 4 by column position, so this is the only layout written; a wider layout
+    would be read wrongly by every one of them.
     """
 
-    if float_format == "wide":
-        fmt = "{h:4d}{k:4d}{l:4d}{I:14.4f}{sig:14.4f}\n"
-    elif float_format == "shelx_fixed":
-        write_fixed_width_hkl(path, rows)
-        return
-    else:
-        raise ValueError(f"unknown hkl format {float_format!r}")
-    with path.open("w") as f:
-        for h, k, l, I, sig in rows:
-            f.write(fmt.format(h=int(h), k=int(k), l=int(l), I=float(I), sig=float(sig)))
-        f.write(fmt.format(h=0, k=0, l=0, I=0.0, sig=0.0))
+    if float_format != "shelx_fixed":
+        raise ValueError(f"unknown hkl format {float_format!r}: only shelx_fixed (3I4,2F8.2) is written")
+    write_fixed_width_hkl(path, rows)
 
 
 def enforce_hkl_row_width(rows_merged, rows_unmerged, hkl_format: str):

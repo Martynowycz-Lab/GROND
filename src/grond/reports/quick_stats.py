@@ -1699,11 +1699,11 @@ def _write_quick_stats_final_summary(
         "## Continue",
         "",
         f"- Checkpoint: `{out_dir / 'grond_continue_checkpoint.json'}`",
-        f"- To push from an edited model: `GROND push-endpoint --checkpoint {out_dir / 'grond_continue_checkpoint.json'} --start-res edited.res --out-dir {out_dir / 'endpoint_push_edited'}`",
-        f"- To regenerate this package: `GROND finish --run-dir {out_dir}`",
+        f"- To push from an edited model: `grond refine --checkpoint {out_dir / 'grond_continue_checkpoint.json'} --start-res edited.res --out-dir {out_dir / 'endpoint_push_edited'}`",
+        f"- To regenerate this package: `grond finish --run-dir {out_dir}`",
         "",
         "## Notes",
         "",
-        "Native maps made by `GROND finish` use the frozen per-dataset GROND row table or tables, the final model phase, and dynamically inferred electron amplitudes. Use `--map-mode shelx2map` only for a fast corrected-HKL endpoint-map check.",
+        "Native maps made by `grond finish` use the frozen per-dataset GROND row table or tables, the final model phase, and dynamically inferred electron amplitudes. Use `--map-mode shelx2map` only for a fast corrected-HKL endpoint-map check.",
     ]
     final_summary_path.write_text("\n".join(final_lines) + "\n")

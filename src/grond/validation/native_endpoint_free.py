@@ -1,4 +1,4 @@
-"""Score-only replay of a published single-crystal corrected-HKL endpoint (``grond validate-endpoint --endpoint published``).
+"""Score-only replay of a published single-crystal corrected-HKL endpoint (used by the all-data refinement).
 
 A single-crystal AUTO run publishes a per-crystal endpoint of the native engine (source_kind ``native_corrected_hkl``):
 ``<cycle>/endpoint_lam_<l>_B_<b>_<exti>/dyn_nuisance_corrected.{res,hkl,lst}``, which export_corrected_endpoint

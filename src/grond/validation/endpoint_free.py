@@ -39,8 +39,8 @@ STATISTICS = ("R1_gt", "R1_all", "wR2_all", "GooF")
 FREE_FLAG = -1
 # The work-statistics reproduction rule, defined once for every L.S. 0 score of a refined model (the GROND merged and
 # unmerged endpoints and the conventional leak-free start).  The model and the work reflections are the endpoint's own
-# bytes: the score fails unless L.S. 0 left the model unchanged (score_model_on_work_and_free), and grond
-# validate-endpoint compares the HKL and model bytes.  SHELXL prints R1 and wR2 with four decimals and S (GooF) with
+# bytes: the score fails unless L.S. 0 left the model unchanged (score_model_on_work_and_free), and the score-only
+# replay (grond.validation.native_endpoint_free) compares the HKL and model bytes.  SHELXL prints R1 and wR2 with four decimals and S (GooF) with
 # three.  The work half of the score must print the same N_gt and N_all as the endpoint's own listing; R1gt, R1all,
 # wR2 and GooF may each differ by one unit of their last printed digit (0.0001 for R1 and wR2, 0.001 for GooF).  The
 # endpoint's L.S. N listing prints the statistics of its last cycle, computed before that cycle's final shifts are
