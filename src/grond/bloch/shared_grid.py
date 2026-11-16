@@ -431,7 +431,12 @@ def solve_grid_point(port, omega: float, tau: float, targets, cut: float, prec: 
     a, d, e, tau_h, info = getattr(lapack, reduce)(A, lower=1, lwork=lwork)
     if info != 0:
         raise np.linalg.LinAlgError(f"{reduce} failed (info={info})")
-    lam, Z = eigh_tridiagonal(d, e, lapack_driver="stemr")
+    try:
+        lam, Z = eigh_tridiagonal(d, e, lapack_driver="stemr")
+    except np.linalg.LinAlgError:
+        # MRRR can fail on a rare spectrum (once in 16,888 SU-102 rows in single precision); divide and conquer
+        # solves the same tridiagonal problem.
+        lam, Z = eigh_tridiagonal(d, e, lapack_driver="stevd")
     pos = np.asarray([order[(int(h[0]), int(h[1]), int(h[2]))] for h in targets], dtype=int)
     m = len(pos)
     unit = np.zeros((n - 1, m), dtype=a.dtype, order="F")

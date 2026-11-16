@@ -117,3 +117,32 @@ def test_response_tables_default_to_the_prediction_grid(monkeypatch):
                  "GROND_SHARED_GRID_PRECISION"):
         monkeypatch.delenv(name, raising=False)
     assert (SG.per_degree(), SG.table_per_degree(), SG.table_precision()) == (100.0, 100.0, "double")
+
+
+def test_grid_solve_falls_back_from_mrrr(tmp_path, monkeypatch):
+    # A failed MRRR tridiagonal solve (LAPACK ?stemr) is redone with divide and conquer (?stevd); 0.4.3 stopped the
+    # stage with LinAlgError. When MRRR succeeds nothing changes.
+    port = _port(tmp_path)
+    rows = _adjacent_rows(port, 3)
+    targets = np.asarray([port.data.hkl[r] for r in rows], dtype=int)
+    omega = float(np.mean([port.omega_from_z(port.data.zcal[r]) for r in rows]))
+    lam_ref, C_ref, n_ref = SG.solve_grid_point(port, omega, 0.0, targets, 0.05, "double")
+    real = SG.eigh_tridiagonal
+    drivers = []
+
+    def mrrr_fails(d, e, lapack_driver="auto", **kwargs):
+        drivers.append(lapack_driver)
+        if lapack_driver == "stemr":
+            raise np.linalg.LinAlgError("stemr failed (simulated)")
+        return real(d, e, lapack_driver=lapack_driver, **kwargs)
+
+    monkeypatch.setattr(SG, "eigh_tridiagonal", mrrr_fails)
+    lam, C, n = SG.solve_grid_point(port, omega, 0.0, targets, 0.05, "double")
+    assert drivers == ["stemr", "stevd"]
+    assert n == n_ref
+    np.testing.assert_allclose(lam, lam_ref, rtol=0, atol=1e-12 * np.max(np.abs(lam_ref)))
+    grid, weights = port.thickness_uniform_grid(), np.asarray(port.thick_w)
+    got = SG.target_intensities(lam, C, grid, (1, -1), weights=weights)
+    ref = SG.target_intensities(lam_ref, C_ref, grid, (1, -1), weights=weights)
+    for h in (1, -1):
+        np.testing.assert_allclose(got[h], ref[h], rtol=1e-9)
