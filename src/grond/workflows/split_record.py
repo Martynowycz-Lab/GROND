@@ -302,7 +302,8 @@ def format_split_summary(record: Mapping[str, object]) -> list[str]:
             lines.append(
                 "WARN split: some Laue orbits are free in one crystal and work or excluded in another "
                 f"(e.g. {', '.join(pooled.get('cross_crystal_status_conflict_examples') or [])}); the cross-crystal "
-                "check will refuse this run. Use --split-candidate-set shared-closure."
+                "check will refuse this run. Give each crystal its verified transform (hkl_transform= in its "
+                "--dataset) and run with --trust-hkl-transform, or leave out the crystal whose candidates differ."
             )
     return lines
 

@@ -315,8 +315,8 @@ def _materialize_transform_hand_split_contract(
 ) -> tuple[DatasetSpec, dict[str, object]]:
     """Write and bind the candidate-union raw-row split used by all scouts.
 
-    ``candidates`` is the crystal's split candidate set (its share of the shared closure, or its own retained
-    candidates under --split-candidate-set per-crystal); ``candidate_set`` records the shared closure.
+    ``candidates`` is the crystal's split candidate set (its share of the shared closure of plan_split_candidates);
+    ``candidate_set`` records the shared closure.
     """
 
     from grond.engine.bloch_engine import (
@@ -412,12 +412,11 @@ def run_cross_crystal_split_check(
 ) -> dict[str, object]:
     """Refuse a multi-crystal run in which one Laue orbit is held out in one crystal and fitted in another.
 
-    Under --split-candidate-set shared-closure (default) every crystal's contract is built from one shared
-    candidate closure, so this check is an assertion that passes by construction.  Under per-crystal each
-    crystal's orbit-hash contract is built from that crystal's own metric-filtered transform
-    candidates, and a component is free when any of its orbit keys is free.  Crystals that keep
-    different, not Laue-equivalent candidates can therefore put the same orbit on opposite sides, and
-    the combined SHELXL HKL would refine on rows another crystal reports as held out.  After every
+    Every crystal's contract is built from one shared candidate closure (plan_split_candidates), so this check is
+    an assertion that passes by construction.  Were a crystal's orbit-hash contract built from that crystal's own
+    metric-filtered transform candidates alone, a component would be free when any of its orbit keys is free, and
+    crystals that keep different, not Laue-equivalent candidates could put the same orbit on opposite sides; the
+    combined SHELXL HKL would then refine on rows another crystal reports as held out.  After every
     transform is selected, the work and free rows of the screen row tables are keyed with
     grond.validation.heldout.orbit_key (model Laue group + Friedel, final-transform model setting) and
     pooled: no orbit may be free in one crystal and work in another, and no orbit excluded in one
@@ -522,9 +521,8 @@ def run_cross_crystal_split_check(
             "transform candidates (candidate_generation in decisions/<crystal>/transform_decision.json). "
             f"Conflicting orbits: {'; '.join(listed[:_CONFLICTS_IN_MESSAGE])}"
             + (f"; and {more} more" if more > 0 else "")
-            + f". Full list: {path}. Build the contracts from one shared candidate set (--split-candidate-set "
-            "shared-closure, the default), give every crystal the same Laue-equivalent candidate set with "
-            "--transform-candidates, or supply verified transforms with --trust-hkl-transform."
+            + f". Full list: {path}. Give each crystal its verified transform (hkl_transform= in its --dataset) "
+            "and run with --trust-hkl-transform, or leave out the crystal whose candidates differ."
         )
     return record
 

@@ -1,6 +1,6 @@
 """Validation lines AUTO prints at each step, read back from the JSON artifacts that step recorded.
 
-With ``--validation-console on`` (default) AUTO prints, as each step finishes: the split summary (work,
+AUTO prints, as each step finishes (in every run except a dry run, see console_enabled): the split summary (work,
 free and excluded rows and orbits per crystal), the held-out (free-row) R_obs/R_all with 95% CIs after the
 screen, the early and final hand blocks (pooled and per-crystal orbit sign z, dR_obs with its CI, the
 escalation), every nuisance decision with its CV R and paired CI or its work-row score, the thickness, and
@@ -9,8 +9,7 @@ flags and phase timings are part of the terminal finish summary (grond.reports.t
 
 Every number is read from a recorded artifact; nothing is recomputed for the console.  The two artifacts this
 module writes itself, ``decisions/split_summary.json`` and ``decisions/heldout_stage_<label>.json``, are
-written first and then printed from the file.  ``--validation-console off`` (legacy) prints none of these
-lines and writes neither file.
+written first and then printed from the file.
 """
 
 from __future__ import annotations

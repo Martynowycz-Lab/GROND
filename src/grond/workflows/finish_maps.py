@@ -290,7 +290,7 @@ def _copy_map_inputs(
     """Copy a model's .res/.fcf/.lst/.hkl into a new directory so map work never writes beside the source.
 
     ``endpoint["endpoint_fcf"]`` (optional) names an FCF that is not next to the
-    .res under the same stem, for example ``figure-maps --conventional-fcf``.
+    .res under the same stem.
     """
 
     out_dir = Path(out_dir)

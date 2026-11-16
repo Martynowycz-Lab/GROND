@@ -170,7 +170,7 @@ def raise_for_missing_external_tools(
     if not errors:
         return
     hint = (
-        "Create a template with `GROND init-config --out grond.config.json`, "
+        "Create a template with `grond init-config --out grond.config.json`, "
         "then rerun with `--config grond.config.json` or set GROND_CONFIG."
     )
     raise SystemExit("Missing required external tools:\n- " + "\n- ".join(errors) + "\n" + hint)
